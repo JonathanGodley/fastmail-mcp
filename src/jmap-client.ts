@@ -941,11 +941,11 @@ export class JmapClient {
 
   async bulkDelete(emailIds: string[]): Promise<void> {
     const session = await this.getSession();
-    
+
     // Find the trash mailbox
     const mailboxes = await this.getMailboxes();
     const trashMailbox = mailboxes.find(mb => mb.role === 'trash') || mailboxes.find(mb => mb.name.toLowerCase().includes('trash'));
-    
+
     if (!trashMailbox) {
       throw new Error('Could not find Trash mailbox');
     }
@@ -970,7 +970,7 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     const result = response.methodResponses[0][1];
-    
+
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
       throw new Error('Failed to delete some emails.');
     }

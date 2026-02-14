@@ -14,7 +14,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.6.1',
+    version: '1.7.0',
   },
   {
     capabilities: {
