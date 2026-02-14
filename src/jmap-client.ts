@@ -20,6 +20,11 @@ export interface JmapResponse {
   sessionState: string;
 }
 
+export interface QueryResult<T = any> {
+  items: T[];
+  total: number;
+}
+
 export class JmapClient {
   private auth: FastmailAuth;
   private session: JmapSession | null = null;
@@ -95,11 +100,11 @@ export class JmapClient {
     return response.methodResponses[0][1].list;
   }
 
-  async getEmails(mailboxId?: string, limit: number = 20): Promise<any[]> {
+  async getEmails(mailboxId?: string, limit: number = 20): Promise<QueryResult> {
     const session = await this.getSession();
-    
+
     const filter = mailboxId ? { inMailbox: mailboxId } : {};
-    
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
@@ -107,7 +112,8 @@ export class JmapClient {
           accountId: session.accountId,
           filter,
           sort: [{ property: 'receivedAt', isAscending: false }],
-          limit
+          limit,
+          calculateTotal: true
         }, 'query'],
         ['Email/get', {
           accountId: session.accountId,
@@ -118,7 +124,10 @@ export class JmapClient {
     };
 
     const response = await this.makeRequest(request);
-    return response.methodResponses[1][1].list;
+    return {
+      items: response.methodResponses[1][1].list,
+      total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
+    };
   }
 
   async getEmailById(id: string): Promise<any> {
@@ -392,7 +401,7 @@ export class JmapClient {
     return draftResult.created?.draft?.id || 'unknown';
   }
 
-  async getRecentEmails(limit: number = 10, mailboxName: string = 'inbox'): Promise<any[]> {
+  async getRecentEmails(limit: number = 10, mailboxName: string = 'inbox'): Promise<QueryResult> {
     const session = await this.getSession();
     
     // Find the specified mailbox (default to inbox)
@@ -413,7 +422,8 @@ export class JmapClient {
           accountId: session.accountId,
           filter: { inMailbox: targetMailbox.id },
           sort: [{ property: 'receivedAt', isAscending: false }],
-          limit: Math.min(limit, 50)
+          limit: Math.min(limit, 50),
+          calculateTotal: true
         }, 'query'],
         ['Email/get', {
           accountId: session.accountId,
@@ -424,7 +434,10 @@ export class JmapClient {
     };
 
     const response = await this.makeRequest(request);
-    return response.methodResponses[1][1].list;
+    return {
+      items: response.methodResponses[1][1].list,
+      total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
+    };
   }
 
   async markEmailRead(emailId: string, read: boolean = true): Promise<void> {
@@ -743,7 +756,7 @@ export class JmapClient {
     after?: string;
     before?: string;
     limit?: number;
-  }): Promise<any[]> {
+  }): Promise<QueryResult> {
     const session = await this.getSession();
     
     // Build JMAP filter object
@@ -772,7 +785,8 @@ export class JmapClient {
           accountId: session.accountId,
           filter,
           sort: [{ property: 'receivedAt', isAscending: false }],
-          limit: Math.min(filters.limit || 50, 100)
+          limit: Math.min(filters.limit || 50, 100),
+          calculateTotal: true
         }, 'query'],
         ['Email/get', {
           accountId: session.accountId,
@@ -783,7 +797,10 @@ export class JmapClient {
     };
 
     const response = await this.makeRequest(request);
-    return response.methodResponses[1][1].list;
+    return {
+      items: response.methodResponses[1][1].list,
+      total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
+    };
   }
 
   async getThread(threadId: string): Promise<any[]> {

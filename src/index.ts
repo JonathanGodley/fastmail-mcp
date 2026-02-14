@@ -8,7 +8,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { FastmailAuth, FastmailConfig } from './auth.js';
-import { JmapClient, JmapRequest } from './jmap-client.js';
+import { JmapClient, JmapRequest, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 
 const server = new Server(
@@ -838,6 +838,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
+  function formatQueryResult(result: QueryResult): string {
+    const { items, total } = result;
+    const summary = total > items.length
+      ? `Showing ${items.length} of ${total} results.`
+      : `${items.length} results.`;
+    return `${summary}\n${JSON.stringify(items, null, 2)}`;
+  }
+
   try {
 
     const client = initializeClient();
@@ -857,12 +865,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_emails': {
         const { mailboxId, limit = 20 } = args as any;
-        const emails = await client.getEmails(mailboxId, limit);
+        const result = await client.getEmails(mailboxId, limit);
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(emails, null, 2),
+              text: formatQueryResult(result),
             },
           ],
         };
@@ -1029,7 +1037,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               accountId: session.accountId,
               filter: { text: query },
               sort: [{ property: 'receivedAt', isAscending: false }],
-              limit
+              limit,
+              calculateTotal: true
             }, 'query'],
             ['Email/get', {
               accountId: session.accountId,
@@ -1040,13 +1049,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const response = await client.makeRequest(request);
-        const emails = response.methodResponses[1][1].list;
+        const result: QueryResult = {
+          items: response.methodResponses[1][1].list,
+          total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
+        };
 
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(emails, null, 2),
+              text: formatQueryResult(result),
             },
           ],
         };
@@ -1055,12 +1067,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'list_contacts': {
         const { limit = 50 } = args as any;
         const contactsClient = initializeContactsCalendarClient();
-        const contacts = await contactsClient.getContacts(limit);
+        const result = await contactsClient.getContacts(limit);
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(contacts, null, 2),
+              text: formatQueryResult(result),
             },
           ],
         };
@@ -1089,12 +1101,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
         const contactsClient = initializeContactsCalendarClient();
-        const contacts = await contactsClient.searchContacts(query, limit);
+        const result = await contactsClient.searchContacts(query, limit);
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(contacts, null, 2),
+              text: formatQueryResult(result),
             },
           ],
         };
@@ -1116,12 +1128,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'list_calendar_events': {
         const { calendarId, limit = 50 } = args as any;
         const contactsClient = initializeContactsCalendarClient();
-        const events = await contactsClient.getCalendarEvents(calendarId, limit);
+        const result = await contactsClient.getCalendarEvents(calendarId, limit);
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(events, null, 2),
+              text: formatQueryResult(result),
             },
           ],
         };
@@ -1186,12 +1198,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_recent_emails': {
         const { limit = 10, mailboxName = 'inbox' } = args as any;
         const client = initializeClient();
-        const emails = await client.getRecentEmails(limit, mailboxName);
+        const result = await client.getRecentEmails(limit, mailboxName);
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(emails, null, 2),
+              text: formatQueryResult(result),
             },
           ],
         };
@@ -1345,14 +1357,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'advanced_search': {
         const { query, from, to, subject, hasAttachment, isUnread, mailboxId, after, before, limit } = args as any;
         const client = initializeClient();
-        const emails = await client.advancedSearch({
+        const result = await client.advancedSearch({
           query, from, to, subject, hasAttachment, isUnread, mailboxId, after, before, limit
         });
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(emails, null, 2),
+              text: formatQueryResult(result),
             },
           ],
         };
@@ -1571,8 +1583,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Get some recent emails to test with
         const testLimit = Math.min(Math.max(limit, 1), 10);
-        const emails = await client.getRecentEmails(testLimit, 'inbox');
-        
+        const { items: emails } = await client.getRecentEmails(testLimit, 'inbox');
+
         if (emails.length === 0) {
           return {
             content: [
