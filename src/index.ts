@@ -605,7 +605,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'download_attachment',
-        description: 'Download an email attachment',
+        description: 'Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -616,6 +616,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             attachmentId: {
               type: 'string',
               description: 'ID of the attachment',
+            },
+            savePath: {
+              type: 'string',
+              description: 'Absolute file path to save the attachment to. Parent directories will be created automatically.',
             },
           },
           required: ['emailId', 'attachmentId'],
@@ -1302,21 +1306,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'download_attachment': {
-        const { emailId, attachmentId } = args as any;
+        const { emailId, attachmentId, savePath } = args as any;
         if (!emailId || !attachmentId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId and attachmentId are required');
         }
         const client = initializeClient();
         try {
-          const downloadUrl = await client.downloadAttachment(emailId, attachmentId);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Download URL: ${downloadUrl}`,
-              },
-            ],
-          };
+          if (savePath) {
+            const result = await client.downloadAttachmentToFile(emailId, attachmentId, savePath);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Saved to: ${savePath} (${result.bytesWritten} bytes)`,
+                },
+              ],
+            };
+          } else {
+            const downloadUrl = await client.downloadAttachment(emailId, attachmentId);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Download URL: ${downloadUrl}`,
+                },
+              ],
+            };
+          }
         } catch (error) {
           // Sanitize error to avoid leaking attachment metadata
           throw new McpError(

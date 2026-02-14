@@ -165,8 +165,8 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 - **get_email_attachments**: Get list of attachments for an email
   - Parameters: `emailId` (required)
-- **download_attachment**: Get download URL for an email attachment
-  - Parameters: `emailId` (required), `attachmentId` (required)
+- **download_attachment**: Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.
+  - Parameters: `emailId` (required), `attachmentId` (required), `savePath` (optional)
 - **advanced_search**: Advanced email search with multiple criteria
   - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50)
 - **get_thread**: Get all emails in a conversation thread

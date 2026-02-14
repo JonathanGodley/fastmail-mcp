@@ -1,4 +1,6 @@
 import { FastmailAuth } from './auth.js';
+import { writeFile, mkdir } from 'fs/promises';
+import { dirname } from 'path';
 
 export interface JmapSession {
   apiUrl: string;
@@ -709,6 +711,25 @@ export class JmapClient {
       .replace('{name}', encodeURIComponent(attachment.name || 'attachment'));
 
     return url;
+  }
+
+  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string): Promise<{ url: string; bytesWritten: number }> {
+    const url = await this.downloadAttachment(emailId, attachmentId);
+
+    const response = await fetch(url, {
+      headers: { 'Authorization': this.auth.getAuthHeaders()['Authorization'] }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    await mkdir(dirname(savePath), { recursive: true });
+    await writeFile(savePath, buffer);
+
+    return { url, bytesWritten: buffer.length };
   }
 
   async advancedSearch(filters: {
