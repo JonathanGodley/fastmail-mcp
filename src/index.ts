@@ -715,7 +715,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             savePath: {
               type: 'string',
-              description: 'File path within ~/Downloads/fastmail-mcp/ to save the attachment to. Paths outside this directory are rejected for security. Parent directories will be created automatically.',
+              description: 'Absolute file path to save the attachment to. Relative paths are resolved against the current working directory. Parent directories will be created automatically.',
             },
           },
           required: ['emailId', 'attachmentId'],
