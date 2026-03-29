@@ -13,6 +13,8 @@ export interface SimplifiedEmail {
   isRead?: boolean;
   isFlagged?: boolean;
   isDraft?: boolean;
+  preview?: string;
+  hasAttachment?: boolean;
   bodyText?: string;
   bodyHtml?: string;
   attachments?: Array<{
@@ -27,12 +29,9 @@ export interface SimplifiedEmail {
 // Fields consumed by simplifyEmail — anything not in this set goes to _extra
 const KNOWN_FIELDS = new Set([
   'id', 'threadId', 'messageId', 'references', 'subject', 'from', 'to', 'cc', 'bcc',
-  'receivedAt', 'inReplyTo', 'keywords',
+  'receivedAt', 'inReplyTo', 'keywords', 'preview', 'hasAttachment',
   'textBody', 'htmlBody', 'bodyValues', 'attachments',
 ]);
-
-// Fields to silently drop (redundant with simplified fields)
-const DROP_FIELDS = new Set(['hasAttachment']);
 
 export function formatAddress(addr: { name?: string; email: string }): string {
   if (!addr) return 'unknown';
@@ -66,7 +65,7 @@ function addIf<T>(obj: Record<string, any>, key: string, value: T): void {
 export function simplifyEmail(raw: any): SimplifiedEmail {
   const extra: Record<string, unknown> = {};
   for (const key of Object.keys(raw)) {
-    if (!KNOWN_FIELDS.has(key) && !DROP_FIELDS.has(key)) {
+    if (!KNOWN_FIELDS.has(key)) {
       extra[key] = raw[key];
     }
   }
@@ -88,6 +87,11 @@ export function simplifyEmail(raw: any): SimplifiedEmail {
   addIf(result, 'isRead', !!(raw.keywords?.$seen));
   addIf(result, 'isFlagged', !!(raw.keywords?.$flagged));
   addIf(result, 'isDraft', !!(raw.keywords?.$draft));
+  addIf(result, 'preview', raw.preview);
+  // hasAttachment is redundant when attachments array is present
+  if (!raw.attachments) {
+    addIf(result, 'hasAttachment', !!raw.hasAttachment);
+  }
   addIf(result, 'bodyText', extractBody(raw.textBody, raw.bodyValues));
   addIf(result, 'bodyHtml', extractBody(raw.htmlBody, raw.bodyValues));
 

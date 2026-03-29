@@ -142,8 +142,9 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 ### Email Tools
 
 - **list_mailboxes**: Get all mailboxes in your account
-- **list_emails**: List emails from a specific mailbox or all mailboxes
-  - Parameters: `mailboxId` (optional), `limit` (default: 20)
+- **list_emails**: List emails from a specific mailbox or all mailboxes (returns simplified format by default)
+  - Parameters: `mailboxId` (optional), `limit` (default: 20), `raw` (optional boolean, returns raw JMAP when true)
+  - See [Simplified Email Format](#simplified-email-format) below
 - **get_email**: Get a specific email by ID (returns simplified format by default)
   - Parameters: `emailId` (required), `raw` (optional boolean, returns raw JMAP response when true)
   - See [Simplified Email Format](#simplified-email-format) below
@@ -155,10 +156,12 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array)
 - **create_draft**: Create a minimal email draft (at least one of to/subject/body required)
   - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional)
-- **search_emails**: Search emails by content
-  - Parameters: `query` (required), `limit` (default: 20)
-- **get_recent_emails**: Get the most recent emails from a mailbox (inspired by JMAP-Samples top-ten)
-  - Parameters: `limit` (default: 10, max: 50), `mailboxName` (default: 'inbox')
+- **search_emails**: Search emails by content (returns simplified format by default)
+  - Parameters: `query` (required), `limit` (default: 20), `raw` (optional boolean, returns raw JMAP when true)
+  - See [Simplified Email Format](#simplified-email-format) below
+- **get_recent_emails**: Get the most recent emails from a mailbox (returns simplified format by default)
+  - Parameters: `limit` (default: 10, max: 50), `mailboxName` (default: 'inbox'), `raw` (optional boolean, returns raw JMAP when true)
+  - See [Simplified Email Format](#simplified-email-format) below
 - **mark_email_read**: Mark an email as read or unread
   - Parameters: `emailId` (required), `read` (default: true)
 - **delete_email**: Delete an email (move to trash)
@@ -176,8 +179,9 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
   - Parameters: `emailId` (required)
 - **download_attachment**: Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.
   - Parameters: `emailId` (required), `attachmentId` (required), `savePath` (optional)
-- **advanced_search**: Advanced email search with multiple criteria
-  - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50)
+- **advanced_search**: Advanced email search with multiple criteria (returns simplified format by default)
+  - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `raw` (optional boolean, returns raw JMAP when true)
+  - See [Simplified Email Format](#simplified-email-format) below
 - **get_thread**: Get all emails in a conversation thread (returns array of simplified emails with full bodies by default)
   - Parameters: `threadId` (required), `raw` (optional boolean, returns raw JMAP response when true)
   - See [Simplified Email Format](#simplified-email-format) below
@@ -242,9 +246,11 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - `messageId` — Message-ID header values
 - `references` — References header (threading chain)
 - `to`, `cc`, `bcc` — recipient lists as `"Name <email>"` strings
-- `bodyText` — extracted plain-text body
-- `bodyHtml` — extracted HTML body
-- `attachments` — array of `{ name?, contentType, size, blobId }`
+- `preview` — Fastmail's short summary of the email body
+- `bodyText` — extracted plain-text body (full emails and threads only)
+- `bodyHtml` — extracted HTML body (full emails and threads only)
+- `attachments` — array of `{ name?, contentType, size, blobId }` (full emails and threads only)
+- `hasAttachment` — boolean, included in list/search results where `attachments` array is not available
 
 **Included when true:**
 - `isReply` — email has In-Reply-To header
@@ -254,7 +260,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 **`_extra`** — included only when the JMAP response contains fields not covered above. This ensures no data is silently lost if Fastmail adds new fields or returns unexpected properties.
 
-Pass `raw: true` to either tool to get the full, unmodified JMAP response instead.
+Pass `raw: true` to any email tool to get the full, unmodified JMAP response instead.
 
 ## API Information
 

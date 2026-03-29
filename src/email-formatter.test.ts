@@ -228,13 +228,47 @@ describe('simplifyEmail', () => {
     assert.equal(result._extra!.subject, undefined);
   });
 
-  it('silently drops hasAttachment (redundant)', () => {
+  it('includes preview when present', () => {
     const raw = {
       id: 'e20',
+      preview: 'Hey, just wanted to check in about...',
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.preview, 'Hey, just wanted to check in about...');
+  });
+
+  it('omits preview when absent', () => {
+    const result = simplifyEmail({ id: 'e21' });
+    assert.equal(result.preview, undefined);
+  });
+
+  it('includes hasAttachment when true and no attachments array', () => {
+    const raw = {
+      id: 'e22',
+      hasAttachment: true,
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.hasAttachment, true);
+  });
+
+  it('omits hasAttachment when false', () => {
+    const raw = {
+      id: 'e23',
+      hasAttachment: false,
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.hasAttachment, undefined);
+  });
+
+  it('drops hasAttachment when attachments array is present', () => {
+    const raw = {
+      id: 'e24',
       hasAttachment: true,
       attachments: [{ type: 'image/png', size: 100, blobId: 'b1' }],
     };
     const result = simplifyEmail(raw);
+    assert.equal(result.hasAttachment, undefined);
+    assert.equal(result.attachments!.length, 1);
     assert.equal(result._extra, undefined);
   });
 
@@ -257,6 +291,7 @@ describe('simplifyEmail', () => {
       bodyValues: {},
       attachments: [],
       hasAttachment: false,
+      preview: 'Some preview text',
     };
     const result = simplifyEmail(raw);
     assert.equal(result._extra, undefined);

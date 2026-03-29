@@ -124,7 +124,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_emails',
-        description: 'List emails from a mailbox',
+        description: 'List emails from a mailbox. Returns simplified format by default (same fields as get_email). Use raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -136,6 +136,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Maximum number of emails to return (default: 20)',
               default: 20,
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return raw JMAP response instead of simplified format (default: false)',
             },
           },
         },
@@ -373,7 +377,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'search_emails',
-        description: 'Search emails by subject or content',
+        description: 'Search emails by subject or content. Returns simplified format by default. Use raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -385,6 +389,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Maximum number of results (default: 20)',
               default: 20,
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return raw JMAP response instead of simplified format (default: false)',
             },
           },
           required: ['query'],
@@ -532,7 +540,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from inbox (like top-ten)',
+        description: 'Get the most recent emails from inbox (like top-ten). Returns simplified format by default. Use raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -545,6 +553,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Mailbox to search (default: inbox)',
               default: 'inbox',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return raw JMAP response instead of simplified format (default: false)',
             },
           },
         },
@@ -695,7 +707,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'advanced_search',
-        description: 'Advanced email search with multiple criteria',
+        description: 'Advanced email search with multiple criteria. Returns simplified format by default. Use raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -743,6 +755,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Maximum results (default: 50)',
               default: 50,
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return raw JMAP response instead of simplified format (default: false)',
             },
           },
         },
@@ -942,6 +958,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return `${summary}\n${JSON.stringify(items, null, 2)}`;
   }
 
+  function formatEmailQueryResult(result: QueryResult): string {
+    const { items, total } = result;
+    const simplified = items.map(simplifyEmail);
+    const summary = total > items.length
+      ? `Showing ${items.length} of ${total} results.`
+      : `${items.length} results.`;
+    return `${summary}\n${JSON.stringify(simplified, null, 2)}`;
+  }
+
   try {
 
     const client = initializeClient();
@@ -960,14 +985,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_emails': {
-        const { mailboxId, limit } = args as any;
+        const { mailboxId, limit, raw } = args as any;
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
         const result = await client.getEmails(mailboxId, validLimit);
         return {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
@@ -1182,7 +1207,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_emails': {
-        const { query, limit = 20 } = args as any;
+        const { query, limit = 20, raw } = args as any;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
@@ -1192,7 +1217,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
@@ -1335,14 +1360,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_recent_emails': {
-        const { limit = 10, mailboxName = 'inbox' } = args as any;
+        const { limit = 10, mailboxName = 'inbox', raw } = args as any;
         const client = initializeClient();
         const result = await client.getRecentEmails(limit, mailboxName);
         return {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
@@ -1515,7 +1540,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'advanced_search': {
-        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit } = args as any;
+        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, raw } = args as any;
         const client = initializeClient();
         const result = await client.advancedSearch({
           query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit
@@ -1524,7 +1549,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
