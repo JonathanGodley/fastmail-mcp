@@ -137,6 +137,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Maximum number of emails to return (default: 20)',
               default: 20,
             },
+            ascending: {
+              type: 'boolean',
+              description: 'Sort oldest first instead of newest first (default: false)',
+            },
             raw: {
               type: 'boolean',
               description: 'Return raw JMAP response instead of simplified format (default: false)',
@@ -390,6 +394,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Maximum number of results (default: 20)',
               default: 20,
             },
+            ascending: {
+              type: 'boolean',
+              description: 'Sort oldest first instead of newest first (default: false)',
+            },
             raw: {
               type: 'boolean',
               description: 'Return raw JMAP response instead of simplified format (default: false)',
@@ -553,6 +561,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Mailbox to search (default: inbox)',
               default: 'inbox',
+            },
+            ascending: {
+              type: 'boolean',
+              description: 'Sort oldest first instead of newest first (default: false)',
             },
             raw: {
               type: 'boolean',
@@ -755,6 +767,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Maximum results (default: 50)',
               default: 50,
+            },
+            ascending: {
+              type: 'boolean',
+              description: 'Sort oldest first instead of newest first (default: false)',
             },
             raw: {
               type: 'boolean',
@@ -985,9 +1001,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_emails': {
-        const { mailboxId, limit, raw } = args as any;
+        const { mailboxId, limit, ascending, raw } = args as any;
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
-        const result = await client.getEmails(mailboxId, validLimit);
+        const result = await client.getEmails(mailboxId, validLimit, ascending);
         return {
           content: [
             {
@@ -1207,11 +1223,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_emails': {
-        const { query, limit = 20, raw } = args as any;
+        const { query, limit = 20, ascending, raw } = args as any;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
-        const result = await client.searchEmails(query, limit);
+        const result = await client.searchEmails(query, limit, ascending);
 
         return {
           content: [
@@ -1360,9 +1376,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_recent_emails': {
-        const { limit = 10, mailboxName = 'inbox', raw } = args as any;
+        const { limit = 10, mailboxName = 'inbox', ascending, raw } = args as any;
         const client = initializeClient();
-        const result = await client.getRecentEmails(limit, mailboxName);
+        const result = await client.getRecentEmails(limit, mailboxName, ascending);
         return {
           content: [
             {
@@ -1540,10 +1556,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'advanced_search': {
-        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, raw } = args as any;
+        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, ascending, raw } = args as any;
         const client = initializeClient();
         const result = await client.advancedSearch({
-          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit
+          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, ascending
         });
         return {
           content: [
