@@ -11,6 +11,7 @@ import { FastmailAuth, FastmailConfig } from './auth.js';
 import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
+import { simplifyEmail } from './email-formatter.js';
 
 const server = new Server(
   {
@@ -141,13 +142,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID',
+        description: 'Get a specific email by ID. Returns simplified format by default: { id, subject, from, date?, threadId?, messageId?, references?, to?, cc?, bcc?, isReply?, isRead?, isFlagged?, isDraft?, bodyText?, bodyHtml?, attachments?, _extra? }. Empty/null/false fields are omitted. Unknown JMAP fields appear in _extra. Use raw: true for the full JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
             emailId: {
               type: 'string',
               description: 'ID of the email to retrieve',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return raw JMAP response instead of simplified format (default: false)',
             },
           },
           required: ['emailId'],
@@ -744,13 +749,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread',
+        description: 'Get all emails in a conversation thread. Returns array of simplified emails by default (same format as get_email, with full bodies). Use raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
             threadId: {
               type: 'string',
               description: 'ID of the thread/conversation',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return raw JMAP response instead of simplified format (default: false)',
             },
           },
           required: ['threadId'],
@@ -965,16 +974,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_email': {
-        const { emailId } = args as any;
+        const { emailId, raw } = args as any;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
         const email = await client.getEmailById(emailId);
+        const output = raw ? email : simplifyEmail(email);
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(email, null, 2),
+              text: JSON.stringify(output, null, 2),
             },
           ],
         };
@@ -1521,18 +1531,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_thread': {
-        const { threadId } = args as any;
+        const { threadId, raw } = args as any;
         if (!threadId) {
           throw new McpError(ErrorCode.InvalidParams, 'threadId is required');
         }
         const client = initializeClient();
         try {
           const thread = await client.getThread(threadId);
+          const output = raw ? thread : thread.map(simplifyEmail);
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify(thread, null, 2),
+                text: JSON.stringify(output, null, 2),
               },
             ],
           };

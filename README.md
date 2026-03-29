@@ -144,8 +144,9 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - **list_mailboxes**: Get all mailboxes in your account
 - **list_emails**: List emails from a specific mailbox or all mailboxes
   - Parameters: `mailboxId` (optional), `limit` (default: 20)
-- **get_email**: Get a specific email by ID
-  - Parameters: `emailId` (required)
+- **get_email**: Get a specific email by ID (returns simplified format by default)
+  - Parameters: `emailId` (required), `raw` (optional boolean, returns raw JMAP response when true)
+  - See [Simplified Email Format](#simplified-email-format) below
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array)
 - **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Set `send=false` to save as draft instead of sending.
@@ -177,8 +178,9 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
   - Parameters: `emailId` (required), `attachmentId` (required), `savePath` (optional)
 - **advanced_search**: Advanced email search with multiple criteria
   - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50)
-- **get_thread**: Get all emails in a conversation thread
-  - Parameters: `threadId` (required)
+- **get_thread**: Get all emails in a conversation thread (returns array of simplified emails with full bodies by default)
+  - Parameters: `threadId` (required), `raw` (optional boolean, returns raw JMAP response when true)
+  - See [Simplified Email Format](#simplified-email-format) below
 
 ### Email Statistics & Analytics
 
@@ -225,6 +227,35 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - **test_bulk_operations**: Safely test bulk operations with dry-run mode
   - Parameters: `dryRun` (default: true), `limit` (default: 3)
 
+## Simplified Email Format
+
+`get_email` and `get_thread` return a simplified format by default, designed for efficient consumption by AI agents. Fields that are empty, null, or false are omitted to save tokens.
+
+**Always present:**
+- `id` — email ID
+- `subject` — subject line (defaults to "(no subject)")
+- `from` — sender as `"Name <email>"` or `"email"`
+
+**Included when non-empty/non-null:**
+- `date` — ISO 8601 timestamp
+- `threadId` — conversation thread ID
+- `messageId` — Message-ID header values
+- `references` — References header (threading chain)
+- `to`, `cc`, `bcc` — recipient lists as `"Name <email>"` strings
+- `bodyText` — extracted plain-text body
+- `bodyHtml` — extracted HTML body
+- `attachments` — array of `{ name?, contentType, size, blobId }`
+
+**Included when true:**
+- `isReply` — email has In-Reply-To header
+- `isRead` — email has been read (`$seen` keyword)
+- `isFlagged` — email is starred/pinned (`$flagged` keyword)
+- `isDraft` — email is a draft (`$draft` keyword)
+
+**`_extra`** — included only when the JMAP response contains fields not covered above. This ensures no data is silently lost if Fastmail adds new fields or returns unexpected properties.
+
+Pass `raw: true` to either tool to get the full, unmodified JMAP response instead.
+
 ## API Information
 
 This server uses the JMAP (JSON Meta Application Protocol) API provided by Fastmail. JMAP is a modern, efficient alternative to IMAP for email access.
@@ -270,6 +301,7 @@ src/
 ├── index.ts              # Main MCP server implementation
 ├── auth.ts              # Authentication handling
 ├── jmap-client.ts       # JMAP client wrapper
+├── email-formatter.ts   # Simplified email response formatting
 ├── contacts-calendar.ts # Contacts and calendar extensions
 └── caldav-client.ts     # CalDAV calendar client (fallback)
 ```

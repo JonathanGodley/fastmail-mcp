@@ -527,3 +527,45 @@ describe('getListResult', () => {
     assert.deepEqual(mailboxes, []);
   });
 });
+
+// ---------- getThread ----------
+
+describe('getThread', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it('requests full body properties for thread emails', async () => {
+    let callCount = 0;
+    const makeReq = mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          methodResponses: [
+            ['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail'],
+          ],
+        };
+      }
+      return {
+        methodResponses: [
+          ['Thread/get', { list: [{ id: 'thread-1', emailIds: ['e1'] }] }, 'getThread'],
+          ['Email/get', { list: [{ id: 'e1', subject: 'Test', bodyValues: {} }] }, 'emails'],
+        ],
+      };
+    });
+
+    await client.getThread('e1');
+
+    const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
+    assert.ok(emailGetArgs.properties.includes('bodyValues'), 'should request bodyValues');
+    assert.ok(emailGetArgs.properties.includes('textBody'), 'should request textBody');
+    assert.ok(emailGetArgs.properties.includes('htmlBody'), 'should request htmlBody');
+    assert.ok(emailGetArgs.properties.includes('attachments'), 'should request attachments');
+    assert.ok(emailGetArgs.properties.includes('inReplyTo'), 'should request inReplyTo');
+    assert.equal(emailGetArgs.fetchTextBodyValues, true);
+    assert.equal(emailGetArgs.fetchHTMLBodyValues, true);
+    assert.ok(emailGetArgs.bodyProperties.includes('name'), 'should request name in bodyProperties');
+  });
+});
