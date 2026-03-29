@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'os';
-import { resolve, join } from 'path';
+import { resolve, join, normalize } from 'path';
 import { JmapClient } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 
@@ -539,53 +539,25 @@ describe('searchEmails', () => {
 // ---------- validateSavePath tests ----------
 
 describe('validateSavePath', () => {
-  const allowedDir = resolve(homedir(), 'Downloads', 'fastmail-mcp');
-
-  it('accepts paths within the allowed directory', () => {
-    const testPath = join(allowedDir, 'photo.jpg');
+  it('resolves absolute paths', () => {
+    const testPath = join(homedir(), 'Documents', 'photo.jpg');
     const result = JmapClient.validateSavePath(testPath);
     assert.equal(result, testPath);
   });
 
-  it('accepts paths in subdirectories', () => {
-    const testPath = join(allowedDir, 'andrew', 'assets', 'logo.png');
-    const result = JmapClient.validateSavePath(testPath);
-    assert.equal(result, testPath);
+  it('resolves relative paths against CWD', () => {
+    const result = JmapClient.validateSavePath('output/file.txt');
+    assert.equal(result, resolve('output/file.txt'));
   });
 
-  it('rejects paths outside the allowed directory', () => {
-    assert.throws(
-      () => JmapClient.validateSavePath('/tmp/evil.sh'),
-      (err: Error) => {
-        assert.match(err.message, /must be within/);
-        return true;
-      },
-    );
-  });
-
-  it('rejects path traversal attempts', () => {
-    assert.throws(
-      () => JmapClient.validateSavePath(`${allowedDir}/../../../.bashrc`),
-      (err: Error) => {
-        assert.match(err.message, /must be within/);
-        return true;
-      },
-    );
-  });
-
-  it('rejects home directory writes', () => {
-    assert.throws(
-      () => JmapClient.validateSavePath(`${homedir()}/.ssh/authorized_keys`),
-      (err: Error) => {
-        assert.match(err.message, /must be within/);
-        return true;
-      },
-    );
+  it('normalizes path traversal', () => {
+    const result = JmapClient.validateSavePath('/tmp/a/../b/file.txt');
+    assert.equal(result, resolve(normalize('/tmp/a/../b/file.txt')));
   });
 
   it('rejects null bytes', () => {
     assert.throws(
-      () => JmapClient.validateSavePath(join(allowedDir, 'file\0.txt')),
+      () => JmapClient.validateSavePath('file\0.txt'),
       (err: Error) => {
         assert.match(err.message, /null bytes/);
         return true;

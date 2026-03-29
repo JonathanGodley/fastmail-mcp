@@ -1173,17 +1173,7 @@ export class JmapClient {
       throw new Error('Save path contains null bytes');
     }
 
-    const allowedDir = JmapClient.DEFAULT_DOWNLOADS_DIR;
-    const resolved = resolve(normalize(savePath));
-
-    if (!resolved.startsWith(allowedDir + sep) && resolved !== allowedDir) {
-      throw new Error(
-        `Save path must be within ${allowedDir}. ` +
-        `Received: ${savePath}`
-      );
-    }
-
-    return resolved;
+    return resolve(normalize(savePath));
   }
 
   async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string): Promise<{ url: string; bytesWritten: number }> {
