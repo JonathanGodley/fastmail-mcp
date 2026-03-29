@@ -145,8 +145,8 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - **list_emails**: List emails from a specific mailbox or all mailboxes (returns simplified format by default)
   - Parameters: `mailboxId` (optional), `limit` (default: 20), `ascending` (optional, oldest first), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
-- **get_email**: Get a specific email by ID (returns simplified format by default)
-  - Parameters: `emailId` (required), `raw` (optional boolean, returns raw JMAP response when true)
+- **get_email**: Get a specific email by ID (returns simplified format by default, HTML body omitted)
+  - Parameters: `emailId` (required), `includeHtml` (optional, include full HTML body), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array)
@@ -182,8 +182,8 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - **advanced_search**: Advanced email search with multiple criteria (returns simplified format by default)
   - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
-- **get_thread**: Get all emails in a conversation thread (returns array of simplified emails with full bodies by default)
-  - Parameters: `threadId` (required), `raw` (optional boolean, returns raw JMAP response when true)
+- **get_thread**: Get all emails in a conversation thread (returns simplified format, HTML body omitted by default)
+  - Parameters: `threadId` (required), `includeHtml` (optional, include full HTML body), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
 
 ### Email Statistics & Analytics
@@ -246,11 +246,14 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - `messageId` — Message-ID header values
 - `references` — References header (threading chain)
 - `to`, `cc`, `bcc` — recipient lists as `"Name <email>"` strings
-- `preview` — Fastmail's short summary of the email body
-- `bodyText` — extracted plain-text body (full emails and threads only)
-- `bodyHtml` — extracted HTML body (full emails and threads only)
+- `preview` — Fastmail's short summary of the email body (max 256 chars)
+- `bodyText` — extracted plain-text body (from `text/plain` parts only)
 - `attachments` — array of `{ name?, contentType, size, blobId }` (full emails and threads only)
 - `hasAttachment` — boolean, included in list/search results where `attachments` array is not available
+
+**HTML body handling:**
+- `bodyHtml` — **omitted by default** to save tokens. Automatically included for HTML-only emails (where no `text/plain` alternative exists). Use `includeHtml: true` to always include it.
+- `bodyHtmlSize` — when `bodyHtml` is omitted, this integer shows how many characters the HTML body contains, so you can decide whether to request it.
 
 **Included when true:**
 - `isReply` — email has In-Reply-To header

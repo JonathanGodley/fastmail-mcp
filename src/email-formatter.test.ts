@@ -59,7 +59,9 @@ describe('simplifyEmail', () => {
     assert.equal(result.isRead, true);
     assert.equal(result.isFlagged, true);
     assert.equal(result.bodyText, 'Hello world');
-    assert.equal(result.bodyHtml, '<p>Hello world</p>');
+    // bodyHtml omitted by default, bodyHtmlSize provided instead
+    assert.equal(result.bodyHtml, undefined);
+    assert.equal(result.bodyHtmlSize, '<p>Hello world</p>'.length);
     assert.equal(result.attachments!.length, 1);
     assert.equal(result.attachments![0].name, 'doc.pdf');
     assert.equal(result.attachments![0].contentType, 'application/pdf');
@@ -270,6 +272,86 @@ describe('simplifyEmail', () => {
     assert.equal(result.hasAttachment, undefined);
     assert.equal(result.attachments!.length, 1);
     assert.equal(result._extra, undefined);
+  });
+
+  // --- bodyHtml omission and bodyHtmlSize ---
+
+  it('omits bodyHtml by default, provides bodyHtmlSize', () => {
+    const raw = {
+      id: 'e30',
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '2', type: 'text/html' }],
+      bodyValues: {
+        '1': { value: 'Plain text' },
+        '2': { value: '<p>HTML content that is much longer</p>' },
+      },
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.bodyText, 'Plain text');
+    assert.equal(result.bodyHtml, undefined);
+    assert.equal(result.bodyHtmlSize, '<p>HTML content that is much longer</p>'.length);
+  });
+
+  it('includes bodyHtml when includeHtml is true', () => {
+    const raw = {
+      id: 'e31',
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '2', type: 'text/html' }],
+      bodyValues: {
+        '1': { value: 'Plain text' },
+        '2': { value: '<p>HTML</p>' },
+      },
+    };
+    const result = simplifyEmail(raw, { includeHtml: true });
+    assert.equal(result.bodyText, 'Plain text');
+    assert.equal(result.bodyHtml, '<p>HTML</p>');
+    assert.equal(result.bodyHtmlSize, undefined);
+  });
+
+  it('handles real HTML-only email (both arrays point to same text/html part)', () => {
+    // Real JMAP behavior: HTML-only emails have both textBody and htmlBody
+    // pointing to the same text/html part with the same partId
+    const raw = {
+      id: 'e32',
+      textBody: [{ partId: '1', type: 'text/html' }],
+      htmlBody: [{ partId: '1', type: 'text/html' }],
+      bodyValues: {
+        '1': { value: '<html><body><h1>Newsletter</h1></body></html>' },
+      },
+    };
+    const result = simplifyEmail(raw);
+    // bodyText should be null (no text/plain parts)
+    assert.equal(result.bodyText, undefined);
+    // bodyHtml auto-included as fallback since bodyText is null
+    assert.equal(result.bodyHtml, '<html><body><h1>Newsletter</h1></body></html>');
+    assert.equal(result.bodyHtmlSize, undefined);
+  });
+
+  it('plain-text-only email has no bodyHtml or bodyHtmlSize', () => {
+    const raw = {
+      id: 'e33',
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '1', type: 'text/plain' }],
+      bodyValues: {
+        '1': { value: 'Just plain text' },
+      },
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.bodyText, 'Just plain text');
+    assert.equal(result.bodyHtml, undefined);
+    assert.equal(result.bodyHtmlSize, undefined);
+  });
+
+  it('parts with no type field pass through (defensive)', () => {
+    const raw = {
+      id: 'e34',
+      textBody: [{ partId: '1' }],
+      bodyValues: {
+        '1': { value: 'Content without type' },
+      },
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.bodyText, 'Content without type');
   });
 
   it('returns empty _extra when all fields are known', () => {

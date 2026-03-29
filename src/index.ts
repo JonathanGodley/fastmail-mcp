@@ -150,13 +150,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format by default: { id, subject, from, date?, threadId?, messageId?, references?, to?, cc?, bcc?, isReply?, isRead?, isFlagged?, isDraft?, bodyText?, bodyHtml?, attachments?, _extra? }. Empty/null/false fields are omitted. Unknown JMAP fields appear in _extra. Use raw: true for the full JMAP response.',
+        description: 'Get a specific email by ID. Returns simplified format by default: { id, subject, from, date?, threadId?, messageId?, references?, to?, cc?, bcc?, isReply?, isRead?, isFlagged?, isDraft?, preview?, bodyText?, bodyHtml?, bodyHtmlSize?, attachments?, _extra? }. HTML body omitted by default (bodyHtmlSize provided instead). HTML auto-included for HTML-only emails. Use includeHtml: true for full HTML, raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
             emailId: {
               type: 'string',
               description: 'ID of the email to retrieve',
+            },
+            includeHtml: {
+              type: 'boolean',
+              description: 'Include full HTML body in response (default: false, always included for HTML-only emails)',
             },
             raw: {
               type: 'boolean',
@@ -781,13 +785,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns array of simplified emails by default (same format as get_email, with full bodies). Use raw: true for raw JMAP.',
+        description: 'Get all emails in a conversation thread. Returns array of simplified emails by default (same format as get_email, HTML omitted by default). Use includeHtml: true for full HTML, raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
             threadId: {
               type: 'string',
               description: 'ID of the thread/conversation',
+            },
+            includeHtml: {
+              type: 'boolean',
+              description: 'Include full HTML body in response (default: false, always included for HTML-only emails)',
             },
             raw: {
               type: 'boolean',
@@ -976,7 +984,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   function formatEmailQueryResult(result: QueryResult): string {
     const { items, total } = result;
-    const simplified = items.map(simplifyEmail);
+    const simplified = items.map(e => simplifyEmail(e));
     const summary = total > items.length
       ? `Showing ${items.length} of ${total} results.`
       : `${items.length} results.`;
@@ -1015,12 +1023,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_email': {
-        const { emailId, raw } = args as any;
+        const { emailId, includeHtml, raw } = args as any;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
         const email = await client.getEmailById(emailId);
-        const output = raw ? email : simplifyEmail(email);
+        const output = raw ? email : simplifyEmail(email, { includeHtml });
         return {
           content: [
             {
@@ -1572,14 +1580,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_thread': {
-        const { threadId, raw } = args as any;
+        const { threadId, includeHtml, raw } = args as any;
         if (!threadId) {
           throw new McpError(ErrorCode.InvalidParams, 'threadId is required');
         }
         const client = initializeClient();
         try {
           const thread = await client.getThread(threadId);
-          const output = raw ? thread : thread.map(simplifyEmail);
+          const output = raw ? thread : thread.map(e => simplifyEmail(e, { includeHtml }));
           return {
             content: [
               {

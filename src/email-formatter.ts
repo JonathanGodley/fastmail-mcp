@@ -17,6 +17,7 @@ export interface SimplifiedEmail {
   hasAttachment?: boolean;
   bodyText?: string;
   bodyHtml?: string;
+  bodyHtmlSize?: number;
   attachments?: Array<{
     name?: string;
     contentType: string;
@@ -24,6 +25,10 @@ export interface SimplifiedEmail {
     blobId: string;
   }>;
   _extra?: Record<string, unknown>;
+}
+
+export interface SimplifyOptions {
+  includeHtml?: boolean;
 }
 
 // Fields consumed by simplifyEmail — anything not in this set goes to _extra
@@ -38,11 +43,17 @@ export function formatAddress(addr: { name?: string; email: string }): string {
   return addr.name ? `${addr.name} <${addr.email}>` : addr.email;
 }
 
-function extractBody(parts: any[] | undefined | null, bodyValues: Record<string, any> | undefined | null): string | null {
+function extractBody(
+  parts: any[] | undefined | null,
+  bodyValues: Record<string, any> | undefined | null,
+  preferType: 'text/plain' | 'text/html'
+): string | null {
   if (!parts?.length || !bodyValues) return null;
 
   const chunks: string[] = [];
   for (const part of parts) {
+    // Skip parts that don't match the preferred type (defensive: allow parts with no type)
+    if (part.type && part.type !== preferType) continue;
     const bv = bodyValues[part.partId];
     if (!bv?.value) continue;
 
@@ -62,7 +73,7 @@ function addIf<T>(obj: Record<string, any>, key: string, value: T): void {
   obj[key] = value;
 }
 
-export function simplifyEmail(raw: any): SimplifiedEmail {
+export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEmail {
   const extra: Record<string, unknown> = {};
   for (const key of Object.keys(raw)) {
     if (!KNOWN_FIELDS.has(key)) {
@@ -92,8 +103,20 @@ export function simplifyEmail(raw: any): SimplifiedEmail {
   if (!raw.attachments) {
     addIf(result, 'hasAttachment', !!raw.hasAttachment);
   }
-  addIf(result, 'bodyText', extractBody(raw.textBody, raw.bodyValues));
-  addIf(result, 'bodyHtml', extractBody(raw.htmlBody, raw.bodyValues));
+
+  const bodyText = extractBody(raw.textBody, raw.bodyValues, 'text/plain');
+  const bodyHtml = extractBody(raw.htmlBody, raw.bodyValues, 'text/html');
+
+  addIf(result, 'bodyText', bodyText);
+  if (options?.includeHtml) {
+    addIf(result, 'bodyHtml', bodyHtml);
+  } else if (!bodyText && bodyHtml) {
+    // HTML-only email — include HTML as fallback since there's no plain text
+    addIf(result, 'bodyHtml', bodyHtml);
+  } else if (bodyHtml) {
+    // Include size so agent knows HTML exists and can request it
+    addIf(result, 'bodyHtmlSize', bodyHtml.length);
+  }
 
   const attachments = (raw.attachments ?? []).map((a: any) => {
     const att: Record<string, any> = {
