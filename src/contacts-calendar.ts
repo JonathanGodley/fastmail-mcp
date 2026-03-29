@@ -40,10 +40,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return {
-        items: response.methodResponses[1][1].list,
-        total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
-      };
+      return this.getQueryResult(response, 1, 0);
     } catch (error) {
       // Fallback: try to get contacts using AddressBook methods
       const fallbackRequest: JmapRequest = {
@@ -57,7 +54,7 @@ export class ContactsCalendarClient extends JmapClient {
 
       try {
         const fallbackResponse = await this.makeRequest(fallbackRequest);
-        const list = fallbackResponse.methodResponses[0][1].list || [];
+        const list = this.getListResult(fallbackResponse, 0);
         return { items: list, total: list.length };
       } catch (fallbackError) {
         throw new Error(`Contacts not supported or accessible: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
@@ -86,7 +83,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return response.methodResponses[0][1].list[0];
+      return this.getListResult(response, 0)[0];
     } catch (error) {
       throw new Error(`Contact access not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
     }
@@ -120,10 +117,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return {
-        items: response.methodResponses[1][1].list,
-        total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
-      };
+      return this.getQueryResult(response, 1, 0);
     } catch (error) {
       throw new Error(`Contact search not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
     }
@@ -149,7 +143,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return response.methodResponses[0][1].list;
+      return this.getListResult(response, 0);
     } catch (error) {
       // Calendar access might require special permissions
       throw new Error(`Calendar access not supported or requires additional permissions. This may be due to account settings or JMAP scope limitations: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling calendar API access in Fastmail settings.`);
@@ -187,10 +181,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return {
-        items: response.methodResponses[1][1].list,
-        total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
-      };
+      return this.getQueryResult(response, 1, 0);
     } catch (error) {
       throw new Error(`Calendar events access not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling calendar API access in Fastmail settings.`);
     }
@@ -217,7 +208,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return response.methodResponses[0][1].list[0];
+      return this.getListResult(response, 0)[0];
     } catch (error) {
       throw new Error(`Calendar event access not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling calendar API access in Fastmail settings.`);
     }
@@ -262,7 +253,12 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return response.methodResponses[0][1].created.newEvent.id;
+      const result = this.getMethodResult(response, 0);
+      const eventId = result.created?.newEvent?.id;
+      if (!eventId) {
+        throw new Error('Calendar event creation returned no event ID');
+      }
+      return eventId;
     } catch (error) {
       throw new Error(`Calendar event creation not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling calendar API access in Fastmail settings.`);
     }

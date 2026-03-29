@@ -8,13 +8,14 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { FastmailAuth, FastmailConfig } from './auth.js';
-import { JmapClient, JmapRequest, QueryResult } from './jmap-client.js';
+import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
+import { CalDAVCalendarClient } from './caldav-client.js';
 
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.7.0',
+    version: '1.8.2',
   },
   {
     capabilities: {
@@ -25,17 +26,7 @@ const server = new Server(
 
 let jmapClient: JmapClient | null = null;
 let contactsCalendarClient: ContactsCalendarClient | null = null;
-
-function resolveEnvValue(...keys: string[]): string | undefined {
-  const isPlaceholder = (val: string) => /\$\{[^}]+\}/.test(val.trim());
-  for (const key of keys) {
-    const raw = process.env[key];
-    if (typeof raw === 'string' && raw.trim().length > 0 && !isPlaceholder(raw)) {
-      return raw.trim();
-    }
-  }
-  return undefined;
-}
+let caldavClient: CalDAVCalendarClient | null = null;
 
 function findEnvValue(keys: string[]): { value?: string; key?: string; wasPlaceholder: boolean } {
   const isPlaceholder = (val: string) => /\$\{[^}]+\}/.test(val.trim());
@@ -56,18 +47,13 @@ function maskSecret(value: string): string {
   return `${value.slice(0, 4)}…${value.slice(-2)} (len ${value.length})`;
 }
 
-function initializeClient(): JmapClient {
-  if (jmapClient) {
-    return jmapClient;
-  }
-
+function getAuthConfig(): FastmailConfig {
   const tokenInfo = findEnvValue([
     'FASTMAIL_API_TOKEN',
     'USER_CONFIG_FASTMAIL_API_TOKEN',
     'USER_CONFIG_fastmail_api_token',
     'fastmail_api_token',
   ]);
-  // production: do not log token-related env details
   const apiToken = tokenInfo.value;
   if (!apiToken) {
     throw new McpError(
@@ -82,14 +68,16 @@ function initializeClient(): JmapClient {
     'USER_CONFIG_fastmail_base_url',
     'fastmail_base_url',
   ]);
-  // production: do not log base URL env details
 
-  const config: FastmailConfig = {
-    apiToken,
-    baseUrl: baseInfo.value
-  };
+  return { apiToken, baseUrl: baseInfo.value };
+}
 
-  const auth = new FastmailAuth(config);
+function initializeClient(): JmapClient {
+  if (jmapClient) {
+    return jmapClient;
+  }
+
+  const auth = new FastmailAuth(getAuthConfig());
   jmapClient = new JmapClient(auth);
   return jmapClient;
 }
@@ -99,37 +87,27 @@ function initializeContactsCalendarClient(): ContactsCalendarClient {
     return contactsCalendarClient;
   }
 
-  const tokenInfo = findEnvValue([
-    'FASTMAIL_API_TOKEN',
-    'USER_CONFIG_FASTMAIL_API_TOKEN',
-    'USER_CONFIG_fastmail_api_token',
-    'fastmail_api_token',
-  ]);
-  // production: do not log token-related env details (contacts/calendar)
-  const apiToken = tokenInfo.value;
-  if (!apiToken) {
-    throw new McpError(
-      ErrorCode.InvalidRequest,
-      'FASTMAIL_API_TOKEN environment variable is required'
-    );
-  }
-
-  const baseInfo = findEnvValue([
-    'FASTMAIL_BASE_URL',
-    'USER_CONFIG_FASTMAIL_BASE_URL',
-    'USER_CONFIG_fastmail_base_url',
-    'fastmail_base_url',
-  ]);
-  // production: do not log base URL env details (contacts/calendar)
-
-  const config: FastmailConfig = {
-    apiToken,
-    baseUrl: baseInfo.value
-  };
-
-  const auth = new FastmailAuth(config);
+  const auth = new FastmailAuth(getAuthConfig());
   contactsCalendarClient = new ContactsCalendarClient(auth);
   return contactsCalendarClient;
+}
+
+function initializeCalDAVClient(): CalDAVCalendarClient | null {
+  if (caldavClient) return caldavClient;
+
+  const username = findEnvValue([
+    'FASTMAIL_CALDAV_USERNAME',
+    'USER_CONFIG_FASTMAIL_CALDAV_USERNAME',
+  ]).value;
+  const password = findEnvValue([
+    'FASTMAIL_CALDAV_PASSWORD',
+    'USER_CONFIG_FASTMAIL_CALDAV_PASSWORD',
+  ]).value;
+
+  if (!username || !password) return null;
+
+  caldavClient = new CalDAVCalendarClient({ username, password });
+  return caldavClient;
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -232,7 +210,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain.',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default sends immediately; set send=false to save as a draft instead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -267,20 +245,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'HTML body (optional)',
             },
+            send: {
+              type: 'boolean',
+              description: 'Whether to send the reply immediately (default: true). Set to false to save as draft instead.',
+            },
           },
           required: ['originalEmailId'],
         },
       },
       {
-        name: 'save_draft',
-        description: 'Save an email as a draft without sending it. Supports threading headers for replies.',
+        name: 'create_draft',
+        description: 'Create an email draft without sending it. Supports threading headers for replies. IMPORTANT: each call creates a new draft — do not call twice for the same message.',
         inputSchema: {
           type: 'object',
           properties: {
             to: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Recipient email addresses',
+              description: 'Recipient email addresses (optional)',
             },
             cc: {
               type: 'array',
@@ -296,9 +278,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'Sender email address (optional, defaults to account primary email)',
             },
+            mailboxId: {
+              type: 'string',
+              description: 'Mailbox ID to save the draft to (optional, defaults to Drafts folder)',
+            },
             subject: {
               type: 'string',
-              description: 'Email subject',
+              description: 'Email subject (optional)',
             },
             textBody: {
               type: 'string',
@@ -319,7 +305,65 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Message-IDs for References header (optional, for threading)',
             },
           },
-          required: ['to', 'subject'],
+        },
+      },
+      {
+        name: 'edit_draft',
+        description: 'Edit an existing draft email. Since JMAP emails are immutable, this atomically destroys the old draft and creates a new one with the updated fields. Only fields you provide will be changed; others are preserved from the original draft.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailId: {
+              type: 'string',
+              description: 'The ID of the draft email to edit',
+            },
+            to: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Updated recipient email addresses (optional, keeps existing if omitted)',
+            },
+            cc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Updated CC email addresses (optional)',
+            },
+            bcc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Updated BCC email addresses (optional)',
+            },
+            from: {
+              type: 'string',
+              description: 'Updated sender email address (optional)',
+            },
+            subject: {
+              type: 'string',
+              description: 'Updated email subject (optional)',
+            },
+            textBody: {
+              type: 'string',
+              description: 'Updated plain text body (optional)',
+            },
+            htmlBody: {
+              type: 'string',
+              description: 'Updated HTML body (optional)',
+            },
+          },
+          required: ['emailId'],
+        },
+      },
+      {
+        name: 'send_draft',
+        description: 'Send an existing draft email. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailId: {
+              type: 'string',
+              description: 'The ID of the draft email to send',
+            },
+          },
+          required: ['emailId'],
         },
       },
       {
@@ -520,6 +564,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'pin_email',
+        description: 'Pin or unpin an email',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailId: {
+              type: 'string',
+              description: 'ID of the email to pin/unpin',
+            },
+            pinned: {
+              type: 'boolean',
+              description: 'true to pin, false to unpin',
+              default: true,
+            },
+          },
+          required: ['emailId'],
+        },
+      },
+      {
         name: 'delete_email',
         description: 'Delete an email (move to trash)',
         inputSchema: {
@@ -619,7 +682,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             savePath: {
               type: 'string',
-              description: 'Absolute file path to save the attachment to. Parent directories will be created automatically.',
+              description: 'File path within ~/Downloads/fastmail-mcp/ to save the attachment to. Paths outside this directory are rejected for security. Parent directories will be created automatically.',
             },
           },
           required: ['emailId', 'attachmentId'],
@@ -654,6 +717,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             isUnread: {
               type: 'boolean',
               description: 'Filter unread emails',
+            },
+            isPinned: {
+              type: 'boolean',
+              description: 'Filter pinned emails',
             },
             mailboxId: {
               type: 'string',
@@ -724,6 +791,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             read: {
               type: 'boolean',
               description: 'true to mark as read, false as unread',
+              default: true,
+            },
+          },
+          required: ['emailIds'],
+        },
+      },
+      {
+        name: 'bulk_pin',
+        description: 'Pin or unpin multiple emails',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailIds: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Array of email IDs to pin/unpin',
+            },
+            pinned: {
+              type: 'boolean',
+              description: 'true to pin, false to unpin',
               default: true,
             },
           },
@@ -864,8 +951,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_emails': {
-        const { mailboxId, limit = 20 } = args as any;
-        const result = await client.getEmails(mailboxId, limit);
+        const { mailboxId, limit } = args as any;
+        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
+        const result = await client.getEmails(mailboxId, validLimit);
         return {
           content: [
             {
@@ -928,11 +1016,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'reply_email': {
-        const { originalEmailId, to, cc, bcc, from, textBody, htmlBody } = args as any;
+        const { originalEmailId, to, cc, bcc, from, textBody, htmlBody, send: shouldSend = true } = args as any;
         if (!originalEmailId) {
           throw new McpError(ErrorCode.InvalidParams, 'originalEmailId is required');
         }
-        if (!textBody && !htmlBody) {
+        if (shouldSend && !textBody && !htmlBody) {
           throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
         }
 
@@ -960,13 +1048,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Default recipients to the original sender
         const replyTo = (to && Array.isArray(to) && to.length > 0)
           ? to
-          : originalEmail.from?.map((addr: any) => addr.email).filter(Boolean) || [];
+          : (Array.isArray(originalEmail.from) ? originalEmail.from.map((addr: any) => addr.email).filter(Boolean) : []);
 
         if (replyTo.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'Could not determine reply recipient. Please provide "to" explicitly.');
         }
 
-        const submissionId = await client.sendEmail({
+        const replyParams = {
           to: replyTo,
           cc,
           bcc,
@@ -976,7 +1064,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           htmlBody,
           inReplyTo: inReplyToHeader,
           references: referencesHeader,
-        });
+        };
+
+        if (!shouldSend) {
+          const emailId = await client.createDraft(replyParams);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Reply draft saved successfully (Email ID: ${emailId}). Subject: ${replySubject}`,
+              },
+            ],
+          };
+        }
+
+        const submissionId = await client.sendEmail(replyParams);
 
         return {
           content: [
@@ -988,23 +1090,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case 'save_draft': {
-        const { to, cc, bcc, from, subject, textBody, htmlBody, inReplyTo, references } = args as any;
-        if (!to || !Array.isArray(to) || to.length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, 'to field is required and must be a non-empty array');
-        }
-        if (!subject) {
-          throw new McpError(ErrorCode.InvalidParams, 'subject is required');
-        }
-        if (!textBody && !htmlBody) {
-          throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
+      case 'create_draft': {
+        const { to, cc, bcc, from, mailboxId, subject, textBody, htmlBody, inReplyTo, references } = args as any;
+
+        if (!to?.length && !subject && !textBody && !htmlBody) {
+          throw new McpError(ErrorCode.InvalidParams, 'At least one of to, subject, textBody, or htmlBody must be provided');
         }
 
-        const draftId = await client.saveDraft({
+        const emailId = await client.createDraft({
           to,
           cc,
           bcc,
           from,
+          mailboxId,
           subject,
           textBody,
           htmlBody,
@@ -1012,11 +1110,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           references,
         });
 
+        const summary = [
+          `Draft created successfully (Email ID: ${emailId}).`,
+          subject ? `Subject: ${subject}` : null,
+          to?.length ? `To: ${to.join(', ')}` : null,
+          cc?.length ? `CC: ${cc.join(', ')}` : null,
+        ].filter(Boolean).join(' ');
+
         return {
           content: [
             {
               type: 'text',
-              text: `Draft saved successfully. Draft ID: ${draftId}`,
+              text: summary,
+            },
+          ],
+        };
+      }
+
+      case 'edit_draft': {
+        const { emailId, to, cc, bcc, from, subject, textBody, htmlBody } = args as any;
+        if (!emailId) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
+        }
+
+        const newEmailId = await client.updateDraft(emailId, {
+          to,
+          cc,
+          bcc,
+          from,
+          subject,
+          textBody,
+          htmlBody,
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Draft updated successfully. New Email ID: ${newEmailId} (old draft ${emailId} was replaced)`,
+            },
+          ],
+        };
+      }
+
+      case 'send_draft': {
+        const { emailId } = args as any;
+        if (!emailId) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
+        }
+
+        const submissionId = await client.sendDraft(emailId);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Draft sent successfully. Submission ID: ${submissionId}`,
             },
           ],
         };
@@ -1027,32 +1176,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
-
-        // For search, we'll use the Email/query method with a text filter
-        const session = await client.getSession();
-        const request: JmapRequest = {
-          using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-          methodCalls: [
-            ['Email/query', {
-              accountId: session.accountId,
-              filter: { text: query },
-              sort: [{ property: 'receivedAt', isAscending: false }],
-              limit,
-              calculateTotal: true
-            }, 'query'],
-            ['Email/get', {
-              accountId: session.accountId,
-              '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-              properties: ['id', 'subject', 'from', 'to', 'receivedAt', 'preview', 'hasAttachment']
-            }, 'emails']
-          ]
-        };
-
-        const response = await client.makeRequest(request);
-        const result: QueryResult = {
-          items: response.methodResponses[1][1].list,
-          total: response.methodResponses[0][1].total ?? response.methodResponses[1][1].list.length,
-        };
+        const result = await client.searchEmails(query, limit);
 
         return {
           content: [
@@ -1113,30 +1237,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_calendars': {
-        const contactsClient = initializeContactsCalendarClient();
-        const calendars = await contactsClient.getCalendars();
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(calendars, null, 2),
-            },
-          ],
-        };
+        try {
+          const contactsClient = initializeContactsCalendarClient();
+          const calendars = await contactsClient.getCalendars();
+          return { content: [{ type: 'text', text: JSON.stringify(calendars, null, 2) }] };
+        } catch {
+          // JMAP calendars not available, try CalDAV
+          const davClient = initializeCalDAVClient();
+          if (!davClient) {
+            throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD to use CalDAV.');
+          }
+          const calendars = await davClient.getCalendars();
+          return { content: [{ type: 'text', text: JSON.stringify(calendars, null, 2) }] };
+        }
       }
 
       case 'list_calendar_events': {
         const { calendarId, limit = 50 } = args as any;
-        const contactsClient = initializeContactsCalendarClient();
-        const result = await contactsClient.getCalendarEvents(calendarId, limit);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: formatQueryResult(result),
-            },
-          ],
-        };
+        try {
+          const contactsClient = initializeContactsCalendarClient();
+          const result = await contactsClient.getCalendarEvents(calendarId, limit);
+          return { content: [{ type: 'text', text: formatQueryResult(result) }] };
+        } catch {
+          const davClient = initializeCalDAVClient();
+          if (!davClient) {
+            throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD to use CalDAV.');
+          }
+          const events = await davClient.getCalendarEvents(calendarId, limit);
+          return { content: [{ type: 'text', text: JSON.stringify(events, null, 2) }] };
+        }
       }
 
       case 'get_calendar_event': {
@@ -1144,16 +1273,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!eventId) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
-        const contactsClient = initializeContactsCalendarClient();
-        const event = await contactsClient.getCalendarEventById(eventId);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(event, null, 2),
-            },
-          ],
-        };
+        try {
+          const contactsClient = initializeContactsCalendarClient();
+          const event = await contactsClient.getCalendarEventById(eventId);
+          return { content: [{ type: 'text', text: JSON.stringify(event, null, 2) }] };
+        } catch {
+          const davClient = initializeCalDAVClient();
+          if (!davClient) {
+            throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD to use CalDAV.');
+          }
+          const event = await davClient.getCalendarEventById(eventId);
+          return { content: [{ type: 'text', text: JSON.stringify(event, null, 2) }] };
+        }
       }
 
       case 'create_calendar_event': {
@@ -1161,24 +1292,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!calendarId || !title || !start || !end) {
           throw new McpError(ErrorCode.InvalidParams, 'calendarId, title, start, and end are required');
         }
-        const contactsClient = initializeContactsCalendarClient();
-        const eventId = await contactsClient.createCalendarEvent({
-          calendarId,
-          title,
-          description,
-          start,
-          end,
-          location,
-          participants,
-        });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Calendar event created successfully. Event ID: ${eventId}`,
-            },
-          ],
-        };
+        try {
+          const contactsClient = initializeContactsCalendarClient();
+          const eventId = await contactsClient.createCalendarEvent({
+            calendarId, title, description, start, end, location, participants,
+          });
+          return { content: [{ type: 'text', text: `Calendar event created successfully. Event ID: ${eventId}` }] };
+        } catch {
+          const davClient = initializeCalDAVClient();
+          if (!davClient) {
+            throw new McpError(ErrorCode.InvalidRequest, 'JMAP calendars not available and CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD to use CalDAV.');
+          }
+          const eventId = await davClient.createCalendarEvent({
+            calendarId, title, description, start, end, location,
+          });
+          return { content: [{ type: 'text', text: `Calendar event created via CalDAV. Event ID: ${eventId}` }] };
+        }
       }
 
       case 'list_identities': {
@@ -1221,6 +1350,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: `Email ${read ? 'marked as read' : 'marked as unread'} successfully`,
+            },
+          ],
+        };
+      }
+
+      case 'pin_email': {
+        const { emailId, pinned = true } = args as any;
+        if (!emailId) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
+        }
+        const client = initializeClient();
+        await client.pinEmail(emailId, pinned);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Email ${pinned ? 'pinned' : 'unpinned'} successfully`,
             },
           ],
         };
@@ -1346,7 +1492,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
         } catch (error) {
-          // Sanitize error to avoid leaking attachment metadata
+          // Let path validation errors through so users see why their savePath was rejected
+          if (error instanceof Error && (error.message.includes('Save path') || error.message.includes('null bytes'))) {
+            throw new McpError(ErrorCode.InvalidParams, error.message);
+          }
+          // Sanitize other errors to avoid leaking attachment metadata
           throw new McpError(
             ErrorCode.InternalError,
             'Attachment download failed. Verify emailId and attachmentId and try again.'
@@ -1355,10 +1505,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'advanced_search': {
-        const { query, from, to, subject, hasAttachment, isUnread, mailboxId, after, before, limit } = args as any;
+        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit } = args as any;
         const client = initializeClient();
         const result = await client.advancedSearch({
-          query, from, to, subject, hasAttachment, isUnread, mailboxId, after, before, limit
+          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit
         });
         return {
           content: [
@@ -1431,6 +1581,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: `${emailIds.length} emails ${read ? 'marked as read' : 'marked as unread'} successfully`,
+            },
+          ],
+        };
+      }
+
+      case 'bulk_pin': {
+        const { emailIds, pinned = true } = args as any;
+        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
+        }
+        const client = initializeClient();
+        await client.bulkPinEmails(emailIds, pinned);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `${emailIds.length} emails ${pinned ? 'pinned' : 'unpinned'} successfully`,
             },
           ],
         };
@@ -1521,10 +1688,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           email: {
             available: true,
             functions: [
-              'list_mailboxes', 'list_emails', 'get_email', 'send_email', 'search_emails',
-              'get_recent_emails', 'mark_email_read', 'delete_email', 'move_email',
+              'list_mailboxes', 'list_emails', 'get_email', 'send_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
+              'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email',
               'get_email_attachments', 'download_attachment', 'advanced_search', 'get_thread',
-              'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_move', 'bulk_delete',
+              'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
               'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'
             ]
           },
