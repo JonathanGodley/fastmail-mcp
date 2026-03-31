@@ -785,7 +785,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns array of simplified emails by default (same format as get_email, HTML omitted by default). Use includeHtml: true for full HTML, raw: true for raw JMAP.',
+        description: 'Get all emails in a conversation thread. Returns compact index by default (metadata + preview per message, no bodies). Use full: true for complete email bodies (HTML omitted unless includeHtml: true). Use raw: true for raw JMAP.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -793,9 +793,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'ID of the thread/conversation',
             },
+            full: {
+              type: 'boolean',
+              description: 'Return full email bodies instead of compact index (default: false). Compact mode returns metadata + preview only.',
+            },
             includeHtml: {
               type: 'boolean',
-              description: 'Include full HTML body in response (default: false, always included for HTML-only emails)',
+              description: 'Include full HTML body in response (only applies when full: true, default: false, always included for HTML-only emails)',
             },
             raw: {
               type: 'boolean',
@@ -1580,14 +1584,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_thread': {
-        const { threadId, includeHtml, raw } = args as any;
+        const { threadId, full, includeHtml, raw } = args as any;
         if (!threadId) {
           throw new McpError(ErrorCode.InvalidParams, 'threadId is required');
         }
         const client = initializeClient();
         try {
-          const thread = await client.getThread(threadId);
-          const output = raw ? thread : thread.map(e => simplifyEmail(e, { includeHtml }));
+          const compact = !full && !raw;
+          const thread = await client.getThread(threadId, compact);
+          const output = raw ? thread : thread.map(e => simplifyEmail(e, { includeHtml: full ? includeHtml : false }));
           return {
             content: [
               {

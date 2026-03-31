@@ -1287,12 +1287,12 @@ export class JmapClient {
     return this.getQueryResult(response, 1, 0);
   }
 
-  async getThread(threadId: string): Promise<any[]> {
+  async getThread(threadId: string, compact: boolean = true): Promise<any[]> {
     const session = await this.getSession();
 
     // First, check if threadId is actually an email ID and resolve the thread
     let actualThreadId = threadId;
-    
+
     // Try to get the email first to see if we need to resolve thread ID
     try {
       const emailRequest: JmapRequest = {
@@ -1305,7 +1305,7 @@ export class JmapClient {
           }, 'checkEmail']
         ]
       };
-      
+
       const emailResponse = await this.makeRequest(emailRequest);
       const email = this.getListResult(emailResponse, 0)[0];
 
@@ -1316,6 +1316,20 @@ export class JmapClient {
       // If email lookup fails, assume threadId is correct
     }
 
+    // Compact: metadata + preview only (same as list/search). Full: includes bodies.
+    const emailGetParams: Record<string, any> = {
+      accountId: session.accountId,
+      '#ids': { resultOf: 'getThread', name: 'Thread/get', path: '/list/*/emailIds' },
+      properties: compact
+        ? ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
+        : ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'hasAttachment', 'keywords', 'messageId', 'references', 'threadId', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'inReplyTo'],
+    };
+    if (!compact) {
+      emailGetParams.bodyProperties = ['partId', 'blobId', 'type', 'size', 'name'];
+      emailGetParams.fetchTextBodyValues = true;
+      emailGetParams.fetchHTMLBodyValues = true;
+    }
+
     // Use Thread/get with the resolved thread ID
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
@@ -1324,14 +1338,7 @@ export class JmapClient {
           accountId: session.accountId,
           ids: [actualThreadId]
         }, 'getThread'],
-        ['Email/get', {
-          accountId: session.accountId,
-          '#ids': { resultOf: 'getThread', name: 'Thread/get', path: '/list/*/emailIds' },
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'hasAttachment', 'keywords', 'messageId', 'references', 'threadId', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'inReplyTo'],
-          bodyProperties: ['partId', 'blobId', 'type', 'size', 'name'],
-          fetchTextBodyValues: true,
-          fetchHTMLBodyValues: true,
-        }, 'emails']
+        ['Email/get', emailGetParams, 'emails']
       ]
     };
 

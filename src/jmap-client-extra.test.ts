@@ -537,7 +537,40 @@ describe('getThread', () => {
     client = makeClient();
   });
 
-  it('requests full body properties for thread emails', async () => {
+  it('requests compact properties by default (no body data)', async () => {
+    let callCount = 0;
+    const makeReq = mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          methodResponses: [
+            ['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail'],
+          ],
+        };
+      }
+      return {
+        methodResponses: [
+          ['Thread/get', { list: [{ id: 'thread-1', emailIds: ['e1'] }] }, 'getThread'],
+          ['Email/get', { list: [{ id: 'e1', subject: 'Test' }] }, 'emails'],
+        ],
+      };
+    });
+
+    await client.getThread('e1');
+
+    const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
+    assert.ok(emailGetArgs.properties.includes('preview'), 'should request preview');
+    assert.ok(emailGetArgs.properties.includes('inReplyTo'), 'should request inReplyTo');
+    assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
+    assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
+    assert.ok(!emailGetArgs.properties.includes('htmlBody'), 'should NOT request htmlBody');
+    assert.ok(!emailGetArgs.properties.includes('attachments'), 'should NOT request attachments');
+    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+    assert.equal(emailGetArgs.fetchHTMLBodyValues, undefined);
+    assert.equal(emailGetArgs.bodyProperties, undefined);
+  });
+
+  it('requests full body properties when compact is false', async () => {
     let callCount = 0;
     const makeReq = mock.method(client, 'makeRequest', async () => {
       callCount++;
@@ -556,7 +589,7 @@ describe('getThread', () => {
       };
     });
 
-    await client.getThread('e1');
+    await client.getThread('e1', false);
 
     const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
     assert.ok(emailGetArgs.properties.includes('bodyValues'), 'should request bodyValues');
