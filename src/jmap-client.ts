@@ -103,15 +103,6 @@ export class JmapClient {
     return this.session;
   }
 
-  async getUserEmail(): Promise<string> {
-    try {
-      const identity = await this.getDefaultIdentity();
-      return identity?.email || 'user@example.com';
-    } catch (error) {
-      // Fallback if Identity/get is not available
-      return 'user@example.com';
-    }
-  }
 
   async makeRequest(request: JmapRequest): Promise<JmapResponse> {
     const session = await this.getSession();
@@ -461,13 +452,13 @@ export class JmapClient {
 
     const result = this.getMethodResult(response, 0);
 
-    // Bug 2: Propagate server-provided error details from notCreated
+    // Propagate server-provided error details from notCreated
     if (result.notCreated?.draft) {
       const err = result.notCreated.draft;
       throw new Error(`Failed to create draft: ${err.type}${err.description ? ' - ' + err.description : ''}`);
     }
 
-    // Bug 3: Throw if created ID is missing instead of returning 'unknown'
+    // Throw if created ID is missing instead of returning silently
     const emailId = result.created?.draft?.id;
     if (!emailId) {
       throw new Error('Draft creation returned no email ID');
@@ -709,94 +700,6 @@ export class JmapClient {
     return submissionId;
   }
 
-  async saveDraft(email: {
-    to: string[];
-    cc?: string[];
-    bcc?: string[];
-    subject: string;
-    textBody?: string;
-    htmlBody?: string;
-    from?: string;
-    inReplyTo?: string[];
-    references?: string[];
-  }): Promise<string> {
-    const session = await this.getSession();
-
-    // Get all identities to validate from address
-    const identities = await this.getIdentities();
-    if (!identities || identities.length === 0) {
-      throw new Error('No sending identities found');
-    }
-
-    // Determine which identity to use
-    let selectedIdentity;
-    if (email.from) {
-      selectedIdentity = identities.find(id => 
-        id.email.toLowerCase() === email.from?.toLowerCase()
-      );
-      if (!selectedIdentity) {
-        throw new Error('From address is not verified for sending. Choose one of your verified identities.');
-      }
-    } else {
-      selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
-    }
-
-    const fromEmail = selectedIdentity.email;
-
-    // Get the Drafts mailbox
-    const mailboxes = await this.getMailboxes();
-    const draftsMailbox = mailboxes.find(mb => mb.role === 'drafts') || mailboxes.find(mb => mb.name.toLowerCase().includes('draft'));
-    
-    if (!draftsMailbox) {
-      throw new Error('Could not find Drafts mailbox');
-    }
-
-    // Ensure we have at least one body type
-    if (!email.textBody && !email.htmlBody) {
-      throw new Error('Either textBody or htmlBody must be provided');
-    }
-
-    const mailboxIds: Record<string, boolean> = {};
-    mailboxIds[draftsMailbox.id] = true;
-
-    const emailObject: any = {
-      mailboxIds,
-      keywords: { $draft: true },
-      from: [{ email: fromEmail }],
-      to: email.to.map(addr => ({ email: addr })),
-      cc: email.cc?.map(addr => ({ email: addr })) || [],
-      bcc: email.bcc?.map(addr => ({ email: addr })) || [],
-      subject: email.subject,
-      ...(email.inReplyTo && { inReplyTo: email.inReplyTo }),
-      ...(email.references && { references: email.references }),
-      textBody: email.textBody ? [{ partId: 'text', type: 'text/plain' }] : undefined,
-      htmlBody: email.htmlBody ? [{ partId: 'html', type: 'text/html' }] : undefined,
-      bodyValues: {
-        ...(email.textBody && { text: { value: email.textBody } }),
-        ...(email.htmlBody && { html: { value: email.htmlBody } })
-      }
-    };
-
-    const request: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/set', {
-          accountId: session.accountId,
-          create: { draft: emailObject }
-        }, 'createDraft']
-      ]
-    };
-
-    const response = await this.makeRequest(request);
-    
-    // Check if draft creation was successful
-    const draftResult = response.methodResponses[0][1];
-    if (draftResult.notCreated && draftResult.notCreated.draft) {
-      throw new Error('Failed to create draft. Please check inputs and try again.');
-    }
-    
-    return draftResult.created?.draft?.id || 'unknown';
-  }
 
   async getRecentEmails(limit: number = 10, mailboxName: string = 'inbox', ascending: boolean = false): Promise<QueryResult> {
     const session = await this.getSession();
@@ -837,18 +740,17 @@ export class JmapClient {
   async markEmailRead(emailId: string, read: boolean = true): Promise<void> {
     const session = await this.getSession();
     
-    const keywords = read ? { $seen: true } : {};
-    
+    const update: Record<string, any> = {};
+    update[emailId] = read
+      ? { 'keywords/$seen': true }
+      : { 'keywords/$seen': null };
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
         ['Email/set', {
           accountId: session.accountId,
-          update: {
-            [emailId]: {
-              keywords
-            }
-          }
+          update
         }, 'updateEmail']
       ]
     };
@@ -1417,11 +1319,12 @@ export class JmapClient {
   async bulkMarkRead(emailIds: string[], read: boolean = true): Promise<void> {
     const session = await this.getSession();
     
-    const keywords = read ? { $seen: true } : {};
     const updates: Record<string, any> = {};
-    
+
     emailIds.forEach(id => {
-      updates[id] = { keywords };
+      updates[id] = read
+        ? { 'keywords/$seen': true }
+        : { 'keywords/$seen': null };
     });
 
     const request: JmapRequest = {

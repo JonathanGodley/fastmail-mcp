@@ -130,7 +130,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 3. Use any of the tools (e.g. `get_recent_emails`).
 
-## Available Tools (38 Total)
+## Available Tools (39 Total)
 
 **🎯 Most Popular Tools:**
 - **check_function_availability**: Check what's available and get setup guidance  
@@ -152,18 +152,22 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array)
 - **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Set `send=false` to save as draft instead of sending.
   - Parameters: `originalEmailId` (required), `to` (optional array, defaults to original sender), `cc` (optional array), `bcc` (optional array), `from` (optional), `textBody` (optional), `htmlBody` (optional), `send` (optional boolean, default: true)
-- **save_draft**: Save an email as a draft without sending (supports threading headers for reply drafts)
-  - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array)
 - **create_draft**: Create a minimal email draft (at least one of to/subject/body required)
   - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional)
+- **edit_draft**: Edit an existing draft email. Atomically destroys the old draft and creates a new one with updated fields. Only provided fields are changed; others are preserved.
+  - Parameters: `emailId` (required), `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional)
+- **send_draft**: Send an existing draft email. The draft must have recipients and a from address.
+  - Parameters: `emailId` (required)
 - **search_emails**: Search emails by content (returns simplified format by default)
   - Parameters: `query` (required), `limit` (default: 20), `ascending` (optional, oldest first), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
 - **get_recent_emails**: Get the most recent emails from a mailbox (returns simplified format by default)
   - Parameters: `limit` (default: 10, max: 50), `mailboxName` (default: 'inbox'), `ascending` (optional, oldest first), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
-- **mark_email_read**: Mark an email as read or unread
+- **mark_email_read**: Mark an email as read or unread (preserves other keywords like flagged/draft)
   - Parameters: `emailId` (required), `read` (default: true)
+- **pin_email**: Pin or unpin an email (toggle the $flagged keyword)
+  - Parameters: `emailId` (required), `pinned` (default: true)
 - **delete_email**: Delete an email (move to trash)
   - Parameters: `emailId` (required)
 - **move_email**: Move an email to a different mailbox (replaces all mailboxes)
@@ -180,7 +184,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - **download_attachment**: Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL. Use absolute paths; relative paths resolve against CWD.
   - Parameters: `emailId` (required), `attachmentId` (required), `savePath` (optional, absolute path recommended)
 - **advanced_search**: Advanced email search with multiple criteria (returns simplified format by default)
-  - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, raw JMAP)
+  - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
 - **get_thread**: Get all emails in a conversation thread (returns compact index by default: metadata + preview, no bodies)
   - Parameters: `threadId` (required), `full` (optional, fetch and return full email bodies), `includeHtml` (optional, include HTML body when full: true), `raw` (optional, raw JMAP with full bodies — implies full: true)
@@ -196,6 +200,8 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 - **bulk_mark_read**: Mark multiple emails as read/unread
   - Parameters: `emailIds` (required array), `read` (default: true)
+- **bulk_pin**: Pin or unpin multiple emails
+  - Parameters: `emailIds` (required array), `pinned` (default: true)
 - **bulk_move**: Move multiple emails to a mailbox
   - Parameters: `emailIds` (required array), `targetMailboxId` (required)
 - **bulk_delete**: Delete multiple emails (move to trash)

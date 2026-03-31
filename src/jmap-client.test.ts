@@ -87,7 +87,7 @@ describe('createDraft', () => {
     assert.equal(emailObj.mailboxIds[DRAFTS_MAILBOX.id], true);
   });
 
-  // 3. Bug 1 regression — JMAP method-level error throws
+  // JMAP method-level error throws
   it('throws on JMAP method-level error', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -105,7 +105,7 @@ describe('createDraft', () => {
     );
   });
 
-  // 4. Bug 2 regression — notCreated includes server type + description
+  // notCreated includes server type + description
   it('throws with server-provided error details from notCreated', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -131,7 +131,7 @@ describe('createDraft', () => {
     );
   });
 
-  // 5. Bug 3 regression — missing created.draft.id throws
+  // missing created.draft.id throws
   it('throws when created.draft.id is missing', async () => {
     stubMakeRequest(client, {
       methodResponses: [
