@@ -183,7 +183,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
   - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, raw JMAP)
   - See [Simplified Email Format](#simplified-email-format) below
 - **get_thread**: Get all emails in a conversation thread (returns compact index by default: metadata + preview, no bodies)
-  - Parameters: `threadId` (required), `full` (optional, return full email bodies), `includeHtml` (optional, include HTML body when full: true), `raw` (optional, raw JMAP)
+  - Parameters: `threadId` (required), `full` (optional, fetch and return full email bodies), `includeHtml` (optional, include HTML body when full: true), `raw` (optional, raw JMAP with full bodies — implies full: true)
   - See [Simplified Email Format](#simplified-email-format) below
 
 ### Email Statistics & Analytics

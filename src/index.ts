@@ -795,15 +795,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             full: {
               type: 'boolean',
-              description: 'Return full email bodies instead of compact index (default: false). Compact mode returns metadata + preview only.',
+              description: 'Fetch and return full email bodies instead of compact index (default: false). Compact mode returns metadata + preview only.',
             },
             includeHtml: {
               type: 'boolean',
-              description: 'Include full HTML body in response (only applies when full: true, default: false, always included for HTML-only emails)',
+              description: 'Include full HTML body in response (only applies with full: true; default: false, always included for HTML-only emails)',
             },
             raw: {
               type: 'boolean',
-              description: 'Return raw JMAP response instead of simplified format (default: false)',
+              description: 'Fetch full bodies and return raw JMAP response without simplification (default: false). Implies full: true.',
             },
           },
           required: ['threadId'],

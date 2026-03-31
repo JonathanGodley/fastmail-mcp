@@ -188,7 +188,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [id],
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references', 'keywords'],
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'hasAttachment', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references', 'keywords'],
           bodyProperties: ['partId', 'blobId', 'type', 'size', 'name'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
