@@ -1070,16 +1070,29 @@ export class JmapClient {
 
   static readonly DEFAULT_DOWNLOADS_DIR = resolve(homedir(), 'Downloads', 'fastmail-mcp');
 
-  static validateSavePath(savePath: string): string {
+  static validateSavePath(savePath: string, allowAnyPath: boolean = false): string {
     if (savePath.includes('\0')) {
       throw new Error('Save path contains null bytes');
     }
 
-    return resolve(normalize(savePath));
+    const resolved = resolve(normalize(savePath));
+
+    if (!allowAnyPath) {
+      const allowedDir = JmapClient.DEFAULT_DOWNLOADS_DIR;
+      if (!resolved.startsWith(allowedDir + sep) && resolved !== allowedDir) {
+        throw new Error(
+          `Save path must be within ${allowedDir}. ` +
+          `Set FASTMAIL_ALLOW_ANY_PATH=true to save anywhere. ` +
+          `Received: ${savePath}`
+        );
+      }
+    }
+
+    return resolved;
   }
 
-  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string): Promise<{ url: string; bytesWritten: number }> {
-    const validatedPath = JmapClient.validateSavePath(savePath);
+  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, allowAnyPath: boolean = false): Promise<{ url: string; bytesWritten: number }> {
+    const validatedPath = JmapClient.validateSavePath(savePath, allowAnyPath);
     const url = await this.downloadAttachment(emailId, attachmentId);
 
     const response = await fetch(url, {

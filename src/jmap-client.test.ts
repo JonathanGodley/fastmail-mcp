@@ -539,20 +539,45 @@ describe('searchEmails', () => {
 // ---------- validateSavePath tests ----------
 
 describe('validateSavePath', () => {
-  it('resolves absolute paths', () => {
-    const testPath = join(homedir(), 'Documents', 'photo.jpg');
+  it('allows paths within default downloads dir', () => {
+    const testPath = join(JmapClient.DEFAULT_DOWNLOADS_DIR, 'photo.jpg');
     const result = JmapClient.validateSavePath(testPath);
     assert.equal(result, testPath);
   });
 
-  it('resolves relative paths against CWD', () => {
-    const result = JmapClient.validateSavePath('output/file.txt');
-    assert.equal(result, resolve('output/file.txt'));
+  it('rejects paths outside default downloads dir', () => {
+    const testPath = join(homedir(), 'Documents', 'photo.jpg');
+    assert.throws(
+      () => JmapClient.validateSavePath(testPath),
+      (err: Error) => {
+        assert.match(err.message, /Save path must be within/);
+        assert.match(err.message, /FASTMAIL_ALLOW_ANY_PATH/);
+        return true;
+      },
+    );
+  });
+
+  it('allows any path when allowAnyPath is true', () => {
+    const testPath = join(homedir(), 'Documents', 'photo.jpg');
+    const result = JmapClient.validateSavePath(testPath, true);
+    assert.equal(result, testPath);
   });
 
   it('normalizes path traversal', () => {
-    const result = JmapClient.validateSavePath('/tmp/a/../b/file.txt');
-    assert.equal(result, resolve(normalize('/tmp/a/../b/file.txt')));
+    const testPath = join(JmapClient.DEFAULT_DOWNLOADS_DIR, 'a', '..', 'b', 'file.txt');
+    const result = JmapClient.validateSavePath(testPath);
+    assert.equal(result, resolve(normalize(testPath)));
+  });
+
+  it('rejects path traversal escaping downloads dir', () => {
+    const testPath = join(JmapClient.DEFAULT_DOWNLOADS_DIR, '..', '..', 'etc', 'passwd');
+    assert.throws(
+      () => JmapClient.validateSavePath(testPath),
+      (err: Error) => {
+        assert.match(err.message, /Save path must be within/);
+        return true;
+      },
+    );
   });
 
   it('rejects null bytes', () => {
