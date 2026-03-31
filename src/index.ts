@@ -16,7 +16,7 @@ import { simplifyEmail } from './email-formatter.js';
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.8.2',
+    version: '1.9.0',
   },
   {
     capabilities: {
@@ -1014,7 +1014,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_emails': {
         const { mailboxId, limit, ascending, raw } = args as any;
-        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
+        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
         const result = await client.getEmails(mailboxId, validLimit, ascending);
         return {
           content: [
@@ -1235,11 +1235,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_emails': {
-        const { query, limit = 20, ascending, raw } = args as any;
+        const { query, limit, ascending, raw } = args as any;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
-        const result = await client.searchEmails(query, limit, ascending);
+        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+        const result = await client.searchEmails(query, validLimit, ascending);
 
         return {
           content: [
@@ -1570,8 +1571,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'advanced_search': {
         const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, ascending, raw } = args as any;
         const client = initializeClient();
+        const validLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
         const result = await client.advancedSearch({
-          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, ascending
+          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit: validLimit, ascending
         });
         return {
           content: [
