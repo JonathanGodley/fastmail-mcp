@@ -557,10 +557,25 @@ describe('validateSavePath', () => {
     );
   });
 
+  it('resolves bare filenames to downloads dir in restricted mode', () => {
+    const result = JmapClient.validateSavePath('report.pdf');
+    assert.equal(result, join(JmapClient.DEFAULT_DOWNLOADS_DIR, 'report.pdf'));
+  });
+
+  it('resolves relative paths to downloads dir in restricted mode', () => {
+    const result = JmapClient.validateSavePath('2026/march/report.pdf');
+    assert.equal(result, join(JmapClient.DEFAULT_DOWNLOADS_DIR, '2026', 'march', 'report.pdf'));
+  });
+
   it('allows any path when allowAnyPath is true', () => {
     const testPath = join(homedir(), 'Documents', 'photo.jpg');
     const result = JmapClient.validateSavePath(testPath, true);
     assert.equal(result, testPath);
+  });
+
+  it('resolves relative paths against CWD when allowAnyPath is true', () => {
+    const result = JmapClient.validateSavePath('output/file.txt', true);
+    assert.equal(result, resolve('output/file.txt'));
   });
 
   it('normalizes path traversal', () => {

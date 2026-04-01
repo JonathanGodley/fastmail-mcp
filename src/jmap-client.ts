@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { writeFile, mkdir } from 'fs/promises';
-import { dirname, resolve, normalize, sep } from 'path';
+import { dirname, resolve, normalize, sep, isAbsolute } from 'path';
 import { homedir } from 'os';
 
 export interface JmapSession {
@@ -1075,7 +1075,10 @@ export class JmapClient {
       throw new Error('Save path contains null bytes');
     }
 
-    const resolved = resolve(normalize(savePath));
+    // In restricted mode, resolve relative paths against the default downloads dir
+    const resolved = !allowAnyPath && !isAbsolute(savePath)
+      ? resolve(JmapClient.DEFAULT_DOWNLOADS_DIR, normalize(savePath))
+      : resolve(normalize(savePath));
 
     if (!allowAnyPath) {
       const allowedDir = JmapClient.DEFAULT_DOWNLOADS_DIR;
