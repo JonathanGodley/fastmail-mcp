@@ -221,6 +221,32 @@ describe('createDraft', () => {
     assert.equal(emailObj.textBody, undefined);
     assert.deepEqual(emailObj.bodyValues, { html: { value: '<p>Hello</p>' } });
   });
+
+  it('includes replyTo in created email when provided', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/set', { created: { draft: { id: 'email-rt' } } }, 'createDraft'],
+      ],
+    }));
+
+    await client.createDraft({ subject: 'Test', textBody: 'body', replyTo: ['other@example.com'] });
+
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.replyTo, [{ email: 'other@example.com' }]);
+  });
+
+  it('does not include replyTo when not provided', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/set', { created: { draft: { id: 'email-nrt' } } }, 'createDraft'],
+      ],
+    }));
+
+    await client.createDraft({ subject: 'Test', textBody: 'body' });
+
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.equal(emailObj.replyTo, undefined);
+  });
 });
 
 // ---------- updateDraft ----------

@@ -602,3 +602,69 @@ describe('getThread', () => {
     assert.ok(emailGetArgs.bodyProperties.includes('name'), 'should request name in bodyProperties');
   });
 });
+
+// ---------- ascending sort parameter ----------
+
+describe('ascending sort parameter', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it('getEmails passes ascending=false by default', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/query', { ids: [], total: 0 }, 'query'],
+        ['Email/get', { list: [] }, 'emails'],
+      ],
+    }));
+
+    await client.getEmails(undefined, 20);
+
+    const queryArgs = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.equal(queryArgs.sort[0].isAscending, false);
+  });
+
+  it('getEmails passes ascending=true when set', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/query', { ids: [], total: 0 }, 'query'],
+        ['Email/get', { list: [] }, 'emails'],
+      ],
+    }));
+
+    await client.getEmails(undefined, 20, true);
+
+    const queryArgs = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.equal(queryArgs.sort[0].isAscending, true);
+  });
+
+  it('searchEmails passes ascending=true when set', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/query', { ids: [], total: 0 }, 'query'],
+        ['Email/get', { list: [] }, 'emails'],
+      ],
+    }));
+
+    await client.searchEmails('test', 20, true);
+
+    const queryArgs = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.equal(queryArgs.sort[0].isAscending, true);
+  });
+
+  it('advancedSearch passes ascending=true when set', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/query', { ids: [], total: 0 }, 'query'],
+        ['Email/get', { list: [] }, 'emails'],
+      ],
+    }));
+
+    await client.advancedSearch({ ascending: true });
+
+    const queryArgs = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.equal(queryArgs.sort[0].isAscending, true);
+  });
+});
