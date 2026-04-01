@@ -161,7 +161,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
         }, 'emails']
       ]
     };
@@ -179,7 +179,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [id],
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'hasAttachment', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references', 'keywords'],
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt', 'preview', 'hasAttachment', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references', 'keywords'],
           bodyProperties: ['partId', 'blobId', 'type', 'size', 'name'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
@@ -735,7 +735,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
         }, 'emails']
       ]
     };
@@ -1178,7 +1178,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
         }, 'emails']
       ]
     };
@@ -1203,7 +1203,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
         }, 'emails']
       ]
     };
@@ -1247,7 +1247,7 @@ export class JmapClient {
       '#ids': { resultOf: 'getThread', name: 'Thread/get', path: '/list/*/emailIds' },
       properties: compact
         ? ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo', 'hasAttachment']
-        : ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'preview', 'hasAttachment', 'keywords', 'messageId', 'references', 'threadId', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'inReplyTo'],
+        : ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt', 'preview', 'hasAttachment', 'keywords', 'messageId', 'references', 'threadId', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'inReplyTo'],
     };
     if (!compact) {
       emailGetParams.bodyProperties = ['partId', 'blobId', 'type', 'size', 'name'];

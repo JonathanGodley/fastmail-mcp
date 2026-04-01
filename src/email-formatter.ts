@@ -33,7 +33,7 @@ export interface SimplifyOptions {
 
 // Fields consumed by simplifyEmail — anything not in this set goes to _extra
 const KNOWN_FIELDS = new Set([
-  'id', 'threadId', 'messageId', 'references', 'subject', 'from', 'to', 'cc', 'bcc',
+  'id', 'threadId', 'messageId', 'references', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo',
   'receivedAt', 'inReplyTo', 'keywords', 'preview', 'hasAttachment',
   'textBody', 'htmlBody', 'bodyValues', 'attachments',
 ]);
@@ -94,6 +94,7 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   addIf(result, 'to', (raw.to ?? []).map(formatAddress));
   addIf(result, 'cc', (raw.cc ?? []).map(formatAddress));
   addIf(result, 'bcc', (raw.bcc ?? []).map(formatAddress));
+  addIf(result, 'replyTo', (raw.replyTo ?? []).map(formatAddress));
   addIf(result, 'isReply', !!(raw.inReplyTo?.length));
   addIf(result, 'isRead', !!(raw.keywords?.$seen));
   addIf(result, 'isFlagged', !!(raw.keywords?.$flagged));
