@@ -236,6 +236,7 @@ export class JmapClient {
     mailboxId?: string;
     inReplyTo?: string[];
     references?: string[];
+    replyTo?: string[];
   }): Promise<string> {
     const session = await this.getSession();
 
@@ -298,6 +299,7 @@ export class JmapClient {
       subject: email.subject,
       ...(email.inReplyTo && { inReplyTo: email.inReplyTo }),
       ...(email.references && { references: email.references }),
+      ...(email.replyTo?.length && { replyTo: email.replyTo.map(addr => ({ email: addr })) }),
       textBody: email.textBody ? [{ partId: 'text', type: 'text/plain' }] : undefined,
       htmlBody: email.htmlBody ? [{ partId: 'html', type: 'text/html' }] : undefined,
       bodyValues: {
@@ -373,6 +375,7 @@ export class JmapClient {
     mailboxId?: string;
     inReplyTo?: string[];
     references?: string[];
+    replyTo?: string[];
   }): Promise<string> {
     const session = await this.getSession();
 
@@ -429,6 +432,7 @@ export class JmapClient {
     if (email.subject) emailObject.subject = email.subject;
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
+    if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(addr => ({ email: addr }));
     if (email.textBody) emailObject.textBody = [{ partId: 'text', type: 'text/plain' }];
     if (email.htmlBody) emailObject.htmlBody = [{ partId: 'html', type: 'text/html' }];
     if (email.textBody || email.htmlBody) {
@@ -475,6 +479,7 @@ export class JmapClient {
     textBody?: string;
     htmlBody?: string;
     from?: string;
+    replyTo?: string[];
   }): Promise<string> {
     const session = await this.getSession();
 
@@ -547,6 +552,7 @@ export class JmapClient {
     const mergedTo = updates.to !== undefined ? updates.to.map(addr => ({ email: addr })) : (existingEmail.to || []);
     const mergedCc = updates.cc !== undefined ? updates.cc.map(addr => ({ email: addr })) : (existingEmail.cc || []);
     const mergedBcc = updates.bcc !== undefined ? updates.bcc.map(addr => ({ email: addr })) : (existingEmail.bcc || []);
+    const mergedReplyTo = updates.replyTo !== undefined ? updates.replyTo.map(addr => ({ email: addr })) : (existingEmail.replyTo || null);
 
     const textBodyValue = updates.textBody !== undefined ? updates.textBody : (existingTextBody as any)?.value;
     const htmlBodyValue = updates.htmlBody !== undefined ? updates.htmlBody : (existingHtmlBody as any)?.value;
@@ -558,6 +564,7 @@ export class JmapClient {
       to: mergedTo,
       cc: mergedCc,
       bcc: mergedBcc,
+      ...(mergedReplyTo?.length && { replyTo: mergedReplyTo }),
       subject: mergedSubject,
     };
 
