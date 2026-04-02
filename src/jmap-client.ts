@@ -42,6 +42,18 @@ export const EMAIL_PROPERTIES_VERBOSE = [
 
 export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name'] as const;
 
+/** Match an email address against an identity, supporting wildcard identities (e.g. *@example.com). */
+function matchesIdentity(identityEmail: string, address: string): boolean {
+  const identity = identityEmail.toLowerCase();
+  const addr = address.toLowerCase();
+  if (identity === addr) return true;
+  if (identity.startsWith('*@')) {
+    const domain = identity.slice(1); // "@example.com"
+    return addr.endsWith(domain) && addr.indexOf('@') > 0;
+  }
+  return false;
+}
+
 export class JmapClient {
   private auth: FastmailAuth;
   private session: JmapSession | null = null;
@@ -267,9 +279,7 @@ export class JmapClient {
     let selectedIdentity;
     if (email.from) {
       // Validate that the from address matches an available identity
-      selectedIdentity = identities.find(id => 
-        id.email.toLowerCase() === email.from?.toLowerCase()
-      );
+      selectedIdentity = identities.find(id => matchesIdentity(id.email, email.from!));
       if (!selectedIdentity) {
         throw new Error('From address is not verified for sending. Choose one of your verified identities.');
       }
@@ -278,7 +288,8 @@ export class JmapClient {
       selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
     }
 
-    const fromEmail = selectedIdentity.email;
+    // Use the requested from address (not the identity email, which may be a wildcard like *@domain)
+    const fromEmail = email.from || selectedIdentity.email;
 
     // Get the mailbox IDs we need
     const mailboxes = await this.getMailboxes();
@@ -409,9 +420,7 @@ export class JmapClient {
 
     let selectedIdentity;
     if (email.from) {
-      selectedIdentity = identities.find(id =>
-        id.email.toLowerCase() === email.from?.toLowerCase()
-      );
+      selectedIdentity = identities.find(id => matchesIdentity(id.email, email.from!));
       if (!selectedIdentity) {
         throw new Error('From address is not verified for sending. Choose one of your verified identities.');
       }
@@ -419,7 +428,7 @@ export class JmapClient {
       selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
     }
 
-    const fromEmail = selectedIdentity.email;
+    const fromEmail = email.from || selectedIdentity.email;
 
     // Resolve drafts mailbox
     let draftMailboxId: string;
@@ -534,9 +543,7 @@ export class JmapClient {
 
     let selectedIdentity;
     if (updates.from) {
-      selectedIdentity = identities.find(id =>
-        id.email.toLowerCase() === updates.from?.toLowerCase()
-      );
+      selectedIdentity = identities.find(id => matchesIdentity(id.email, updates.from!));
       if (!selectedIdentity) {
         throw new Error('From address is not verified for sending. Choose one of your verified identities.');
       }
@@ -544,9 +551,8 @@ export class JmapClient {
       // Use existing from, or fall back to default identity
       const existingFrom = existingEmail.from?.[0]?.email;
       if (existingFrom) {
-        selectedIdentity = identities.find(id =>
-          id.email.toLowerCase() === existingFrom.toLowerCase()
-        ) || identities.find(id => id.mayDelete === false) || identities[0];
+        selectedIdentity = identities.find(id => matchesIdentity(id.email, existingFrom))
+          || identities.find(id => id.mayDelete === false) || identities[0];
       } else {
         selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
       }
@@ -577,7 +583,7 @@ export class JmapClient {
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
       keywords: { $draft: true },
-      from: [{ email: selectedIdentity.email }],
+      from: [{ email: updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email }],
       to: mergedTo,
       cc: mergedCc,
       bcc: mergedBcc,
@@ -665,9 +671,7 @@ export class JmapClient {
     }
 
     const identities = await this.getIdentities();
-    const selectedIdentity = identities.find(id =>
-      id.email.toLowerCase() === fromEmail.toLowerCase()
-    );
+    const selectedIdentity = identities.find(id => matchesIdentity(id.email, fromEmail));
     if (!selectedIdentity) {
       throw new Error('From address on draft does not match any sending identity');
     }
