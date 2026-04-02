@@ -1,17 +1,19 @@
-# Fastmail MCP Server
+# Fastmail MCP Server (Fork)
 
-A Model Context Protocol (MCP) server that provides access to the Fastmail API, enabling AI assistants to interact with email, contacts, and calendar data.
+A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) — an MCP server for Fastmail's JMAP and CalDAV APIs.
+
+This fork adds a **response simplification system** that reduces token usage when used with AI clients. All data-returning tools return a cleaned, curated format by default. Use `verbose` for all fields in the clean shape, or `raw` for the original JMAP response. See [Response Simplification](#response-simplification) for details.
 
 ## Features
 
 ### Core Email Operations
 - List mailboxes and get mailbox statistics
 - List, search, and filter emails with advanced criteria
-- Get specific emails by ID with full content
+- Get specific emails by ID
 - Send emails (text and HTML) with proper draft/sent handling
 - Reply to emails with proper threading (In-Reply-To, References headers)
-- Create and save email drafts (with or without threading)
-- Email management: mark read/unread, delete, move between folders
+- Create, edit, and send email drafts (with or without threading)
+- Email management: mark read/unread, pin/unpin, delete, move between folders
 
 ### Advanced Email Features
 - **Attachment Handling**: List and download email attachments
@@ -21,7 +23,7 @@ A Model Context Protocol (MCP) server that provides access to the Fastmail API, 
 - **Statistics & Analytics**: Account summaries and mailbox statistics
 
 ### Contacts Operations
-- List all contacts with full contact information
+- List all contacts
 - Get specific contacts by ID
 - Search contacts by name or email
 
@@ -95,7 +97,7 @@ Default to `main` branch:
 
 ```bash
 FASTMAIL_API_TOKEN="your_token" FASTMAIL_BASE_URL="https://api.fastmail.com" \
-  npx --yes github:MadLlama25/fastmail-mcp fastmail-mcp
+  npx --yes github:JonathanGodley/fastmail-mcp fastmail-mcp
 ```
 
 Windows PowerShell:
@@ -103,14 +105,14 @@ Windows PowerShell:
 ```powershell
 $env:FASTMAIL_API_TOKEN="your_token"
 $env:FASTMAIL_BASE_URL="https://api.fastmail.com"
-npx --yes github:MadLlama25/fastmail-mcp fastmail-mcp
+npx --yes github:JonathanGodley/fastmail-mcp fastmail-mcp
 ```
 
 Pin to a tagged release:
 
 ```bash
 FASTMAIL_API_TOKEN="your_token" \
-  npx --yes github:MadLlama25/fastmail-mcp@v1.9.1 fastmail-mcp
+  npx --yes github:JonathanGodley/fastmail-mcp@v1.9.1-fork.1 fastmail-mcp
 ```
 
 ## Install as a Claude Desktop Extension (DXT)
@@ -132,6 +134,71 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 3. Use any of the tools (e.g. `get_recent_emails`).
 
+## Response Simplification
+
+All data-returning tools simplify responses by default to reduce token usage. Two optional parameters control how much data is returned:
+
+- **Default** — a curated, cleaned response. Addresses are strings instead of objects, boolean flags replace keyword maps, null/empty fields are stripped, and only the most useful fields are included.
+- **`verbose: true`** — all fields, still in the simplified shape. Use this when you need data the default omits (e.g. HTML body, mailbox permissions, contact addresses) without dealing with raw JMAP structures.
+- **`raw: true`** — the original JMAP response with no transformation. Use this for debugging or when you need exact JMAP field names and structures.
+
+### What each tool returns
+
+| Tool | `verbose` | `raw` |
+|------|-----------|-------|
+| `get_email` | ✅ | ✅ |
+| `list_emails`, `search_emails`, `get_recent_emails`, `advanced_search`, `get_thread` | — | ✅ |
+| `list_mailboxes` | ✅ | ✅ |
+| `list_identities` | ✅ | ✅ |
+| `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ |
+
+Email list/search tools don't support `verbose` — they always return metadata and preview. Use `get_email` for full email content.
+
+### Email fields
+
+**Default fields** (all email tools): `id`, `subject`, `from`, `date`, `threadId`, `messageId`, `references`, `to`, `cc`, `bcc`, `replyTo`, `inReplyTo`, `isRead`, `isReply`, `isFlagged`, `isDraft`, `keywords`, `preview`, `hasAttachment`, `attachments`, `listUnsubscribe`, `blobId`, `size`
+
+**`get_email` also includes**: `bodyText`, `bodyHtmlSize` (character count hint — HTML omitted by default)
+
+**`get_email` with `verbose`**: adds `bodyHtml`
+
+**Simplification applied to all email output:**
+- Addresses: `"Name <email>"` strings instead of `{name, email}` objects
+- Flags: `isRead`, `isReply`, `isFlagged`, `isDraft` derived from JMAP keywords. `isRead` always included (unread is meaningful); `isReply`, `isFlagged`, `isDraft` omitted when false
+- Non-standard keywords (e.g. `$hasattachment`) surfaced in a `keywords` field; standard keywords (`$seen`, `$flagged`, `$draft`) consumed by the boolean flags
+- HTML-only emails (no plain text) auto-include `bodyHtml` as fallback
+- `hasAttachment` omitted when false, and suppressed entirely when an `attachments` array is present (redundant)
+- Attachments simplified to `{contentType, size, blobId, partId?, name?}`
+- `listUnsubscribe` mapped from JMAP's `header:List-Unsubscribe:asURLs`
+- Empty and null fields omitted
+
+### Mailbox fields
+
+**Default**: `id`, `name`, `role`, `parentId`, `totalEmails`, `unreadEmails`, `totalThreads`, `unreadThreads`
+
+**Verbose adds**: `myRights`, `sortOrder`, `isSubscribed`, `sort`, `autoLearn`, `autoPurge`, `purgeOlderThanDays`, `hidden`, `isCollapsed`, `identityRef`, `learnAsSpam`, `suppressDuplicates`, plus any other JMAP fields
+
+Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if you need `null` values).
+
+### Identity fields
+
+**Default**: `id`, `name`, `email`, `replyTo`, `mayDelete`
+
+**Verbose adds**: `textSignature`, `htmlSignature`, `bcc`, `verificationState`, `showInCompose`, `saveSentToMailboxId`, `displayName`, `isAutoConfigured`, `enableExternalSMTP`, `server`, `port`, `ssl`, `addBccOnSMTP`, `saveOnSMTP`, `externalCredentialId`, `warnings`, `useForAutoReply`, `verificationCheckTime`, plus any other JMAP fields
+
+### Contact fields
+
+**Default**: `id`, `name`, `emails`, `phones`, `organization`, `notes`
+
+**Verbose adds**: `addresses`, `titles`, `online`, `photos`, `anniversaries`, plus any remaining JMAP fields
+
+**Simplification applied:**
+- Name resolved from `name.full` or `given + surname`
+- Emails/phones flattened from JMAP's `{hash: {address}}` maps to string arrays
+- Organization extracted from first entry
+- Notes extracted from JMAP's `{hash: {note}}` object format
+- Verbose: addresses as objects, titles as strings, online/URLs as URIs
+
 ## Available Tools (40 Total)
 
 **🎯 Most Popular Tools:**
@@ -144,24 +211,29 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 ### Email Tools
 
 - **list_mailboxes**: Get all mailboxes in your account
+  - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **list_emails**: List emails from a specific mailbox or all mailboxes
-  - Parameters: `mailboxId` (optional), `limit` (default: 20), `ascending` (optional, oldest first)
-- **get_email**: Get a specific email by ID
-  - Parameters: `emailId` (required)
+  - Parameters: `mailboxId` (optional), `limit` (default: 20), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
+- **get_email**: Get a specific email by ID. HTML omitted by default with size hint; use `verbose` to include.
+  - Parameters: `emailId` (required), `verbose` (optional, include HTML body and all fields), `raw` (optional, return original JMAP response)
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array)
 - **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Set `send=false` to save as draft instead of sending.
   - Parameters: `originalEmailId` (required), `to` (optional array, defaults to original sender), `cc` (optional array), `bcc` (optional array), `from` (optional), `textBody` (optional), `htmlBody` (optional), `send` (optional boolean, default: true), `replyTo` (optional array)
-- **save_draft**: Save an email as a draft without sending (supports threading headers for reply drafts)
-  - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array)
-- **create_draft**: Create a minimal email draft (at least one of to/subject/body required)
-  - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `replyTo` (optional array)
+- **create_draft**: Create an email draft without sending. Supports threading headers for replies. Each call creates a new draft.
+  - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array)
+- **edit_draft**: Edit an existing draft email. Atomically destroys the old draft and creates a new one with updated fields. Only provided fields are changed; others are preserved.
+  - Parameters: `emailId` (required), `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `replyTo` (optional array)
+- **send_draft**: Send an existing draft email. The draft must have recipients and a from address. Moves the email to the Sent folder.
+  - Parameters: `emailId` (required)
 - **search_emails**: Search emails by content
-  - Parameters: `query` (required), `limit` (default: 20), `ascending` (optional, oldest first)
+  - Parameters: `query` (required), `limit` (default: 20), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **get_recent_emails**: Get the most recent emails from a mailbox (inspired by JMAP-Samples top-ten)
-  - Parameters: `limit` (default: 10, max: 50), `mailboxName` (default: 'inbox'), `ascending` (optional, oldest first)
+  - Parameters: `limit` (default: 10, max: 50), `mailboxName` (default: 'inbox'), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **mark_email_read**: Mark an email as read or unread
   - Parameters: `emailId` (required), `read` (default: true)
+- **pin_email**: Pin or unpin an email
+  - Parameters: `emailId` (required), `pinned` (default: true)
 - **delete_email**: Delete an email (move to trash)
   - Parameters: `emailId` (required)
 - **move_email**: Move an email to a different mailbox (replaces all mailboxes)
@@ -178,9 +250,9 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 - **download_attachment**: Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.
   - Parameters: `emailId` (required), `attachmentId` (required), `savePath` (optional)
 - **advanced_search**: Advanced email search with multiple criteria
-  - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first)
-- **get_thread**: Get all emails in a conversation thread
-  - Parameters: `threadId` (required)
+  - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
+- **get_thread**: Get all emails in a conversation thread. Returns metadata + preview for each email.
+  - Parameters: `threadId` (required), `raw` (optional, return original JMAP response)
 
 ### Email Statistics & Analytics
 
@@ -192,6 +264,8 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 - **bulk_mark_read**: Mark multiple emails as read/unread
   - Parameters: `emailIds` (required array), `read` (default: true)
+- **bulk_pin**: Pin or unpin multiple emails
+  - Parameters: `emailIds` (required array), `pinned` (default: true)
 - **bulk_move**: Move multiple emails to a mailbox
   - Parameters: `emailIds` (required array), `targetMailboxId` (required)
 - **bulk_delete**: Delete multiple emails (move to trash)
@@ -203,18 +277,18 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 ### Contact Tools
 
-- **list_contacts**: List all contacts
-  - Parameters: `limit` (default: 50)
-- **get_contact**: Get a specific contact by ID
-  - Parameters: `contactId` (required)
-- **search_contacts**: Search contacts by name or email
-  - Parameters: `query` (required), `limit` (default: 20)
+- **list_contacts**: List all contacts. Returns simplified format by default.
+  - Parameters: `limit` (default: 50), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+- **get_contact**: Get a specific contact by ID. Returns simplified format by default.
+  - Parameters: `contactId` (required), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+- **search_contacts**: Search contacts by name or email. Returns simplified format by default.
+  - Parameters: `query` (required), `limit` (default: 20), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 
 ### Calendar Tools
 
 - **list_calendars**: List all calendars
 - **list_calendar_events**: List calendar events
-  - Parameters: `calendarId` (optional), `limit` (default: 50)
+  - Parameters: `calendarId` (optional), `startDate` (optional, ISO 8601), `endDate` (optional, ISO 8601), `limit` (default: 50)
 - **get_calendar_event**: Get a specific calendar event by ID
   - Parameters: `eventId` (required)
 - **create_calendar_event**: Create a new calendar event
@@ -226,7 +300,8 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 ### Identity & Testing Tools
 
-- **list_identities**: List sending identities (email addresses that can be used for sending)
+- **list_identities**: List sending identities (email addresses that can be used for sending). Returns simplified format by default.
+  - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **check_function_availability**: Check which functions are available based on account permissions (includes setup guidance)
 - **test_bulk_operations**: Safely test bulk operations with dry-run mode
   - Parameters: `dryRun` (default: true), `limit` (default: 3)
@@ -273,11 +348,13 @@ When these variables are set, the calendar tools (`list_calendars`, `list_calend
 ### Project Structure
 ```
 src/
-├── index.ts              # Main MCP server implementation
-├── auth.ts              # Authentication handling
-├── jmap-client.ts       # JMAP client wrapper
-├── contacts-calendar.ts # Contacts and calendar extensions
-└── caldav-client.ts     # CalDAV calendar client (fallback)
+├── index.ts                # Main MCP server implementation
+├── auth.ts                 # Authentication handling
+├── jmap-client.ts          # JMAP client wrapper
+├── email-formatter.ts      # Simplified email format for AI consumption
+├── response-formatters.ts  # Mailbox/identity/contact simplifiers and query formatters
+├── contacts-calendar.ts    # Contacts and calendar extensions
+└── caldav-client.ts        # CalDAV calendar client (fallback)
 ```
 
 ### Building
@@ -310,10 +387,6 @@ Contributions are welcome! Please ensure that:
 2. **Missing Dependencies**: Run `npm install` to ensure all dependencies are installed  
 3. **Build Errors**: Check that TypeScript compilation completes without errors using `npm run build`
 4. **Calendar/Contacts "Forbidden" Errors**: Use `check_function_availability` to see setup guidance
-
-### Email Tools Failing with Serialization Errors?
-
-If `get_email`, `list_emails`, `search_emails`, or `advanced_search` fail with "content serialization" or "Cannot read properties of undefined" errors, upgrade to v1.7.1+. This was caused by incomplete JMAP response validation that surfaced after the MCP SDK v1.x upgrade added stricter result checking.
 
 ### Calendar/Contacts Not Working?
 

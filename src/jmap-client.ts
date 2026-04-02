@@ -26,6 +26,22 @@ export interface QueryResult<T = any> {
   total?: number;
 }
 
+// Shared Email/get property lists — keep in sync per CLAUDE.md rules.
+// COMPACT: used by list/search tools in default mode and getThread(compact=true)
+export const EMAIL_PROPERTIES_COMPACT = [
+  'id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt',
+  'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo',
+  'hasAttachment', 'header:List-Unsubscribe:asURLs', 'blobId', 'size',
+] as const;
+
+// VERBOSE: superset with body properties — used by verbose mode, getEmailById, getThread(compact=false)
+export const EMAIL_PROPERTIES_VERBOSE = [
+  ...EMAIL_PROPERTIES_COMPACT,
+  'textBody', 'htmlBody', 'attachments', 'bodyValues',
+] as const;
+
+export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name'] as const;
+
 export class JmapClient {
   private auth: FastmailAuth;
   private session: JmapSession | null = null;
@@ -146,6 +162,13 @@ export class JmapClient {
 
     const filter = mailboxId ? { inMailbox: mailboxId } : {};
 
+    const emailGetParams: any = {
+      accountId: session.accountId,
+      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
+    };
+
+    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
@@ -156,11 +179,7 @@ export class JmapClient {
           limit,
           calculateTotal: true
         }, 'query'],
-        ['Email/get', {
-          accountId: session.accountId,
-          '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'replyTo', 'receivedAt', 'preview', 'hasAttachment']
-        }, 'emails']
+        ['Email/get', emailGetParams, 'emails']
       ]
     };
 
@@ -177,8 +196,8 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [id],
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt', 'textBody', 'htmlBody', 'attachments', 'bodyValues', 'messageId', 'threadId', 'inReplyTo', 'references', 'keywords', 'header:List-Unsubscribe:asURLs'],
-          bodyProperties: ['partId', 'blobId', 'type', 'size'],
+          properties: [...EMAIL_PROPERTIES_VERBOSE],
+          bodyProperties: [...EMAIL_BODY_PROPERTIES],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
         }, 'email']
@@ -707,17 +726,24 @@ export class JmapClient {
 
   async getRecentEmails(limit: number = 10, mailboxName: string = 'inbox', ascending: boolean = false): Promise<QueryResult> {
     const session = await this.getSession();
-    
+
     // Find the specified mailbox (default to inbox)
     const mailboxes = await this.getMailboxes();
-    const targetMailbox = mailboxes.find(mb => 
-      mb.role === mailboxName.toLowerCase() || 
+    const targetMailbox = mailboxes.find(mb =>
+      mb.role === mailboxName.toLowerCase() ||
       mb.name.toLowerCase().includes(mailboxName.toLowerCase())
     );
-    
+
     if (!targetMailbox) {
       throw new Error(`Could not find mailbox: ${mailboxName}`);
     }
+
+    const emailGetParams: any = {
+      accountId: session.accountId,
+      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
+    };
+
+    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
 
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
@@ -729,11 +755,7 @@ export class JmapClient {
           limit: Math.min(limit, 50),
           calculateTotal: true
         }, 'query'],
-        ['Email/get', {
-          accountId: session.accountId,
-          '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'replyTo', 'receivedAt', 'preview', 'hasAttachment', 'keywords', 'header:List-Unsubscribe:asURLs']
-        }, 'emails']
+        ['Email/get', emailGetParams, 'emails']
       ]
     };
 
@@ -1156,6 +1178,13 @@ export class JmapClient {
       finalFilter = { operator: 'AND', conditions };
     }
 
+    const emailGetParams: any = {
+      accountId: session.accountId,
+      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
+    };
+
+    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
@@ -1166,11 +1195,7 @@ export class JmapClient {
           limit: Math.min(filters.limit || 50, 100),
           calculateTotal: true
         }, 'query'],
-        ['Email/get', {
-          accountId: session.accountId,
-          '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'replyTo', 'receivedAt', 'preview', 'hasAttachment', 'keywords', 'threadId']
-        }, 'emails']
+        ['Email/get', emailGetParams, 'emails']
       ]
     };
 
@@ -1180,6 +1205,13 @@ export class JmapClient {
 
   async searchEmails(query: string, limit: number = 20, ascending: boolean = false): Promise<QueryResult> {
     const session = await this.getSession();
+
+    const emailGetParams: any = {
+      accountId: session.accountId,
+      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
+    };
+
+    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
 
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
@@ -1191,11 +1223,7 @@ export class JmapClient {
           limit,
           calculateTotal: true
         }, 'query'],
-        ['Email/get', {
-          accountId: session.accountId,
-          '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-          properties: ['id', 'subject', 'from', 'to', 'replyTo', 'receivedAt', 'preview', 'hasAttachment']
-        }, 'emails']
+        ['Email/get', emailGetParams, 'emails']
       ]
     };
 
@@ -1208,7 +1236,7 @@ export class JmapClient {
 
     // First, check if threadId is actually an email ID and resolve the thread
     let actualThreadId = threadId;
-    
+
     // Try to get the email first to see if we need to resolve thread ID
     try {
       const emailRequest: JmapRequest = {
@@ -1221,7 +1249,7 @@ export class JmapClient {
           }, 'checkEmail']
         ]
       };
-      
+
       const emailResponse = await this.makeRequest(emailRequest);
       const email = this.getListResult(emailResponse, 0)[0];
 
@@ -1232,6 +1260,13 @@ export class JmapClient {
       // If email lookup fails, assume threadId is correct
     }
 
+    const emailGetParams: any = {
+      accountId: session.accountId,
+      '#ids': { resultOf: 'getThread', name: 'Thread/get', path: '/list/*/emailIds' },
+    };
+
+    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
+
     // Use Thread/get with the resolved thread ID
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
@@ -1240,11 +1275,7 @@ export class JmapClient {
           accountId: session.accountId,
           ids: [actualThreadId]
         }, 'getThread'],
-        ['Email/get', {
-          accountId: session.accountId,
-          '#ids': { resultOf: 'getThread', name: 'Thread/get', path: '/list/*/emailIds' },
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'replyTo', 'receivedAt', 'preview', 'hasAttachment', 'keywords', 'threadId']
-        }, 'emails']
+        ['Email/get', emailGetParams, 'emails']
       ]
     };
 

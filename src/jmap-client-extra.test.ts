@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 
 // ---------- helpers ----------
@@ -525,6 +525,164 @@ describe('getListResult', () => {
 
     const mailboxes = await client.getMailboxes();
     assert.deepEqual(mailboxes, []);
+  });
+});
+
+// ---------- getThread ----------
+
+describe('getThread', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it('requests compact properties by default (no body data)', async () => {
+    let callCount = 0;
+    const makeReq = mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          methodResponses: [
+            ['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail'],
+          ],
+        };
+      }
+      return {
+        methodResponses: [
+          ['Thread/get', { list: [{ id: 'thread-1', emailIds: ['e1'] }] }, 'getThread'],
+          ['Email/get', { list: [{ id: 'e1', subject: 'Test' }] }, 'emails'],
+        ],
+      };
+    });
+
+    await client.getThread('e1');
+
+    const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
+    assert.ok(emailGetArgs.properties.includes('preview'), 'should request preview');
+    assert.ok(emailGetArgs.properties.includes('inReplyTo'), 'should request inReplyTo');
+    assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
+    assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
+    assert.ok(!emailGetArgs.properties.includes('htmlBody'), 'should NOT request htmlBody');
+    assert.ok(!emailGetArgs.properties.includes('attachments'), 'should NOT request attachments');
+    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+    assert.equal(emailGetArgs.fetchHTMLBodyValues, undefined);
+    assert.equal(emailGetArgs.bodyProperties, undefined);
+  });
+
+  it('always requests compact properties (no bodies)', async () => {
+    let callCount = 0;
+    const makeReq = mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          methodResponses: [
+            ['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail'],
+          ],
+        };
+      }
+      return {
+        methodResponses: [
+          ['Thread/get', { list: [{ id: 'thread-1', emailIds: ['e1'] }] }, 'getThread'],
+          ['Email/get', { list: [{ id: 'e1', subject: 'Test' }] }, 'emails'],
+        ],
+      };
+    });
+
+    await client.getThread('e1');
+
+    const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
+    assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
+    assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
+    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+  });
+});
+
+// ---------- list method property checks ----------
+
+describe('list method property checks', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  const standardQueryResponse = {
+    methodResponses: [
+      ['Email/query', { ids: ['e1'], total: 1 }, 'query'],
+      ['Email/get', { list: [{ id: 'e1', subject: 'Test' }] }, 'emails'],
+    ],
+  };
+
+  function mockAndCall(method: string, callFn: () => Promise<any>) {
+    const makeReq = mock.method(client, 'makeRequest', async () => standardQueryResponse);
+    return { makeReq, result: callFn() };
+  }
+
+  it('getEmails always requests compact properties (no bodies)', async () => {
+    const { makeReq, result } = mockAndCall('getEmails', () => client.getEmails());
+    await result;
+    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
+    assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
+    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+  });
+
+  it('searchEmails always requests compact properties (no bodies)', async () => {
+    const { makeReq, result } = mockAndCall('searchEmails', () => client.searchEmails('test'));
+    await result;
+    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    assert.ok(!emailGetArgs.properties.includes('bodyValues'));
+    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+  });
+
+  it('getRecentEmails always requests compact properties (no bodies)', async () => {
+    mock.method(client, 'getMailboxes', async () => [INBOX_MAILBOX]);
+    const makeReq = mock.method(client, 'makeRequest', async () => standardQueryResponse);
+    await client.getRecentEmails();
+    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    assert.ok(!emailGetArgs.properties.includes('bodyValues'));
+    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+  });
+
+  it('advancedSearch always requests compact properties (no bodies)', async () => {
+    const { makeReq, result } = mockAndCall('advancedSearch', () => client.advancedSearch({ query: 'test' }));
+    await result;
+    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    assert.ok(!emailGetArgs.properties.includes('bodyValues'));
+    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+  });
+});
+
+// ---------- JMAP property consistency ----------
+
+describe('JMAP property consistency', () => {
+  it('verbose properties are a superset of compact properties', () => {
+    for (const prop of EMAIL_PROPERTIES_COMPACT) {
+      assert.ok(
+        EMAIL_PROPERTIES_VERBOSE.includes(prop),
+        `verbose properties missing compact property: ${prop}`
+      );
+    }
+  });
+
+  it('verbose includes body-specific properties that compact does not', () => {
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('textBody'));
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('htmlBody'));
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('bodyValues'));
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('attachments'));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('textBody'));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('htmlBody'));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('bodyValues'));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('attachments'));
+  });
+
+  it('body properties include required fields', () => {
+    assert.ok(EMAIL_BODY_PROPERTIES.includes('partId'));
+    assert.ok(EMAIL_BODY_PROPERTIES.includes('blobId'));
+    assert.ok(EMAIL_BODY_PROPERTIES.includes('type'));
+    assert.ok(EMAIL_BODY_PROPERTIES.includes('size'));
+    assert.ok(EMAIL_BODY_PROPERTIES.includes('name'));
   });
 });
 

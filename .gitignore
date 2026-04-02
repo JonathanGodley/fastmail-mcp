@@ -6,5 +6,6 @@ dist/
 .DS_Store
 *.tsbuildinfo
 CLAUDE.md
+.claude/
 *.dxt
 test-live*.sh

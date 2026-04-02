@@ -11,11 +11,13 @@ import { FastmailAuth, FastmailConfig } from './auth.js';
 import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
+import { simplifyEmail } from './email-formatter.js';
+import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
 
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.1',
+    version: '1.9.1-fork.1',
   },
   {
     capabilities: {
@@ -124,15 +126,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'list_mailboxes',
-        description: 'List all mailboxes in the Fastmail account',
+        description: 'List all mailboxes in the Fastmail account. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
-          properties: {},
+          properties: {
+            verbose: {
+              type: 'boolean',
+              description: 'Include all mailbox fields (sortOrder, isSubscribed, myRights) in simplified format',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
+            },
+          },
         },
       },
       {
         name: 'list_emails',
-        description: 'List emails from a mailbox',
+        description: 'List emails from a mailbox. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -149,18 +160,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
             },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
+            },
           },
         },
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID',
+        description: 'Get a specific email by ID. Returns simplified format by default (HTML omitted, bodyHtmlSize hint provided). Use verbose=true to include HTML body. Use raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
             emailId: {
               type: 'string',
               description: 'ID of the email to retrieve',
+            },
+            verbose: {
+              type: 'boolean',
+              description: 'Include HTML body and all fields in simplified response',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
             },
           },
           required: ['emailId'],
@@ -401,7 +424,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'search_emails',
-        description: 'Search emails by subject or content',
+        description: 'Search emails by subject or content. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -418,13 +441,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
             },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
+            },
           },
           required: ['query'],
         },
       },
       {
         name: 'list_contacts',
-        description: 'List contacts from the address book',
+        description: 'List contacts from the address book. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -433,12 +460,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: 'Maximum number of contacts to return (default: 50)',
               default: 50,
             },
+            verbose: {
+              type: 'boolean',
+              description: 'Include all contact fields (addresses, titles, URLs, photos, anniversaries) in simplified format',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
+            },
           },
         },
       },
       {
         name: 'get_contact',
-        description: 'Get a specific contact by ID',
+        description: 'Get a specific contact by ID. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -446,13 +481,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'ID of the contact to retrieve',
             },
+            verbose: {
+              type: 'boolean',
+              description: 'Include all contact fields (addresses, titles, URLs, photos, anniversaries) in simplified format',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
+            },
           },
           required: ['contactId'],
         },
       },
       {
         name: 'search_contacts',
-        description: 'Search contacts by name or email',
+        description: 'Search contacts by name or email. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -464,6 +507,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'number',
               description: 'Maximum number of results (default: 20)',
               default: 20,
+            },
+            verbose: {
+              type: 'boolean',
+              description: 'Include all contact fields (addresses, titles, URLs, photos, anniversaries) in simplified format',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
             },
           },
           required: ['query'],
@@ -612,15 +663,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_identities',
-        description: 'List sending identities (email addresses that can be used for sending)',
+        description: 'List sending identities (email addresses that can be used for sending). Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
-          properties: {},
+          properties: {
+            verbose: {
+              type: 'boolean',
+              description: 'Include all identity fields (signatures, bcc) in simplified format',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
+            },
+          },
         },
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from inbox (like top-ten)',
+        description: 'Get the most recent emails from inbox (like top-ten). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -637,6 +697,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             ascending: {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
             },
           },
         },
@@ -787,7 +851,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'advanced_search',
-        description: 'Advanced email search with multiple criteria',
+        description: 'Advanced email search with multiple criteria. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -840,18 +904,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
             },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
+            },
           },
         },
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread',
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email.',
         inputSchema: {
           type: 'object',
           properties: {
             threadId: {
               type: 'string',
               description: 'ID of the thread/conversation',
+            },
+            raw: {
+              type: 'boolean',
+              description: 'Return original JMAP response instead of simplified format',
             },
           },
           required: ['threadId'],
@@ -1026,49 +1098,41 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  function formatQueryResult(result: QueryResult): string {
-    const { items, total } = result;
-    const summary = total != null && total > items.length
-      ? `Showing ${items.length} of ${total} results.`
-      : total != null
-        ? `${total} results.`
-        : `${items.length} results.`;
-    return `${summary}\n${JSON.stringify(items, null, 2)}`;
-  }
-
   try {
 
     const client = initializeClient();
 
     switch (name) {
       case 'list_mailboxes': {
+        const { verbose, raw } = args as any;
         const mailboxes = await client.getMailboxes();
+        const output = raw ? mailboxes : mailboxes.map(m => simplifyMailbox(m, { verbose: !!verbose }));
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(mailboxes, null, 2),
+              text: JSON.stringify(output, null, 2),
             },
           ],
         };
       }
 
       case 'list_emails': {
-        const { mailboxId, limit, ascending } = args as any;
+        const { mailboxId, limit, ascending, raw } = args as any;
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
         const result = await client.getEmails(mailboxId, validLimit, !!ascending);
         return {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
       }
 
       case 'get_email': {
-        const { emailId } = args as any;
+        const { emailId, verbose, raw } = args as any;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -1077,7 +1141,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(email, null, 2),
+              text: raw ? JSON.stringify(email, null, 2) : JSON.stringify(simplifyEmail(email, { includeHtml: !!verbose }), null, 2),
             },
           ],
         };
@@ -1279,7 +1343,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_emails': {
-        const { query, limit, ascending } = args as any;
+        const { query, limit, ascending, raw } = args as any;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
@@ -1289,45 +1353,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
       }
 
       case 'list_contacts': {
-        const { limit = 50 } = args as any;
+        const { limit = 50, verbose, raw } = args as any;
         const contactsClient = initializeContactsCalendarClient();
         const result = await contactsClient.getContacts(limit);
         return {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose: !!verbose }),
             },
           ],
         };
       }
 
       case 'get_contact': {
-        const { contactId } = args as any;
+        const { contactId, verbose, raw } = args as any;
         if (!contactId) {
           throw new McpError(ErrorCode.InvalidParams, 'contactId is required');
         }
         const contactsClient = initializeContactsCalendarClient();
         const contact = await contactsClient.getContactById(contactId);
+        const output = raw ? contact : simplifyContact(contact, { verbose: !!verbose });
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(contact, null, 2),
+              text: JSON.stringify(output, null, 2),
             },
           ],
         };
       }
 
       case 'search_contacts': {
-        const { query, limit = 20 } = args as any;
+        const { query, limit = 20, verbose, raw } = args as any;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
@@ -1337,7 +1402,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose: !!verbose }),
             },
           ],
         };
@@ -1460,28 +1525,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_identities': {
+        const { verbose, raw } = args as any;
         const client = initializeClient();
         const identities = await client.getIdentities();
-        
+        const output = raw ? identities : identities.map(i => simplifyIdentity(i, { verbose: !!verbose }));
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(identities, null, 2),
+              text: JSON.stringify(output, null, 2),
             },
           ],
         };
       }
 
       case 'get_recent_emails': {
-        const { limit = 10, mailboxName = 'inbox', ascending } = args as any;
+        const { limit = 10, mailboxName = 'inbox', ascending, raw } = args as any;
         const client = initializeClient();
         const result = await client.getRecentEmails(limit, mailboxName, !!ascending);
         return {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
@@ -1654,7 +1720,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'advanced_search': {
-        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, ascending } = args as any;
+        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, ascending, raw } = args as any;
         const client = initializeClient();
         const validLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
         const result = await client.advancedSearch({
@@ -1664,25 +1730,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: formatQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
       }
 
       case 'get_thread': {
-        const { threadId } = args as any;
+        const { threadId, raw } = args as any;
         if (!threadId) {
           throw new McpError(ErrorCode.InvalidParams, 'threadId is required');
         }
         const client = initializeClient();
         try {
           const thread = await client.getThread(threadId);
+          if (raw) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(thread, null, 2),
+                },
+              ],
+            };
+          }
+          const simplified = thread.map(e => simplifyEmail(e));
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify(thread, null, 2),
+                text: JSON.stringify(simplified, null, 2),
               },
             ],
           };
