@@ -112,7 +112,7 @@ Pin to a tagged release:
 
 ```bash
 FASTMAIL_API_TOKEN="your_token" \
-  npx --yes github:JonathanGodley/fastmail-mcp@v1.9.1-fork.1 fastmail-mcp
+  npx --yes github:JonathanGodley/fastmail-mcp@v1.9.1-fork.2 fastmail-mcp
 ```
 
 ## Install as a Claude Desktop Extension (DXT)
