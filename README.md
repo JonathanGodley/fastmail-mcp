@@ -160,7 +160,7 @@ Email list/search tools don't support `verbose` — they always return metadata 
 
 **`get_email` also includes**: `bodyText`, `bodyHtmlSize` (character count hint — HTML omitted by default)
 
-**`get_email` with `verbose`**: adds `bodyHtml`
+**`get_email` with `verbose`**: adds `bodyHtml` (WARNING: can produce very large responses for marketing/rich emails — only use when HTML content is specifically needed)
 
 **Simplification applied to all email output:**
 - Addresses: `"Name <email>"` strings instead of `{name, email}` objects
@@ -214,8 +214,8 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
   - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **list_emails**: List emails from a specific mailbox or all mailboxes
   - Parameters: `mailboxId` (optional), `limit` (default: 20), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
-- **get_email**: Get a specific email by ID. HTML omitted by default with size hint; use `verbose` to include.
-  - Parameters: `emailId` (required), `verbose` (optional, include HTML body and all fields), `raw` (optional, return original JMAP response)
+- **get_email**: Get a specific email by ID. Returns plain text body with HTML omitted (bodyHtmlSize hint provided). Only use `verbose` if you specifically need the HTML body — it can be very large for marketing emails.
+  - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `raw` (optional, return original JMAP response)
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array)
 - **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Set `send=false` to save as draft instead of sending.

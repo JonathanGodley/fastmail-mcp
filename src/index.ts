@@ -126,13 +126,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'list_mailboxes',
-        description: 'List all mailboxes in the Fastmail account. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
+        description: 'List all mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, role, counts). Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
             verbose: {
               type: 'boolean',
-              description: 'Include all mailbox fields (sortOrder, isSubscribed, myRights) in simplified format',
+              description: 'Include extra mailbox fields (sortOrder, isSubscribed, myRights). Not needed for most tasks.',
             },
             raw: {
               type: 'boolean',
@@ -169,7 +169,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format by default (HTML omitted, bodyHtmlSize hint provided). Use verbose=true to include HTML body. Use raw=true for original JMAP response.',
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -179,7 +179,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             verbose: {
               type: 'boolean',
-              description: 'Include HTML body and all fields in simplified response',
+              description: 'Include HTML body in response. WARNING: can produce very large responses (50K+ chars) for marketing/rich emails. Only use when HTML content is specifically needed.',
             },
             raw: {
               type: 'boolean',
@@ -451,7 +451,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_contacts',
-        description: 'List contacts from the address book. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
+        description: 'List contacts from the address book. Returns simplified format by default (name, emails, phones, org). Use verbose=true only if you need extra fields like addresses, titles, or photos. Use raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -462,7 +462,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             verbose: {
               type: 'boolean',
-              description: 'Include all contact fields (addresses, titles, URLs, photos, anniversaries) in simplified format',
+              description: 'Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.',
             },
             raw: {
               type: 'boolean',
@@ -473,7 +473,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_contact',
-        description: 'Get a specific contact by ID. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
+        description: 'Get a specific contact by ID. Returns simplified format by default (name, emails, phones, org). Use verbose=true only if you need extra fields like addresses, titles, or photos. Use raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -483,7 +483,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             verbose: {
               type: 'boolean',
-              description: 'Include all contact fields (addresses, titles, URLs, photos, anniversaries) in simplified format',
+              description: 'Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.',
             },
             raw: {
               type: 'boolean',
@@ -495,7 +495,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'search_contacts',
-        description: 'Search contacts by name or email. Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
+        description: 'Search contacts by name or email. Returns simplified format by default (name, emails, phones, org). Use verbose=true only if you need extra fields like addresses, titles, or photos. Use raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -510,7 +510,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             verbose: {
               type: 'boolean',
-              description: 'Include all contact fields (addresses, titles, URLs, photos, anniversaries) in simplified format',
+              description: 'Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.',
             },
             raw: {
               type: 'boolean',
@@ -663,13 +663,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_identities',
-        description: 'List sending identities (email addresses that can be used for sending). Returns simplified format by default; set verbose=true for all fields in simplified format, or raw=true for original JMAP response.',
+        description: 'List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo). Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.',
         inputSchema: {
           type: 'object',
           properties: {
             verbose: {
               type: 'boolean',
-              description: 'Include all identity fields (signatures, bcc) in simplified format',
+              description: 'Include extra identity fields (SMTP config, verification state). Not needed for most tasks.',
             },
             raw: {
               type: 'boolean',
