@@ -17,7 +17,7 @@ import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIde
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.1-fork.2',
+    version: '1.9.1-fork.3',
   },
   {
     capabilities: {
