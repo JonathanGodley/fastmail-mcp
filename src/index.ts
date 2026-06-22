@@ -18,7 +18,7 @@ import { coerceStringArray, coerceBool, redactBearerTokens } from './coerce.js';
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.4-fork.1',
+    version: '1.9.4-fork.2',
   },
   {
     capabilities: {
@@ -627,7 +627,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'update_calendar_event',
-        description: 'Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Floating times preserve the original timezone; explicit UTC/offset times convert to UTC. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees.',
+        description: 'Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times preserve the original timezone; explicit UTC/offset times convert to UTC. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -666,6 +666,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 required: ['email'],
               },
               description: 'Replaces ALL existing attendees. Empty array removes all attendees. Omit to preserve existing attendees.',
+            },
+            clearFields: {
+              type: 'array',
+              items: { type: 'string', enum: ['description', 'location'] },
+              description: 'Property names to delete from the event. Allowed: description, location. Cannot also pass the same field as a value.',
             },
             confirmRecurring: {
               type: 'boolean',
@@ -1094,7 +1099,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'check_function_availability',
-        description: 'Check which MCP functions are available based on account permissions',
+        description: 'Check which MCP functions are available based on account permissions. Calendar tools run over CalDAV, so calendar is reported available when CalDAV credentials are configured, regardless of the JMAP calendar capability.',
         inputSchema: {
           type: 'object',
           properties: {},
@@ -1494,18 +1499,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'update_calendar_event': {
-        const { eventId, title, description, start, end, location, participants, confirmRecurring } = args as any;
+        const { eventId, title, description, start, end, location, participants, clearFields, confirmRecurring } = args as any;
         if (!eventId) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
-        if (title === undefined && description === undefined && start === undefined && end === undefined && location === undefined && participants === undefined) {
-          throw new McpError(ErrorCode.InvalidParams, 'At least one field to update must be provided (title, description, start, end, location, or participants)');
+        const hasClearFields = Array.isArray(clearFields) && clearFields.length > 0;
+        if (title === undefined && description === undefined && start === undefined && end === undefined && location === undefined && participants === undefined && !hasClearFields) {
+          throw new McpError(ErrorCode.InvalidParams, 'At least one field to update must be provided (title, description, start, end, location, participants, or clearFields)');
         }
         const davClient = initializeCalDAVClient();
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const fields = { title, description, start, end, location, participants, confirmRecurring };
+        const fields = { title, description, start, end, location, participants, clearFields, confirmRecurring };
         await davClient.updateCalendarEvent(eventId, fields);
         return { content: [{ type: 'text', text: `Calendar event updated. Event ID: ${eventId}` }] };
       }
@@ -1909,7 +1915,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'check_function_availability': {
         const client = initializeClient();
         const session = await client.getSession();
-        
+
+        // Calendar tools run on CalDAV, not JMAP (the JMAP calendar path is
+        // disabled). So calendar is available if EITHER the JMAP calendar
+        // capability is present OR CalDAV credentials are configured.
+        const jmapCalendar = !!session.capabilities['urn:ietf:params:jmap:calendars'];
+        const caldavConfigured = initializeCalDAVClient() !== null;
+        const calendarAvailable = jmapCalendar || caldavConfigured;
+        const calendarNote = jmapCalendar
+          ? 'Calendar is available (JMAP)'
+          : caldavConfigured
+            ? 'Calendar is available via CalDAV'
+            : 'Calendar access not available - set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD, or enable calendar scope in Fastmail account settings';
+
         const availability = {
           email: {
             available: true,
@@ -1942,14 +1960,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           },
           calendar: {
-            available: !!session.capabilities['urn:ietf:params:jmap:calendars'],
+            available: calendarAvailable,
             functions: ['list_calendars', 'list_calendar_events', 'get_calendar_event', 'create_calendar_event', 'update_calendar_event', 'delete_calendar_event'],
-            note: session.capabilities['urn:ietf:params:jmap:calendars'] ? 
-              'Calendar is available' : 
-              'Calendar access not available - may require enabling in Fastmail account settings',
-            enablementGuide: session.capabilities['urn:ietf:params:jmap:calendars'] ? null : {
+            note: calendarNote,
+            enablementGuide: calendarAvailable ? null : {
               steps: [
-                '1. Log into Fastmail web interface',
+                'Option A (CalDAV): set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD (app password) — calendar tools run over CalDAV',
+                'Option B (JMAP scope): 1. Log into Fastmail web interface',
                 '2. Go to Settings → Privacy & Security → Connected Apps & API tokens',
                 '3. Check if calendar scope is enabled for your API token',
                 '4. If not available, you may need to upgrade your Fastmail plan or contact support'

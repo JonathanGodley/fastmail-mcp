@@ -36,3 +36,29 @@ export function coerceBool(value: unknown): boolean | undefined {
   if (value === 'false') return false;
   return undefined;
 }
+
+// Loud-reject a settable string field that was provided but is empty,
+// whitespace-only, or null. Callers invoke this only for fields that were
+// actually present (i.e. !== undefined at the call site), so silently omitting
+// a field stays distinct from explicitly blanking it. Returns the trimmed value.
+export function requireNonEmpty(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${fieldName} cannot be empty; omit the field to leave it unchanged`);
+  }
+  return value.trim();
+}
+
+// Validate a clearFields list: every entry must be in the allowed set, and no
+// entry may also appear as a settable param (can't both set and clear a field).
+// No-op when clearFields is empty/undefined.
+export function validateClearFields(clearFields: string[] | undefined, allowed: Set<string>, provided: Set<string>): void {
+  if (!clearFields || clearFields.length === 0) return;
+  for (const field of clearFields) {
+    if (!allowed.has(field)) {
+      throw new Error(`Cannot clear "${field}"; clearable fields are: ${[...allowed].join(', ')}`);
+    }
+    if (provided.has(field)) {
+      throw new Error(`cannot both set and clear ${field}; pass it as a value or in clearFields, not both`);
+    }
+  }
+}

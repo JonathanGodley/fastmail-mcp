@@ -7,6 +7,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
 // behavior). The rrule package has a single transitive dependency (tslib).
 import rruleLib from 'rrule';
 const { rrulestr } = rruleLib;
+import { requireNonEmpty, validateClearFields } from './coerce.js';
 
 export interface CalDAVConfig {
   username: string;
@@ -1044,6 +1045,7 @@ export class CalDAVCalendarClient {
     end?: string;
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
+    clearFields?: string[];
     confirmRecurring?: boolean;
   }): Promise<string> {
     const client = await this.getClient();
@@ -1065,6 +1067,14 @@ export class CalDAVCalendarClient {
     if (fields.end !== undefined && !datePattern.test(fields.end) && !dateTimePattern.test(fields.end)) {
       throw new Error(`Invalid end date format: ${fields.end}. Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
+
+    // Validate clearFields: only the optional, string-settable, not-otherwise-
+    // clearable fields may be cleared, and a field can't be both set and cleared.
+    const CLEARABLE_FIELDS = new Set(['description', 'location']);
+    const providedStringFields = new Set<string>();
+    if (fields.description !== undefined) providedStringFields.add('description');
+    if (fields.location !== undefined) providedStringFields.add('location');
+    validateClearFields(fields.clearFields, CLEARABLE_FIELDS, providedStringFields);
 
     const lineEnding = detectLineEnding(obj.data);
     const fold = (line: string) => foldICalLine(line, lineEnding);
@@ -1154,11 +1164,13 @@ export class CalDAVCalendarClient {
     let timeChanged = false;
 
     if (fields.title !== undefined) {
-      data = replaceICalProperty(data, 'SUMMARY', fold(`SUMMARY:${escapeICalText(fields.title)}`));
+      const title = requireNonEmpty(fields.title, 'title');
+      data = replaceICalProperty(data, 'SUMMARY', fold(`SUMMARY:${escapeICalText(title)}`));
     }
 
     if (fields.description !== undefined) {
-      data = replaceICalProperty(data, 'DESCRIPTION', fold(`DESCRIPTION:${escapeICalText(fields.description)}`));
+      const description = requireNonEmpty(fields.description, 'description');
+      data = replaceICalProperty(data, 'DESCRIPTION', fold(`DESCRIPTION:${escapeICalText(description)}`));
     }
 
     if (fields.start !== undefined) {
@@ -1195,7 +1207,16 @@ export class CalDAVCalendarClient {
     }
 
     if (fields.location !== undefined) {
-      data = replaceICalProperty(data, 'LOCATION', fold(`LOCATION:${escapeICalText(fields.location)}`));
+      const location = requireNonEmpty(fields.location, 'location');
+      data = replaceICalProperty(data, 'LOCATION', fold(`LOCATION:${escapeICalText(location)}`));
+    }
+
+    // Clear requested fields by removing the property line entirely.
+    if (fields.clearFields && fields.clearFields.length > 0) {
+      const KEY_BY_FIELD: Record<string, string> = { description: 'DESCRIPTION', location: 'LOCATION' };
+      for (const field of fields.clearFields) {
+        data = replaceICalProperty(data, KEY_BY_FIELD[field], null);
+      }
     }
 
     if (fields.participants !== undefined) {
@@ -1203,8 +1224,14 @@ export class CalDAVCalendarClient {
       for (const p of fields.participants) {
         validateAttendeeEmail(p.email);
       }
-      // Remove all existing ATTENDEE lines (ORGANIZER is preserved)
+      // Remove all existing ATTENDEE lines
       data = removeAllICalProperties(data, 'ATTENDEE');
+      // Clearing all participants must also strip ORGANIZER — an ORGANIZER with
+      // no ATTENDEEs is a malformed scheduling VEVENT (RFC 5545 §3.8.4.3). On the
+      // length>0 path below the ORGANIZER is re-added, so this is gated to ===0.
+      if (fields.participants.length === 0) {
+        data = removeAllICalProperties(data, 'ORGANIZER');
+      }
       // Build and insert all ATTENDEE lines in one pass
       if (fields.participants.length > 0) {
         const attendeeLines = fields.participants.map(p => {

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceBool, redactBearerTokens } from './coerce.js';
+import { coerceStringArray, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields } from './coerce.js';
 
 describe('coerceStringArray', () => {
   it('returns undefined for undefined input', () => {
@@ -116,5 +116,66 @@ describe('redactBearerTokens', () => {
 
   it('handles empty string', () => {
     assert.equal(redactBearerTokens(''), '');
+  });
+});
+
+describe('requireNonEmpty', () => {
+  it('returns the trimmed value for a normal string', () => {
+    assert.equal(requireNonEmpty('  hello  ', 'title'), 'hello');
+  });
+
+  it('returns the value unchanged when no trimming is needed', () => {
+    assert.equal(requireNonEmpty('hello', 'title'), 'hello');
+  });
+
+  it('throws for an empty string', () => {
+    assert.throws(() => requireNonEmpty('', 'title'), /title cannot be empty/);
+  });
+
+  it('throws for a whitespace-only string', () => {
+    assert.throws(() => requireNonEmpty('   ', 'title'), /title cannot be empty/);
+  });
+
+  it('throws for null', () => {
+    assert.throws(() => requireNonEmpty(null, 'title'), /title cannot be empty/);
+  });
+
+  it('throws for undefined', () => {
+    assert.throws(() => requireNonEmpty(undefined, 'title'), /title cannot be empty/);
+  });
+
+  it('names the field in the error message', () => {
+    assert.throws(() => requireNonEmpty('', 'location'), /location cannot be empty; omit the field to leave it unchanged/);
+  });
+});
+
+describe('validateClearFields', () => {
+  const allowed = new Set(['description', 'location']);
+
+  it('no-ops on an empty array', () => {
+    assert.doesNotThrow(() => validateClearFields([], allowed, new Set()));
+  });
+
+  it('no-ops on undefined', () => {
+    assert.doesNotThrow(() => validateClearFields(undefined as any, allowed, new Set()));
+  });
+
+  it('accepts allowed fields not also being set', () => {
+    assert.doesNotThrow(() => validateClearFields(['location'], allowed, new Set(['title'])));
+  });
+
+  it('throws for a field not in the allowed set', () => {
+    assert.throws(() => validateClearFields(['title'], allowed, new Set()), /title/);
+  });
+
+  it('lists the allowed set in the unknown-field error', () => {
+    assert.throws(() => validateClearFields(['start'], allowed, new Set()), /description, location/);
+  });
+
+  it('throws when a field is both set and cleared', () => {
+    assert.throws(
+      () => validateClearFields(['description'], allowed, new Set(['description'])),
+      /cannot both set and clear description/
+    );
   });
 });
