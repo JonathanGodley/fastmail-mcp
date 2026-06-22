@@ -4,6 +4,14 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
 
 This fork adds a **response simplification system** that reduces token usage when used with AI clients. All data-returning tools return a cleaned, curated format by default. Use `verbose` for all fields in the clean shape, or `raw` for the original JMAP response. See [Response Simplification](#response-simplification) for details.
 
+## What this fork adds over upstream
+
+- **Response simplification** — all data-returning tools return a token-lean shape by default (`verbose`/`raw` to opt out). See [Response Simplification](#response-simplification).
+- **Calendar** — attendee/participant support, non-destructive event updates (no silent field wipes), and RFC 5545 date/TZID handling.
+- **Local-time email dates** — the `date` field renders in your timezone with a UTC offset instead of raw UTC; `FASTMAIL_TIMEZONE` overrides the host zone.
+- **Sending ergonomics** — drafts carry the identity's display name (parity with send); recipient strings like `"Name <email>"` are parsed across send/draft.
+- **Attachment paths** — relative `download_attachment` savePaths resolve inside the configured download dir, so a bare filename lands there in one step.
+
 ## Features
 
 ### Core Email Operations
