@@ -62,3 +62,24 @@ export function validateClearFields(clearFields: string[] | undefined, allowed: 
     }
   }
 }
+
+// Parse an RFC 5322 "Display Name <email>" recipient string into a JMAP
+// EmailAddress object. Bare addresses pass through as { email }, and a blank
+// display name is omitted. This is a pragmatic parse, not the full RFC grammar.
+// Callers map it over already-trimmed, non-empty arrays (coerceStringArray
+// filters blanks), so input is assumed non-empty.
+export function parseAddress(input: string): { name?: string; email: string } {
+  const trimmed = String(input).trim();
+  const open = trimmed.lastIndexOf('<');
+  const close = trimmed.lastIndexOf('>');
+  if (open !== -1 && close > open) {
+    const email = trimmed.slice(open + 1, close).trim();
+    let name = trimmed.slice(0, open).trim();
+    // Strip one pair of surrounding double-quotes from a quoted display name.
+    if (name.length >= 2 && name.startsWith('"') && name.endsWith('"')) {
+      name = name.slice(1, -1).trim();
+    }
+    return name ? { name, email } : { email };
+  }
+  return { email: trimmed };
+}

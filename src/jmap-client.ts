@@ -1,5 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
+import { parseAddress } from './coerce.js';
 import { writeFile, mkdir, realpath, stat, lstat } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
 import { homedir } from 'os';
@@ -338,13 +339,13 @@ export class JmapClient {
       mailboxIds: initialMailboxIds,
       keywords: { $draft: true },
       from: [{ name: selectedIdentity.name, email: fromEmail }],
-      to: email.to.map(addr => ({ email: addr })),
-      cc: email.cc?.map(addr => ({ email: addr })) || [],
-      bcc: email.bcc?.map(addr => ({ email: addr })) || [],
+      to: email.to.map(parseAddress),
+      cc: email.cc?.map(parseAddress) || [],
+      bcc: email.bcc?.map(parseAddress) || [],
       subject: email.subject,
       ...(email.inReplyTo && { inReplyTo: email.inReplyTo }),
       ...(email.references && { references: email.references }),
-      ...(email.replyTo?.length && { replyTo: email.replyTo.map(addr => ({ email: addr })) }),
+      ...(email.replyTo?.length && { replyTo: email.replyTo.map(parseAddress) }),
       textBody: email.textBody ? [{ partId: 'text', type: 'text/plain' }] : undefined,
       htmlBody: email.htmlBody ? [{ partId: 'html', type: 'text/html' }] : undefined,
       bodyValues: {
@@ -369,9 +370,9 @@ export class JmapClient {
               envelope: {
                 mailFrom: { email: fromEmail },
                 rcptTo: [
-                  ...email.to.map(addr => ({ email: addr })),
-                  ...(email.cc || []).map(addr => ({ email: addr })),
-                  ...(email.bcc || []).map(addr => ({ email: addr })),
+                  ...email.to.map(addr => ({ email: parseAddress(addr).email })),
+                  ...(email.cc || []).map(addr => ({ email: parseAddress(addr).email })),
+                  ...(email.bcc || []).map(addr => ({ email: parseAddress(addr).email })),
                 ]
               }
             }
@@ -470,16 +471,16 @@ export class JmapClient {
     const emailObject: any = {
       mailboxIds,
       keywords: { $draft: true },
-      from: [{ email: fromEmail }],
+      from: [{ name: selectedIdentity.name, email: fromEmail }],
     };
 
-    if (email.to?.length) emailObject.to = email.to.map(addr => ({ email: addr }));
-    if (email.cc?.length) emailObject.cc = email.cc.map(addr => ({ email: addr }));
-    if (email.bcc?.length) emailObject.bcc = email.bcc.map(addr => ({ email: addr }));
+    if (email.to?.length) emailObject.to = email.to.map(parseAddress);
+    if (email.cc?.length) emailObject.cc = email.cc.map(parseAddress);
+    if (email.bcc?.length) emailObject.bcc = email.bcc.map(parseAddress);
     if (email.subject) emailObject.subject = email.subject;
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
-    if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(addr => ({ email: addr }));
+    if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
     if (email.textBody) emailObject.textBody = [{ partId: 'text', type: 'text/plain' }];
     if (email.htmlBody) emailObject.htmlBody = [{ partId: 'html', type: 'text/html' }];
     if (email.textBody || email.htmlBody) {
@@ -593,10 +594,10 @@ export class JmapClient {
 
     // Merge: updates override existing values
     const mergedSubject = updates.subject !== undefined ? updates.subject : (existingEmail.subject || '');
-    const mergedTo = updates.to !== undefined ? updates.to.map(addr => ({ email: addr })) : (existingEmail.to || []);
-    const mergedCc = updates.cc !== undefined ? updates.cc.map(addr => ({ email: addr })) : (existingEmail.cc || []);
-    const mergedBcc = updates.bcc !== undefined ? updates.bcc.map(addr => ({ email: addr })) : (existingEmail.bcc || []);
-    const mergedReplyTo = updates.replyTo !== undefined ? updates.replyTo.map(addr => ({ email: addr })) : (existingEmail.replyTo || null);
+    const mergedTo = updates.to !== undefined ? updates.to.map(parseAddress) : (existingEmail.to || []);
+    const mergedCc = updates.cc !== undefined ? updates.cc.map(parseAddress) : (existingEmail.cc || []);
+    const mergedBcc = updates.bcc !== undefined ? updates.bcc.map(parseAddress) : (existingEmail.bcc || []);
+    const mergedReplyTo = updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null);
 
     const textBodyValue = updates.textBody !== undefined ? updates.textBody : (existingTextBody as any)?.value;
     const htmlBodyValue = updates.htmlBody !== undefined ? updates.htmlBody : (existingHtmlBody as any)?.value;
@@ -604,7 +605,7 @@ export class JmapClient {
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
       keywords: { $draft: true },
-      from: [{ email: updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email }],
+      from: [{ name: selectedIdentity.name, email: updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email }],
       to: mergedTo,
       cc: mergedCc,
       bcc: mergedBcc,

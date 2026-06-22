@@ -18,7 +18,7 @@ import { coerceStringArray, coerceBool, redactBearerTokens } from './coerce.js';
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.4-fork.2',
+    version: '1.9.4-fork.3',
   },
   {
     capabilities: {
@@ -209,17 +209,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 { type: 'array', items: { type: 'string' } },
                 { type: 'string' },
               ],
-              description: 'Recipient email addresses (array of strings, or a comma-separated string)',
+              description: 'Recipient email addresses (array of strings, or a comma-separated string). Each entry may be "Name <email>" or a bare address.',
             },
             cc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'CC email addresses (optional)',
+              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             bcc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'BCC email addresses (optional)',
+              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             from: {
               type: 'string',
@@ -254,7 +254,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             replyTo: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender)',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
           },
           required: ['to', 'subject'],
@@ -273,17 +273,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             to: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Recipient email addresses (optional, defaults to the original sender)',
+              description: 'Recipient email addresses (optional, defaults to the original sender). Each entry may be "Name <email>" or a bare address.',
             },
             cc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'CC email addresses (optional)',
+              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             bcc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'BCC email addresses (optional)',
+              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             from: {
               type: 'string',
@@ -304,7 +304,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             replyTo: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender)',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
           },
           required: ['originalEmailId'],
@@ -319,17 +319,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             to: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Recipient email addresses (optional)',
+              description: 'Recipient email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             cc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'CC email addresses (optional)',
+              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             bcc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'BCC email addresses (optional)',
+              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             from: {
               type: 'string',
@@ -364,7 +364,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             replyTo: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender)',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
           },
         },
@@ -382,17 +382,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             to: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Updated recipient email addresses (optional, keeps existing if omitted)',
+              description: 'Updated recipient email addresses (optional, keeps existing if omitted). Each entry may be "Name <email>" or a bare address.',
             },
             cc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Updated CC email addresses (optional)',
+              description: 'Updated CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             bcc: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Updated BCC email addresses (optional)',
+              description: 'Updated BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
             },
             from: {
               type: 'string',
@@ -413,7 +413,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             replyTo: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender)',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
           },
           required: ['emailId'],

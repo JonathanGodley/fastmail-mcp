@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields } from './coerce.js';
+import { coerceStringArray, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress } from './coerce.js';
 
 describe('coerceStringArray', () => {
   it('returns undefined for undefined input', () => {
@@ -177,5 +177,35 @@ describe('validateClearFields', () => {
       () => validateClearFields(['description'], allowed, new Set(['description'])),
       /cannot both set and clear description/
     );
+  });
+});
+
+describe('parseAddress', () => {
+  it('parses "Name <email>" into name + email', () => {
+    assert.deepEqual(parseAddress('Alice <a@x.com>'), { name: 'Alice', email: 'a@x.com' });
+  });
+
+  it('strips surrounding double-quotes from a quoted display name', () => {
+    assert.deepEqual(parseAddress('"Doe, John" <j@x.com>'), { name: 'Doe, John', email: 'j@x.com' });
+  });
+
+  it('passes a bare address through as { email }', () => {
+    assert.deepEqual(parseAddress('a@x.com'), { email: 'a@x.com' });
+  });
+
+  it('omits the name when angle brackets carry no display name', () => {
+    assert.deepEqual(parseAddress('<a@x.com>'), { email: 'a@x.com' });
+  });
+
+  it('trims surrounding whitespace and an empty name', () => {
+    assert.deepEqual(parseAddress('   <a@x.com>  '), { email: 'a@x.com' });
+  });
+
+  it('trims whitespace around name and email', () => {
+    assert.deepEqual(parseAddress('  Bob   <  b@x.com  >  '), { name: 'Bob', email: 'b@x.com' });
+  });
+
+  it('uses the last angle-bracket pair so a name may contain "<"', () => {
+    assert.deepEqual(parseAddress('a<b <c@x.com>'), { name: 'a<b', email: 'c@x.com' });
   });
 });

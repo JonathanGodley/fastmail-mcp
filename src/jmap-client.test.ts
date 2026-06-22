@@ -8,7 +8,7 @@ import { FastmailAuth } from './auth.js';
 // ---------- helpers ----------
 
 const ACCOUNT_ID = 'acct-123';
-const IDENTITY = { id: 'id-1', email: 'me@example.com', mayDelete: false };
+const IDENTITY = { id: 'id-1', name: 'Test User', email: 'me@example.com', mayDelete: false };
 const DRAFTS_MAILBOX = { id: 'mb-drafts', name: 'Drafts', role: 'drafts' };
 
 function makeClient(): JmapClient {
@@ -82,7 +82,7 @@ describe('createDraft', () => {
     // email object shape
     const emailObj = request.methodCalls[0][1].create.draft;
     assert.equal(emailObj.subject, 'Test');
-    assert.deepEqual(emailObj.from, [{ email: 'me@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Test User', email: 'me@example.com' }]);
     assert.deepEqual(emailObj.keywords, { $draft: true });
     assert.equal(emailObj.mailboxIds[DRAFTS_MAILBOX.id], true);
   });
@@ -161,7 +161,7 @@ describe('createDraft', () => {
 
   // 7. Custom from address used correctly
   it('uses custom from address when provided', async () => {
-    const altIdentity = { id: 'id-2', email: 'alias@example.com', mayDelete: true };
+    const altIdentity = { id: 'id-2', name: 'Alias User', email: 'alias@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [IDENTITY, altIdentity]);
 
     const makeReq = mock.method(client, 'makeRequest', async () => ({
@@ -173,7 +173,7 @@ describe('createDraft', () => {
     await client.createDraft({ subject: 'Hi', from: 'alias@example.com' });
 
     const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ email: 'alias@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Alias User', email: 'alias@example.com' }]);
   });
 
   // 8. Invalid from address throws
@@ -189,7 +189,7 @@ describe('createDraft', () => {
 
   // 8b. Wildcard identity matches concrete from address
   it('matches wildcard identity for from address', async () => {
-    const wildcardIdentity = { id: 'id-wild', email: '*@example.com', mayDelete: true };
+    const wildcardIdentity = { id: 'id-wild', name: 'Wild User', email: '*@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
 
     const makeReq = mock.method(client, 'makeRequest', async () => ({
@@ -201,7 +201,7 @@ describe('createDraft', () => {
     await client.createDraft({ subject: 'Hi', from: 'work@example.com' });
 
     const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ email: 'work@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Wild User', email: 'work@example.com' }]);
   });
 
   // 8c. Bare @ rejected (no local part)
@@ -880,6 +880,73 @@ describe('sendEmail envelope recipients', () => {
   });
 });
 
+// ---------- recipient name parsing (B3) ----------
+
+describe('recipient name parsing (B3)', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getMailboxes', async () => [
+      DRAFTS_MAILBOX,
+      { id: 'mb-sent', name: 'Sent', role: 'sent' },
+    ]);
+  });
+
+  it('createDraft parses "Name <email>" recipients into { name, email }', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'd-1' } } }, 'createDraft']],
+    }));
+
+    await client.createDraft({ subject: 'Hi', to: ['Alice <a@x.com>'] });
+
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.com' }]);
+  });
+
+  it('updateDraft parses "Name <email>" recipients into { name, email }', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
+      }
+      return { methodResponses: [['Email/set', { created: { draft: { id: 'd-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+    });
+
+    await client.updateDraft('draft-1', { to: ['Alice <a@x.com>'] });
+
+    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.com' }]);
+  });
+
+  it('sendEmail parses "Name <email>" recipients in the email object', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/set', { created: { draft: { id: 'e-1' } } }, 'createEmail'],
+        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
+      ],
+    }));
+
+    await client.sendEmail({ to: ['Alice <a@x.com>'], subject: 'Hi', textBody: 'Hello' });
+
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.com' }]);
+  });
+
+  it('sendEmail keeps the SMTP envelope rcptTo as a bare address (strips display name)', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/set', { created: { draft: { id: 'e-1' } } }, 'createEmail'],
+        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
+      ],
+    }));
+
+    await client.sendEmail({ to: ['Alice <a@x.com>'], subject: 'Hi', textBody: 'Hello' });
+
+    const rcptTo = makeReq.mock.calls[0].arguments[0].methodCalls[1][1].create.submission.envelope.rcptTo;
+    assert.deepEqual(rcptTo, [{ email: 'a@x.com' }]);
+  });
+});
+
 // ---------- createDraft replyTo ----------
 
 describe('createDraft replyTo', () => {
@@ -1040,7 +1107,7 @@ describe('updateDraft wildcard identity', () => {
     await client.updateDraft('draft-1', { from: 'new@example.com' });
 
     const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ email: 'new@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'new@example.com' }]);
   });
 
   it('preserves concrete from when updating without changing from', async () => {
@@ -1055,7 +1122,7 @@ describe('updateDraft wildcard identity', () => {
     await client.updateDraft('draft-1', { subject: 'Changed subject only' });
 
     const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ email: 'work@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
   });
 });
 

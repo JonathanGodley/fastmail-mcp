@@ -212,6 +212,10 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 
 ### Email Tools
 
+> **Recipient format:** every recipient field (`to`/`cc`/`bcc`/`replyTo` on `send_email`, `reply_email`, `create_draft`, `edit_draft`) accepts each entry as either a bare address (`a@x.com`) or the RFC 5322 `"Name <email>"` form (`Alice <a@x.com>`), which is parsed into a display name + address. The SMTP envelope always uses the bare address.
+>
+> **Draft sender name:** drafts created or edited via `create_draft`/`edit_draft` now carry the sending identity's display name (matching `send_email`), so the From shows your name rather than a bare address.
+
 - **list_mailboxes**: Get all mailboxes in your account
   - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **list_emails**: List emails from a specific mailbox or all mailboxes
