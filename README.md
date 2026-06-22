@@ -77,7 +77,9 @@ This fork adds a **response simplification system** that reduces token usage whe
    # Only api.fastmail.com and www.fastmailusercontent.com are accepted by default.
    # For self-hosted JMAP servers, also set FASTMAIL_ALLOW_UNSAFE_BASE_URL=true.
    export FASTMAIL_BASE_URL="https://api.fastmail.com"
-   # Optional: customize attachment download directory (defaults to ~/Downloads/fastmail-mcp/)
+   # Optional: customize attachment download directory (defaults to ~/Downloads/fastmail-mcp/).
+   # download_attachment savePaths are confined to this directory; set it to the root
+   # you want attachments saved under to write there directly in one step.
    export FASTMAIL_DOWNLOAD_DIR="/path/to/your/downloads"
    ```
 
@@ -255,6 +257,7 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
   - Parameters: `emailId` (required)
 - **download_attachment**: Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.
   - Parameters: `emailId` (required), `attachmentId` (required), `savePath` (optional)
+  - `savePath` may be absolute or relative. Relative paths (including a bare filename) resolve against the download directory, so an attachment lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected. To save directly into your own location, set `FASTMAIL_DOWNLOAD_DIR` to that root (see [Setup](#setup)) — confinement stays on, scoped to the directory you choose.
 - **advanced_search**: Advanced email search with multiple criteria
   - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **get_thread**: Get all emails in a conversation thread. Returns metadata + preview for each email.
