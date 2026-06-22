@@ -248,7 +248,8 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 - **send_draft**: Send an existing draft email. The draft must have recipients and a from address. Moves the email to the Sent folder.
   - Parameters: `emailId` (required)
 - **search_emails**: Search emails by content
-  - Parameters: `query` (required), `limit` (default: 20), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
+  - Parameters: `query` (required), `limit` (default: 20), `ascending` (optional, oldest first), `excludeDrafts` (optional, omit draft messages), `raw` (optional, return original JMAP response)
+  - Drafts are **included by default**. Set `excludeDrafts: true` to filter them out server-side (the total count reflects the exclusion).
 - **get_recent_emails**: Get the most recent emails from a mailbox (inspired by JMAP-Samples top-ten)
   - Parameters: `limit` (default: 10, max: 50), `mailboxName` (default: 'inbox'), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **mark_email_read**: Mark an email as read or unread
@@ -274,7 +275,10 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 - **advanced_search**: Advanced email search with multiple criteria
   - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **get_thread**: Get all emails in a conversation thread. Returns metadata + preview for each email.
-  - Parameters: `threadId` (required), `raw` (optional, return original JMAP response)
+  - Parameters: `threadId` (required), `includeDrafts` (optional, include in-progress drafts), `raw` (optional, return original JMAP response)
+  - Draft messages are **excluded by default** (an in-progress reply is noise when reading a conversation). Set `includeDrafts: true` to include them.
+
+> **Draft handling is asymmetric by design.** `get_thread` excludes drafts by default while `search_emails` includes them: a draft reply is noise when reconstructing a conversation, but a search should still find everything you've written. Drafts are identified by the `$draft` keyword (robust even if a draft is moved out of the Drafts mailbox), not by mailbox role. Use `includeDrafts` / `excludeDrafts` to override either default.
 
 ### Email Statistics & Analytics
 

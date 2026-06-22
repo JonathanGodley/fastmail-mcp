@@ -444,7 +444,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'search_emails',
-        description: 'Search emails by subject or content. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time.',
+        description: 'Search emails by subject or content. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Drafts are included by default; set excludeDrafts=true to omit draft messages from results (and from the total count).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -460,6 +460,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             ascending: {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
+            },
+            excludeDrafts: {
+              type: 'boolean',
+              description: 'Omit draft messages from results (default: false, drafts included). Filtered server-side, so the total count reflects the exclusion.',
             },
             raw: {
               type: 'boolean',
@@ -955,13 +959,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time.',
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Draft messages are excluded by default; set includeDrafts=true to include in-progress drafts in the thread.',
         inputSchema: {
           type: 'object',
           properties: {
             threadId: {
               type: 'string',
               description: 'ID of the thread/conversation',
+            },
+            includeDrafts: {
+              type: 'boolean',
+              description: 'Include draft messages in the thread (default: false, drafts excluded).',
             },
             raw: {
               type: 'boolean',
@@ -1388,12 +1396,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_emails': {
-        const { query, limit, ascending, raw } = args as any;
+        const { query, limit, ascending, raw, excludeDrafts } = args as any;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
-        const result = await client.searchEmails(query, validLimit, !!ascending);
+        const result = await client.searchEmails(query, validLimit, !!ascending, coerceBool(excludeDrafts) ?? false);
         return {
           content: [
             {
@@ -1751,13 +1759,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_thread': {
-        const { threadId, raw } = args as any;
+        const { threadId, raw, includeDrafts } = args as any;
         if (!threadId) {
           throw new McpError(ErrorCode.InvalidParams, 'threadId is required');
         }
         const client = initializeClient();
         try {
-          const thread = await client.getThread(threadId);
+          const thread = await client.getThread(threadId, coerceBool(includeDrafts) ?? false);
           if (raw) {
             return {
               content: [

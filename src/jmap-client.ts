@@ -1295,7 +1295,7 @@ export class JmapClient {
     return this.getQueryResult(response, 0, 1);
   }
 
-  async searchEmails(query: string, limit: number = 20, ascending: boolean = false): Promise<QueryResult> {
+  async searchEmails(query: string, limit: number = 20, ascending: boolean = false, excludeDrafts: boolean = false): Promise<QueryResult> {
     const session = await this.getSession();
 
     const emailGetParams: any = {
@@ -1305,12 +1305,18 @@ export class JmapClient {
 
     emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
 
+    // A JMAP FilterCondition ANDs its properties, so text + notKeyword means
+    // "matches the query AND is not a draft". Server-side, so calculateTotal
+    // stays honest (no post-filtering).
+    const filter: any = { text: query };
+    if (excludeDrafts) filter.notKeyword = '$draft';
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
         ['Email/query', {
           accountId: session.accountId,
-          filter: { text: query },
+          filter,
           sort: [{ property: 'receivedAt', isAscending: ascending }],
           limit,
           calculateTotal: true
@@ -1323,7 +1329,7 @@ export class JmapClient {
     return this.getQueryResult(response, 0, 1);
   }
 
-  async getThread(threadId: string): Promise<any[]> {
+  async getThread(threadId: string, includeDrafts: boolean = false): Promise<any[]> {
     const session = await this.getSession();
 
     // First, check if threadId is actually an email ID and resolve the thread
@@ -1379,7 +1385,11 @@ export class JmapClient {
       throw new Error(`Thread with ID '${actualThreadId}' not found`);
     }
 
-    return this.getListResult(response, 1);
+    // Drafts (e.g. an in-progress reply) are noise when reading a conversation,
+    // so exclude them by default. Identify by the $draft keyword (survives a
+    // draft moved out of the Drafts mailbox); opt back in via includeDrafts.
+    const emails = this.getListResult(response, 1);
+    return includeDrafts ? emails : emails.filter((e: any) => !e.keywords?.$draft);
   }
 
   async getMailboxStats(mailboxId?: string): Promise<any> {
