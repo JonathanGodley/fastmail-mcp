@@ -81,6 +81,10 @@ This fork adds a **response simplification system** that reduces token usage whe
    # download_attachment savePaths are confined to this directory; set it to the root
    # you want attachments saved under to write there directly in one step.
    export FASTMAIL_DOWNLOAD_DIR="/path/to/your/downloads"
+   # Optional: timezone for rendering email date fields in local time with a UTC
+   # offset. Accepts an IANA name (e.g. America/New_York). Defaults to the server
+   # host's timezone; set it if the server runs in a different timezone than you.
+   export FASTMAIL_TIMEZONE="America/New_York"
    ```
 
 ### Running the Server
@@ -174,6 +178,7 @@ Email list/search tools don't support `verbose` — they always return metadata 
 - `hasAttachment` omitted when false, and suppressed entirely when an `attachments` array is present (redundant)
 - Attachments simplified to `{contentType, size, blobId, partId?, name?}`
 - `listUnsubscribe` mapped from JMAP's `header:List-Unsubscribe:asURLs`
+- `date` rendered in local time as ISO-8601 with a numeric UTC offset (e.g. `2026-03-02T08:00:00+10:00`), not UTC `Z`. The zone is the server host's by default, or `FASTMAIL_TIMEZONE` if set. Each email carries the offset for its own instant, so DST is handled per-message. Use `raw: true` to get the canonical JMAP UTC `receivedAt` instead.
 - Empty and null fields omitted
 
 ### Mailbox fields

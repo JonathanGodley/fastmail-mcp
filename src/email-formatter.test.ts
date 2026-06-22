@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyEmail, formatAddress } from './email-formatter.js';
+import { simplifyEmail, formatAddress, toLocalIso, setDefaultTimezone } from './email-formatter.js';
 
 describe('formatAddress', () => {
   it('formats name and email', () => {
@@ -14,6 +14,54 @@ describe('formatAddress', () => {
   it('returns unknown for null/undefined', () => {
     assert.equal(formatAddress(null as any), 'unknown');
     assert.equal(formatAddress(undefined as any), 'unknown');
+  });
+});
+
+describe('toLocalIso', () => {
+  const utc = '2026-03-01T12:00:00Z';
+
+  it('renders a whole-hour zone with offset (Brisbane, +10:00)', () => {
+    assert.equal(toLocalIso(utc, 'Australia/Brisbane'), '2026-03-01T22:00:00+10:00');
+  });
+
+  it('renders a half-hour zone (Kolkata, +05:30)', () => {
+    assert.equal(toLocalIso(utc, 'Asia/Kolkata'), '2026-03-01T17:30:00+05:30');
+  });
+
+  it('renders a 45-minute zone (Eucla, +08:45)', () => {
+    assert.equal(toLocalIso(utc, 'Australia/Eucla'), '2026-03-01T20:45:00+08:45');
+  });
+
+  it('renders UTC as +00:00, not Z', () => {
+    assert.equal(toLocalIso(utc, 'UTC'), '2026-03-01T12:00:00+00:00');
+  });
+
+  it('applies the correct offset for a DST-inactive instant (New York, Jan, -05:00)', () => {
+    assert.equal(toLocalIso('2026-01-15T12:00:00Z', 'America/New_York'), '2026-01-15T07:00:00-05:00');
+  });
+
+  it('applies the correct offset for a DST-active instant (New York, Jul, -04:00)', () => {
+    assert.equal(toLocalIso('2026-07-15T12:00:00Z', 'America/New_York'), '2026-07-15T08:00:00-04:00');
+  });
+
+  it('falls back gracefully on an invalid timezone (never throws)', () => {
+    let out: string | undefined;
+    assert.doesNotThrow(() => {
+      out = toLocalIso(utc, 'Not/ARealZone');
+    });
+    // Either the host-zone render or the untouched UTC string — never empty.
+    assert.ok(typeof out === 'string' && out!.length > 0);
+  });
+
+  it('honors the module default set by setDefaultTimezone', () => {
+    try {
+      setDefaultTimezone('Asia/Kolkata');
+      assert.equal(toLocalIso(utc), '2026-03-01T17:30:00+05:30');
+      // Explicit option overrides the module default.
+      assert.equal(toLocalIso(utc, 'Australia/Brisbane'), '2026-03-01T22:00:00+10:00');
+    } finally {
+      setDefaultTimezone(undefined);
+    }
   });
 });
 
@@ -43,7 +91,10 @@ describe('simplifyEmail', () => {
       ],
     };
 
-    const result = simplifyEmail(raw);
+    // Explicit timezone: the module default is process-global mutable state
+    // shared across all tests in this single tsx process, so pin the zone here
+    // to keep the date assertion deterministic regardless of host TZ.
+    const result = simplifyEmail(raw, { timezone: 'Australia/Brisbane' });
 
     assert.equal(result.id, 'e1');
     assert.equal(result.threadId, 't1');
@@ -54,7 +105,8 @@ describe('simplifyEmail', () => {
     assert.deepEqual(result.to, ['Bob <bob@example.com>']);
     assert.deepEqual(result.cc, ['carol@example.com']);
     assert.deepEqual(result.bcc, ['secret@example.com']);
-    assert.equal(result.date, '2026-03-01T12:00:00Z');
+    // Brisbane is UTC+10 year-round (no DST): 12:00Z → 22:00+10:00 same day.
+    assert.equal(result.date, '2026-03-01T22:00:00+10:00');
     assert.equal(result.isReply, true);
     assert.equal(result.isRead, true);
     assert.equal(result.isFlagged, true);
