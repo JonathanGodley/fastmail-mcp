@@ -6,6 +6,7 @@ dist/
 .DS_Store
 *.tsbuildinfo
 coverage/
+PLAN.md
 CLAUDE.md
 .claude/
 *.dxt
