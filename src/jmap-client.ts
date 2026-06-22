@@ -580,17 +580,29 @@ export class JmapClient {
       }
     }
 
-    // Extract existing body values
-    const existingTextBody = existingEmail.bodyValues
-      ? Object.values(existingEmail.bodyValues).find((bv: any) =>
-          existingEmail.textBody?.some((tb: any) => tb.partId === (bv as any).partId || true)
-        )
-      : null;
-    const existingHtmlBody = existingEmail.bodyValues
-      ? Object.values(existingEmail.bodyValues).find((bv: any) =>
-          existingEmail.htmlBody?.some((hb: any) => hb.partId === (bv as any).partId || true)
-        )
-      : null;
+    // Extract existing body values by MIME type, keyed into bodyValues by partId.
+    //
+    // Server behaviour (verified live against Fastmail, 2026-06-23):
+    //  - The server does NOT auto-generate the missing text/html partner in either
+    //    direction; the client owns keeping the pair in sync.
+    //  - A single-format draft has its ONE part aliased into BOTH the textBody and
+    //    htmlBody lists (e.g. a text-only draft lists the text/plain part under htmlBody
+    //    too, with type "text/plain"). So we select by the part's actual MIME type — not
+    //    mere presence in a list — otherwise we'd read the text value into the html slot
+    //    and synthesise a phantom text/html part on recreate.
+    //  - JMAP body properties are immutable (RFC 8621 §4.1), which is why this method
+    //    rebuilds and re-sends the bodies via destroy+recreate rather than patching.
+    // Takes the first part of each type (drafts here carry at most one per type). If a
+    // value were ever elided from bodyValues, that format is dropped rather than
+    // re-sending a partial body (our Email/get above fetches full values, so this won't
+    // occur in practice).
+    const bodyValues = existingEmail.bodyValues || {};
+    const bodyValueForType = (parts: any[] | undefined, mimeType: string): string | undefined => {
+      const part = parts?.find((p: any) => p.type === mimeType && p.partId != null && bodyValues[p.partId]);
+      return part ? bodyValues[part.partId].value : undefined;
+    };
+    const existingTextValue = bodyValueForType(existingEmail.textBody, 'text/plain');
+    const existingHtmlValue = bodyValueForType(existingEmail.htmlBody, 'text/html');
 
     // Merge: updates override existing values
     const mergedSubject = updates.subject !== undefined ? updates.subject : (existingEmail.subject || '');
@@ -599,8 +611,8 @@ export class JmapClient {
     const mergedBcc = updates.bcc !== undefined ? updates.bcc.map(parseAddress) : (existingEmail.bcc || []);
     const mergedReplyTo = updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null);
 
-    const textBodyValue = updates.textBody !== undefined ? updates.textBody : (existingTextBody as any)?.value;
-    const htmlBodyValue = updates.htmlBody !== undefined ? updates.htmlBody : (existingHtmlBody as any)?.value;
+    const textBodyValue = updates.textBody !== undefined ? updates.textBody : existingTextValue;
+    const htmlBodyValue = updates.htmlBody !== undefined ? updates.htmlBody : existingHtmlValue;
 
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
