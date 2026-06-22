@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'os';
-import { resolve, join } from 'path';
+import { resolve, join, basename } from 'path';
 import { JmapClient } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 
@@ -668,6 +668,109 @@ describe('validateSavePath', () => {
   });
 });
 
+// ---------- safeWritePath (symlink-safe canonicalization) ----------
+
+import { mkdtemp, symlink, rm, mkdir as fsMkdir, writeFile as fsWriteFile } from 'fs/promises';
+import { tmpdir } from 'os';
+
+describe('safeWritePath (symlink escapes)', () => {
+  it('accepts a normal path inside the allowed directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-safe-'));
+    try {
+      const allowed = join(root, 'allowed');
+      await fsMkdir(allowed, { recursive: true });
+      const target = join(allowed, 'attachment.bin');
+      const safe = await JmapClient.safeWritePath(target, allowed);
+      // realpath on macOS may add /private prefix, so just check basename equality
+      assert.equal(basename(safe), 'attachment.bin');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('creates intermediate directories under the canonical allowed dir', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-safe-'));
+    try {
+      const allowed = join(root, 'allowed');
+      await fsMkdir(allowed, { recursive: true });
+      const target = join(allowed, 'sub1', 'sub2', 'file.bin');
+      const safe = await JmapClient.safeWritePath(target, allowed);
+      assert.ok(safe.endsWith(join('sub1', 'sub2', 'file.bin')));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects writes via a symlink that escapes the allowed directory', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-safe-'));
+    try {
+      const allowed = join(root, 'allowed');
+      const outside = join(root, 'outside');
+      await fsMkdir(allowed, { recursive: true });
+      await fsMkdir(outside, { recursive: true });
+      // Symlink inside allowed pointing to outside.
+      // Symlink creation requires elevated privileges on Windows; skip where unavailable.
+      try {
+        await symlink(outside, join(allowed, 'escape'));
+      } catch (err) {
+        if ((err as any)?.code === 'EPERM' || (err as any)?.code === 'EACCES') {
+          t.skip('symlink creation not permitted on this platform');
+          return;
+        }
+        throw err;
+      }
+      const target = join(allowed, 'escape', 'pwned.bin');
+      await assert.rejects(
+        () => JmapClient.safeWritePath(target, allowed),
+        /outside the allowed directory|symlink escape/i,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to overwrite a pre-existing symlink at the target path', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-safe-'));
+    try {
+      const allowed = join(root, 'allowed');
+      const outside = join(root, 'outside.txt');
+      await fsMkdir(allowed, { recursive: true });
+      await fsWriteFile(outside, 'orig');
+      const target = join(allowed, 'sneaky.bin');
+      // Symlink creation requires elevated privileges on Windows; skip where unavailable.
+      try {
+        await symlink(outside, target);
+      } catch (err) {
+        if ((err as any)?.code === 'EPERM' || (err as any)?.code === 'EACCES') {
+          t.skip('symlink creation not permitted on this platform');
+          return;
+        }
+        throw err;
+      }
+      await assert.rejects(
+        () => JmapClient.safeWritePath(target, allowed),
+        /existing symlink/i,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('still rejects lexical traversal even when allowed dir exists', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-safe-'));
+    try {
+      const allowed = join(root, 'allowed');
+      await fsMkdir(allowed, { recursive: true });
+      await assert.rejects(
+        () => JmapClient.safeWritePath(`${allowed}/../escape.bin`, allowed),
+        /must be within/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ---------- sendEmail replyTo ----------
 
 describe('sendEmail replyTo', () => {
@@ -851,8 +954,6 @@ describe('updateDraft replyTo', () => {
   });
 });
 
-// ---------- version sync ----------
-
 // ---------- wildcard identity ----------
 
 const WILDCARD_IDENTITY = { id: 'id-wild', name: 'Jonathan Godley', email: '*@example.com', mayDelete: true };
@@ -957,6 +1058,8 @@ describe('updateDraft wildcard identity', () => {
     assert.deepEqual(emailObj.from, [{ email: 'work@example.com' }]);
   });
 });
+
+// ---------- version sync ----------
 
 describe('version sync', () => {
   it('package.json, manifest.json, and index.ts all have the same version', async () => {

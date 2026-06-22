@@ -5,7 +5,10 @@ dist/
 .env.local
 .DS_Store
 *.tsbuildinfo
+coverage/
 CLAUDE.md
 .claude/
 *.dxt
 test-live*.sh
+test-live*.mjs
+test-live*.js

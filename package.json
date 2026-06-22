@@ -1,6 +1,6 @@
 {
   "name": "fastmail-mcp",
-  "version": "1.9.1-fork.4",
+  "version": "1.9.4-fork.1",
   "description": "MCP server for Fastmail API integration",
   "main": "dist/index.js",
   "type": "module",
@@ -15,7 +15,7 @@
     "test": "tsx --test src/**/*.test.ts"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "mcp",
@@ -29,13 +29,13 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "rrule": "^2.8.1",
     "tsdav": "^2.1.8"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^25.6.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^6.0.3"
   }
 }
