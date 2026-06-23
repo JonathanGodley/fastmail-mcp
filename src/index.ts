@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
-import { coerceRecipients, coerceBool, redactBearerTokens } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens } from './coerce.js';
 
 const server = new Server(
   {
@@ -380,7 +380,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Since JMAP emails are immutable, this atomically destroys the old draft and creates a new one with the updated fields. Only fields you provide will be changed; others are preserved from the original draft.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected — to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). Since JMAP emails are immutable, this atomically destroys the old draft and creates a new one with the updated fields, so the returned email ID is new.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -423,6 +423,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'array',
               items: { type: 'string' },
               description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
+            },
+            clearFields: {
+              type: 'array',
+              items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody'] },
+              description: 'Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody. `from` cannot be cleared. Cannot also pass the same field as a value.',
             },
           },
           required: ['emailId'],
@@ -1354,6 +1359,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'edit_draft': {
         const { emailId, from, subject, textBody, htmlBody } = args as any;
         const { to, cc, bcc, replyTo } = coerceRecipients(args as any);
+        const clearFields = coerceStringArray((args as any).clearFields);
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -1367,6 +1373,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           textBody,
           htmlBody,
           replyTo,
+          clearFields,
         });
 
         return {

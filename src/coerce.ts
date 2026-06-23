@@ -56,9 +56,9 @@ export function coerceBool(value: unknown): boolean | undefined {
 // whitespace-only, or null. Callers invoke this only for fields that were
 // actually present (i.e. !== undefined at the call site), so silently omitting
 // a field stays distinct from explicitly blanking it. Returns the trimmed value.
-export function requireNonEmpty(value: unknown, fieldName: string): string {
+export function requireNonEmpty(value: unknown, fieldName: string, hint = 'omit the field to leave it unchanged'): string {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`${fieldName} cannot be empty; omit the field to leave it unchanged`);
+    throw new Error(`${fieldName} cannot be empty; ${hint}`);
   }
   return value.trim();
 }

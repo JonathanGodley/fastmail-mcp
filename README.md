@@ -243,8 +243,10 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
   - Parameters: `originalEmailId` (required), `to` (optional array, defaults to original sender), `cc` (optional array), `bcc` (optional array), `from` (optional), `textBody` (optional), `htmlBody` (optional), `send` (optional boolean, default: true), `replyTo` (optional array)
 - **create_draft**: Create an email draft without sending. Supports threading headers for replies. Each call creates a new draft.
   - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array)
-- **edit_draft**: Edit an existing draft email. Atomically destroys the old draft and creates a new one with updated fields. Only provided fields are changed; others are preserved.
-  - Parameters: `emailId` (required), `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `replyTo` (optional array)
+- **edit_draft**: Edit an existing draft email. Atomically destroys the old draft and creates a new one with updated fields (so the returned email ID is new). Only fields you provide are changed; omit a field to leave it unchanged.
+  - Parameters: `emailId` (required), `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `replyTo` (optional array), `clearFields` (optional array)
+  - **Empty values are rejected.** Passing an empty string or empty array for a field (e.g. `subject: ""`, `to: []`) is an error, not a silent clear — it's almost always an accidental clobber. To deliberately blank a field, name it in `clearFields`.
+  - **`clearFields`**: list of field names to clear to empty/none. Allowed: `to`, `cc`, `bcc`, `replyTo`, `subject`, `textBody`, `htmlBody`. `from` cannot be cleared (a draft always has a sender, matching the Fastmail UI). You cannot both pass a field as a value and list it in `clearFields`. A cleared draft is still a valid draft; it just may not be sendable (e.g. with no recipients).
 - **send_draft**: Send an existing draft email. The draft must have recipients and a from address. Moves the email to the Sent folder.
   - Parameters: `emailId` (required)
 - **search_emails**: Search emails by content

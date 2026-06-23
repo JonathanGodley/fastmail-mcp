@@ -284,6 +284,37 @@ const EXISTING_DRAFT = {
   keywords: { $draft: true },
 };
 
+// A draft with every field populated, for exercising clearFields / empty-reject.
+const RICH_DRAFT = {
+  id: 'draft-1',
+  subject: 'Old Subject',
+  from: [{ email: 'me@example.com' }],
+  to: [{ email: 'bob@example.com' }],
+  cc: [{ email: 'carol@example.com' }],
+  bcc: [],
+  replyTo: [{ email: 'reply@example.com' }],
+  textBody: [{ partId: '1', type: 'text/plain' }],
+  htmlBody: [{ partId: '2', type: 'text/html' }],
+  bodyValues: { '1': { value: 'The text' }, '2': { value: '<p>The html</p>' } },
+  mailboxIds: { 'mb-drafts': true },
+  keywords: { $draft: true },
+};
+
+// Wire makeRequest: Email/get returns the fixture, Email/set succeeds. Returns the mock.
+function mockUpdate(client: JmapClient, fixture: any) {
+  return mock.method(client, 'makeRequest', async (req: any) => {
+    if (req.methodCalls[0][0] === 'Email/get') {
+      return { methodResponses: [['Email/get', { list: [fixture] }, 'getEmail']] };
+    }
+    return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+  });
+}
+
+// Pull the recreated draft object out of the second (Email/set) call.
+function draftFromCall(makeReq: ReturnType<typeof mock.method>) {
+  return makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+}
+
 describe('updateDraft', () => {
   let client: JmapClient;
 
@@ -442,6 +473,147 @@ describe('updateDraft', () => {
     const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
     assert.equal(emailObj.bodyValues.text.value, 'NEW text');
     assert.equal(emailObj.bodyValues.html.value, '<p>The html</p>');
+  });
+
+  // ---- Layer 2: strict empty-reject ----
+
+  it('rejects an empty subject (use clearFields to clear)', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: '' }),
+      /subject cannot be empty; omit to leave it unchanged, or list it in clearFields to clear it/,
+    );
+  });
+
+  it('rejects a whitespace-only textBody', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: '   ' }),
+      /textBody cannot be empty/,
+    );
+  });
+
+  it('rejects an empty to with the clearFields hint', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { to: [] }),
+      /to cannot be empty; omit to leave it unchanged, or list it in clearFields to clear it/,
+    );
+  });
+
+  it('rejects an empty cc', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { cc: [] }),
+      /cc cannot be empty/,
+    );
+  });
+
+  it('rejects an empty replyTo', async () => {
+    mockUpdate(client, RICH_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { replyTo: [] }),
+      /replyTo cannot be empty/,
+    );
+  });
+
+  it('rejects an empty from (from is not clearable)', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { from: '' }),
+      /from cannot be empty/,
+    );
+  });
+
+  // ---- Layer 2: clearFields ----
+
+  it('clears cc via clearFields and preserves other fields', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['cc'] });
+    const draft = draftFromCall(makeReq);
+    assert.deepEqual(draft.cc, []);
+    assert.deepEqual(draft.to, [{ email: 'bob@example.com' }]);
+    assert.equal(draft.subject, 'Old Subject');
+  });
+
+  it('clears to via clearFields (a recipient-less draft is valid)', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['to'] });
+    assert.deepEqual(draftFromCall(makeReq).to, []);
+  });
+
+  it('clears subject via clearFields', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['subject'] });
+    assert.equal(draftFromCall(makeReq).subject, '');
+  });
+
+  it('clears textBody via clearFields and preserves htmlBody', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['textBody'] });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft.textBody, undefined);
+    assert.deepEqual(draft.bodyValues, { html: { value: '<p>The html</p>' } });
+  });
+
+  it('clears htmlBody via clearFields and preserves textBody', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['htmlBody'] });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft.htmlBody, undefined);
+    assert.deepEqual(draft.bodyValues, { text: { value: 'The text' } });
+  });
+
+  it('clears replyTo via clearFields (the spread-omit path)', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['replyTo'] });
+    assert.equal(draftFromCall(makeReq).replyTo, undefined);
+  });
+
+  it('rejects clearFields:["from"] (from is not clearable)', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['from'] }),
+      /Cannot clear "from"/,
+    );
+  });
+
+  it('rejects an unknown clearFields name', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['bogus'] }),
+      /Cannot clear "bogus"/,
+    );
+  });
+
+  it('rejects setting and clearing the same field', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { cc: ['x@y.com'], clearFields: ['cc'] }),
+      /cannot both set and clear cc/,
+    );
+  });
+
+  it('lets the set+clear conflict win over the empty-reject when cc:[] + clearFields:["cc"]', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { cc: [], clearFields: ['cc'] }),
+      /cannot both set and clear cc/, // conflict check runs before the empty loop
+    );
+  });
+
+  it('clearing an already-absent field still succeeds and emits the empty value', async () => {
+    // EXISTING_DRAFT.cc is already [] — clear is idempotent, not state-dependent.
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['cc'] });
+    assert.deepEqual(draftFromCall(makeReq).cc, []);
+  });
+
+  it('a non-empty normal edit still succeeds (regression guard)', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+    const newId = await client.updateDraft('draft-1', { subject: 'Real new subject' });
+    assert.equal(newId, 'draft-2');
+    assert.equal(draftFromCall(makeReq).subject, 'Real new subject');
   });
 });
 

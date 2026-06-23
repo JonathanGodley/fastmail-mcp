@@ -191,6 +191,13 @@ describe('requireNonEmpty', () => {
   it('names the field in the error message', () => {
     assert.throws(() => requireNonEmpty('', 'location'), /location cannot be empty; omit the field to leave it unchanged/);
   });
+
+  it('uses a custom hint when provided', () => {
+    assert.throws(
+      () => requireNonEmpty('', 'subject', 'list it in clearFields to clear it'),
+      /subject cannot be empty; list it in clearFields to clear it/,
+    );
+  });
 });
 
 describe('validateClearFields', () => {

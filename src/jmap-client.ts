@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields } from './coerce.js';
 import { writeFile, mkdir, realpath, stat, lstat } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
 import { homedir } from 'os';
@@ -528,6 +528,7 @@ export class JmapClient {
     htmlBody?: string;
     from?: string;
     replyTo?: string[];
+    clearFields?: string[];
   }): Promise<string> {
     const session = await this.getSession();
 
@@ -604,15 +605,41 @@ export class JmapClient {
     const existingTextValue = bodyValueForType(existingEmail.textBody, 'text/plain');
     const existingHtmlValue = bodyValueForType(existingEmail.htmlBody, 'text/html');
 
-    // Merge: updates override existing values
-    const mergedSubject = updates.subject !== undefined ? updates.subject : (existingEmail.subject || '');
-    const mergedTo = updates.to !== undefined ? updates.to.map(parseAddress) : (existingEmail.to || []);
-    const mergedCc = updates.cc !== undefined ? updates.cc.map(parseAddress) : (existingEmail.cc || []);
-    const mergedBcc = updates.bcc !== undefined ? updates.bcc.map(parseAddress) : (existingEmail.bcc || []);
-    const mergedReplyTo = updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null);
+    // Strict empty-reject + explicit clearFields. A provided-but-empty value is a
+    // loud error (it's almost always an accidental clobber); deliberately blanking
+    // a field is done by naming it in clearFields. Every field is clearable EXCEPT
+    // `from` (identity-resolved; a draft always has a sender, matching the Fastmail UI).
+    const CLEARABLE = new Set(['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody']); // NOT 'from'
+    const SETTABLE = ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'from'] as const;
+    const provided = new Set(SETTABLE.filter(f => (updates as any)[f] !== undefined));
+    validateClearFields(updates.clearFields, CLEARABLE, provided);
+    const clear = new Set(updates.clearFields ?? []);
 
-    const textBodyValue = updates.textBody !== undefined ? updates.textBody : existingTextValue;
-    const htmlBodyValue = updates.htmlBody !== undefined ? updates.htmlBody : existingHtmlValue;
+    // The `!clear.has(f)` guard is belt-and-suspenders: validateClearFields already
+    // throws when a field is BOTH provided and cleared, so a cleared field can't also
+    // reach these checks — the skip just keeps each check self-evidently correct.
+    const clearHint = 'omit to leave it unchanged, or list it in clearFields to clear it';
+    if (updates.subject  !== undefined && !clear.has('subject'))  requireNonEmpty(updates.subject,  'subject',  clearHint);
+    if (updates.textBody !== undefined && !clear.has('textBody')) requireNonEmpty(updates.textBody, 'textBody', clearHint);
+    if (updates.htmlBody !== undefined && !clear.has('htmlBody')) requireNonEmpty(updates.htmlBody, 'htmlBody', clearHint);
+    if (updates.from     !== undefined) requireNonEmpty(updates.from, 'from'); // not clearable; no hint about clearFields
+    for (const f of ['to', 'cc', 'bcc', 'replyTo'] as const) {
+      if (updates[f] !== undefined && !clear.has(f) && updates[f]!.length === 0) {
+        throw new Error(`${f} cannot be empty; ${clearHint}`);
+      }
+    }
+    // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
+    // discarded so stored bodies keep their exact (untrimmed) value below.
+
+    // Merge: updates override existing values; clearFields force the empty/none value.
+    const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));
+    const mergedTo      = clear.has('to')      ? [] : (updates.to      !== undefined ? updates.to.map(parseAddress)      : (existingEmail.to || []));
+    const mergedCc      = clear.has('cc')      ? [] : (updates.cc      !== undefined ? updates.cc.map(parseAddress)      : (existingEmail.cc || []));
+    const mergedBcc     = clear.has('bcc')     ? [] : (updates.bcc     !== undefined ? updates.bcc.map(parseAddress)     : (existingEmail.bcc || []));
+    const mergedReplyTo = clear.has('replyTo') ? [] : (updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null));
+
+    const textBodyValue = clear.has('textBody') ? undefined : (updates.textBody !== undefined ? updates.textBody : existingTextValue);
+    const htmlBodyValue = clear.has('htmlBody') ? undefined : (updates.htmlBody !== undefined ? updates.htmlBody : existingHtmlValue);
 
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
