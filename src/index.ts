@@ -1653,11 +1653,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'add_labels': {
-        const { emailId, mailboxIds } = args as any;
+        const { emailId } = args as any;
+        const mailboxIds = coerceStringArray((args as any).mailboxIds);
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
-        if (!mailboxIds || !Array.isArray(mailboxIds) || mailboxIds.length === 0) {
+        if (!mailboxIds || mailboxIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
         }
         const client = initializeClient();
@@ -1673,11 +1674,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'remove_labels': {
-        const { emailId, mailboxIds } = args as any;
+        const { emailId } = args as any;
+        const mailboxIds = coerceStringArray((args as any).mailboxIds);
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
-        if (!mailboxIds || !Array.isArray(mailboxIds) || mailboxIds.length === 0) {
+        if (!mailboxIds || mailboxIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
         }
         const client = initializeClient();
@@ -1828,8 +1830,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_mark_read': {
-        const { emailIds, read = true } = args as any;
-        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+        const { read = true } = args as any;
+        const emailIds = coerceStringArray((args as any).emailIds);
+        if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
         const client = initializeClient();
@@ -1845,8 +1848,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_pin': {
-        const { emailIds, pinned = true } = args as any;
-        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+        const { pinned = true } = args as any;
+        const emailIds = coerceStringArray((args as any).emailIds);
+        if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
         const client = initializeClient();
@@ -1862,8 +1866,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_move': {
-        const { emailIds, targetMailboxId } = args as any;
-        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+        const { targetMailboxId } = args as any;
+        const emailIds = coerceStringArray((args as any).emailIds);
+        if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
         if (!targetMailboxId) {
@@ -1882,8 +1887,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_delete': {
-        const { emailIds } = args as any;
-        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+        const emailIds = coerceStringArray((args as any).emailIds);
+        if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
         const client = initializeClient();
@@ -1899,11 +1904,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_add_labels': {
-        const { emailIds, mailboxIds } = args as any;
-        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+        const emailIds = coerceStringArray((args as any).emailIds);
+        const mailboxIds = coerceStringArray((args as any).mailboxIds);
+        if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
-        if (!mailboxIds || !Array.isArray(mailboxIds) || mailboxIds.length === 0) {
+        if (!mailboxIds || mailboxIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
         }
         const client = initializeClient();
@@ -1919,11 +1925,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_remove_labels': {
-        const { emailIds, mailboxIds } = args as any;
-        if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
+        const emailIds = coerceStringArray((args as any).emailIds);
+        const mailboxIds = coerceStringArray((args as any).mailboxIds);
+        if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
-        if (!mailboxIds || !Array.isArray(mailboxIds) || mailboxIds.length === 0) {
+        if (!mailboxIds || mailboxIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
         }
         const client = initializeClient();
