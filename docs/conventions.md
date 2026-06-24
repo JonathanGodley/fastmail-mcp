@@ -28,6 +28,47 @@ accept. To verify coercion you must drive a raw JSON-RPC request against the bui
 server (`dist/index.js`) with `FASTMAIL_API_TOKEN` set, bypassing the schema-validating
 harness. (See the `verify-lenient-client-coercion` note in project memory.)
 
+## Strict parameter keys (the complement to lenient values)
+
+Coercion is the *value* half of input handling; the *key* half is strict. The CallTool
+handler runs `assertKnownParams` (`src/coerce.ts`) first, before touching credentials,
+and hard-rejects any argument key a tool did not declare in its `inputSchema.properties`
+with an `InvalidParams` error that lists the valid keys. The two halves encode one
+principle: **recover a clear intent, but refuse to guess at an unclear one.** A
+stringified `"true"` or a comma-joined list is unambiguous, so coerce it; a misspelled
+`mailbox` for `mailboxId` or a hallucinated `folder` is not, so reject it. A silently
+dropped key is worse than a coerced value — the tool runs with defaults and returns
+confident wrong results (the original `list_emails {mailbox:'drafts'}` listed *every*
+mailbox).
+
+- The allowed-key set is derived from the live `TOOLS` catalog (`TOOL_SCHEMAS` in
+  `src/index.ts`), so it never drifts from what clients see via `ListTools`.
+- A per-tool `additionalProperties: true` opts that tool out (none set today;
+  future-proofing).
+- Like coercion, this is unreachable through the normal harness (a compliant client
+  cannot send an undeclared key), so verify it with the same raw-JSON-RPC harness.
+
+## Surfacing computed fields without leaking into `raw: true`
+
+When the client layer resolves derived data to attach to a raw JMAP object so a
+downstream simplifier can read it — but `raw: true` must stay pure JMAP — attach it as a
+**non-enumerable** property:
+
+```js
+Object.defineProperty(email, '_mailboxNames', { value: names, enumerable: false, configurable: true });
+```
+
+`JSON.stringify` (every `raw: true` path) omits non-enumerable properties, while
+`simplifyEmail` reads `raw._mailboxNames` directly. This is how the `mailboxes` field
+reaches simplified output — mailbox ids are resolved to names in `src/jmap-client.ts`
+(`buildMailboxNameMap` / `attachMailboxNames`) and ride along the email object through
+every read path — with **zero signature changes** to `simplifyEmail` /
+`formatEmailQueryResult`, keeping the formatter pure and testable. The convention for the
+next computed field: resolve in the client layer, attach non-enumerably under a
+leading-underscore name, and read it in the simplifier via `addIf` (so it is omitted when
+absent). Do not thread it through function signatures, and do not make it enumerable — it
+would leak into raw output.
+
 ## Local-time formatting and the U+202F trap
 
 Date rendering for humans (`toLocalIso` and `formatReplyDate` in

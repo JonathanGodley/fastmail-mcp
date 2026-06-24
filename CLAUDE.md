@@ -40,13 +40,9 @@ The version string lives in three places — update all when bumping:
 
 The MCP server runs from `dist/index.js`, not `src/`. After making changes, run `npm run build` to compile. Connected MCP clients will need to reconnect to pick up the new code.
 
-The local Claude loads the server straight from this repo's `dist/index.js` (both the project `.mcp.json` and the user `~/.claude.json` entry point at that path), so a successful `npm run build` **is** the deploy — there's no separate copy/install step; just reconnect or restart the MCP. (The `manifest.json` version is only for a packaged `.dxt` Desktop Extension bundle, which this setup doesn't use.)
-
 ## Testing
 
 Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
-
-Some behaviour can't be reached through normal MCP tool calls: the client/test harness validates each tool's `inputSchema`, so malformed values and unknown keys are rejected before any handler runs. To verify lenient-client value coercion (the `#54` class) or the unknown-parameter guard (`#11`), drive the **built** `dist/index.js` directly over stdio with a raw JSON-RPC harness — spawn `node dist/index.js`, send an `initialize` frame then `tools/call` frames, with a real `FASTMAIL_API_TOKEN` in the env. The connected server runs stale code, so `npm run build` first. Keep these harnesses in scratch (never commit them — they need live creds), create any test data as drafts, and delete throwaway drafts in a `finally`.
 
 ## Releasing
 
