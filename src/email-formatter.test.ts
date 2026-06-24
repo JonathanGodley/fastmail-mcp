@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyEmail, formatAddress, toLocalIso, setDefaultTimezone } from './email-formatter.js';
+import { simplifyEmail, formatAddress, toLocalIso, setDefaultTimezone, formatReplyDate } from './email-formatter.js';
 
 describe('formatAddress', () => {
   it('formats name and email', () => {
@@ -62,6 +62,40 @@ describe('toLocalIso', () => {
     } finally {
       setDefaultTimezone(undefined);
     }
+  });
+});
+
+describe('formatReplyDate', () => {
+  it('renders the exact captured Fastmail format in local time with an ASCII space before AM/PM', () => {
+    const s = formatReplyDate('2026-06-15T03:29:02Z', 'Australia/Sydney');
+    assert.equal(s, 'Mon, Jun 15, 2026, at 1:29 PM');           // AEST +10, seasonally stable
+    assert.equal(s.includes(String.fromCharCode(0x202f)), false); // no U+202F narrow no-break space
+    assert.equal(s.includes(String.fromCharCode(0x00a0)), false); // no U+00A0 either
+  });
+  it('is local, not UTC — same instant, different hour, same weekday', () => {
+    assert.equal(formatReplyDate('2026-06-15T03:29:02Z', 'UTC'), 'Mon, Jun 15, 2026, at 3:29 AM');
+  });
+  it('renders midnight as 12:14 AM (hour12 boundary), not 0:14 or 24:14', () => {
+    // 2026-06-14T14:14Z is 2026-06-15 00:14 in Sydney (+10).
+    assert.equal(formatReplyDate('2026-06-14T14:14:00Z', 'Australia/Sydney'), 'Mon, Jun 15, 2026, at 12:14 AM');
+  });
+  it('honors the module default timezone', () => {
+    try {
+      setDefaultTimezone('UTC');
+      assert.equal(formatReplyDate('2026-06-15T03:29:02Z'), 'Mon, Jun 15, 2026, at 3:29 AM');
+    } finally {
+      setDefaultTimezone(undefined);
+    }
+  });
+  it('returns "" (never "Invalid Date") for absent/unparseable input', () => {
+    assert.equal(formatReplyDate(undefined, 'UTC'), '');
+    assert.equal(formatReplyDate(null, 'UTC'), '');
+    assert.equal(formatReplyDate('', 'UTC'), '');
+    assert.equal(formatReplyDate('not-a-date', 'UTC'), '');
+  });
+  it('falls back to a working zone for a bad IANA name (never throws)', () => {
+    const s = formatReplyDate('2026-06-15T03:29:02Z', 'Not/AZone');
+    assert.match(s, /Mon, Jun 15, 2026, at \d{1,2}:\d{2} [AP]M/);
   });
 });
 

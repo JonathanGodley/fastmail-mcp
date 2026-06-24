@@ -118,6 +118,35 @@ export function formatAddress(addr: { name?: string; email: string }): string {
   return addr.name ? `${addr.name} <${addr.email}>` : addr.email;
 }
 
+// Format a UTC instant as a reply-attribution date in LOCAL time, e.g.
+// "Mon, Jun 15, 2026, at 1:29 PM". Returns '' when the instant is absent or unparseable
+// (so the caller omits the date rather than emit the literal "Invalid Date"). Reuses the
+// same zone resolution as toLocalIso (timezone || defaultTimezone || host). Node ICU
+// inserts a narrow no-break space (U+202F) before AM/PM, so we normalize every Unicode
+// space separator to a plain ASCII space to match the captured Fastmail format. Never
+// throws (a bad IANA zone falls back to the host zone, then to '').
+export function formatReplyDate(utcIso: string | null | undefined, timezone?: string): string {
+  if (!utcIso) return '';
+  const date = new Date(utcIso);
+  if (Number.isNaN(date.getTime())) return '';
+  const zone = timezone || defaultTimezone || undefined;
+  const render = (z: string | undefined): string => {
+    const datePart = new Intl.DateTimeFormat('en-US', {
+      timeZone: z, weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+    }).format(date);
+    // hour:'numeric' + hour12 renders midnight as "12:00 AM" (not "0:00"/"24:00").
+    const timePart = new Intl.DateTimeFormat('en-US', {
+      timeZone: z, hour: 'numeric', minute: '2-digit', hour12: true,
+    }).format(date);
+    return `${datePart}, at ${timePart}`.replace(/\p{Zs}/gu, ' ');
+  };
+  try {
+    return render(zone);
+  } catch {
+    try { return render(undefined); } catch { return ''; }
+  }
+}
+
 function extractBody(
   parts: any[] | undefined | null,
   bodyValues: Record<string, any> | undefined | null,

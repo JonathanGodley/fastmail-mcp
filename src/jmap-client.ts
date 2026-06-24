@@ -38,9 +38,11 @@ export const EMAIL_PROPERTIES_COMPACT = [
 ] as const;
 
 // VERBOSE: superset with body properties — used by verbose mode, getEmailById, getThread(compact=false)
+// `sentAt` is here (a get-path superset addition, allowed by the property-consistency rule)
+// for the reply-quote attribution (when the original was actually written), not in COMPACT.
 export const EMAIL_PROPERTIES_VERBOSE = [
   ...EMAIL_PROPERTIES_COMPACT,
-  'textBody', 'htmlBody', 'attachments', 'bodyValues',
+  'textBody', 'htmlBody', 'attachments', 'bodyValues', 'sentAt',
 ] as const;
 
 export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name'] as const;
@@ -220,7 +222,12 @@ export class JmapClient {
 
   async getEmailById(id: string): Promise<any> {
     const session = await this.getSession();
-    
+
+    // No maxBodyValueBytes: verified live (2026-06-24) that Fastmail does NOT truncate body
+    // values by default (a 5 MB body returned whole, isTruncated=false), so reply_email gets
+    // the complete original to quote. (An explicit maxBodyValueBytes:0 is REJECTED by Fastmail
+    // with invalidArguments, so we must not send it.) The reply-quote module still appends an
+    // elision marker if any bodyValue ever reports isTruncated, as a defensive net.
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [

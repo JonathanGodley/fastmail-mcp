@@ -14,6 +14,8 @@ import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens } from './coerce.js';
+import { buildReplyBodies } from './reply-quote.js';
+import { isBlank } from './body-format.js';
 
 const server = new Server(
   {
@@ -271,7 +273,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default sends immediately; set send=false to save as a draft instead.',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default sends immediately; set send=false to save as a draft instead. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -309,6 +311,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             send: {
               type: ['boolean', 'string'],
               description: 'Whether to send the reply immediately (default: true). Set to false to save as draft instead.',
+            },
+            quoteOriginal: {
+              type: ['boolean', 'string'],
+              description: 'Append the original message as an attributed quote (default true). Set false to omit it.',
             },
             replyTo: {
               type: 'array',
@@ -1243,10 +1249,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { originalEmailId, from, textBody, htmlBody, send } = args as any;
         const { to: toArray, cc, bcc, replyTo } = coerceRecipients(args as any);
         const shouldSend = coerceBool(send) ?? true;
+        const quoteOriginal = coerceBool((args as any).quoteOriginal) ?? true;
         if (!originalEmailId) {
           throw new McpError(ErrorCode.InvalidParams, 'originalEmailId is required');
         }
-        if (shouldSend && !textBody && !htmlBody) {
+        // Trim-based so a whitespace-only htmlBody:'   ' (+ quoteOriginal) can't slip through
+        // and produce a "   " + quote reply; it flows to the same no-body handling everywhere.
+        if (shouldSend && isBlank(textBody) && isBlank(htmlBody)) {
           throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
         }
 
@@ -1280,14 +1289,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'Could not determine reply recipient. Please provide "to" explicitly.');
         }
 
+        // Append the original as an attributed, top-posted quote (default on). Returns only
+        // the formats the caller supplied; the body-format law then adds the text fallback
+        // for an html-only reply, so no double-quoting.
+        const quoted = buildReplyBodies({ original: originalEmail, textBody, htmlBody, quoteOriginal });
+
         const replyParams = {
           to: replyRecipients,
           cc,
           bcc,
           from,
           subject: replySubject,
-          textBody,
-          htmlBody,
+          textBody: quoted.textBody,
+          htmlBody: quoted.htmlBody,
           inReplyTo: inReplyToHeader,
           references: referencesHeader,
           replyTo,
