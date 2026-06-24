@@ -380,7 +380,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected — to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). Since JMAP emails are immutable, this atomically destroys the old draft and creates a new one with the updated fields, so the returned email ID is new.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). Editing one body (textBody or htmlBody) makes the draft single-format; if the draft already has the other body, the edit is rejected so it is not silently lost: supply both bodies to keep them in sync, or list the other in clearFields to drop it. Since JMAP emails are immutable, this atomically destroys the old draft and creates a new one with the updated fields, so the returned email ID is new.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -435,7 +435,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'send_draft',
-        description: 'Send an existing draft email. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed.',
+        description: 'Send an existing draft email. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. If the draft has an empty body part (e.g. a blank htmlBody alongside real text), sending is rejected because it would render blank to recipients; edit the draft to supply or clear that body first.',
         inputSchema: {
           type: 'object',
           properties: {

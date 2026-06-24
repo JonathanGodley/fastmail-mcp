@@ -519,6 +519,26 @@ export class JmapClient {
     return emailId;
   }
 
+  // Extract a stored body value by MIME type, keyed into bodyValues by partId.
+  //
+  // Server behaviour (verified live against Fastmail, 2026-06-23):
+  //  - The server does NOT auto-generate the missing text/html partner in either
+  //    direction; the client owns keeping the pair in sync.
+  //  - A single-format draft has its ONE part aliased into BOTH the textBody and
+  //    htmlBody lists (e.g. a text-only draft lists the text/plain part under htmlBody
+  //    too, with type "text/plain"). So we select by the part's actual MIME type — not
+  //    mere presence in a list — otherwise we'd read the text value into the html slot
+  //    and synthesise a phantom text/html part on recreate.
+  //  - JMAP body properties are immutable (RFC 8621 §4.1), which is why updateDraft
+  //    rebuilds and re-sends the bodies via destroy+recreate rather than patching.
+  // Takes the first part of the given type (drafts here carry at most one per type). If a
+  // value were ever elided from bodyValues, that format reads as undefined rather than a
+  // partial body (callers fetch full values, so this won't occur in practice).
+  private bodyValueForType(parts: any[] | undefined, mimeType: string, bodyValues: Record<string, any>): string | undefined {
+    const part = parts?.find((p: any) => p.type === mimeType && p.partId != null && bodyValues[p.partId]);
+    return part ? bodyValues[part.partId].value : undefined;
+  }
+
   async updateDraft(emailId: string, updates: {
     to?: string[];
     cc?: string[];
@@ -581,29 +601,11 @@ export class JmapClient {
       }
     }
 
-    // Extract existing body values by MIME type, keyed into bodyValues by partId.
-    //
-    // Server behaviour (verified live against Fastmail, 2026-06-23):
-    //  - The server does NOT auto-generate the missing text/html partner in either
-    //    direction; the client owns keeping the pair in sync.
-    //  - A single-format draft has its ONE part aliased into BOTH the textBody and
-    //    htmlBody lists (e.g. a text-only draft lists the text/plain part under htmlBody
-    //    too, with type "text/plain"). So we select by the part's actual MIME type — not
-    //    mere presence in a list — otherwise we'd read the text value into the html slot
-    //    and synthesise a phantom text/html part on recreate.
-    //  - JMAP body properties are immutable (RFC 8621 §4.1), which is why this method
-    //    rebuilds and re-sends the bodies via destroy+recreate rather than patching.
-    // Takes the first part of each type (drafts here carry at most one per type). If a
-    // value were ever elided from bodyValues, that format is dropped rather than
-    // re-sending a partial body (our Email/get above fetches full values, so this won't
-    // occur in practice).
+    // Extract existing body values by MIME type (see bodyValueForType for the
+    // MIME-match-not-list-presence rationale; bodies are immutable so we destroy+recreate).
     const bodyValues = existingEmail.bodyValues || {};
-    const bodyValueForType = (parts: any[] | undefined, mimeType: string): string | undefined => {
-      const part = parts?.find((p: any) => p.type === mimeType && p.partId != null && bodyValues[p.partId]);
-      return part ? bodyValues[part.partId].value : undefined;
-    };
-    const existingTextValue = bodyValueForType(existingEmail.textBody, 'text/plain');
-    const existingHtmlValue = bodyValueForType(existingEmail.htmlBody, 'text/html');
+    const existingTextValue = this.bodyValueForType(existingEmail.textBody, 'text/plain', bodyValues);
+    const existingHtmlValue = this.bodyValueForType(existingEmail.htmlBody, 'text/html', bodyValues);
 
     // Strict empty-reject + explicit clearFields. A provided-but-empty value is a
     // loud error (it's almost always an accidental clobber); deliberately blanking
@@ -631,6 +633,27 @@ export class JmapClient {
     // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
     // discarded so stored bodies keep their exact (untrimmed) value below.
 
+    // Cross-format coupling guard. Writing exactly one body makes the draft single-format;
+    // refuse to silently discard a non-empty opposite partner (recipients render the HTML
+    // alternative per RFC 2046 §5.1.4, so a half-updated pair would ship stale). Resolve by
+    // supplying both bodies (keep the pair) or naming the partner in clearFields (drop it).
+    //
+    // The `existing*Value` truthiness check deliberately treats an empty string '' as "no
+    // partner," and it is safe to do so (verified 2026-06-24): every body-emitting path in
+    // this client truthy-gates (sendEmail, createDraft, the recreate below), so we never
+    // originate an empty '' part, and the recreate's emission drops any falsy body regardless
+    // of this guard — editing an externally-malformed "real-text + empty-html" draft is
+    // CLEANSED to a clean single-format draft, not corrupted. Tightening to `!== undefined`
+    // would only throw a confusing false-positive over content-free junk and gain no safety.
+    const wroteText = updates.textBody !== undefined;
+    const wroteHtml = updates.htmlBody !== undefined;
+    if (wroteText && !wroteHtml && existingHtmlValue && !clear.has('htmlBody')) {
+      throw new Error('updating textBody alone would discard the draft\'s existing htmlBody, which is what recipients render. Supply htmlBody as well to keep both formats in sync, or list "htmlBody" in clearFields to drop it deliberately.');
+    }
+    if (wroteHtml && !wroteText && existingTextValue && !clear.has('textBody')) {
+      throw new Error('updating htmlBody alone would discard the draft\'s existing textBody. Supply textBody as well to keep both formats in sync, or list "textBody" in clearFields to drop it deliberately.');
+    }
+
     // Merge: updates override existing values; clearFields force the empty/none value.
     const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));
     const mergedTo      = clear.has('to')      ? [] : (updates.to      !== undefined ? updates.to.map(parseAddress)      : (existingEmail.to || []));
@@ -638,8 +661,15 @@ export class JmapClient {
     const mergedBcc     = clear.has('bcc')     ? [] : (updates.bcc     !== undefined ? updates.bcc.map(parseAddress)     : (existingEmail.bcc || []));
     const mergedReplyTo = clear.has('replyTo') ? [] : (updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null));
 
-    const textBodyValue = clear.has('textBody') ? undefined : (updates.textBody !== undefined ? updates.textBody : existingTextValue);
-    const htmlBodyValue = clear.has('htmlBody') ? undefined : (updates.htmlBody !== undefined ? updates.htmlBody : existingHtmlValue);
+    // A written body drops the unwritten partner (single-format intent, guarded above);
+    // a no-body edit (subject/recipients only) preserves both.
+    const wroteAnyBody = wroteText || wroteHtml;
+    const textBodyValue = clear.has('textBody') ? undefined
+      : (updates.textBody !== undefined ? updates.textBody
+      : (wroteAnyBody ? undefined : existingTextValue));
+    const htmlBodyValue = clear.has('htmlBody') ? undefined
+      : (updates.htmlBody !== undefined ? updates.htmlBody
+      : (wroteAnyBody ? undefined : existingHtmlValue));
 
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
@@ -699,7 +729,10 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords'],
+          properties: ['id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'textBody', 'htmlBody', 'bodyValues'],
+          bodyProperties: ['partId', 'blobId', 'type', 'size'],
+          fetchTextBodyValues: true,
+          fetchHTMLBodyValues: true,
         }, 'getEmail']
       ]
     };
@@ -712,6 +745,23 @@ export class JmapClient {
 
     if (!email.keywords?.$draft) {
       throw new Error('Cannot send a non-draft email');
+    }
+
+    // Reject an empty body part before an irreversible send. sendDraft submits the draft by
+    // reference WITHOUT recreating it, so unlike edit_draft it can't truthy-gate the body away.
+    // An empty/whitespace body part renders blank; an empty text/html part even shadows a real
+    // text/plain (RFC 2046: clients render the richest alternative), so the recipient sees
+    // nothing. We never emit such a part, but an externally-created draft (Fastmail web UI, etc.)
+    // can carry one — refuse to ship it. Reject, not silent sanitize: recreating to strip the part
+    // would change the email id and rewrite the message, against this codebase's loud-reject
+    // philosophy. The hardened edit_draft is the fix path.
+    const textVal = this.bodyValueForType(email.textBody, 'text/plain', email.bodyValues || {});
+    const htmlVal = this.bodyValueForType(email.htmlBody, 'text/html', email.bodyValues || {});
+    if (htmlVal !== undefined && htmlVal.trim() === '') {
+      throw new Error('This draft has an empty htmlBody that would render blank to recipients. Edit the draft to supply or clear htmlBody before sending.');
+    }
+    if (textVal !== undefined && textVal.trim() === '') {
+      throw new Error('This draft has an empty textBody that would render blank for plain-text recipients. Edit the draft to supply or clear textBody before sending.');
     }
 
     // Collect all recipients for the envelope

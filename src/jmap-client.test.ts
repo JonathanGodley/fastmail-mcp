@@ -454,25 +454,74 @@ describe('updateDraft', () => {
     });
   });
 
-  it('updates only textBody and preserves the existing htmlBody', async () => {
-    const dualDraft = {
-      ...EXISTING_DRAFT,
-      textBody: [{ partId: '1', type: 'text/plain' }],
-      htmlBody: [{ partId: '2', type: 'text/html' }],
-      bodyValues: { '1': { value: 'The text' }, '2': { value: '<p>The html</p>' } },
-    };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
-      if (req.methodCalls[0][0] === 'Email/get') {
-        return { methodResponses: [['Email/get', { list: [dualDraft] }, 'getEmail']] };
-      }
-      return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+  // ---- cross-format coupling guard (option D) ----
+
+  it('throws when writing textBody alone on a dual-body draft (would discard htmlBody)', async () => {
+    mockUpdate(client, RICH_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: 'NEW text' }),
+      /htmlBody.*Supply htmlBody as well.*clearFields/s,
+    );
+  });
+
+  it('throws when writing htmlBody alone on a dual-body draft (parity, would discard textBody)', async () => {
+    mockUpdate(client, RICH_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' }),
+      /textBody.*Supply textBody as well.*clearFields/s,
+    );
+  });
+
+  it('writes textBody and drops htmlBody when the partner is named in clearFields', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { textBody: 'NEW text', clearFields: ['htmlBody'] });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft.htmlBody, undefined);
+    assert.deepEqual(draft.bodyValues, { text: { value: 'NEW text' } });
+  });
+
+  it('updates both bodies when both are supplied (no throw)', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { textBody: 'NEW text', htmlBody: '<p>NEW</p>' });
+    const draft = draftFromCall(makeReq);
+    assert.deepEqual(draft.bodyValues, {
+      text: { value: 'NEW text' },
+      html: { value: '<p>NEW</p>' },
     });
+  });
 
+  it('writes textBody on a text-only draft (no partner, stays text-only, no throw)', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
     await client.updateDraft('draft-1', { textBody: 'NEW text' });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft.htmlBody, undefined);
+    assert.deepEqual(draft.bodyValues, { text: { value: 'NEW text' } });
+  });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
-    assert.equal(emailObj.bodyValues.text.value, 'NEW text');
-    assert.equal(emailObj.bodyValues.html.value, '<p>The html</p>');
+  it('throws when adding htmlBody alone to a text-only draft (parity: would discard textBody)', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' }),
+      /textBody.*Supply textBody as well.*clearFields/s,
+    );
+  });
+
+  it('adds htmlBody to a text-only draft when textBody is cleared (html-only result)', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>', clearFields: ['textBody'] });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft.textBody, undefined);
+    assert.deepEqual(draft.bodyValues, { html: { value: '<p>NEW</p>' } });
+  });
+
+  it('preserves both bodies on a subject-only edit of a dual-body draft (guard does not fire)', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { subject: 'New' });
+    const draft = draftFromCall(makeReq);
+    assert.deepEqual(draft.bodyValues, {
+      text: { value: 'The text' },
+      html: { value: '<p>The html</p>' },
+    });
   });
 
   // ---- Layer 2: strict empty-reject ----
@@ -721,6 +770,78 @@ describe('sendDraft', () => {
         return true;
       },
     );
+  });
+
+  // ---- Change 2: reject an empty body part on send ----
+  // Our own tools never originate an empty part, but an externally-created draft can carry
+  // one, so these fixtures hand-build the malformed shapes.
+
+  it('rejects a draft with a real text part and an empty html part (names htmlBody)', async () => {
+    const emptyHtml = {
+      ...SENDABLE_DRAFT,
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '2', type: 'text/html' }],
+      bodyValues: { '1': { value: 'Real text' }, '2': { value: '' } },
+    };
+    mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/get', { list: [emptyHtml] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      /empty htmlBody that would render blank/,
+    );
+  });
+
+  it('rejects a draft with an empty text part and a real html part (names textBody)', async () => {
+    const emptyText = {
+      ...SENDABLE_DRAFT,
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '2', type: 'text/html' }],
+      bodyValues: { '1': { value: '   ' }, '2': { value: '<p>Real html</p>' } },
+    };
+    mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/get', { list: [emptyText] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      /empty textBody that would render blank/,
+    );
+  });
+
+  it('sends a clean dual-body draft (both parts non-empty)', async () => {
+    const dual = {
+      ...SENDABLE_DRAFT,
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '2', type: 'text/html' }],
+      bodyValues: { '1': { value: 'Real text' }, '2': { value: '<p>Real html</p>' } },
+    };
+    mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [dual] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    assert.equal(await client.sendDraft('draft-1'), 'sub-1');
+  });
+
+  it('sends a clean text-only draft (absent partner is undefined, not empty)', async () => {
+    const textOnly = {
+      ...SENDABLE_DRAFT,
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '1', type: 'text/plain' }], // server aliases the one part into both lists
+      bodyValues: { '1': { value: 'Real text' } },
+    };
+    mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [textOnly] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    assert.equal(await client.sendDraft('draft-1'), 'sub-1');
   });
 });
 
