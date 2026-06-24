@@ -5,7 +5,7 @@ import { formatReplyDate } from './email-formatter.js';
 // Build the reply bodies (caller's new text + an attributed, top-posted quote of the
 // original), matching the Fastmail web client with a portable quote-bar. createDraft/
 // sendEmail add the auto text/plain fallback downstream for an html-only caller reply, so
-// the cross-format matrix collapses here.
+// this function only quotes the formats the caller actually supplied (no double-quoting).
 
 // Escape the five HTML-significant characters for safe interpolation into quote markup.
 function escapeHtml(s: string): string {

@@ -252,7 +252,7 @@ describe('createDraft', () => {
   });
 
   // 10. HTML body constructed correctly
-  it('derives a text/plain fallback for an html-only draft (the body-format law)', async () => {
+  it('derives a text/plain fallback for an html-only draft', async () => {
     const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-10' } } }, 'createDraft'],
@@ -263,7 +263,7 @@ describe('createDraft', () => {
 
     const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.htmlBody, [{ partId: 'html', type: 'text/html' }]);
-    // The law auto-generates a readable text/plain alternative from the html.
+    // The fallback is auto-generated as a readable text/plain alternative from the html.
     assert.deepEqual(emailObj.textBody, [{ partId: 'text', type: 'text/plain' }]);
     assert.equal(emailObj.bodyValues.html.value, '<p>Hello</p>');
     assert.match(emailObj.bodyValues.text.value, /Hello/);
@@ -461,7 +461,7 @@ describe('updateDraft', () => {
     });
   });
 
-  // ---- one-sided guard + the body-format law (regenerate-on-html-edit) ----
+  // ---- one-sided guard + text-fallback regeneration on html edit ----
 
   it('throws when editing textBody alone on a dual-body draft (html is what recipients see)', async () => {
     mockUpdate(client, RICH_DRAFT);
@@ -938,7 +938,7 @@ describe('sendDraft', () => {
     );
   });
 
-  // ---- Change 2: reject an empty body part on send ----
+  // ---- reject an empty body part on send ----
   // Our own tools never originate an empty part, but an externally-created draft can carry
   // one, so these fixtures hand-build the malformed shapes.
 
@@ -1487,9 +1487,9 @@ describe('sendEmail envelope recipients', () => {
   });
 });
 
-// ---------- recipient name parsing (B3) ----------
+// ---------- recipient name parsing ----------
 
-describe('recipient name parsing (B3)', () => {
+describe('recipient name parsing', () => {
   let client: JmapClient;
 
   beforeEach(() => {

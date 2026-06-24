@@ -52,7 +52,7 @@ describe('buildReplyParams — quoteOriginal wiring', () => {
       { originalEmailId: 'e1', htmlBody: '<p>html reply</p>' },
       makeOriginal(),
     );
-    assert.equal(replyParams.textBody, undefined); // caller gave no text; law adds it later
+    assert.equal(replyParams.textBody, undefined); // caller gave no text; createDraft/sendEmail add the fallback later
     assert.match(replyParams.htmlBody!, /html reply.*<blockquote/s);
   });
 });

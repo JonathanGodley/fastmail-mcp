@@ -775,7 +775,7 @@ export class JmapClient {
     // lands in notCreated, which would vanish the draft. So we create FIRST, confirm it
     // succeeded, and only THEN destroy the old draft. Worst case is a harmless duplicate
     // (recoverable), never a vanished draft (unrecoverable).
-    // ⚠️ Do NOT "optimize" this back into one Email/set call — that reintroduces the
+    // WARNING: do NOT "optimize" this back into one Email/set call; that reintroduces the
     // data-loss window.
     const createRequest: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
