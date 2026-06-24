@@ -46,6 +46,8 @@ Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
 
 Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). `gh` defaults to the upstream `MadLlama25/fastmail-mcp`, so pass `--repo JonathanGodley/fastmail-mcp` on every release, tag, and issue command. Cut a release only when the user asks for it.
 
+Prefer batching related changes into one release: every shipped change pays the documentation + 3-file version-bump tax (see **Version**), so bundling a cluster of related work amortizes it — for a two-line fix the tax is most of the work.
+
 1. Bump the version (see **Version**), then verify clean: `npx tsc --noEmit`, `npm test`, `npm run build`.
 2. Tag and publish the GitHub release on `origin`.
 3. **The release notes AND the git tag annotation message must be consumer-facing** — describe each change and cite its public `#issue`; never use internal plan codenames (e.g. `B4`, `B7`). Match the style of the existing fork releases.
@@ -61,3 +63,15 @@ The *why* behind shipped behaviour lives in two places, split by scope. Look her
   - `docs/conventions.md` — lenient input coercion, the U+202F local-time trap, the `sanitizeForQuote` posture, and dependency/build gotchas.
 
 The dividing line: **an issue explains why ONE tool behaves as it does; a docs file captures a fact or model spanning multiple tools, or a property of the platform/codebase.** When you add a durable decision, file it on the side of that line — don't leave it in a local scratch file.
+
+## Working with upstream
+
+`upstream` = `MadLlama25/fastmail-mcp` (the fork's base); `origin` = `JonathanGodley/fastmail-mcp`. `gh` defaults to upstream, so pass `--repo JonathanGodley/fastmail-mcp` for every fork-side issue/PR/release command.
+
+**Strategy.** Track upstream by *generally merging it into the fork whenever that is doable* — a periodic mainline sync that re-bases the fork's differentiators (response simplification, the calendar work) on top of upstream's latest. Supplement that baseline with the fork's own fixes carried ahead of upstream as open PRs *against* upstream. The upstream maintainer is intermittent (active in bursts, absent in between), so never block fork progress on their review: land and release on the fork, offer the general fixes back, and move on whether or not they respond.
+
+**Adopting an upstream PR (their work → ours).** **File a fork issue for every open third-party upstream PR** — every PR authored by someone other than us, excluding bot dependency bumps — one issue per PR, titled so it names the PR. Do NOT pre-filter by whether a PR looks worth carrying: raising the issue is just bookkeeping, and the adopt-or-decline call is made *in the issue*, never by judging which PRs deserve one. In the issue, capture what the PR adds and how it interacts with the fork's differentiators (especially response simplification — the fork trims the body from *output* but still *fetches* it, so "metadata-only / never-fetch" PRs are NOT redundant with us). Where the fork's structure has diverged (simplification, `advanced_search`, descriptions), **reimplement in the fork's style rather than cherry-pick the patch verbatim.** Link the upstream PR with the fully-qualified `MadLlama25/fastmail-mcp#NN` form (a bare `#NN` in a fork issue links to a fork issue, not upstream).
+
+**Offering a fix back (our work → theirs).** Any fix that addresses an upstream issue or a general bug (not a fork-differentiator feature) should be offered back as a focused, single-purpose PR once it lands and tests pass on the fork: cut a branch with just that fix (a `git worktree` off `upstream/main` keeps the fork's tree clean), reference the issue it closes, and don't drag in fork-only changes. Fork-only differentiators (the simplification system, etc.) are not auto-offered — upstream wants their own (issue #40).
+
+**⛔ Never comment on an upstream PR or issue directly.** Drafting the text is fine; a human posts it. The rule is about writing in *someone else's* repo. The fork's OWN issues are fine for Claude to open, comment on, and close (close only when the user says so — see the `github-comments-human-only` memory).
