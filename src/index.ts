@@ -246,11 +246,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             textBody: {
               type: 'string',
-              description: 'Plain text body (optional)',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional)',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML.',
             },
             inReplyTo: {
               type: 'array',
@@ -302,11 +302,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             textBody: {
               type: 'string',
-              description: 'Plain text body (optional)',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional)',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML.',
             },
             send: {
               type: ['boolean', 'string'],
@@ -360,11 +360,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             textBody: {
               type: 'string',
-              description: 'Plain text body (optional)',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional)',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML.',
             },
             inReplyTo: {
               type: 'array',
@@ -419,11 +419,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             textBody: {
               type: 'string',
-              description: 'Updated plain text body (optional)',
+              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed).',
             },
             htmlBody: {
               type: 'string',
-              description: 'Updated HTML body (optional)',
+              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically.',
             },
             replyTo: {
               type: 'array',
