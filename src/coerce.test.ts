@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams } from './coerce.js';
+import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
   it('returns undefined for undefined input', () => {
@@ -258,5 +259,50 @@ describe('parseAddress', () => {
 
   it('uses the last angle-bracket pair so a name may contain "<"', () => {
     assert.deepEqual(parseAddress('a<b <c@x.com>'), { name: 'a<b', email: 'c@x.com' });
+  });
+});
+
+describe('assertKnownParams (#11)', () => {
+  const allowed = new Set(['mailboxId', 'limit', 'raw']);
+
+  it('passes when every key is declared', () => {
+    assert.doesNotThrow(() => assertKnownParams('list_emails', { mailboxId: 'x', limit: 5 }, allowed, false));
+  });
+
+  it('throws InvalidParams for an unknown key, listing the offender and the valid keys', () => {
+    try {
+      assertKnownParams('list_emails', { mailbox: 'drafts' }, allowed, false);
+      assert.fail('expected throw');
+    } catch (e) {
+      assert.ok(e instanceof McpError);
+      assert.equal((e as McpError).code, ErrorCode.InvalidParams);
+      assert.match((e as McpError).message, /Unknown parameter\(s\): mailbox/);
+      assert.match((e as McpError).message, /Valid: mailboxId, limit, raw/);
+    }
+  });
+
+  it('lists every unknown key when several are present', () => {
+    assert.throws(
+      () => assertKnownParams('list_emails', { mailbox: 'x', folder: 'y', limit: 5 }, allowed, false),
+      /Unknown parameter\(s\): mailbox, folder/,
+    );
+  });
+
+  it('bypasses entirely when additionalProperties is true (escape hatch)', () => {
+    assert.doesNotThrow(() => assertKnownParams('whatever', { anything: 1, goes: 2 }, allowed, true));
+  });
+
+  it('treats null/undefined args as no-args (passes)', () => {
+    assert.doesNotThrow(() => assertKnownParams('list_emails', undefined, allowed, false));
+    assert.doesNotThrow(() => assertKnownParams('list_emails', null, allowed, false));
+  });
+
+  it('a param-less tool (empty allowed set) rejects any arg but accepts {}', () => {
+    assert.doesNotThrow(() => assertKnownParams('ping', {}, new Set(), false));
+    assert.throws(() => assertKnownParams('ping', { x: 1 }, new Set(), false), /Unknown parameter\(s\): x/);
+  });
+
+  it('does NOT reject a stringified-but-known key — key-strictness only, value-leniency is separate', () => {
+    assert.doesNotThrow(() => assertKnownParams('list_emails', { limit: '20' }, allowed, false));
   });
 });

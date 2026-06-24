@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams } from './coerce.js';
 import { buildReplyParams } from './reply-handler.js';
 
 const server = new Server(
@@ -140,9 +140,10 @@ function getTimezone(): string | undefined {
   ]).value;
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+// Single source of truth for the tool catalog. Hoisted to module scope so the
+// CallTool handler can derive each tool's declared parameter set for the
+// unknown-parameter guard (#11) — no drift from what clients see via ListTools.
+const TOOLS = [
       {
         name: 'list_mailboxes',
         description: 'List all mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, role, counts). Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response.',
@@ -1151,14 +1152,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
-    ],
-  };
+];
+
+// Per-tool allowed parameter keys + escape hatch, derived once from the same
+// inputSchema clients see. Drives the unknown-parameter guard (#11).
+const TOOL_SCHEMAS = new Map(
+  TOOLS.map(t => [
+    t.name,
+    {
+      keys: new Set(Object.keys((t.inputSchema as any).properties ?? {})),
+      additional: (t.inputSchema as any).additionalProperties === true,
+    },
+  ])
+);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return { tools: TOOLS };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   try {
+    // Reject unknown/misspelled parameters before touching credentials, so the
+    // error doesn't depend on the client being initialized. Key-strictness only;
+    // value coercion (coerceBool/coerceStringArray/...) is unaffected. (#11)
+    const schema = TOOL_SCHEMAS.get(name);
+    if (schema) assertKnownParams(name, args as any, schema.keys, schema.additional);
 
     const client = initializeClient();
 

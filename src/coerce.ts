@@ -1,3 +1,5 @@
+import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+
 // Some MCP clients (e.g. Claude Cowork as of 2026-04-08, issue #54) stringify
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.
@@ -43,6 +45,27 @@ export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unkno
     bcc: coerceStringArray(args.bcc),
     replyTo: coerceStringArray(args.replyTo),
   };
+}
+
+// Hard-reject any argument key the tool didn't declare in its inputSchema, so a
+// misspelled/hallucinated param (e.g. `mailbox` vs `mailboxId`) fails loudly
+// instead of being silently dropped and the tool running with defaults (#11).
+// KEY-strictness only — value coercion is handled separately and is untouched.
+// `additionalProperties: true` on a tool's schema opts that tool out (none today).
+export function assertKnownParams(
+  toolName: string,
+  args: Record<string, unknown> | null | undefined,
+  allowedKeys: Set<string>,
+  additionalProperties: boolean,
+): void {
+  if (additionalProperties) return;
+  if (args === null || args === undefined) return;
+  const unknown = Object.keys(args).filter(k => !allowedKeys.has(k));
+  if (unknown.length === 0) return;
+  throw new McpError(
+    ErrorCode.InvalidParams,
+    `Unknown parameter(s): ${unknown.join(', ')}. Valid: ${[...allowedKeys].join(', ')}`,
+  );
 }
 
 export function coerceBool(value: unknown): boolean | undefined {
