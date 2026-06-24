@@ -1557,7 +1557,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'mark_email_read': {
-        const { emailId, read = true } = args as any;
+        const { emailId } = args as any;
+        const read = coerceBool((args as any).read) ?? true;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -1574,7 +1575,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'pin_email': {
-        const { emailId, pinned = true } = args as any;
+        const { emailId } = args as any;
+        const pinned = coerceBool((args as any).pinned) ?? true;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -1802,7 +1804,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_mark_read': {
-        const { read = true } = args as any;
+        const read = coerceBool((args as any).read) ?? true;
         const emailIds = coerceStringArray((args as any).emailIds);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
@@ -1820,7 +1822,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_pin': {
-        const { pinned = true } = args as any;
+        const pinned = coerceBool((args as any).pinned) ?? true;
         const emailIds = coerceStringArray((args as any).emailIds);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
@@ -2054,7 +2056,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Execute the test operations
           for (const operation of operations) {
             try {
-              await client.bulkMarkRead(operation.parameters.emailIds, operation.parameters.read);
+              await client.bulkMarkRead(operation.parameters.emailIds, coerceBool(operation.parameters.read) ?? true);
               results.operations.push({
                 ...operation,
                 status: 'SUCCESS',
