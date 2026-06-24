@@ -343,8 +343,8 @@ export class JmapClient {
     const sentMailboxIds: Record<string, boolean> = {};
     sentMailboxIds[sentMailbox.id] = true;
 
-    // Apply the body-format law: html-only input gets an auto text/plain fallback where
-    // one is derivable (degrade-gracefully otherwise; no-body is rejected by shapeBodies).
+    // Generate the body parts: html-only input gets an auto text/plain fallback where one
+    // is derivable (ships html-only otherwise; a no-body message is rejected by shapeBodies).
     const emailObject = {
       mailboxIds: initialMailboxIds,
       keywords: { $draft: true },
@@ -487,9 +487,9 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
-    // Apply the body-format law (auto text/plain fallback for html-only input where
-    // derivable; degrade-gracefully; no-body html is rejected by shapeBodies). A draft
-    // with neither body is allowed — shapeBodies returns empty shaping in that case.
+    // Generate the body parts (auto text/plain fallback for html-only input where
+    // derivable; ships html-only otherwise; no-body html is rejected by shapeBodies). A
+    // draft with neither body is allowed — shapeBodies returns empty shaping in that case.
     Object.assign(emailObject, this.shapeBodies(email.textBody, email.htmlBody));
 
     const request: JmapRequest = {
@@ -541,19 +541,19 @@ export class JmapClient {
     return part ? bodyValues[part.partId].value : undefined;
   }
 
-  // Apply the body-format law for an authoring path (sendEmail/createDraft) and return
-  // the JMAP body-part shaping to splat into the email object. normalizeBodies derives
-  // the text/plain fallback from html when none was supplied; we degrade gracefully —
-  // ship html-only when the html has visible media but no derivable text — and reject
-  // ONLY a genuinely no-body message (html present that renders to nothing AND has no
-  // image). A message with neither body returns empty shaping (a body-less draft is
+  // Generate the JMAP body-part shaping for an authoring path (sendEmail/createDraft) to
+  // splat into the email object. normalizeBodies derives the text/plain fallback from html
+  // when none was supplied; we degrade gracefully — ship html-only when the html has
+  // visible media but no derivable text — and reject ONLY a genuinely no-body message
+  // (html present that renders to nothing AND has no image). A message with neither body
+  // returns empty shaping (a body-less draft is
   // allowed; the no-body reject only fires when an html body was actually provided).
   private shapeBodies(textBody?: string, htmlBody?: string) {
-    const law = normalizeBodies({ textBody, htmlBody });
-    if (law.htmlOnly && !htmlHasVisibleContent(htmlBody!)) {
+    const normalized = normalizeBodies({ textBody, htmlBody });
+    if (normalized.htmlOnly && !htmlHasVisibleContent(htmlBody!)) {
       throw new Error('This message has no readable body; add text or visible content.');
     }
-    return buildBodyParts(law);
+    return buildBodyParts(normalized);
   }
 
   async updateDraft(emailId: string, updates: {
@@ -680,7 +680,7 @@ export class JmapClient {
     const mergedBcc     = clear.has('bcc')     ? [] : (updates.bcc     !== undefined ? updates.bcc.map(parseAddress)     : (existingEmail.bcc || []));
     const mergedReplyTo = clear.has('replyTo') ? [] : (updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null));
 
-    // ---- Body-format pipeline: one-sided guard + the law ----
+    // ---- Body pipeline: one-sided guard + text-fallback generation ----
     // The text part is a DERIVED fallback when html is present. So:
     //  - editing htmlBody alone REGENERATES the text fallback from the new html (no throw);
     //  - editing textBody alone (while a non-empty html survives) is rejected — it won't
@@ -708,23 +708,23 @@ export class JmapClient {
     // Guard: clearFields:['textBody'] while htmlBody survives — the text fallback is
     // managed automatically (regenerated from html, or html-only if none is derivable), so
     // clearing it on its own is rejected. Evaluated against the MERGED html and BEFORE the
-    // law runs (else the law would silently refill it). Allowed when html is also cleared.
+    // fallback step runs (else that step would silently refill it). Allowed when html is also cleared.
     if (clear.has('textBody') && !clear.has('htmlBody') && !isBlank(mergedHtmlRaw)) {
       throw new Error('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
     }
 
-    // Apply the law, but ONLY when a body was actually written — a metadata-only edit must
-    // stay body-invariant (it must NOT inject a text part into an html-only draft). When
-    // html was (re)written without text, regenerate the text fallback from the new html;
-    // degrade gracefully (ship html-only) if none is derivable but the html has visible
+    // Generate the text fallback, but ONLY when a body was actually written — a
+    // metadata-only edit must stay body-invariant (it must NOT inject a text part into an
+    // html-only draft). When html was (re)written without text, regenerate the text fallback
+    // from the new html; ship html-only if none is derivable but the html has visible
     // content; reject a genuinely no-body result.
     let textBodyValue = mergedTextRaw;
     let htmlBodyValue = mergedHtmlRaw;
     if (wroteAnyBody) {
-      const law = normalizeBodies({ textBody: mergedTextRaw, htmlBody: mergedHtmlRaw });
-      textBodyValue = law.textBody;
-      htmlBodyValue = law.htmlBody;
-      if (law.htmlOnly && !htmlHasVisibleContent(mergedHtmlRaw!)) {
+      const normalized = normalizeBodies({ textBody: mergedTextRaw, htmlBody: mergedHtmlRaw });
+      textBodyValue = normalized.textBody;
+      htmlBodyValue = normalized.htmlBody;
+      if (normalized.htmlOnly && !htmlHasVisibleContent(mergedHtmlRaw!)) {
         throw new Error('This message has no readable body; add text or visible content.');
       }
     }

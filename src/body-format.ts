@@ -1,11 +1,13 @@
 import { convert } from 'html-to-text';
 
-// The body-format law (application-wide): no HTML without a readable text/plain
-// fallback. The text part is a DERIVED fallback, auto-generated from HTML when the
-// caller does not supply one; an explicitly-supplied textBody is stored verbatim.
-// text/plain-only mail is legitimate and left untouched (we never fabricate HTML).
-// We degrade gracefully: when HTML has no derivable text (an image-only message), we
-// ship it HTML-only rather than reject — only a genuinely no-body send is refused.
+// Body-format rule applied across every compose path: never ship an HTML body without a
+// readable text/plain alternative. The text part is a DERIVED fallback, auto-generated
+// from the HTML when the caller does not supply one; an explicitly-supplied textBody is
+// stored verbatim. text/plain-only mail is legitimate and left untouched (we never
+// fabricate HTML). Degrade gracefully: when the HTML yields no derivable text (an
+// image-only message), ship it HTML-only rather than reject; only a genuinely no-body
+// send (no text and no visible content) is refused. These helpers implement that rule;
+// the per-function comments below describe exactly what each does.
 
 // Zero-width / invisible characters that bare trim() leaves behind but that render as
 // blank: ZWSP (U+200B), ZWNJ (U+200C), ZWJ (U+200D), BOM/ZWNBSP (U+FEFF), soft hyphen
@@ -13,7 +15,7 @@ import { convert } from 'html-to-text';
 // empty, so the emptiness test must strip these in addition to trim().
 const ZERO_WIDTH = /[\u200B\u200C\u200D\uFEFF\u00AD]/g;
 
-// The single emptiness predicate shared by the law and every emit gate, so '' /
+// The single emptiness predicate shared by normalizeBodies and every emit gate, so '' /
 // whitespace / zero-width-only all read as "absent" consistently everywhere.
 export function isBlank(s: string | undefined | null): boolean {
   return !s || s.replace(ZERO_WIDTH, '').trim() === '';
@@ -77,8 +79,8 @@ export function htmlHasVisibleContent(html: string): boolean {
   return false;
 }
 
-// Apply the law (degrade-gracefully). If htmlBody is present and textBody is absent,
-// derive the text fallback from the HTML; if that derives to empty, leave text absent
+// Derive the text/plain fallback (degrade-gracefully). If htmlBody is present and textBody
+// is absent, derive the text fallback from the HTML; if that derives to empty, leave text absent
 // and flag htmlOnly (an INTERNAL signal the authoring guard consumes — NOT a reject by
 // itself, and not surfaced to the consumer). text-only and both-supplied pass through
 // untouched (distinct content preserved). Presence uses the shared isBlank predicate.
@@ -95,8 +97,9 @@ export function normalizeBodies(input: { textBody?: string; htmlBody?: string })
   return { ...(text !== undefined && { textBody: text }), ...(html !== undefined && { htmlBody: html }) };
 }
 
-// Pure shaping — NO law. Build the JMAP body-part arrays + bodyValues keyed by the
-// literal partIds 'text'/'html' (must match the part-array partIds). Accepts strings
+// Pure shaping — NO fallback derivation (that is normalizeBodies' job). Build the JMAP
+// body-part arrays + bodyValues keyed by the literal partIds 'text'/'html' (must match
+// the part-array partIds). Accepts strings
 // only (callers extract from JMAP part arrays first). Drops a blank body via the shared
 // predicate so a cleared/empty body never emits a part.
 export function buildBodyParts(input: { textBody?: string; htmlBody?: string }): {

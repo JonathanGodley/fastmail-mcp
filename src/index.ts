@@ -1290,8 +1290,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Append the original as an attributed, top-posted quote (default on). Returns only
-        // the formats the caller supplied; the body-format law then adds the text fallback
-        // for an html-only reply, so no double-quoting.
+        // the formats the caller supplied; createDraft/sendEmail then add the auto text/plain
+        // fallback for an html-only reply, so no double-quoting.
         const quoted = buildReplyBodies({ original: originalEmail, textBody, htmlBody, quoteOriginal });
 
         const replyParams = {

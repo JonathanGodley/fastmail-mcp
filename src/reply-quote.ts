@@ -3,9 +3,9 @@ import { htmlToText, isBlank } from './body-format.js';
 import { formatReplyDate } from './email-formatter.js';
 
 // Build the reply bodies (caller's new text + an attributed, top-posted quote of the
-// original), matching the Fastmail web client with a portable quote-bar. The body-format
-// law (applied downstream by createDraft/sendEmail) adds the text/plain fallback for an
-// html-only caller reply, so the cross-format matrix collapses here.
+// original), matching the Fastmail web client with a portable quote-bar. createDraft/
+// sendEmail add the auto text/plain fallback downstream for an html-only caller reply, so
+// the cross-format matrix collapses here.
 
 // Escape the five HTML-significant characters for safe interpolation into quote markup.
 function escapeHtml(s: string): string {
@@ -110,7 +110,7 @@ export function buildReplyBodies(input: {
 }): { textBody?: string; htmlBody?: string } {
   const { original, textBody, htmlBody, quoteOriginal, timezone } = input;
 
-  // Return only the formats the caller supplied (the law adds the text fallback later).
+  // Return only the formats the caller supplied (createDraft/sendEmail add the text fallback later).
   const passthrough = () => ({
     ...(textBody !== undefined && { textBody }),
     ...(htmlBody !== undefined && { htmlBody }),
