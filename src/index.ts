@@ -380,7 +380,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). Editing one body (textBody or htmlBody) makes the draft single-format; if the draft already has the other body, the edit is rejected so it is not silently lost: supply both bodies to keep them in sync, or list the other in clearFields to drop it. Since JMAP emails are immutable, this atomically destroys the old draft and creates a new one with the updated fields, so the returned email ID is new.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). Editing one body (textBody or htmlBody) makes the draft single-format; if the draft already has the other body, the edit is rejected so it is not silently lost: supply both bodies to keep them in sync, or list the other in clearFields to drop it. Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can\'t be removed, you may be left with a duplicate draft rather than none. A draft containing inline (cid:) images, or a body part that isn\'t plain text or HTML, can\'t be preserved by editing and is rejected — recreate it instead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1364,7 +1364,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
 
-        const newEmailId = await client.updateDraft(emailId, {
+        const { id: newEmailId, orphanedOldDraftId } = await client.updateDraft(emailId, {
           to,
           cc,
           bcc,
@@ -1376,11 +1376,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           clearFields,
         });
 
+        // JMAP content is immutable, so an edit creates a replacement draft and removes
+        // the old one (create-then-delete). On the rare path where the new draft was
+        // created but the old copy couldn't be removed, say so plainly rather than claim
+        // it "was replaced" — the old draft lingers as a duplicate holding pre-edit content.
+        const text = orphanedOldDraftId
+          ? `Draft saved as new Email ID: ${newEmailId}. The previous draft copy could not be removed and remains as a duplicate (id ${orphanedOldDraftId}); you may want to delete it.`
+          : `Draft updated successfully. New Email ID: ${newEmailId} (old draft ${emailId} was replaced)`;
+
         return {
           content: [
             {
               type: 'text',
-              text: `Draft updated successfully. New Email ID: ${newEmailId} (old draft ${emailId} was replaced)`,
+              text,
             },
           ],
         };

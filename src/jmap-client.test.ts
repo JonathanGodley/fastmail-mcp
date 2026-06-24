@@ -300,17 +300,23 @@ const RICH_DRAFT = {
   keywords: { $draft: true },
 };
 
-// Wire makeRequest: Email/get returns the fixture, Email/set succeeds. Returns the mock.
+// Wire makeRequest for create-then-delete: Email/get returns the fixture; the create-only
+// Email/set returns a created id; the destroy-only Email/set returns destroyed. Returns the mock.
 function mockUpdate(client: JmapClient, fixture: any) {
   return mock.method(client, 'makeRequest', async (req: any) => {
-    if (req.methodCalls[0][0] === 'Email/get') {
+    const [method, params] = req.methodCalls[0];
+    if (method === 'Email/get') {
       return { methodResponses: [['Email/get', { list: [fixture] }, 'getEmail']] };
     }
-    return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+    // Email/set — create-then-delete issues a create-only call, then a destroy-only call.
+    if (params.create) {
+      return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+    }
+    return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
   });
 }
 
-// Pull the recreated draft object out of the second (Email/set) call.
+// Pull the recreated draft object out of the create (second overall) call.
 function draftFromCall(makeReq: ReturnType<typeof mock.method>) {
   return makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
 }
@@ -322,24 +328,23 @@ describe('updateDraft', () => {
     client = makeClient();
   });
 
-  it('returns new email ID on success', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
-      // First call: Email/get to fetch existing draft
-      if (req.methodCalls[0][0] === 'Email/get') {
-        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
-      }
-      // Second call: Email/set with create+destroy
-      return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
-    });
+  it('returns new email ID on success (create-then-delete: create first, then destroy)', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
 
-    const newId = await client.updateDraft('draft-1', { subject: 'New Subject' });
-    assert.equal(newId, 'draft-2');
+    const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
+    assert.equal(result.id, 'draft-2');
+    assert.equal(result.orphanedOldDraftId, undefined);
 
-    // Verify the second call has both create and destroy
-    const setCall = makeReq.mock.calls[1].arguments[0];
-    assert.equal(setCall.methodCalls[0][0], 'Email/set');
-    assert.deepEqual(setCall.methodCalls[0][1].destroy, ['draft-1']);
-    assert.equal(setCall.methodCalls[0][1].create.draft.subject, 'New Subject');
+    // Three calls: Email/get, then a create-ONLY Email/set, then a destroy-ONLY Email/set.
+    assert.equal(makeReq.mock.calls.length, 3);
+    const createCall = makeReq.mock.calls[1].arguments[0].methodCalls[0];
+    assert.equal(createCall[0], 'Email/set');
+    assert.equal(createCall[1].destroy, undefined); // create call must NOT also destroy
+    assert.equal(createCall[1].create.draft.subject, 'New Subject');
+    const destroyCall = makeReq.mock.calls[2].arguments[0].methodCalls[0];
+    assert.equal(destroyCall[0], 'Email/set');
+    assert.deepEqual(destroyCall[1].destroy, ['draft-1']);
+    assert.equal(destroyCall[1].create, undefined); // destroy call must NOT also create
   });
 
   it('merges fields — preserves existing values for unspecified fields', async () => {
@@ -388,7 +393,7 @@ describe('updateDraft', () => {
     );
   });
 
-  it('throws on JMAP error during create+destroy', async () => {
+  it('throws on JMAP error during the create call', async () => {
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
@@ -660,9 +665,141 @@ describe('updateDraft', () => {
 
   it('a non-empty normal edit still succeeds (regression guard)', async () => {
     const makeReq = mockUpdate(client, EXISTING_DRAFT);
-    const newId = await client.updateDraft('draft-1', { subject: 'Real new subject' });
-    assert.equal(newId, 'draft-2');
+    const result = await client.updateDraft('draft-1', { subject: 'Real new subject' });
+    assert.equal(result.id, 'draft-2');
     assert.equal(draftFromCall(makeReq).subject, 'Real new subject');
+  });
+
+  // ---- faithful recreate: carry threading / attachments / keywords ----
+
+  const DRAFT_WITH_EXTRAS = {
+    ...EXISTING_DRAFT,
+    keywords: { $draft: true, $flagged: true, 'custom-label': true },
+    inReplyTo: ['<orig@example.com>'],
+    references: ['<root@example.com>', '<orig@example.com>'],
+    attachments: [
+      { blobId: 'blob-att', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment', cid: null, partId: '3', size: 1234 },
+    ],
+  };
+
+  it('carries inReplyTo/references/keywords/attachments through the recreate', async () => {
+    const makeReq = mockUpdate(client, DRAFT_WITH_EXTRAS);
+    await client.updateDraft('draft-1', { subject: 'New subject' });
+    const draft = draftFromCall(makeReq);
+    assert.deepEqual(draft.inReplyTo, ['<orig@example.com>']);
+    assert.deepEqual(draft.references, ['<root@example.com>', '<orig@example.com>']);
+    // keywords merged: $draft preserved alongside $flagged and the custom label
+    assert.equal(draft.keywords.$draft, true);
+    assert.equal(draft.keywords.$flagged, true);
+    assert.equal(draft.keywords['custom-label'], true);
+    // attachments carried by blobId, whitelisted fields only (NO partId/size)
+    assert.deepEqual(draft.attachments, [
+      { blobId: 'blob-att', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' },
+    ]);
+  });
+
+  it('rejects editing a draft with an inline (cid:) image', async () => {
+    const inlineDraft = {
+      ...EXISTING_DRAFT,
+      attachments: [{ blobId: 'blob-img', type: 'image/png', disposition: 'inline', cid: 'img@x', name: null, partId: '2', size: 70 }],
+    };
+    mockUpdate(client, inlineDraft);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      /inline images.*Recreate the draft instead/s,
+    );
+  });
+
+  it('carries a regular attachment that merely has a cid (disposition not inline)', async () => {
+    const cidAttachDraft = {
+      ...EXISTING_DRAFT,
+      attachments: [{ blobId: 'blob-logo', type: 'image/png', disposition: 'attachment', cid: 'logo@x', name: 'logo.png', partId: '2', size: 99 }],
+    };
+    const makeReq = mockUpdate(client, cidAttachDraft);
+    await client.updateDraft('draft-1', { subject: 'X' }); // not rejected
+    assert.deepEqual(draftFromCall(makeReq).attachments, [
+      { blobId: 'blob-logo', type: 'image/png', name: 'logo.png', disposition: 'attachment', cid: 'logo@x' },
+    ]);
+  });
+
+  it('rejects editing a draft with a non-text/non-html body part', async () => {
+    const weirdDraft = {
+      ...EXISTING_DRAFT,
+      textBody: [{ partId: '1', type: 'text/calendar' }],
+      htmlBody: null,
+      bodyValues: { '1': { value: 'BEGIN:VCALENDAR' } },
+    };
+    mockUpdate(client, weirdDraft);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      /plain text or HTML.*Recreate the draft instead/s,
+    );
+  });
+
+  it('does NOT reject a text-only draft aliased into both body lists (alias-aware)', async () => {
+    const aliasedDraft = {
+      ...EXISTING_DRAFT,
+      textBody: [{ partId: '1', type: 'text/plain' }],
+      htmlBody: [{ partId: '1', type: 'text/plain' }], // single part aliased into both lists
+      bodyValues: { '1': { value: 'Plain only' } },
+    };
+    const makeReq = mockUpdate(client, aliasedDraft);
+    await client.updateDraft('draft-1', { subject: 'New' }); // must not throw
+    assert.equal(draftFromCall(makeReq).subject, 'New');
+  });
+
+  // ---- create-then-delete ordering (data-loss prevention) ----
+
+  it('on create failure: throws, issues NO destroy, leaves the old draft untouched', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
+      }
+      if (params.create) {
+        return { methodResponses: [['Email/set', { notCreated: { draft: { type: 'invalidProperties', description: 'bad blob' } } }, 'createDraft']] };
+      }
+      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
+    });
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      /Failed to create updated draft.*invalidProperties/s,
+    );
+    // Exactly 2 calls: Email/get + the failed create. The destroy must NEVER be issued.
+    assert.equal(makeReq.mock.calls.length, 2);
+    assert.ok(makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create);
+  });
+
+  it('on destroy failure (notDestroyed): returns new id + orphan warning, does NOT throw', async () => {
+    mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
+      }
+      if (params.create) {
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
+      return { methodResponses: [['Email/set', { notDestroyed: { 'draft-1': { type: 'serverFail' } } }, 'destroyDraft']] };
+    });
+    const result = await client.updateDraft('draft-1', { subject: 'X' });
+    assert.equal(result.id, 'draft-2');
+    assert.equal(result.orphanedOldDraftId, 'draft-1');
+  });
+
+  it('on destroy throw (transport error after a good create): returns orphan warning, does NOT throw', async () => {
+    mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
+      }
+      if (params.create) {
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
+      throw new Error('network down');
+    });
+    const result = await client.updateDraft('draft-1', { subject: 'X' });
+    assert.equal(result.id, 'draft-2');
+    assert.equal(result.orphanedOldDraftId, 'draft-1');
   });
 });
 

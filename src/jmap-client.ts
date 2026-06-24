@@ -549,7 +549,7 @@ export class JmapClient {
     from?: string;
     replyTo?: string[];
     clearFields?: string[];
-  }): Promise<string> {
+  }): Promise<{ id: string; orphanedOldDraftId?: string }> {
     const session = await this.getSession();
 
     // Fetch the existing email
@@ -559,8 +559,11 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'textBody', 'htmlBody', 'bodyValues', 'mailboxIds', 'keywords'],
-          bodyProperties: ['partId', 'blobId', 'type', 'size'],
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'textBody', 'htmlBody', 'bodyValues', 'mailboxIds', 'keywords', 'inReplyTo', 'references', 'attachments'],
+          // Inline list (NOT the module-level EMAIL_BODY_PROPERTIES) — extended with
+          // name/disposition/cid so the faithful recreate can carry attachment metadata
+          // and detect inline (cid:) images.
+          bodyProperties: ['partId', 'blobId', 'type', 'size', 'name', 'disposition', 'cid'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
         }, 'getEmail']
@@ -576,6 +579,26 @@ export class JmapClient {
     // Verify it's a draft
     if (!existingEmail.keywords?.$draft) {
       throw new Error('Cannot edit a non-draft email');
+    }
+
+    // Faithful-recreate guards. The recreate below rebuilds the message from flat
+    // convenience props (textBody/htmlBody/attachments), which can't round-trip an
+    // inline (cid:) image's multipart/related linkage, nor a non-text/non-html body
+    // part (e.g. an externally-created multipart/signed or text/calendar draft). Rather
+    // than silently drop or mangle those, reject loudly. (Verified live 2026-06-24: a
+    // cid: inline image surfaces in `attachments` with disposition:'inline'; a regular
+    // attachment that merely carries a cid keeps disposition 'attachment'/absent and is
+    // carried fine. Inline-image authoring/editing is tracked as fork issue #13.)
+    const existingAttachments: any[] = existingEmail.attachments || [];
+    if (existingAttachments.some((a: any) => a.disposition === 'inline')) {
+      throw new Error('This draft has inline images, which editing can\'t preserve yet. Recreate the draft instead (see issue #13).');
+    }
+    // Alias-aware: a single-format draft aliases its one part into BOTH lists with its
+    // real MIME type, so a text-only draft lists text/plain twice — not a reject. Only a
+    // genuinely non-text/non-html typed part trips this; a typeless part is left alone.
+    const allBodyParts = [...(existingEmail.textBody || []), ...(existingEmail.htmlBody || [])];
+    if (allBodyParts.some((p: any) => p.type && p.type !== 'text/plain' && p.type !== 'text/html')) {
+      throw new Error('This draft has a body part that isn\'t plain text or HTML, which editing can\'t preserve. Recreate the draft instead.');
     }
 
     // Resolve identity
@@ -671,15 +694,33 @@ export class JmapClient {
       : (updates.htmlBody !== undefined ? updates.htmlBody
       : (wroteAnyBody ? undefined : existingHtmlValue));
 
+    // Carry existing (non-inline) attachments by referencing their existing blobIds.
+    // Whitelist exactly these fields — a blob-backed part is blobId XOR partId, and
+    // `size` is server-set, so sending partId/size would be rejected by a strict server.
+    const carriedAttachments = existingAttachments.map((a: any) => ({
+      blobId: a.blobId,
+      type: a.type,
+      ...(a.name != null && { name: a.name }),
+      ...(a.disposition != null && { disposition: a.disposition }),
+      ...(a.cid != null && { cid: a.cid }),
+    }));
+
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
-      keywords: { $draft: true },
+      // Preserve all existing keywords (e.g. $flagged, custom labels), not just $draft.
+      keywords: { ...(existingEmail.keywords || {}), $draft: true },
       from: [{ name: selectedIdentity.name, email: updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email }],
       to: mergedTo,
       cc: mergedCc,
       bcc: mergedBcc,
       subject: mergedSubject,
       ...(mergedReplyTo?.length && { replyTo: mergedReplyTo }),
+      // Threading: carry inReplyTo/references as JMAP structured properties so the
+      // In-Reply-To/References headers regenerate (fixes silent threading loss on reply
+      // drafts this client creates via reply_email send=false).
+      ...(existingEmail.inReplyTo && { inReplyTo: existingEmail.inReplyTo }),
+      ...(existingEmail.references && { references: existingEmail.references }),
+      ...(carriedAttachments.length && { attachments: carriedAttachments }),
     };
 
     if (textBodyValue) emailObject.textBody = [{ partId: 'text', type: 'text/plain' }];
@@ -691,32 +732,63 @@ export class JmapClient {
       };
     }
 
-    // Atomic create + destroy in a single Email/set call
-    const request: JmapRequest = {
+    // Create-then-delete (NOT a single combined create+destroy call). JMAP content is
+    // immutable — verified live 2026-06-24 that Fastmail SILENTLY NO-OPS an in-place
+    // subject/body update (returns success but changes nothing), so a recreate is
+    // mandatory. RFC 8620 §6.3 guarantees blob lifetime within a call but says NOTHING
+    // about create/destroy atomicity: a server MAY apply the destroy even when the create
+    // lands in notCreated, which would vanish the draft. So we create FIRST, confirm it
+    // succeeded, and only THEN destroy the old draft. Worst case is a harmless duplicate
+    // (recoverable), never a vanished draft (unrecoverable).
+    // ⚠️ Do NOT "optimize" this back into one Email/set call — that reintroduces the
+    // data-loss window.
+    const createRequest: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
         ['Email/set', {
           accountId: session.accountId,
           create: { draft: emailObject },
-          destroy: [emailId],
-        }, 'updateDraft']
+        }, 'createDraft']
       ]
     };
 
-    const response = await this.makeRequest(request);
-    const result = this.getMethodResult(response, 0);
+    const createResponse = await this.makeRequest(createRequest);
+    const createResult = this.getMethodResult(createResponse, 0);
 
-    if (result.notCreated?.draft) {
-      const err = result.notCreated.draft;
+    if (createResult.notCreated?.draft) {
+      const err = createResult.notCreated.draft;
+      // Create failed → old draft is untouched (no destroy was issued). This is the
+      // data-loss-prevention path: surface the error, leave the draft as-is.
       throw new Error(`Failed to create updated draft: ${err.type}${err.description ? ' - ' + err.description : ''}`);
     }
 
-    const newEmailId = result.created?.draft?.id;
+    const newEmailId = createResult.created?.draft?.id;
     if (!newEmailId) {
       throw new Error('Draft update returned no email ID');
     }
 
-    return newEmailId;
+    // The new draft is valid → the edit has SUCCEEDED. Now remove the old copy. Any
+    // failure here (structured notDestroyed OR a thrown transport/method error) leaves a
+    // harmless duplicate holding the OLD pre-edit content — report it as an orphan
+    // warning, but do NOT throw (throwing would tell the caller the edit failed when it
+    // didn't).
+    let orphanedOldDraftId: string | undefined;
+    try {
+      const destroyResponse = await this.makeRequest({
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+        methodCalls: [
+          ['Email/set', { accountId: session.accountId, destroy: [emailId] }, 'destroyDraft']
+        ]
+      });
+      const destroyResult = this.getMethodResult(destroyResponse, 0);
+      if (destroyResult.notDestroyed?.[emailId]) {
+        orphanedOldDraftId = emailId;
+      }
+    } catch {
+      orphanedOldDraftId = emailId;
+    }
+
+    return { id: newEmailId, ...(orphanedOldDraftId && { orphanedOldDraftId }) };
   }
 
   async sendDraft(emailId: string): Promise<string> {
