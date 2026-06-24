@@ -252,7 +252,7 @@ describe('createDraft', () => {
   });
 
   // 10. HTML body constructed correctly
-  it('constructs HTML body parts correctly', async () => {
+  it('derives a text/plain fallback for an html-only draft (the body-format law)', async () => {
     const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-10' } } }, 'createDraft'],
@@ -263,8 +263,10 @@ describe('createDraft', () => {
 
     const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.htmlBody, [{ partId: 'html', type: 'text/html' }]);
-    assert.equal(emailObj.textBody, undefined);
-    assert.deepEqual(emailObj.bodyValues, { html: { value: '<p>Hello</p>' } });
+    // The law auto-generates a readable text/plain alternative from the html.
+    assert.deepEqual(emailObj.textBody, [{ partId: 'text', type: 'text/plain' }]);
+    assert.equal(emailObj.bodyValues.html.value, '<p>Hello</p>');
+    assert.match(emailObj.bodyValues.text.value, /Hello/);
   });
 });
 
@@ -459,22 +461,22 @@ describe('updateDraft', () => {
     });
   });
 
-  // ---- cross-format coupling guard (option D) ----
+  // ---- one-sided guard + the body-format law (regenerate-on-html-edit) ----
 
-  it('throws when writing textBody alone on a dual-body draft (would discard htmlBody)', async () => {
+  it('throws when editing textBody alone on a dual-body draft (html is what recipients see)', async () => {
     mockUpdate(client, RICH_DRAFT);
     await assert.rejects(
       () => client.updateDraft('draft-1', { textBody: 'NEW text' }),
-      /htmlBody.*Supply htmlBody as well.*clearFields/s,
+      /editing textBody alone.*edit htmlBody.*clearFields:\['htmlBody'\]/s,
     );
   });
 
-  it('throws when writing htmlBody alone on a dual-body draft (parity, would discard textBody)', async () => {
-    mockUpdate(client, RICH_DRAFT);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' }),
-      /textBody.*Supply textBody as well.*clearFields/s,
-    );
+  it('regenerates the text fallback when htmlBody is edited alone on a dual-body draft', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' });
+    const draft = draftFromCall(makeReq);
+    // The old "The text" is replaced by the fallback regenerated from the NEW html.
+    assert.deepEqual(draft.bodyValues, { text: { value: 'NEW' }, html: { value: '<p>NEW</p>' } });
   });
 
   it('writes textBody and drops htmlBody when the partner is named in clearFields', async () => {
@@ -503,20 +505,20 @@ describe('updateDraft', () => {
     assert.deepEqual(draft.bodyValues, { text: { value: 'NEW text' } });
   });
 
-  it('throws when adding htmlBody alone to a text-only draft (parity: would discard textBody)', async () => {
-    mockUpdate(client, EXISTING_DRAFT);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' }),
-      /textBody.*Supply textBody as well.*clearFields/s,
-    );
+  it('regenerates the text fallback when htmlBody is edited alone on a text-only draft', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' });
+    const draft = draftFromCall(makeReq);
+    // The old "Old body" text is replaced by the fallback regenerated from the new html.
+    assert.deepEqual(draft.bodyValues, { text: { value: 'NEW' }, html: { value: '<p>NEW</p>' } });
   });
 
-  it('adds htmlBody to a text-only draft when textBody is cleared (html-only result)', async () => {
-    const makeReq = mockUpdate(client, EXISTING_DRAFT);
-    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>', clearFields: ['textBody'] });
-    const draft = draftFromCall(makeReq);
-    assert.equal(draft.textBody, undefined);
-    assert.deepEqual(draft.bodyValues, { html: { value: '<p>NEW</p>' } });
+  it('rejects clearFields:["textBody"] while htmlBody is written (text fallback is auto-managed)', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>', clearFields: ['textBody'] }),
+      /textBody can't be cleared on its own while htmlBody is present/,
+    );
   });
 
   it('preserves both bodies on a subject-only edit of a dual-body draft (guard does not fire)', async () => {
@@ -527,6 +529,30 @@ describe('updateDraft', () => {
       text: { value: 'The text' },
       html: { value: '<p>The html</p>' },
     });
+  });
+
+  it('saves html-only when an edited htmlBody is image-only (degrade gracefully)', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+    await client.updateDraft('draft-1', { htmlBody: '<div><img src="banner.jpg"></div>' });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft.textBody, undefined); // no derivable text → no fallback part
+    assert.deepEqual(draft.bodyValues, { html: { value: '<div><img src="banner.jpg"></div>' } });
+  });
+
+  it('rejects an edited htmlBody that has no visible content (no-body)', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p></p>' }),
+      /no readable body/,
+    );
+  });
+
+  it('rejects clearing the only body (a draft needs a body)', async () => {
+    mockUpdate(client, EXISTING_DRAFT); // text-only draft
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['textBody'] }),
+      /a draft needs a body/,
+    );
   });
 
   // ---- Layer 2: strict empty-reject ----
@@ -602,12 +628,15 @@ describe('updateDraft', () => {
     assert.equal(draftFromCall(makeReq).subject, '');
   });
 
-  it('clears textBody via clearFields and preserves htmlBody', async () => {
-    const makeReq = mockUpdate(client, RICH_DRAFT);
-    await client.updateDraft('draft-1', { clearFields: ['textBody'] });
-    const draft = draftFromCall(makeReq);
-    assert.equal(draft.textBody, undefined);
-    assert.deepEqual(draft.bodyValues, { html: { value: '<p>The html</p>' } });
+  it('rejects clearing textBody alone on a dual-body draft (text fallback is auto-managed)', async () => {
+    // Was: dropped the text part. Now the text fallback is managed automatically, so
+    // clearing it while htmlBody survives is rejected (use clearFields:['htmlBody'] for
+    // a plain-text email instead).
+    mockUpdate(client, RICH_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['textBody'] }),
+      /textBody can't be cleared on its own while htmlBody is present/,
+    );
   });
 
   it('clears htmlBody via clearFields and preserves textBody', async () => {

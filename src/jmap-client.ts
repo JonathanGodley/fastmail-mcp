@@ -1,6 +1,7 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields } from './coerce.js';
+import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank } from './body-format.js';
 import { writeFile, mkdir, realpath, stat, lstat } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
 import { homedir } from 'os';
@@ -324,8 +325,8 @@ export class JmapClient {
     // Use provided mailboxId or default to drafts for initial creation
     const initialMailboxId = email.mailboxId || draftsMailbox.id;
 
-    // Ensure we have at least one body type
-    if (!email.textBody && !email.htmlBody) {
+    // Ensure we have at least one body type (zero-width/whitespace-only counts as absent).
+    if (isBlank(email.textBody) && isBlank(email.htmlBody)) {
       throw new Error('Either textBody or htmlBody must be provided');
     }
 
@@ -335,6 +336,8 @@ export class JmapClient {
     const sentMailboxIds: Record<string, boolean> = {};
     sentMailboxIds[sentMailbox.id] = true;
 
+    // Apply the body-format law: html-only input gets an auto text/plain fallback where
+    // one is derivable (degrade-gracefully otherwise; no-body is rejected by shapeBodies).
     const emailObject = {
       mailboxIds: initialMailboxIds,
       keywords: { $draft: true },
@@ -346,12 +349,7 @@ export class JmapClient {
       ...(email.inReplyTo && { inReplyTo: email.inReplyTo }),
       ...(email.references && { references: email.references }),
       ...(email.replyTo?.length && { replyTo: email.replyTo.map(parseAddress) }),
-      textBody: email.textBody ? [{ partId: 'text', type: 'text/plain' }] : undefined,
-      htmlBody: email.htmlBody ? [{ partId: 'html', type: 'text/html' }] : undefined,
-      bodyValues: {
-        ...(email.textBody && { text: { value: email.textBody } }),
-        ...(email.htmlBody && { html: { value: email.htmlBody } })
-      }
+      ...this.shapeBodies(email.textBody, email.htmlBody),
     };
 
     const request: JmapRequest = {
@@ -429,8 +427,9 @@ export class JmapClient {
   }): Promise<string> {
     const session = await this.getSession();
 
-    // Validate at least one meaningful field is present
-    if (!email.to?.length && !email.subject && !email.textBody && !email.htmlBody) {
+    // Validate at least one meaningful field is present (zero-width/whitespace-only
+    // bodies count as absent).
+    if (!email.to?.length && !email.subject && isBlank(email.textBody) && isBlank(email.htmlBody)) {
       throw new Error('At least one of to, subject, textBody, or htmlBody must be provided');
     }
 
@@ -481,14 +480,10 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
-    if (email.textBody) emailObject.textBody = [{ partId: 'text', type: 'text/plain' }];
-    if (email.htmlBody) emailObject.htmlBody = [{ partId: 'html', type: 'text/html' }];
-    if (email.textBody || email.htmlBody) {
-      emailObject.bodyValues = {
-        ...(email.textBody && { text: { value: email.textBody } }),
-        ...(email.htmlBody && { html: { value: email.htmlBody } })
-      };
-    }
+    // Apply the body-format law (auto text/plain fallback for html-only input where
+    // derivable; degrade-gracefully; no-body html is rejected by shapeBodies). A draft
+    // with neither body is allowed — shapeBodies returns empty shaping in that case.
+    Object.assign(emailObject, this.shapeBodies(email.textBody, email.htmlBody));
 
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
@@ -537,6 +532,21 @@ export class JmapClient {
   private bodyValueForType(parts: any[] | undefined, mimeType: string, bodyValues: Record<string, any>): string | undefined {
     const part = parts?.find((p: any) => p.type === mimeType && p.partId != null && bodyValues[p.partId]);
     return part ? bodyValues[part.partId].value : undefined;
+  }
+
+  // Apply the body-format law for an authoring path (sendEmail/createDraft) and return
+  // the JMAP body-part shaping to splat into the email object. normalizeBodies derives
+  // the text/plain fallback from html when none was supplied; we degrade gracefully —
+  // ship html-only when the html has visible media but no derivable text — and reject
+  // ONLY a genuinely no-body message (html present that renders to nothing AND has no
+  // image). A message with neither body returns empty shaping (a body-less draft is
+  // allowed; the no-body reject only fires when an html body was actually provided).
+  private shapeBodies(textBody?: string, htmlBody?: string) {
+    const law = normalizeBodies({ textBody, htmlBody });
+    if (law.htmlOnly && !htmlHasVisibleContent(htmlBody!)) {
+      throw new Error('This message has no readable body; add text or visible content.');
+    }
+    return buildBodyParts(law);
   }
 
   async updateDraft(emailId: string, updates: {
@@ -656,43 +666,68 @@ export class JmapClient {
     // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
     // discarded so stored bodies keep their exact (untrimmed) value below.
 
-    // Cross-format coupling guard. Writing exactly one body makes the draft single-format;
-    // refuse to silently discard a non-empty opposite partner (recipients render the HTML
-    // alternative per RFC 2046 §5.1.4, so a half-updated pair would ship stale). Resolve by
-    // supplying both bodies (keep the pair) or naming the partner in clearFields (drop it).
-    //
-    // The `existing*Value` truthiness check deliberately treats an empty string '' as "no
-    // partner," and it is safe to do so (verified 2026-06-24): every body-emitting path in
-    // this client truthy-gates (sendEmail, createDraft, the recreate below), so we never
-    // originate an empty '' part, and the recreate's emission drops any falsy body regardless
-    // of this guard — editing an externally-malformed "real-text + empty-html" draft is
-    // CLEANSED to a clean single-format draft, not corrupted. Tightening to `!== undefined`
-    // would only throw a confusing false-positive over content-free junk and gain no safety.
-    const wroteText = updates.textBody !== undefined;
-    const wroteHtml = updates.htmlBody !== undefined;
-    if (wroteText && !wroteHtml && existingHtmlValue && !clear.has('htmlBody')) {
-      throw new Error('updating textBody alone would discard the draft\'s existing htmlBody, which is what recipients render. Supply htmlBody as well to keep both formats in sync, or list "htmlBody" in clearFields to drop it deliberately.');
-    }
-    if (wroteHtml && !wroteText && existingTextValue && !clear.has('textBody')) {
-      throw new Error('updating htmlBody alone would discard the draft\'s existing textBody. Supply textBody as well to keep both formats in sync, or list "textBody" in clearFields to drop it deliberately.');
-    }
-
-    // Merge: updates override existing values; clearFields force the empty/none value.
+    // Merge non-body fields: updates override existing; clearFields force the empty value.
     const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));
     const mergedTo      = clear.has('to')      ? [] : (updates.to      !== undefined ? updates.to.map(parseAddress)      : (existingEmail.to || []));
     const mergedCc      = clear.has('cc')      ? [] : (updates.cc      !== undefined ? updates.cc.map(parseAddress)      : (existingEmail.cc || []));
     const mergedBcc     = clear.has('bcc')     ? [] : (updates.bcc     !== undefined ? updates.bcc.map(parseAddress)     : (existingEmail.bcc || []));
     const mergedReplyTo = clear.has('replyTo') ? [] : (updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null));
 
-    // A written body drops the unwritten partner (single-format intent, guarded above);
-    // a no-body edit (subject/recipients only) preserves both.
+    // ---- Body-format pipeline: one-sided guard + the law ----
+    // The text part is a DERIVED fallback when html is present. So:
+    //  - editing htmlBody alone REGENERATES the text fallback from the new html (no throw);
+    //  - editing textBody alone (while a non-empty html survives) is rejected — it won't
+    //    change what most recipients render (the html), and the fallback is auto-managed;
+    //  - a metadata-only edit (no body written) stays body-invariant (both bodies kept).
+    const wroteText = updates.textBody !== undefined;
+    const wroteHtml = updates.htmlBody !== undefined;
     const wroteAnyBody = wroteText || wroteHtml;
-    const textBodyValue = clear.has('textBody') ? undefined
+
+    // Raw merge: a written body drops the unwritten partner (single-format intent);
+    // a no-body edit preserves both; clearFields force the body absent.
+    const mergedTextRaw = clear.has('textBody') ? undefined
       : (updates.textBody !== undefined ? updates.textBody
       : (wroteAnyBody ? undefined : existingTextValue));
-    const htmlBodyValue = clear.has('htmlBody') ? undefined
+    const mergedHtmlRaw = clear.has('htmlBody') ? undefined
       : (updates.htmlBody !== undefined ? updates.htmlBody
       : (wroteAnyBody ? undefined : existingHtmlValue));
+
+    // Guard: editing textBody alone while a non-empty htmlBody survives (checked against
+    // the EXISTING html, since the raw merge has already dropped the unwritten partner).
+    if (wroteText && !wroteHtml && !clear.has('htmlBody') && !isBlank(existingHtmlValue)) {
+      throw new Error('editing textBody alone won\'t change what most recipients see (they render htmlBody). To change the message, edit htmlBody (the text fallback regenerates automatically); to save a custom plain-text alternative, supply htmlBody alongside it; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
+    }
+
+    // Guard: clearFields:['textBody'] while htmlBody survives — the text fallback is
+    // managed automatically (regenerated from html, or html-only if none is derivable), so
+    // clearing it on its own is rejected. Evaluated against the MERGED html and BEFORE the
+    // law runs (else the law would silently refill it). Allowed when html is also cleared.
+    if (clear.has('textBody') && !clear.has('htmlBody') && !isBlank(mergedHtmlRaw)) {
+      throw new Error('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
+    }
+
+    // Apply the law, but ONLY when a body was actually written — a metadata-only edit must
+    // stay body-invariant (it must NOT inject a text part into an html-only draft). When
+    // html was (re)written without text, regenerate the text fallback from the new html;
+    // degrade gracefully (ship html-only) if none is derivable but the html has visible
+    // content; reject a genuinely no-body result.
+    let textBodyValue = mergedTextRaw;
+    let htmlBodyValue = mergedHtmlRaw;
+    if (wroteAnyBody) {
+      const law = normalizeBodies({ textBody: mergedTextRaw, htmlBody: mergedHtmlRaw });
+      textBodyValue = law.textBody;
+      htmlBodyValue = law.htmlBody;
+      if (law.htmlOnly && !htmlHasVisibleContent(mergedHtmlRaw!)) {
+        throw new Error('This message has no readable body; add text or visible content.');
+      }
+    }
+
+    // Reject a body-less result (clearing the only body, or both). A draft keeps >=1 body.
+    // Distinct from the clear-text-while-html guard (which only fires when merged html IS
+    // present), so the two can't both match.
+    if (isBlank(textBodyValue) && isBlank(htmlBodyValue)) {
+      throw new Error('a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
+    }
 
     // Carry existing (non-inline) attachments by referencing their existing blobIds.
     // Whitelist exactly these fields — a blob-backed part is blobId XOR partId, and
@@ -723,14 +758,7 @@ export class JmapClient {
       ...(carriedAttachments.length && { attachments: carriedAttachments }),
     };
 
-    if (textBodyValue) emailObject.textBody = [{ partId: 'text', type: 'text/plain' }];
-    if (htmlBodyValue) emailObject.htmlBody = [{ partId: 'html', type: 'text/html' }];
-    if (textBodyValue || htmlBodyValue) {
-      emailObject.bodyValues = {
-        ...(textBodyValue && { text: { value: textBodyValue } }),
-        ...(htmlBodyValue && { html: { value: htmlBodyValue } }),
-      };
-    }
+    Object.assign(emailObject, buildBodyParts({ textBody: textBodyValue, htmlBody: htmlBodyValue }));
 
     // Create-then-delete (NOT a single combined create+destroy call). JMAP content is
     // immutable — verified live 2026-06-24 that Fastmail SILENTLY NO-OPS an in-place
