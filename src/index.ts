@@ -14,8 +14,7 @@ import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens } from './coerce.js';
-import { buildReplyBodies } from './reply-quote.js';
-import { isBlank } from './body-format.js';
+import { buildReplyParams } from './reply-handler.js';
 
 const server = new Server(
   {
@@ -1246,66 +1245,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'reply_email': {
-        const { originalEmailId, from, textBody, htmlBody, send } = args as any;
-        const { to: toArray, cc, bcc, replyTo } = coerceRecipients(args as any);
-        const shouldSend = coerceBool(send) ?? true;
-        const quoteOriginal = coerceBool((args as any).quoteOriginal) ?? true;
+        const { originalEmailId } = args as any;
         if (!originalEmailId) {
           throw new McpError(ErrorCode.InvalidParams, 'originalEmailId is required');
         }
-        // Trim-based so a whitespace-only htmlBody:'   ' (+ quoteOriginal) can't slip through
-        // and produce a "   " + quote reply; it flows to the same no-body handling everywhere.
-        if (shouldSend && isBlank(textBody) && isBlank(htmlBody)) {
-          throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
-        }
 
-        // Fetch the original email to get threading headers
+        // Fetch the original, then assemble the reply (threading headers, Re: subject,
+        // recipient defaulting, the attributed quote, body validation). buildReplyParams is
+        // a pure, unit-tested helper so this wiring stays thin.
         const originalEmail = await client.getEmailById(originalEmailId);
-
-        // Build threading headers
-        const originalMessageId = originalEmail.messageId?.[0];
-        if (!originalMessageId) {
-          throw new McpError(ErrorCode.InternalError, 'Original email does not have a Message-ID; cannot thread reply');
-        }
-
-        const inReplyToHeader = [originalMessageId];
-        const referencesHeader = [
-          ...(originalEmail.references || []),
-          originalMessageId,
-        ];
-
-        // Build subject with Re: prefix
-        let replySubject = originalEmail.subject || '';
-        if (!/^Re:/i.test(replySubject)) {
-          replySubject = `Re: ${replySubject}`;
-        }
-
-        // Default recipients to the original sender
-        const replyRecipients = (toArray && toArray.length > 0)
-          ? toArray
-          : (Array.isArray(originalEmail.from) ? originalEmail.from.map((addr: any) => addr.email).filter(Boolean) : []);
-
-        if (replyRecipients.length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, 'Could not determine reply recipient. Please provide "to" explicitly.');
-        }
-
-        // Append the original as an attributed, top-posted quote (default on). Returns only
-        // the formats the caller supplied; createDraft/sendEmail then add the auto text/plain
-        // fallback for an html-only reply, so no double-quoting.
-        const quoted = buildReplyBodies({ original: originalEmail, textBody, htmlBody, quoteOriginal });
-
-        const replyParams = {
-          to: replyRecipients,
-          cc,
-          bcc,
-          from,
-          subject: replySubject,
-          textBody: quoted.textBody,
-          htmlBody: quoted.htmlBody,
-          inReplyTo: inReplyToHeader,
-          references: referencesHeader,
-          replyTo,
-        };
+        const { shouldSend, replyParams } = buildReplyParams(args, originalEmail);
+        const replySubject = replyParams.subject;
 
         if (!shouldSend) {
           const emailId = await client.createDraft(replyParams);
