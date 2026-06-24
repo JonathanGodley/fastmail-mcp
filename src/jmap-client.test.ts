@@ -1009,6 +1009,23 @@ describe('sendDraft', () => {
 
     assert.equal(await client.sendDraft('draft-1'), 'sub-1');
   });
+
+  it('sends an html-only draft with real content as-is (image-only/html-only mail is valid)', async () => {
+    const htmlOnly = {
+      ...SENDABLE_DRAFT,
+      textBody: [{ partId: '2', type: 'text/html' }], // single html part aliased into both lists
+      htmlBody: [{ partId: '2', type: 'text/html' }],
+      bodyValues: { '2': { value: '<div><img src="https://x/banner.jpg"></div>' } },
+    };
+    mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [htmlOnly] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    assert.equal(await client.sendDraft('draft-1'), 'sub-1'); // not rejected — html-only is sendable
+  });
 });
 
 // ---------- JMAP response validation ----------
