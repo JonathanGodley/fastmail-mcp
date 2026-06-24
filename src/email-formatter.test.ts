@@ -564,3 +564,52 @@ describe('simplifyEmail attachment partId', () => {
     assert.equal(result.attachments![0].partId, 'part-1');
   });
 });
+
+describe('simplifyEmail mailboxes (#10)', () => {
+  // Helper: attach _mailboxNames the way the client layer does (non-enumerable).
+  function withNames(raw: any, names?: string[]): any {
+    if (names !== undefined) {
+      Object.defineProperty(raw, '_mailboxNames', { value: names, enumerable: false, configurable: true });
+    }
+    return raw;
+  }
+  const base = { id: 'm1', subject: 'Hi', from: [{ email: 'a@b.com' }] };
+
+  it('emits a single mailbox name', () => {
+    const result = simplifyEmail(withNames({ ...base }, ['Inbox']));
+    assert.deepEqual(result.mailboxes, ['Inbox']);
+  });
+
+  it('emits multiple names for multi-membership (labels are mailboxes)', () => {
+    const result = simplifyEmail(withNames({ ...base }, ['Inbox', 'Receipts']));
+    assert.deepEqual(result.mailboxes, ['Inbox', 'Receipts']);
+  });
+
+  it('uses the real name even for a custom label (role is null)', () => {
+    const result = simplifyEmail(withNames({ ...base }, ['🏷 Project X']));
+    assert.deepEqual(result.mailboxes, ['🏷 Project X']);
+  });
+
+  it('omits mailboxes when _mailboxNames is an empty array', () => {
+    const result = simplifyEmail(withNames({ ...base }, []));
+    assert.equal('mailboxes' in result, false);
+  });
+
+  it('omits mailboxes when _mailboxNames is absent', () => {
+    const result = simplifyEmail({ ...base });
+    assert.equal('mailboxes' in result, false);
+  });
+
+  it('disambiguates a trashed draft: isDraft:true AND mailboxes:["Trash"]', () => {
+    const result = simplifyEmail(withNames({ ...base, keywords: { $draft: true } }, ['Trash']));
+    assert.equal(result.isDraft, true);
+    assert.deepEqual(result.mailboxes, ['Trash']);
+  });
+
+  it('_mailboxNames is non-enumerable: absent from JSON/Object.keys but still readable', () => {
+    const raw: any = withNames({ ...base }, ['Inbox']);
+    assert.equal(JSON.stringify(raw).includes('_mailboxNames'), false);
+    assert.equal(Object.keys(raw).includes('_mailboxNames'), false);
+    assert.deepEqual(raw._mailboxNames, ['Inbox']); // property is still readable for the formatter
+  });
+});

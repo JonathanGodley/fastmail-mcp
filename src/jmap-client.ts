@@ -34,7 +34,7 @@ export interface QueryResult<T = any> {
 export const EMAIL_PROPERTIES_COMPACT = [
   'id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt',
   'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo',
-  'hasAttachment', 'header:List-Unsubscribe:asURLs', 'blobId', 'size',
+  'hasAttachment', 'header:List-Unsubscribe:asURLs', 'blobId', 'size', 'mailboxIds',
 ] as const;
 
 // VERBOSE: superset with body properties — used by verbose mode, getEmailById, getThread(compact=false)
@@ -46,6 +46,33 @@ export const EMAIL_PROPERTIES_VERBOSE = [
 ] as const;
 
 export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name'] as const;
+
+// Build an id -> human name lookup from a Mailbox/get list. We key on the real
+// `name` (not `role`) so custom labels — which have role:null — resolve too;
+// default mailboxes already carry names like "Trash"/"Archive". (#10)
+export function buildMailboxNameMap(mailboxes: any[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const mb of mailboxes || []) {
+    if (mb && mb.id && typeof mb.name === 'string') map.set(mb.id, mb.name);
+  }
+  return map;
+}
+
+// Attach the resolved mailbox/label names onto each raw email as a NON-enumerable
+// `_mailboxNames` so JSON.stringify (the raw:true paths) omits it while
+// simplifyEmail can still read it. Attach only when the email actually has
+// mailboxIds and at least one resolved to a name — otherwise omit, don't
+// fabricate (an empty/unresolvable set leaves the field absent). (#10)
+export function attachMailboxNames(emails: any[], map: Map<string, string>): void {
+  for (const email of emails || []) {
+    if (!email || !email.mailboxIds) continue;
+    const ids = Object.keys(email.mailboxIds);
+    if (ids.length === 0) continue;
+    const names = ids.map(id => map.get(id)).filter(Boolean) as string[];
+    if (names.length === 0) continue;
+    Object.defineProperty(email, '_mailboxNames', { value: names, enumerable: false, configurable: true });
+  }
+}
 
 /** Match an email address against an identity, supporting wildcard identities (e.g. *@example.com). */
 function matchesIdentity(identityEmail: string, address: string): boolean {
@@ -93,6 +120,17 @@ export class JmapClient {
   protected getListResult(response: JmapResponse, index: number): any[] {
     const result = this.getMethodResult(response, index);
     return result?.list || [];
+  }
+
+  /**
+   * Like getListResult, but returns [] when the method at `index` is absent
+   * instead of throwing. Used for an appended Mailbox/get (the trailing #10
+   * mailbox-name resolver): a server that drops the trailing method, or an
+   * older 2-entry test stub, degrades to "no names resolved" rather than an error.
+   */
+  protected readListResultIfPresent(response: JmapResponse, index: number): any[] {
+    if (!response.methodResponses || index >= response.methodResponses.length) return [];
+    return this.getListResult(response, index);
   }
 
   /**
@@ -212,12 +250,15 @@ export class JmapClient {
           limit,
           calculateTotal: true
         }, 'query'],
-        ['Email/get', emailGetParams, 'emails']
+        ['Email/get', emailGetParams, 'emails'],
+        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
       ]
     };
 
     const response = await this.makeRequest(request);
-    return this.getQueryResult(response, 0, 1);
+    const result = this.getQueryResult(response, 0, 1);
+    attachMailboxNames(result.items, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
+    return result;
   }
 
   async getEmailById(id: string): Promise<any> {
@@ -238,7 +279,8 @@ export class JmapClient {
           bodyProperties: [...EMAIL_BODY_PROPERTIES],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
-        }, 'email']
+        }, 'email'],
+        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
       ]
     };
 
@@ -253,7 +295,8 @@ export class JmapClient {
     if (!email) {
       throw new Error(`Email with ID '${id}' not found or not accessible`);
     }
-    
+
+    attachMailboxNames([email], buildMailboxNameMap(this.readListResultIfPresent(response, 1)));
     return email;
   }
 
@@ -982,7 +1025,10 @@ export class JmapClient {
     };
 
     const response = await this.makeRequest(request);
-    return this.getQueryResult(response, 0, 1);
+    const result = this.getQueryResult(response, 0, 1);
+    // Reuse the mailbox list already fetched above to resolve names — no extra methodCall.
+    attachMailboxNames(result.items, buildMailboxNameMap(mailboxes));
+    return result;
   }
 
   async markEmailRead(emailId: string, read: boolean = true): Promise<void> {
@@ -1483,12 +1529,15 @@ export class JmapClient {
           limit: Math.min(filters.limit || 50, 100),
           calculateTotal: true
         }, 'query'],
-        ['Email/get', emailGetParams, 'emails']
+        ['Email/get', emailGetParams, 'emails'],
+        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
       ]
     };
 
     const response = await this.makeRequest(request);
-    return this.getQueryResult(response, 0, 1);
+    const result = this.getQueryResult(response, 0, 1);
+    attachMailboxNames(result.items, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
+    return result;
   }
 
   async searchEmails(query: string, limit: number = 20, ascending: boolean = false, excludeDrafts: boolean = false): Promise<QueryResult> {
@@ -1517,12 +1566,15 @@ export class JmapClient {
           limit,
           calculateTotal: true
         }, 'query'],
-        ['Email/get', emailGetParams, 'emails']
+        ['Email/get', emailGetParams, 'emails'],
+        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
       ]
     };
 
     const response = await this.makeRequest(request);
-    return this.getQueryResult(response, 0, 1);
+    const result = this.getQueryResult(response, 0, 1);
+    attachMailboxNames(result.items, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
+    return result;
   }
 
   async getThread(threadId: string, includeDrafts: boolean = false): Promise<any[]> {
@@ -1569,7 +1621,8 @@ export class JmapClient {
           accountId: session.accountId,
           ids: [actualThreadId]
         }, 'getThread'],
-        ['Email/get', emailGetParams, 'emails']
+        ['Email/get', emailGetParams, 'emails'],
+        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
       ]
     };
 
@@ -1581,10 +1634,14 @@ export class JmapClient {
       throw new Error(`Thread with ID '${actualThreadId}' not found`);
     }
 
+    // Resolve mailbox names onto the FULL list before filtering, so the draft
+    // filter below doesn't skip the attach for retained messages.
+    const emails = this.getListResult(response, 1);
+    attachMailboxNames(emails, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
+
     // Drafts (e.g. an in-progress reply) are noise when reading a conversation,
     // so exclude them by default. Identify by the $draft keyword (survives a
     // draft moved out of the Drafts mailbox); opt back in via includeDrafts.
-    const emails = this.getListResult(response, 1);
     return includeDrafts ? emails : emails.filter((e: any) => !e.keywords?.$draft);
   }
 

@@ -15,6 +15,7 @@ export interface SimplifiedEmail {
   isRead?: boolean;
   isFlagged?: boolean;
   isDraft?: boolean;
+  mailboxes?: string[];
   preview?: string;
   listUnsubscribe?: string[];
   hasAttachment?: boolean;
@@ -205,6 +206,10 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   addFlag(result, 'isRead', !!(raw.keywords?.$seen));
   addFlag(result, 'isFlagged', !!(raw.keywords?.$flagged));
   addFlag(result, 'isDraft', !!(raw.keywords?.$draft));
+  // Human-readable mailbox/label location, resolved in the client layer and
+  // attached as a non-enumerable `_mailboxNames`. Omitted when unresolvable.
+  // Disambiguates e.g. a trashed draft (["Trash"], still isDraft:true) from a live one. (#10)
+  addIf(result, 'mailboxes', raw._mailboxNames);
   addIf(result, 'preview', raw.preview);
   addIf(result, 'listUnsubscribe', raw['header:List-Unsubscribe:asURLs']);
   // hasAttachment is redundant when attachments array is present

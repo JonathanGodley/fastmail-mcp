@@ -162,7 +162,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'list_emails',
-        description: 'List emails from a mailbox. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time.',
+        description: 'List emails from a mailbox. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -188,7 +188,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time.',
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -454,7 +454,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'search_emails',
-        description: 'Search emails by subject or content. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Drafts are included by default; set excludeDrafts=true to omit draft messages from results (and from the total count).',
+        description: 'Search emails by subject or content. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one). Drafts are included by default; set excludeDrafts=true to omit draft messages from results (and from the total count).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -736,7 +736,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from inbox (like top-ten). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time.',
+        description: 'Get the most recent emails from inbox (like top-ten). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -907,7 +907,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'advanced_search',
-        description: 'Advanced email search with multiple criteria. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time.',
+        description: 'Advanced email search with multiple criteria. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -969,7 +969,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Draft messages are excluded by default; set includeDrafts=true to include in-progress drafts in the thread.',
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names each message belongs to (disambiguates e.g. a trashed draft from a live one). Draft messages are excluded by default; set includeDrafts=true to include in-progress drafts in the thread.',
         inputSchema: {
           type: 'object',
           properties: {

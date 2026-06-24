@@ -174,7 +174,7 @@ Email list/search tools don't support `verbose` — they always return metadata 
 
 ### Email fields
 
-**Default fields** (all email tools): `id`, `subject`, `from`, `date`, `threadId`, `messageId`, `references`, `to`, `cc`, `bcc`, `replyTo`, `inReplyTo`, `isRead`, `isReply`, `isFlagged`, `isDraft`, `keywords`, `preview`, `hasAttachment`, `attachments`, `listUnsubscribe`, `blobId`, `size`
+**Default fields** (all email tools): `id`, `subject`, `from`, `date`, `threadId`, `messageId`, `references`, `to`, `cc`, `bcc`, `replyTo`, `inReplyTo`, `isRead`, `isReply`, `isFlagged`, `isDraft`, `mailboxes`, `keywords`, `preview`, `hasAttachment`, `attachments`, `listUnsubscribe`, `blobId`, `size`
 
 **`get_email` also includes**: `bodyText`, `bodyHtmlSize` (character count hint — HTML omitted by default)
 
@@ -184,6 +184,7 @@ Email list/search tools don't support `verbose` — they always return metadata 
 - Addresses: `"Name <email>"` strings instead of `{name, email}` objects
 - Flags: `isRead`, `isReply`, `isFlagged`, `isDraft` derived from JMAP keywords. `isRead` always included (unread is meaningful); `isReply`, `isFlagged`, `isDraft` omitted when false
 - Non-standard keywords (e.g. `$hasattachment`) surfaced in a `keywords` field; standard keywords (`$seen`, `$flagged`, `$draft`) consumed by the boolean flags
+- `mailboxes`: an array of the human-readable mailbox/label names the message lives in (real mailbox `name`s, so custom labels resolve too). Multi-membership is real in Fastmail (labels are mailboxes), so the array can hold more than one name. Present when resolvable, omitted when empty/unresolvable. This disambiguates location that `isDraft` alone can't: a trashed draft shows `["Trash"]` while still reporting `isDraft: true`, distinguishing it from a live, editable draft. `raw: true` returns the underlying JMAP `mailboxIds` (opaque id-to-true map) instead.
 - HTML-only emails (no plain text) auto-include `bodyHtml` as fallback
 - `hasAttachment` omitted when false, and suppressed entirely when an `attachments` array is present (redundant)
 - Attachments simplified to `{contentType, size, blobId, partId?, name?}`
