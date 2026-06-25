@@ -46,7 +46,7 @@ Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
 
 **Handler logic must be unit-testable.** The `index.ts` CallTool `switch` has no test harness, so logic left inline there can only be exercised by a live run — which is not durable regression protection. When a handler does more than trivially destructure-and-delegate (orchestration, branching, threading uploaded data into multiple paths), extract it into a function that takes an **injected client** and unit-test it with a mock. The reply path is the pattern: `composeReply(args, client, attachDir)` in `src/reply-handler.ts` takes a `ReplyClient` interface (which `JmapClient` satisfies structurally), so both the send and draft attachment-threading branches are covered in `npm test` with no credentials and no network. The handler is then a thin result→text wrapper.
 
-**A live harness is on-demand proof of the real external path, never the sole coverage.** The only thing that proves the real upload/send path is a raw JSON-RPC harness spawning `dist/index.js` against a live account (with `FASTMAIL_API_TOKEN` + `FASTMAIL_ATTACH_DIR`) — Fastmail's blob store can't be meaningfully mocked. Use it to verify externally-observable behavior (byte-identical round-trip, server accept/reject), but it is a manual check that runs once; it must not be the only thing testing logic that could be unit-tested. "Verified once, live" ≠ "tested going forward."
+**A live harness is on-demand proof of the real external path, never the sole coverage.** The only thing that proves the real upload/send path is a raw JSON-RPC harness spawning `dist/index.js` against a live account (with `FASTMAIL_API_TOKEN` + `FASTMAIL_ATTACH_DIR`) — Fastmail's blob store can't be meaningfully mocked. Use it to verify externally-observable behavior (byte-identical round-trip, server accept/reject), but it is a manual check that runs once; it must not be the only thing testing logic that could be unit-tested. "Verified once, live" ≠ "tested going forward." The reusable harness lives at `scripts/mcp-harness.mjs` (`createClient({ env })` → `init`/`call`/`close`, matches responses by JSON-RPC `id`); use it rather than hand-writing a new client each time.
 
 ## Review findings get a disposition
 
@@ -60,7 +60,7 @@ When summarizing a review, state each finding's disposition plainly rather than 
 
 ## Releasing
 
-Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). `gh` defaults to the upstream `MadLlama25/fastmail-mcp`, so pass `--repo JonathanGodley/fastmail-mcp` on every release, tag, and issue command. Cut a release only when the user asks for it.
+Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). `gh` defaults to the upstream `MadLlama25/fastmail-mcp`, so pass `--repo JonathanGodley/fastmail-mcp` on every release, tag, and issue command. Cut a release only when the user asks for it. The step-by-step checklist (with the outward steps grouped behind a checkpoint) is the `/release` skill (`.claude/skills/release/SKILL.md`); this section is the rationale behind it.
 
 Prefer batching related changes into one release: every shipped change pays the documentation + 3-file version-bump tax (see **Version**), so bundling a cluster of related work amortizes it — for a two-line fix the tax is most of the work.
 
@@ -90,7 +90,7 @@ The dividing line: **an issue explains why ONE tool behaves as it does; a docs f
 
 **Offering a fix back (our work → theirs).** Any fix that addresses an upstream issue or a general bug (not a fork-differentiator feature) should be offered back as a focused, single-purpose PR once it lands and tests pass on the fork: cut a branch with just that fix (a `git worktree` off `upstream/main` keeps the fork's tree clean), reference the issue it closes, and don't drag in fork-only changes. Fork-only differentiators (the simplification system, etc.) are not auto-offered — upstream wants their own (issue #40).
 
-**⛔ Never comment on an upstream PR or issue directly.** Drafting the text is fine; a human posts it. The rule is about writing in *someone else's* repo. The fork's OWN issues are fine for Claude to open, comment on, and close (close only when the user says so — see the `github-comments-human-only` memory).
+**⛔ Never comment on an upstream PR or issue directly.** Drafting the text is fine; a human posts it. The rule is about writing in *someone else's* repo. The fork's OWN issues are fine for Claude to open, comment on, and close. **Close a fork issue as part of shipping its fix — but validate first:** confirm the fix is actually released (tag + GitHub release on origin, carried in the built `dist/`) and genuinely resolves the issue, then close with a release/commit-citing comment (see the `github-comments-human-only` memory).
 
 ## Artifacts read as standalone work
 

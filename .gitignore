@@ -7,7 +7,11 @@ dist/
 *.tsbuildinfo
 coverage/
 PLAN.md
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/**
+!.claude/skills/**/
+!.claude/skills/**/SKILL.md
 *.dxt
 test-live*.sh
 test-live*.mjs
