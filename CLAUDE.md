@@ -44,6 +44,20 @@ The MCP server runs from `dist/index.js`, not `src/`. After making changes, run 
 
 Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
 
+**Handler logic must be unit-testable.** The `index.ts` CallTool `switch` has no test harness, so logic left inline there can only be exercised by a live run — which is not durable regression protection. When a handler does more than trivially destructure-and-delegate (orchestration, branching, threading uploaded data into multiple paths), extract it into a function that takes an **injected client** and unit-test it with a mock. The reply path is the pattern: `composeReply(args, client, attachDir)` in `src/reply-handler.ts` takes a `ReplyClient` interface (which `JmapClient` satisfies structurally), so both the send and draft attachment-threading branches are covered in `npm test` with no credentials and no network. The handler is then a thin result→text wrapper.
+
+**A live harness is on-demand proof of the real external path, never the sole coverage.** The only thing that proves the real upload/send path is a raw JSON-RPC harness spawning `dist/index.js` against a live account (with `FASTMAIL_API_TOKEN` + `FASTMAIL_ATTACH_DIR`) — Fastmail's blob store can't be meaningfully mocked. Use it to verify externally-observable behavior (byte-identical round-trip, server accept/reject), but it is a manual check that runs once; it must not be the only thing testing logic that could be unit-tested. "Verified once, live" ≠ "tested going forward."
+
+## Review findings get a disposition
+
+A surfaced issue — from a review, a subagent, or a self-check — must end with an explicit disposition; never a silent drop. "Minor / nit / non-blocking" is a *severity*, not a disposition: a non-blocking issue that is neither fixed nor tracked is invisible to the next reader and hides forever. Each finding resolves to exactly one of:
+
+1. **Fixed now** — preferred for anything cheap and real (e.g. a guard that rejects valid input).
+2. **Tracked** — a fork GitHub issue (`--repo JonathanGodley/fastmail-mcp`). NOT a code `TODO`/comment: deferred work belongs in the issue tracker where it stays visible and triageable, not buried in a comment that never resurfaces.
+3. **Consciously declined** — allowed, but the *reason for declining* must live where the next reader will hit it: an in-code comment for a local call, or the `docs/*` rationale files for a cross-cutting/accepted residual (e.g. an inherent path-guard TOCTOU limit). This is for decisions that need no future action; anything meant to be revisited is deferred work and goes in an issue (2), not here. "We decided not to" with no written home does not count.
+
+When summarizing a review, state each finding's disposition plainly rather than burying declined items in a parenthetical, so the decision can be vetoed.
+
 ## Releasing
 
 Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). `gh` defaults to the upstream `MadLlama25/fastmail-mcp`, so pass `--repo JonathanGodley/fastmail-mcp` on every release, tag, and issue command. Cut a release only when the user asks for it.
