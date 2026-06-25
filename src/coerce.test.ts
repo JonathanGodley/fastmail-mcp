@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -304,5 +304,67 @@ describe('assertKnownParams (#11)', () => {
 
   it('does NOT reject a stringified-but-known key — key-strictness only, value-leniency is separate', () => {
     assert.doesNotThrow(() => assertKnownParams('list_emails', { limit: '20' }, allowed, false));
+  });
+});
+
+describe('coerceAttachments', () => {
+  it('returns undefined for undefined/null', () => {
+    assert.equal(coerceAttachments(undefined), undefined);
+    assert.equal(coerceAttachments(null), undefined);
+  });
+
+  it('passes through an array of well-formed specs', () => {
+    const specs = [{ path: 'a.pdf' }, { path: 'b.png', name: 'pic.png', contentType: 'image/png' }];
+    assert.deepEqual(coerceAttachments(specs), specs);
+  });
+
+  it('parses a JSON-stringified array (lenient client)', () => {
+    assert.deepEqual(
+      coerceAttachments('[{"path":"a.pdf"},{"path":"b.png","name":"pic"}]'),
+      [{ path: 'a.pdf' }, { path: 'b.png', name: 'pic' }],
+    );
+  });
+
+  it('parses a per-item JSON-object string', () => {
+    assert.deepEqual(coerceAttachments(['{"path":"a.pdf"}']), [{ path: 'a.pdf' }]);
+  });
+
+  it('rejects (does not drop) a spec missing path, naming the index', () => {
+    assert.throws(
+      () => coerceAttachments([{ name: 'x' }]),
+      (err: unknown) => err instanceof McpError && err.code === ErrorCode.InvalidParams && /attachments\[0\].*path/.test(err.message),
+    );
+  });
+
+  it('rejects a non-object element', () => {
+    assert.throws(
+      () => coerceAttachments([42]),
+      (err: unknown) => err instanceof McpError && /attachments\[0\]/.test(err.message),
+    );
+  });
+
+  it('rejects a bare (non-JSON) string element rather than guessing it is a path', () => {
+    assert.throws(
+      () => coerceAttachments(['a.pdf']),
+      (err: unknown) => err instanceof McpError && /not a bare string/.test(err.message),
+    );
+  });
+
+  it('rejects an unexpected per-item key (index + key named)', () => {
+    assert.throws(
+      () => coerceAttachments([{ path: 'a.pdf', bogus: 1 }]),
+      (err: unknown) => err instanceof McpError && /attachments\[0\].*bogus/.test(err.message),
+    );
+  });
+
+  it('rejects a non-array value', () => {
+    assert.throws(
+      () => coerceAttachments(42),
+      (err: unknown) => err instanceof McpError && /must be an array/.test(err.message),
+    );
+  });
+
+  it('trims an accidental leading/trailing space on path', () => {
+    assert.deepEqual(coerceAttachments([{ path: '  report.pdf  ' }]), [{ path: 'report.pdf' }]);
   });
 });

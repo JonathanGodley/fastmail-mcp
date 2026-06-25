@@ -1752,3 +1752,415 @@ describe('version sync', () => {
     assert.equal(pkg.version, indexMatch[1], 'package.json and index.ts versions must match');
   });
 });
+
+// ---------- outgoing attachments: uploadBlob ----------
+
+describe('uploadBlob', () => {
+  function clientWithUpload(): JmapClient {
+    const auth = new FastmailAuth({ apiToken: 'fake-token' });
+    const client = new JmapClient(auth);
+    mock.method(client, 'getSession', async () => ({
+      apiUrl: 'https://api.example.com/jmap/api/',
+      accountId: ACCOUNT_ID,
+      capabilities: {},
+      uploadUrl: 'https://up.example.com/upload/{accountId}/',
+    }));
+    return client;
+  }
+
+  it('POSTs raw bytes to the {accountId}-substituted uploadUrl with an explicit (non-json) Content-Type', async (t) => {
+    const client = clientWithUpload();
+    let captured: any;
+    t.mock.method(globalThis, 'fetch', async (url: any, init: any) => {
+      captured = { url, init };
+      return { ok: true, json: async () => ({ accountId: ACCOUNT_ID, blobId: 'blob-9', type: 'application/pdf', size: 3 }) } as any;
+    });
+
+    const result = await client.uploadBlob(Buffer.from([1, 2, 3]), 'application/pdf');
+
+    assert.equal(captured.url, `https://up.example.com/upload/${ACCOUNT_ID}/`);
+    assert.equal(captured.init.method, 'POST');
+    assert.equal(captured.init.headers['Content-Type'], 'application/pdf');
+    assert.notEqual(captured.init.headers['Content-Type'], 'application/json');
+    assert.equal(captured.init.headers['Authorization'], 'Bearer fake-token');
+    // Body is the raw bytes (a BufferSource view), never a JSON string.
+    assert.equal(typeof captured.init.body === 'string', false);
+    assert.equal(captured.init.body.byteLength, 3);
+    assert.equal(result.blobId, 'blob-9');
+    assert.equal(result.type, 'application/pdf');
+  });
+
+  it('uses the server-returned type as authoritative even if it differs from what we sent', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(globalThis, 'fetch', async () => ({
+      ok: true, json: async () => ({ accountId: ACCOUNT_ID, blobId: 'b', type: 'image/png', size: 1 }),
+    }) as any);
+    const result = await client.uploadBlob(Buffer.from([0]), 'application/octet-stream');
+    assert.equal(result.type, 'image/png');
+  });
+
+  it('throws when the session has no uploadUrl', async () => {
+    const auth = new FastmailAuth({ apiToken: 'fake-token' });
+    const client = new JmapClient(auth);
+    mock.method(client, 'getSession', async () => ({ apiUrl: 'x', accountId: ACCOUNT_ID, capabilities: {} }));
+    await assert.rejects(() => client.uploadBlob(Buffer.from([1]), 'text/plain'), /Upload capability not available/);
+  });
+
+  it('throws when the server response carries no blobId', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({}) }) as any);
+    await assert.rejects(() => client.uploadBlob(Buffer.from([1]), 'text/plain'), /no blobId/);
+  });
+});
+
+// ---------- outgoing attachments: safeReadPath (read confinement) ----------
+
+describe('safeReadPath (read confinement)', () => {
+  it('throws the opt-in error (no fs touch) when attachDir is undefined', async () => {
+    await assert.rejects(
+      () => JmapClient.safeReadPath('anything.pdf', undefined),
+      /FASTMAIL_ATTACH_DIR/,
+    );
+  });
+
+  it('returns a usable handle for a regular file inside the root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-read-'));
+    try {
+      await fsWriteFile(join(root, 'doc.pdf'), 'hello');
+      const { handle, size } = await JmapClient.safeReadPath('doc.pdf', root);
+      try {
+        assert.equal(size, 5);
+        const buf = Buffer.alloc(size);
+        await handle.read(buf, 0, size, 0);
+        assert.equal(buf.toString(), 'hello');
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a missing file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-read-'));
+    try {
+      await assert.rejects(() => JmapClient.safeReadPath('nope.pdf', root), /File not found/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a directory (not a regular file)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-read-'));
+    try {
+      await fsMkdir(join(root, 'subdir'));
+      // Any rejection is acceptable (the message varies by platform) — it must NOT resolve.
+      await assert.rejects(() => JmapClient.safeReadPath('subdir', root));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a path that escapes the root via ..', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-read-'));
+    try {
+      await assert.rejects(() => JmapClient.safeReadPath('../escape.txt', root), /must be within/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a symlink whose target escapes the root', async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-read-'));
+    const outsideDir = await mkdtemp(join(tmpdir(), 'fastmail-mcp-out-'));
+    try {
+      const outside = join(outsideDir, 'secret.txt');
+      await fsWriteFile(outside, 'secret');
+      try {
+        await symlink(outside, join(root, 'link.txt'));
+      } catch (err) {
+        if ((err as any)?.code === 'EPERM' || (err as any)?.code === 'EACCES') {
+          t.skip('symlink creation not permitted on this platform');
+          return;
+        }
+        throw err;
+      }
+      await assert.rejects(
+        () => JmapClient.safeReadPath('link.txt', root),
+        /outside the allowed directory|symlink escape/i,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the Windows escape shapes (UNC, device namespace, ADS, drive-relative, short name)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-read-'));
+    try {
+      const bad = ['\\\\server\\share\\f.txt', '\\\\?\\C:\\f.txt', 'doc.pdf:stream', 'C:relative', 'PROGRA~1\\f.txt'];
+      for (const input of bad) {
+        await assert.rejects(() => JmapClient.safeReadPath(input, root), /not allowed|drive-relative/);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT reject a legitimate filename that merely contains a tilde (only 8.3 ~digit forms)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-read-'));
+    try {
+      await fsWriteFile(join(root, 'report~final.txt'), 'ok'); // tilde + letter, not an 8.3 short name
+      const { handle } = await JmapClient.safeReadPath('report~final.txt', root);
+      await handle.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------- outgoing attachments: uploadAttachments (read + cap + part shape) ----------
+
+describe('uploadAttachments', () => {
+  function clientWithUpload(): JmapClient {
+    const auth = new FastmailAuth({ apiToken: 'fake-token' });
+    const client = new JmapClient(auth);
+    mock.method(client, 'getSession', async () => ({
+      apiUrl: 'https://api.example.com/jmap/api/',
+      accountId: ACCOUNT_ID,
+      capabilities: {},
+      uploadUrl: 'https://up.example.com/upload/{accountId}/',
+    }));
+    return client;
+  }
+
+  it('throws the opt-in error when attachDir is undefined', async () => {
+    const client = clientWithUpload();
+    await assert.rejects(
+      () => client.uploadAttachments([{ path: 'x.pdf' }], undefined),
+      /FASTMAIL_ATTACH_DIR/,
+    );
+  });
+
+  it('builds a fresh 4-key part from the server type, defaulting name to the basename', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(globalThis, 'fetch', async () => ({
+      ok: true, json: async () => ({ accountId: ACCOUNT_ID, blobId: 'blob-up', type: 'application/pdf', size: 5 }),
+    }) as any);
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      await fsWriteFile(join(root, 'report.pdf'), 'hello');
+      const parts = await client.uploadAttachments([{ path: 'report.pdf' }], root);
+      assert.deepEqual(parts, [
+        { blobId: 'blob-up', type: 'application/pdf', name: 'report.pdf', disposition: 'attachment' },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an invalid caller contentType before any read/upload', async () => {
+    const client = clientWithUpload();
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      await fsWriteFile(join(root, 'f.bin'), 'x');
+      await assert.rejects(
+        () => client.uploadAttachments([{ path: 'f.bin', contentType: 'not a mime type' }], root),
+        /invalid contentType/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads multiple files and returns a part per file (two-pass, in order)', async (t) => {
+    const client = clientWithUpload();
+    let n = 0;
+    t.mock.method(client, 'uploadBlob', async (data: Buffer, ct: string) => ({ blobId: 'blob-' + (++n), type: ct, size: data.length }));
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      await fsWriteFile(join(root, 'a.txt'), 'aa');
+      await fsWriteFile(join(root, 'b.txt'), 'bbb');
+      const parts = await client.uploadAttachments([{ path: 'a.txt' }, { path: 'b.txt', contentType: 'text/plain' }], root);
+      assert.deepEqual(parts.map(p => p.name), ['a.txt', 'b.txt']);
+      assert.deepEqual(parts.map(p => p.blobId), ['blob-1', 'blob-2']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('validates every file before uploading any — a later bad path uploads zero blobs (no orphans)', async (t) => {
+    const client = clientWithUpload();
+    let uploads = 0;
+    t.mock.method(client, 'uploadBlob', async () => { uploads++; return { blobId: 'x', type: 'text/plain', size: 1 }; });
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      await fsWriteFile(join(root, 'good.txt'), 'ok');
+      await assert.rejects(
+        // good.txt validates+opens in pass 1, then the escaping path rejects — pass 2 never runs.
+        () => client.uploadAttachments([{ path: 'good.txt' }, { path: '../escape.txt' }], root),
+        /must be within/,
+      );
+      assert.equal(uploads, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------- outgoing attachments wired into sendEmail / createDraft ----------
+
+describe('attachments on send/create', () => {
+  it('sendEmail places attachment parts in the email object (reply send branch)', async () => {
+    const client = makeClient();
+    mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, { id: 'mb-sent', name: 'Sent', role: 'sent' }]);
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/set', { created: { draft: { id: 'email-new' } } }, 'createEmail'],
+        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
+      ],
+    }));
+    const part = { blobId: 'b1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' };
+    await client.sendEmail({ to: ['bob@example.com'], subject: 'T', textBody: 'Hi', attachments: [part] });
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.attachments, [part]);
+  });
+
+  it('createDraft places attachment parts in the email object (reply draft branch)', async () => {
+    const client = makeClient();
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-42' } } }, 'createDraft']],
+    }));
+    const part = { blobId: 'b2', type: 'image/png', name: 'p.png', disposition: 'attachment' };
+    await client.createDraft({ subject: 'Hello', attachments: [part] });
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.attachments, [part]);
+  });
+
+  it('createDraft accepts an attachment-only draft (no to/subject/body) — attachments count as content', async () => {
+    const client = makeClient();
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-43' } } }, 'createDraft']],
+    }));
+    const part = { blobId: 'b3', type: 'application/pdf', name: 'only.pdf', disposition: 'attachment' };
+    const id = await client.createDraft({ attachments: [part] }); // must NOT throw the contentless guard
+    assert.equal(id, 'email-43');
+    assert.deepEqual(makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft.attachments, [part]);
+  });
+
+  it('createDraft still rejects a truly empty draft (no fields, no attachments)', async () => {
+    const client = makeClient();
+    await assert.rejects(
+      () => client.createDraft({}),
+      /At least one of to, subject, textBody, htmlBody, or attachments/,
+    );
+  });
+});
+
+// ---------- outgoing attachments: updateDraft append / remove / clear-all ----------
+
+describe('updateDraft attachments', () => {
+  let client: JmapClient;
+  beforeEach(() => { client = makeClient(); });
+
+  const NEW_PART = { blobId: 'new-blob', type: 'application/pdf', name: 'new.pdf', disposition: 'attachment' };
+
+  // One carried PDF attachment (blob-att / doc.pdf), no inline parts.
+  const DRAFT_ONE_ATT = {
+    ...EXISTING_DRAFT,
+    attachments: [{ blobId: 'blob-att', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment', cid: null, partId: '3', size: 1234 }],
+  };
+
+  it('appends new parts, keeping carried attachments', async () => {
+    const makeReq = mockUpdate(client, DRAFT_ONE_ATT);
+    await client.updateDraft('draft-1', { attachments: [NEW_PART] });
+    assert.deepEqual(draftFromCall(makeReq).attachments, [
+      { blobId: 'blob-att', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' },
+      NEW_PART,
+    ]);
+  });
+
+  it('removes a carried attachment by blobId', async () => {
+    const makeReq = mockUpdate(client, DRAFT_ONE_ATT);
+    await client.updateDraft('draft-1', { removeAttachments: ['blob-att'] });
+    assert.equal(draftFromCall(makeReq).attachments, undefined);
+  });
+
+  it('removes a carried attachment by a unique name', async () => {
+    const makeReq = mockUpdate(client, DRAFT_ONE_ATT);
+    await client.updateDraft('draft-1', { removeAttachments: ['doc.pdf'] });
+    assert.equal(draftFromCall(makeReq).attachments, undefined);
+  });
+
+  it('rejects a remove ref that matches nothing', async () => {
+    mockUpdate(client, DRAFT_ONE_ATT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { removeAttachments: ['nonexistent'] }),
+      /matched no attachment/,
+    );
+  });
+
+  it('rejects an ambiguous remove-by-name (more than one match)', async () => {
+    const dupDraft = {
+      ...EXISTING_DRAFT,
+      attachments: [
+        { blobId: 'b1', type: 'application/pdf', name: 'dup.pdf', disposition: 'attachment', cid: null, partId: '3', size: 1 },
+        { blobId: 'b2', type: 'application/pdf', name: 'dup.pdf', disposition: 'attachment', cid: null, partId: '4', size: 2 },
+      ],
+    };
+    mockUpdate(client, dupDraft);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { removeAttachments: ['dup.pdf'] }),
+      /matches 2 attachments by name/,
+    );
+  });
+
+  it('never matches a null-named attachment by name (and removes the named one only)', async () => {
+    const mixedDraft = {
+      ...EXISTING_DRAFT,
+      attachments: [
+        { blobId: 'b-null', type: 'application/octet-stream', name: null, disposition: 'attachment', cid: null, partId: '3', size: 1 },
+        { blobId: 'b-real', type: 'application/pdf', name: 'real.pdf', disposition: 'attachment', cid: null, partId: '4', size: 2 },
+      ],
+    };
+    const makeReq = mockUpdate(client, mixedDraft);
+    await client.updateDraft('draft-1', { removeAttachments: ['real.pdf'] });
+    // The null-named one survives; the named one is gone.
+    assert.deepEqual(draftFromCall(makeReq).attachments, [
+      { blobId: 'b-null', type: 'application/octet-stream', disposition: 'attachment' },
+    ]);
+  });
+
+  it('clears all attachments on clearFields:["attachments"]', async () => {
+    const makeReq = mockUpdate(client, DRAFT_ONE_ATT);
+    await client.updateDraft('draft-1', { clearFields: ['attachments'] });
+    assert.equal(draftFromCall(makeReq).attachments, undefined);
+  });
+
+  it('rejects attachments + clearFields:["attachments"] together (conflict)', async () => {
+    mockUpdate(client, DRAFT_ONE_ATT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { attachments: [NEW_PART], clearFields: ['attachments'] }),
+      /cannot both set and clear attachments/,
+    );
+  });
+
+  it('leaves a body-less draft body-invariant on an attachment-only edit (no no-body throw)', async () => {
+    const bodyless = { ...EXISTING_DRAFT, textBody: null, htmlBody: null, bodyValues: {} };
+    const makeReq = mockUpdate(client, bodyless);
+    const result = await client.updateDraft('draft-1', { attachments: [NEW_PART] });
+    assert.equal(result.id, 'draft-2');
+    const draft = draftFromCall(makeReq);
+    assert.deepEqual(draft.attachments, [NEW_PART]);
+    assert.equal(draft.textBody, undefined);
+    assert.equal(draft.htmlBody, undefined);
+  });
+
+  it('still throws the no-body error when the last body is cleared alongside an attachments change', async () => {
+    mockUpdate(client, DRAFT_ONE_ATT); // text-only draft with one attachment
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { attachments: [NEW_PART], clearFields: ['textBody'] }),
+      /a draft needs a body/,
+    );
+  });
+});

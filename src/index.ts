@@ -13,8 +13,8 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams } from './coerce.js';
-import { buildReplyParams } from './reply-handler.js';
+import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError } from './coerce.js';
+import { composeReply } from './reply-handler.js';
 
 const server = new Server(
   {
@@ -129,6 +129,56 @@ function getDownloadDir(): string | undefined {
     'USER_CONFIG_fastmail_download_dir',
     'fastmail_download_dir',
   ]).value;
+}
+
+// The directory attachable files must live within, for outgoing-attachment sending.
+// Resolved independently of the download dir (a shared value re-opens a download->
+// upload round-trip; that's the operator's explicit choice, not a default). No default
+// and no auto-create: an unset value leaves the capability disabled. Blank collapses to
+// undefined via findEnvValue, so FASTMAIL_ATTACH_DIR="" can't resolve to cwd.
+function getAttachDir(): string | undefined {
+  return findEnvValue([
+    'FASTMAIL_ATTACH_DIR',
+    'USER_CONFIG_FASTMAIL_ATTACH_DIR',
+    'USER_CONFIG_fastmail_attach_dir',
+    'fastmail_attach_dir',
+  ]).value;
+}
+
+// Shared `attachments` schema + description for the compose tools. Read getAttachDir()
+// at module load (same as the download `path` description reads getDownloadDir()), and
+// render an honest disabled clause when it's unset — attachments have no fallback
+// default the way downloads do, so we must not print a phantom root.
+function attachmentsDescription(forEdit: boolean): string {
+  const dir = getAttachDir();
+  const gate = dir
+    ? `Files must resolve within ${dir} (set via FASTMAIL_ATTACH_DIR); a bare filename or relative path resolves against it, and an absolute path must fall inside it.`
+    : `Attachments are disabled until FASTMAIL_ATTACH_DIR is set (restart to enable); each path will then resolve within that directory.`;
+  const base =
+    `Files to attach, each an object { path (required), name?, contentType? }. ${gate} ` +
+    `contentType is inferred from the file extension when omitted; an explicit contentType is echoed by Fastmail as-is (not re-detected), so a wrong value rides out wrong. ` +
+    `Size caps (~25 MB/file, ~45 MB total) are a fail-fast guard — Fastmail's own limit ultimately governs.`;
+  if (!forEdit) return base;
+  return base +
+    ` On edit_draft this APPENDS to the draft's existing attachments (they are kept). ` +
+    `To remove specific ones, use removeAttachments (pass the blobId from get_email_attachments; a unique attachment name also works). ` +
+    `To remove all, use clearFields:['attachments']. Passing attachments together with clearFields:['attachments'] is rejected as a conflict.`;
+}
+
+function attachmentsSchemaProperty(forEdit: boolean) {
+  return {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Path to the file to attach: an absolute path within the attach directory, or a bare filename/relative path resolved against it.' },
+        name: { type: 'string', description: "Filename recipients see (optional; defaults to the file's basename)." },
+        contentType: { type: 'string', description: 'MIME type like application/pdf (optional; inferred from the file extension when omitted).' },
+      },
+      required: ['path'],
+    },
+    description: attachmentsDescription(forEdit),
+  };
 }
 
 function getTimezone(): string | undefined {
@@ -267,6 +317,7 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
+            attachments: attachmentsSchemaProperty(false),
           },
           required: ['to', 'subject'],
         },
@@ -321,6 +372,7 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
+            attachments: attachmentsSchemaProperty(false),
           },
           required: ['originalEmailId'],
         },
@@ -381,6 +433,7 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
+            attachments: attachmentsSchemaProperty(false),
           },
         },
       },
@@ -430,10 +483,16 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
+            attachments: attachmentsSchemaProperty(true),
+            removeAttachments: {
+              type: 'array',
+              items: { type: 'string' },
+              description: "Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. To remove every attachment, use clearFields:['attachments'] instead.",
+            },
             clearFields: {
               type: 'array',
-              items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody'] },
-              description: 'Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody. `from` cannot be cleared. Cannot also pass the same field as a value.',
+              items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments'] },
+              description: "Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected).",
             },
           },
           required: ['emailId'],
@@ -886,7 +945,7 @@ const TOOLS = [
       },
       {
         name: 'download_attachment',
-        description: 'Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.',
+        description: 'Download an email attachment. If path is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -898,7 +957,7 @@ const TOOLS = [
               type: 'string',
               description: 'ID of the attachment',
             },
-            savePath: {
+            path: {
               type: 'string',
               description: `File path to save the attachment to. May be absolute or relative; relative paths resolve against ${getDownloadDir() || '~/Downloads/fastmail-mcp/'} (configurable via FASTMAIL_DOWNLOAD_DIR), so a bare filename lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected for security. To save directly into your own location, set FASTMAIL_DOWNLOAD_DIR to that root. Parent directories will be created automatically.`,
             },
@@ -1240,6 +1299,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
         }
 
+        const sendAttachmentSpecs = coerceAttachments((args as any).attachments);
+        const sendAttachments = sendAttachmentSpecs?.length
+          ? await client.uploadAttachments(sendAttachmentSpecs, getAttachDir())
+          : undefined;
+
         const submissionId = await client.sendEmail({
           to: toArray,
           cc,
@@ -1252,6 +1316,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           inReplyTo,
           references,
           replyTo,
+          attachments: sendAttachments,
         });
 
         return {
@@ -1265,49 +1330,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'reply_email': {
-        const { originalEmailId } = args as any;
-        if (!originalEmailId) {
-          throw new McpError(ErrorCode.InvalidParams, 'originalEmailId is required');
-        }
-
-        // Fetch the original, then assemble the reply (threading headers, Re: subject,
-        // recipient defaulting, the attributed quote, body validation). buildReplyParams is
-        // a pure, unit-tested helper so this wiring stays thin.
-        const originalEmail = await client.getEmailById(originalEmailId);
-        const { shouldSend, replyParams } = buildReplyParams(args, originalEmail);
-        const replySubject = replyParams.subject;
-
-        if (!shouldSend) {
-          const emailId = await client.createDraft(replyParams);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Reply draft saved successfully (Email ID: ${emailId}). Subject: ${replySubject}`,
-              },
-            ],
-          };
-        }
-
-        const submissionId = await client.sendEmail(replyParams);
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Reply sent successfully. Submission ID: ${submissionId}`,
-            },
-          ],
-        };
+        // The orchestration (fetch original, assemble reply, upload + thread attachments
+        // into both branches, create-or-send) lives in composeReply so it is unit-testable
+        // with a mock client; this handler just maps the result to the response text.
+        const result = await composeReply(args, client, getAttachDir());
+        const text = result.sent
+          ? `Reply sent successfully. Submission ID: ${result.submissionId}`
+          : `Reply draft saved successfully (Email ID: ${result.emailId}). Subject: ${result.subject}`;
+        return { content: [{ type: 'text', text }] };
       }
 
       case 'create_draft': {
         const { from, mailboxId, subject, textBody, htmlBody, inReplyTo, references } = args as any;
         const { to, cc, bcc, replyTo } = coerceRecipients(args as any);
+        // Coerce attachments BEFORE the contentless guard so an attachment-only draft
+        // (a legitimate "stash this file" artifact, consistent with edit_draft accepting
+        // a body-less attachment edit) counts as content. A lenient client may send a
+        // JSON-string array, so test the coerced specs, not the raw arg.
+        const draftAttachmentSpecs = coerceAttachments((args as any).attachments);
 
-        if (!to?.length && !subject && !textBody && !htmlBody) {
-          throw new McpError(ErrorCode.InvalidParams, 'At least one of to, subject, textBody, or htmlBody must be provided');
+        if (!to?.length && !subject && !textBody && !htmlBody && !draftAttachmentSpecs?.length) {
+          throw new McpError(ErrorCode.InvalidParams, 'At least one of to, subject, textBody, htmlBody, or attachments must be provided');
         }
+
+        const draftAttachments = draftAttachmentSpecs?.length
+          ? await client.uploadAttachments(draftAttachmentSpecs, getAttachDir())
+          : undefined;
 
         const emailId = await client.createDraft({
           to,
@@ -1321,6 +1369,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           inReplyTo,
           references,
           replyTo,
+          attachments: draftAttachments,
         });
 
         const summary = [
@@ -1344,9 +1393,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { emailId, from, subject, textBody, htmlBody } = args as any;
         const { to, cc, bcc, replyTo } = coerceRecipients(args as any);
         const clearFields = coerceStringArray((args as any).clearFields);
+        const removeAttachments = coerceStringArray((args as any).removeAttachments);
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
+
+        const editAttachmentSpecs = coerceAttachments((args as any).attachments);
+        const editAttachments = editAttachmentSpecs?.length
+          ? await client.uploadAttachments(editAttachmentSpecs, getAttachDir())
+          : undefined;
 
         const { id: newEmailId, orphanedOldDraftId } = await client.updateDraft(emailId, {
           to,
@@ -1358,6 +1413,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           htmlBody,
           replyTo,
           clearFields,
+          attachments: editAttachments,
+          removeAttachments,
         });
 
         // JMAP content is immutable, so an edit creates a replacement draft and removes
@@ -1706,14 +1763,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'download_attachment': {
-        const { emailId, attachmentId, savePath } = args as any;
+        const { emailId, attachmentId, path } = args as any;
         if (!emailId || !attachmentId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId and attachmentId are required');
         }
         const client = initializeClient();
         try {
-          if (savePath) {
-            const result = await client.downloadAttachmentToFile(emailId, attachmentId, savePath, getDownloadDir());
+          if (path) {
+            const result = await client.downloadAttachmentToFile(emailId, attachmentId, path, getDownloadDir());
             return {
               content: [
                 {
@@ -1734,11 +1791,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
         } catch (error) {
-          // Let path validation errors through so users see why their savePath was rejected
-          if (error instanceof Error && (error.message.includes('Save path') || error.message.includes('null bytes'))) {
+          // Let path-confinement rejections through so the caller sees why their path was
+          // rejected. PathAccessError is the tagged discriminator (the path guards no
+          // longer prefix "Save path", so a substring match would miss them).
+          if (error instanceof PathAccessError) {
             throw new McpError(ErrorCode.InvalidParams, error.message);
           }
-          // Sanitize other errors to avoid leaking attachment metadata
+          // Sanitize other errors to avoid leaking attachment metadata. This branch is
+          // retained deliberately: redactBearerTokens at the top level would not suppress
+          // attachment metadata in a transport/JMAP error message, so we keep the local
+          // generic message instead of letting such errors reach the top-level catch.
           throw new McpError(
             ErrorCode.InternalError,
             'Attachment download failed. Verify emailId and attachmentId and try again.'
@@ -2114,6 +2176,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (error) {
     if (error instanceof McpError) {
       throw error;
+    }
+    // The four compose handlers (send_email/reply_email/create_draft/edit_draft) have no
+    // local try/catch, so an attachment opt-in/path/contentType rejection thrown as a
+    // PathAccessError surfaces here. Map it to InvalidParams (actionable) rather than the
+    // generic InternalError wrap below. (download_attachment maps its own PathAccessError
+    // locally and never reaches here.)
+    if (error instanceof PathAccessError) {
+      throw new McpError(ErrorCode.InvalidParams, error.message);
     }
     const raw = error instanceof Error ? error.message : String(error);
     throw new McpError(

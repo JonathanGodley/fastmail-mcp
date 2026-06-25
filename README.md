@@ -12,7 +12,8 @@ This fork adds a **response simplification system** that reduces token usage whe
 - **Readable text/plain fallback** — when you supply only `htmlBody`, a plain-text alternative is generated automatically whenever one can be derived from the HTML (accessibility + deliverability). An image-only message with no derivable text still sends HTML-only; only a genuinely no-body send is rejected.
 - **Faithful draft edits** — `edit_draft` preserves the draft's threading headers (In-Reply-To/References), attachments, and keywords across the immutable-email recreate, instead of silently dropping them.
 - **Sending ergonomics** — drafts carry the identity's display name (parity with send); recipient strings like `"Name <email>"` are parsed across send/draft.
-- **Attachment paths** — relative `download_attachment` savePaths resolve inside the configured download dir, so a bare filename lands there in one step.
+- **Outgoing attachments** — attach local files to a sent mail, draft, reply, or edited draft (append / remove-by-ref / clear-all). Disabled until you opt in by setting `FASTMAIL_ATTACH_DIR`, and confined to that directory (reading a local file to email it out is an exfiltration vector). See [Sending attachments](#sending-attachments).
+- **Attachment paths** — relative `download_attachment` paths resolve inside the configured download dir, so a bare filename lands there in one step.
 
 ## Features
 
@@ -26,7 +27,7 @@ This fork adds a **response simplification system** that reduces token usage whe
 - Email management: mark read/unread, pin/unpin, delete, move between folders
 
 ### Advanced Email Features
-- **Attachment Handling**: List and download email attachments
+- **Attachment Handling**: List and download email attachments; attach local files to outgoing mail (opt-in via `FASTMAIL_ATTACH_DIR`)
 - **Threading Support**: Get complete conversation threads
 - **Advanced Search**: Multi-criteria filtering (sender, date range, attachments, read status)
 - **Bulk Operations**: Process multiple emails simultaneously
@@ -88,9 +89,16 @@ This fork adds a **response simplification system** that reduces token usage whe
    # For self-hosted JMAP servers, also set FASTMAIL_ALLOW_UNSAFE_BASE_URL=true.
    export FASTMAIL_BASE_URL="https://api.fastmail.com"
    # Optional: customize attachment download directory (defaults to ~/Downloads/fastmail-mcp/).
-   # download_attachment savePaths are confined to this directory; set it to the root
+   # download_attachment paths are confined to this directory; set it to the root
    # you want attachments saved under to write there directly in one step.
    export FASTMAIL_DOWNLOAD_DIR="/path/to/your/downloads"
+   # Optional (opt-in): enable SENDING attachments. Until this is set, attaching a file
+   # to an outgoing mail/draft is disabled and every attempt fails loudly — reading a
+   # local file to email it out is an exfiltration vector, so it stays off by default.
+   # When set, attachable files are confined to this directory (resolved independently
+   # of FASTMAIL_DOWNLOAD_DIR; see the security note in "Sending attachments"). Restart
+   # the server after setting it to enable the capability.
+   export FASTMAIL_ATTACH_DIR="/path/to/attachable/files"
    # Optional: timezone for rendering email date fields in local time with a UTC
    # offset. Accepts an IANA name (e.g. America/New_York). Defaults to the server
    # host's timezone; set it if the server runs in a different timezone than you.
@@ -245,15 +253,16 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 - **get_email**: Get a specific email by ID. Returns plain text body with HTML omitted (bodyHtmlSize hint provided). Only use `verbose` if you specifically need the HTML body — it can be very large for marketing emails.
   - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `raw` (optional, return original JMAP response)
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
-  - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array)
+  - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Set `send=false` to save as draft instead of sending. The original is **quoted by default** (attributed, top-posted, matching the web client with a portable quote-bar style); set `quoteOriginal=false` to omit it. Quoted HTML is reproduced **sanitised** (script/style/event handlers stripped; formatting and real `http(s)` images kept; inline `cid:` images omitted — see [#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)) and is re-sent under your From address. (This tool returns a status string, not email data, so `raw`/simplification do not apply.)
-  - Parameters: `originalEmailId` (required), `to` (optional array, defaults to original sender), `cc` (optional array), `bcc` (optional array), `from` (optional), `textBody` (optional), `htmlBody` (optional), `send` (optional boolean, default: true), `quoteOriginal` (optional boolean, default: true), `replyTo` (optional array)
+  - Parameters: `originalEmailId` (required), `to` (optional array, defaults to original sender), `cc` (optional array), `bcc` (optional array), `from` (optional), `textBody` (optional), `htmlBody` (optional), `send` (optional boolean, default: true), `quoteOriginal` (optional boolean, default: true), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **create_draft**: Create an email draft without sending. Supports threading headers for replies. Each call creates a new draft.
-  - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array)
+  - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **edit_draft**: Edit an existing draft email. Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new). The edit preserves the draft's threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can't be removed, you may be left with a duplicate draft rather than none. A draft containing inline (`cid:`) images, or a body part that isn't plain text or HTML, can't be preserved by editing and is **rejected** — recreate it instead (see [#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)). Only fields you provide are changed; omit a field to leave it unchanged.
-  - Parameters: `emailId` (required), `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `replyTo` (optional array), `clearFields` (optional array)
+  - Parameters: `emailId` (required), `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `replyTo` (optional array), `clearFields` (optional array), `attachments` (optional array — **appends**), `removeAttachments` (optional array of blobId/name)
+  - **Attachments on edit.** `attachments` **appends** to the draft's existing attachments (they are kept). Remove specific ones with `removeAttachments` (pass the `blobId` from `get_email_attachments`; a unique attachment name also works — a ref matching nothing, or a name matching more than one, is rejected). Remove all with `clearFields:['attachments']`. Passing `attachments` together with `clearFields:['attachments']` is rejected as a conflict. See [Sending attachments](#sending-attachments).
   - **Empty values are rejected.** Passing an empty string or empty array for a field (e.g. `subject: ""`, `to: []`) is an error, not a silent clear — it's almost always an accidental clobber. To deliberately blank a field, name it in `clearFields`.
-  - **`clearFields`**: list of field names to clear to empty/none. Allowed: `to`, `cc`, `bcc`, `replyTo`, `subject`, `textBody`, `htmlBody`. `from` cannot be cleared (a draft always has a sender, matching the Fastmail UI). You cannot both pass a field as a value and list it in `clearFields`. A cleared draft is still a valid draft; it just may not be sendable (e.g. with no recipients).
+  - **`clearFields`**: list of field names to clear to empty/none. Allowed: `to`, `cc`, `bcc`, `replyTo`, `subject`, `textBody`, `htmlBody`, `attachments`. `from` cannot be cleared (a draft always has a sender, matching the Fastmail UI). You cannot both pass a field as a value and list it in `clearFields`. A cleared draft is still a valid draft; it just may not be sendable (e.g. with no recipients).
   - **The text body is an auto-managed fallback of the HTML.** Editing `htmlBody` alone **regenerates** `textBody` from the new HTML (so an html-alone edit discards any custom `textBody` the draft had). Editing `textBody` alone while `htmlBody` is present is **rejected** — it would not change what recipients render (the HTML), and the fallback is managed automatically; to change the message edit `htmlBody`, or supply both bodies to store a custom plain-text alternative. `clearFields:['textBody']` while `htmlBody` is present is **rejected** for the same reason; use `clearFields:['htmlBody']` to convert the draft to a plain-text email. A subject/recipient-only edit (no body written) leaves both bodies untouched. An edit that would leave the draft with no body at all is **rejected**.
 - **send_draft**: Send an existing draft email. The draft must have recipients and a from address. Moves the email to the Sent folder. An **HTML-only draft with real content** (e.g. an image-only message) sends as-is — image-only/HTML-only mail is valid. Only a **genuinely empty body part** (e.g. a blank `htmlBody` alongside real text, which can happen for drafts created in other clients) is **rejected**: an empty `text/html` part renders blank and shadows a real `text/plain`, so the recipient would see nothing. Edit the draft to supply or clear that body first. (Drafts created by this server never carry an empty part; every send/draft path drops empty bodies on write.)
   - Parameters: `emailId` (required)
@@ -279,9 +288,9 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 
 - **get_email_attachments**: Get list of attachments for an email
   - Parameters: `emailId` (required)
-- **download_attachment**: Download an email attachment. If savePath is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.
-  - Parameters: `emailId` (required), `attachmentId` (required), `savePath` (optional)
-  - `savePath` may be absolute or relative. Relative paths (including a bare filename) resolve against the download directory, so an attachment lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected. To save directly into your own location, set `FASTMAIL_DOWNLOAD_DIR` to that root (see [Setup](#setup)) — confinement stays on, scoped to the directory you choose.
+- **download_attachment**: Download an email attachment. If path is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.
+  - Parameters: `emailId` (required), `attachmentId` (required), `path` (optional)
+  - `path` may be absolute or relative. Relative paths (including a bare filename) resolve against the download directory, so an attachment lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected. To save directly into your own location, set `FASTMAIL_DOWNLOAD_DIR` to that root (see [Setup](#setup)) — confinement stays on, scoped to the directory you choose.
 - **advanced_search**: Advanced email search with multiple criteria
   - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **get_thread**: Get all emails in a conversation thread. Returns metadata + preview for each email.
@@ -289,6 +298,20 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
   - Draft messages are **excluded by default** (an in-progress reply is noise when reading a conversation). Set `includeDrafts: true` to include them.
 
 > **Draft handling is asymmetric by design.** `get_thread` excludes drafts by default while `search_emails` includes them: a draft reply is noise when reconstructing a conversation, but a search should still find everything you've written. Drafts are identified by the `$draft` keyword (robust even if a draft is moved out of the Drafts mailbox), not by mailbox role. Use `includeDrafts` / `excludeDrafts` to override either default.
+
+### Sending attachments
+
+`send_email`, `create_draft`, `reply_email`, and `edit_draft` accept an `attachments` array. Each item is an object:
+
+- `path` (required) — the file to attach. A bare filename or relative path resolves against the attach directory; an absolute path must fall within it.
+- `name` (optional) — the filename recipients see; defaults to the file's basename.
+- `contentType` (optional) — a MIME type like `application/pdf`. Inferred from the file extension when omitted. An explicit value is **echoed by Fastmail as-is** (not re-detected), so a wrong value rides out wrong.
+
+Size caps (~25 MB/file, ~45 MB total) are a fail-fast guard; Fastmail's own limit ultimately governs.
+
+On `edit_draft`, `attachments` **appends** (existing attachments are kept). Use `removeAttachments` (a `blobId` from `get_email_attachments`, or a unique name) to drop specific ones, or `clearFields:['attachments']` to remove all. Passing `attachments` and `clearFields:['attachments']` together is rejected as a conflict.
+
+> **Opt-in, by design.** Attaching a file reads it off the local disk and emails it out — an exfiltration vector. So the capability is **disabled until you set `FASTMAIL_ATTACH_DIR`** (see [Setup](#setup)); until then every attach attempt fails with a self-documenting error and no file is read. Files are confined to that directory: a path outside it, a missing file, or a symlink escaping the root is rejected. The attach directory is resolved **independently** of `FASTMAIL_DOWNLOAD_DIR` — pointing both at the same directory re-opens a download-then-email round-trip, so that is your explicit choice, not a default. Restart the server after setting the variable to enable it. The confinement narrows time-of-check/time-of-use races and blocks symlink escapes, but a same-inode swap race and hardlinks inside the root are residual; see [`docs/security-model.md`](docs/security-model.md).
 
 ### Email Statistics & Analytics
 

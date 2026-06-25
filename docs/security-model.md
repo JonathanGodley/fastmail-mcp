@@ -1,9 +1,9 @@
 # Path-confinement security model
 
-Two tools touch the local filesystem: attachment download (writes a file) and the
-planned send-with-attachment (reads a file). Both are constrained to a configured
-directory and can never be told to escape it. This spans both features, so the model
-lives here; the per-feature rationale is in issues #5 (download) and #1 (attachments).
+Two tools touch the local filesystem: attachment download (writes a file) and
+send-with-attachment (reads a file). Both are constrained to a configured directory and
+can never be told to escape it. This spans both features, so the model lives here; the
+per-feature rationale is in issues #5 (download) and #1 (attachments).
 
 ## Confinement is always on, never bypassable
 
@@ -36,20 +36,56 @@ as opt-in capability, not a default:
   The attach dir is resolved independently, via the same env-alias key set as the
   download dir.
 
-## Proposed: a read-shaped `safeReadPath` (not yet built)
+## The read-shaped `safeReadPath` (built, issue #1)
 
-Only `safeWritePath` exists today. The attachment-send feature (issue #1, unbuilt) needs
-a read-shaped guard with different semantics, because `safeWritePath` is write-shaped:
-it `mkdir -p`s the allowed root (`src/jmap-client.ts:1358`), walks missing path segments,
-and checks the target only for an overwrite symlink. None of that is right for a read.
+The attachment-send feature reads a local file and emails it out, so it needs a
+read-shaped guard distinct from the write-shaped `safeWritePath` (which `mkdir -p`s the
+allowed root, walks *missing* path segments, and checks the target only for an overwrite
+symlink — none of which is right for a read). `safeReadPath` (`src/jmap-client.ts`) is
+handle-based:
 
-A `safeReadPath` should instead:
+- **Hard opt-in gate first.** If `FASTMAIL_ATTACH_DIR` is unset, it throws the
+  self-documenting opt-in error **before any filesystem syscall** — nothing is read.
+- **Reject Windows escape shapes** on the raw input (applied on every platform): device
+  namespaces (`\\?\`, `\\.\`), UNC roots (`\\server\share`), drive-relative `C:foo` (no
+  separator, resolves against the drive's own CWD), an NTFS alternate-data-stream `:`
+  past the drive letter, and an 8.3 short-name `~` segment (which can alias a long name
+  past the containment compare).
+- **Lexical containment** against the resolved attach root. A bare filename or relative
+  path resolves *inside* the root in one step; an absolute path must already be within it.
+  The containment compare is **case-insensitive on Win32** (NTFS folds case, so a
+  case-sensitive `startsWith` is bypassable); the write side keeps its byte-exact compare
+  so download behaviour is unchanged. This case-fold is a *parameter* of the
+  containment helper shared by both guards.
+- **Open once, then validate the open file.** `open(path, 'r')`, `fstat` the handle and
+  require a **regular file**, then `realpath` the **full target** (not merely an ancestor)
+  and re-verify it is contained under `realpath(attachDir)`. The caller reads from the
+  returned handle, so the bytes uploaded are the bytes of the file that was validated.
+- A missing attach **root** is reported as a distinct config error (not a raw `realpath`
+  ENOENT, and distinct from the opt-in gate).
 
-- require the target file to already exist (create nothing, no `mkdir`),
-- `lstat` the final file and reject if it is a symlink (or realpath then re-verify
-  containment),
-- share the canonicalize-and-verify-containment core with `safeWritePath` rather than
-  duplicating it.
+The resolved attach root is **disclosed in the tool schema** (parallel to how the download
+directory is interpolated into `download_attachment`'s `path` description). It is
+operator-chosen and low-sensitivity; within-root path specifics in boundary errors are
+therefore actionable rather than a sensitive oracle (caveat: a drive-root config makes
+them a broad probe — acceptable as an explicit operator choice).
 
-Frame this as forward design when implementing #1; do not assume `safeReadPath` exists
-in the current code.
+### Accepted residual risks (not claimed closed)
+
+- **Same-inode swap race.** The `realpath` re-verification runs after `open`, so a
+  component swapped between open and realpath is a narrowed-but-nonzero TOCTOU window.
+- **Win32 has no fd→path binding.** There is no syscall to canonicalize the *open handle*
+  itself on Windows, so a symlink/junction race there is residual.
+- **Hardlinks inside the root** pointing at outside content defeat any path-based guard.
+
+These are the honest limits of a path guard; the opt-in gate and confinement are the
+primary defense, not a claim that exfiltration is impossible once enabled.
+
+### edit_draft attachment model
+
+`edit_draft` carries the existing (non-inline) attachments across the immutable-email
+recreate and then applies the requested change: `attachments` **appends**;
+`removeAttachments` drops carried parts by `blobId` (or a unique non-null `name`), rejecting
+a ref that matches nothing or a name matching more than one; `clearFields:['attachments']`
+removes all. Passing `attachments` together with `clearFields:['attachments']` is a rejected
+conflict. An attachment-only edit stays body-invariant (it must not inject or strip a body).

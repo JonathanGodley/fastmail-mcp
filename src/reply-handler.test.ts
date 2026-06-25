@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReplyParams } from './reply-handler.js';
+import { buildReplyParams, composeReply } from './reply-handler.js';
+import type { ReplyClient } from './reply-handler.js';
 
 // A raw-JMAP-shaped original (as getEmailById returns it).
 function makeOriginal(over: any = {}) {
@@ -100,5 +101,61 @@ describe('buildReplyParams — validation', () => {
   });
   it('throws when no recipient can be determined', () => {
     assert.throws(() => buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal({ from: [] })), /Could not determine reply recipient/);
+  });
+});
+
+describe('composeReply — attachment threading into both branches', () => {
+  const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
+
+  // A spy ReplyClient: records what each method was called with; uploadAttachments
+  // returns the canned UPLOADED parts so we can assert they thread through.
+  function spyClient(over: Partial<ReplyClient> = {}) {
+    const calls: any = {};
+    const client: ReplyClient = {
+      getEmailById: async (id) => { calls.getId = id; return makeOriginal(); },
+      uploadAttachments: async (specs, dir) => { calls.upload = { specs, dir }; return UPLOADED; },
+      createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
+      sendEmail: async (p) => { calls.send = p; return 'sub-9'; },
+      ...over,
+    };
+    return { client, calls };
+  }
+
+  it('uploads with the given attachDir and threads parts into the SEND branch', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeReply(
+      { originalEmailId: 'o1', send: true, textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
+      client, '/attach/root',
+    );
+    assert.equal(r.sent, true);
+    assert.equal(r.submissionId, 'sub-9');
+    assert.deepEqual(calls.upload, { specs: [{ path: 'a.pdf' }], dir: '/attach/root' });
+    assert.deepEqual(calls.send.attachments, UPLOADED); // threaded into sendEmail
+    assert.equal(calls.draft, undefined);               // draft branch not taken
+  });
+
+  it('threads parts into the DRAFT branch (send=false)', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeReply(
+      { originalEmailId: 'o1', send: false, textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
+      client, '/attach/root',
+    );
+    assert.equal(r.sent, false);
+    assert.equal(r.emailId, 'draft-9');
+    assert.deepEqual(calls.draft.attachments, UPLOADED); // threaded into createDraft
+    assert.equal(calls.send, undefined);                 // send branch not taken
+  });
+
+  it('does not call uploadAttachments when no attachments are given', async () => {
+    let uploadCalled = false;
+    const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
+    const r = await composeReply({ originalEmailId: 'o1', send: false, textBody: 'hi' }, client, '/attach/root');
+    assert.equal(r.emailId, 'draft-9');
+    assert.equal(uploadCalled, false);
+  });
+
+  it('requires originalEmailId', async () => {
+    const { client } = spyClient();
+    await assert.rejects(() => composeReply({ textBody: 'hi' }, client, undefined), /originalEmailId is required/);
   });
 });

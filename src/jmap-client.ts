@@ -1,10 +1,115 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank } from './body-format.js';
-import { writeFile, mkdir, realpath, stat, lstat } from 'fs/promises';
+import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
+import type { FileHandle } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
 import { homedir } from 'os';
+
+// A JMAP Email "attachment" body part referencing an uploaded blob. blobId is the
+// stable handle the server assigns; type is the stored MIME type. New uploads carry
+// only blobId/type/name/disposition; a carried (re-referenced) part may also pass
+// through cid/disposition from the existing draft.
+export interface AttachmentPart {
+  blobId: string;
+  type: string;
+  name?: string;
+  disposition?: string;
+  cid?: string;
+}
+
+// True if `child` is `parent` itself or nested beneath it. Case-fold is a parameter:
+// the read guard compares case-insensitively on Win32 (NTFS folds case, so a
+// case-sensitive startsWith is bypassable), while the write guard keeps its existing
+// byte-exact compare so download behaviour is unchanged.
+function isPathContained(child: string, parent: string, caseInsensitive: boolean): boolean {
+  let c = child, p = parent;
+  if (caseInsensitive) { c = c.toLowerCase(); p = p.toLowerCase(); }
+  return c === p || c.startsWith(p + sep);
+}
+
+// Shared lexical pre-check: resolve `inputPath` against `allowedDir` (relative incl.
+// a bare filename lands inside the root in one step; absolute must already be within),
+// reject null bytes, and verify lexical containment. Returns the resolved absolute
+// path. Throws PathAccessError on null bytes or escape. The canonical (realpath)
+// re-verification is the caller's job — this is only the cheap first gate.
+function lexicalContainedPath(inputPath: string, allowedDir: string, caseInsensitive: boolean): string {
+  const resolved = resolve(allowedDir, normalize(inputPath));
+  if (resolved.includes('\0')) {
+    throw new PathAccessError('path contains null bytes');
+  }
+  if (!isPathContained(resolved, allowedDir, caseInsensitive)) {
+    throw new PathAccessError(`path must be within ${allowedDir}. Received: ${inputPath}`);
+  }
+  return resolved;
+}
+
+// Reject Windows path forms that can dodge the lexical containment compare. Applied
+// to the raw input on every platform: these shapes are never a legitimate attachment
+// path, and resolving them first would mask the escape. (Device namespaces and UNC
+// roots jump outside the drive-relative root; a drive-relative `C:foo` resolves
+// against the drive's own CWD; a `:` past the drive names an NTFS alternate data
+// stream; a `~` segment can be an 8.3 short name aliasing a long name past the compare.)
+function rejectWindowsPathEscapes(input: string): void {
+  if (/^\\\\[?.]\\/.test(input)) {
+    throw new PathAccessError('path uses a Windows device namespace (\\\\?\\ or \\\\.\\), which is not allowed.');
+  }
+  if (/^(\\\\|\/\/)/.test(input)) {
+    throw new PathAccessError('path is a UNC network path, which is not allowed.');
+  }
+  if (/^[A-Za-z]:(?![\\/])/.test(input)) {
+    throw new PathAccessError('path is drive-relative (e.g. C:foo); use an absolute path or a name under the attach directory.');
+  }
+  // Strip a leading drive letter's own colon before scanning for a stream colon.
+  if (input.replace(/^[A-Za-z]:/, '').includes(':')) {
+    throw new PathAccessError("path contains a ':' (NTFS alternate data stream), which is not allowed.");
+  }
+  // 8.3 short-name segment (e.g. PROGRA~1) can alias a long name past the compare. Match
+  // the 8.3 form specifically — a tilde followed by a digit — so legitimate filenames that
+  // merely contain a tilde (e.g. report~final.pdf) are NOT rejected.
+  if (/~\d/.test(input)) {
+    throw new PathAccessError("path contains an 8.3 short-name segment (e.g. PROGRA~1), which is not allowed; use the full name.");
+  }
+}
+
+// Extension -> MIME map for the Content-Type we POST when the caller omits one. Only
+// sets the upload header; the recipient sees whatever type the server echoes back.
+const EXT_CONTENT_TYPES: Record<string, string> = {
+  pdf: 'application/pdf',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  zip: 'application/zip',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  json: 'application/json',
+  html: 'text/html',
+};
+
+function guessContentType(path: string): string {
+  const ext = basename(path).split('.').pop()?.toLowerCase() ?? '';
+  return EXT_CONTENT_TYPES[ext] ?? 'application/octet-stream';
+}
+
+// RFC 2045 token grammar for type/subtype, with a length cap. A positive grammar
+// (reject anything outside the token set) closes header injection via the
+// Content-Type we POST — defense in depth alongside undici's own header validation.
+// MIME parameters (e.g. "; charset=utf-8") are intentionally not accepted: only the
+// type/subtype is needed to upload a blob.
+const MIME_TYPE_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+\/[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+function validateContentType(value: string, index: number): string {
+  const v = value.trim();
+  if (v.length > 255 || !MIME_TYPE_PATTERN.test(v)) {
+    throw new PathAccessError(`attachments[${index}] has an invalid contentType '${value}'. Use a MIME type like application/pdf.`);
+  }
+  return v;
+}
 
 export interface JmapSession {
   apiUrl: string;
@@ -335,6 +440,7 @@ export class JmapClient {
     inReplyTo?: string[];
     references?: string[];
     replyTo?: string[];
+    attachments?: AttachmentPart[];
   }): Promise<string> {
     const session = await this.getSession();
 
@@ -399,6 +505,7 @@ export class JmapClient {
       ...(email.inReplyTo && { inReplyTo: email.inReplyTo }),
       ...(email.references && { references: email.references }),
       ...(email.replyTo?.length && { replyTo: email.replyTo.map(parseAddress) }),
+      ...(email.attachments?.length && { attachments: email.attachments }),
       ...this.shapeBodies(email.textBody, email.htmlBody),
     };
 
@@ -474,13 +581,16 @@ export class JmapClient {
     inReplyTo?: string[];
     references?: string[];
     replyTo?: string[];
+    attachments?: AttachmentPart[];
   }): Promise<string> {
     const session = await this.getSession();
 
     // Validate at least one meaningful field is present (zero-width/whitespace-only
-    // bodies count as absent).
-    if (!email.to?.length && !email.subject && isBlank(email.textBody) && isBlank(email.htmlBody)) {
-      throw new Error('At least one of to, subject, textBody, or htmlBody must be provided');
+    // bodies count as absent). Attachments count as content too: an attachment-only
+    // draft is a valid artifact (and is consistent with edit_draft, which preserves a
+    // body-less draft that carries attachments).
+    if (!email.to?.length && !email.subject && isBlank(email.textBody) && isBlank(email.htmlBody) && !email.attachments?.length) {
+      throw new Error('At least one of to, subject, textBody, htmlBody, or attachments must be provided');
     }
 
     // Get all identities to resolve from address
@@ -530,6 +640,7 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
+    if (email.attachments?.length) emailObject.attachments = email.attachments;
     // Generate the body parts (auto text/plain fallback for html-only input where
     // derivable; ships html-only otherwise; no-body html is rejected by shapeBodies). A
     // draft with neither body is allowed — shapeBodies returns empty shaping in that case.
@@ -609,6 +720,8 @@ export class JmapClient {
     from?: string;
     replyTo?: string[];
     clearFields?: string[];
+    attachments?: AttachmentPart[];
+    removeAttachments?: string[];
   }): Promise<{ id: string; orphanedOldDraftId?: string }> {
     const session = await this.getSession();
 
@@ -694,9 +807,14 @@ export class JmapClient {
     // loud error (it's almost always an accidental clobber); deliberately blanking
     // a field is done by naming it in clearFields. Every field is clearable EXCEPT
     // `from` (identity-resolved; a draft always has a sender, matching the Fastmail UI).
-    const CLEARABLE = new Set(['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody']); // NOT 'from'
+    const CLEARABLE = new Set(['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments']); // NOT 'from'
     const SETTABLE = ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'from'] as const;
-    const provided = new Set(SETTABLE.filter(f => (updates as any)[f] !== undefined));
+    const provided = new Set<string>(SETTABLE.filter(f => (updates as any)[f] !== undefined));
+    // `attachments` isn't a string SETTABLE field, so add it to `provided` explicitly
+    // when an attachment add/remove was requested. This is the seam that makes
+    // validateClearFields throw "can't set and clear attachments" if the caller also
+    // passes clearFields:['attachments'] (clear-then-append in one call is ambiguous).
+    if (updates.attachments?.length || updates.removeAttachments?.length) provided.add('attachments');
     validateClearFields(updates.clearFields, CLEARABLE, provided);
     const clear = new Set(updates.clearFields ?? []);
 
@@ -772,23 +890,65 @@ export class JmapClient {
       }
     }
 
-    // Reject a body-less result (clearing the only body, or both). A draft keeps >=1 body.
+    // Reject a body-less RESULT, but only when this edit actually touched the body —
+    // a written body that came out empty, or a cleared body. An attachment-only (or
+    // any metadata-only) edit must NOT trip this: it stays body-invariant and may run
+    // against a draft that legitimately has no body yet. Gating on
+    // `wroteAnyBody || clearedAnyBody` (not `wroteAnyBody` alone) keeps the throw firing
+    // when the last body is cleared — incl. alongside an attachments change — so a
+    // caller can't silently strip a draft down to no body. A draft keeps >=1 body.
     // Distinct from the clear-text-while-html guard (which only fires when merged html IS
     // present), so the two can't both match.
-    if (isBlank(textBodyValue) && isBlank(htmlBodyValue)) {
+    const clearedAnyBody = clear.has('textBody') || clear.has('htmlBody');
+    if ((wroteAnyBody || clearedAnyBody) && isBlank(textBodyValue) && isBlank(htmlBodyValue)) {
       throw new Error('a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
     }
 
     // Carry existing (non-inline) attachments by referencing their existing blobIds.
     // Whitelist exactly these fields — a blob-backed part is blobId XOR partId, and
     // `size` is server-set, so sending partId/size would be rejected by a strict server.
-    const carriedAttachments = existingAttachments.map((a: any) => ({
+    const carriedAttachments: AttachmentPart[] = existingAttachments.map((a: any) => ({
       blobId: a.blobId,
       type: a.type,
       ...(a.name != null && { name: a.name }),
       ...(a.disposition != null && { disposition: a.disposition }),
       ...(a.cid != null && { cid: a.cid }),
     }));
+
+    // Build the final attachment set: clear-all empties it; each removeAttachments ref
+    // drops a carried part by blobId (the stable ref the caller sees), or by a UNIQUE
+    // non-null name as a convenience; then the freshly uploaded parts are appended.
+    // A ref that matches nothing, or an ambiguous name, is rejected loudly rather than
+    // silently no-op'd (a silent no-match is the confident-wrong-result class this
+    // codebase rejects). `attachments` + clearFields:['attachments'] was already rejected
+    // as a conflict above, so clear-all never coexists with an append/remove here.
+    let finalAttachments: AttachmentPart[] = clear.has('attachments') ? [] : carriedAttachments.slice();
+    if (updates.removeAttachments?.length) {
+      for (const ref of updates.removeAttachments) {
+        const beforeLen = finalAttachments.length;
+        const byBlob = finalAttachments.filter(a => a.blobId !== ref);
+        if (byBlob.length < beforeLen) {
+          finalAttachments = byBlob;
+          continue;
+        }
+        const nameMatches = finalAttachments.filter(a => a.name != null && a.name === ref);
+        if (nameMatches.length === 1) {
+          finalAttachments = finalAttachments.filter(a => a !== nameMatches[0]);
+          continue;
+        }
+        if (nameMatches.length > 1) {
+          throw new PathAccessError(
+            `removeAttachments ref '${ref}' matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${finalAttachments.map(a => a.blobId).join(', ')}).`
+          );
+        }
+        throw new PathAccessError(
+          `removeAttachments ref '${ref}' matched no attachment on this draft. Carried blobIds: ${carriedAttachments.map(a => a.blobId).join(', ') || '(none)'}.`
+        );
+      }
+    }
+    if (updates.attachments?.length) {
+      finalAttachments = finalAttachments.concat(updates.attachments);
+    }
 
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
@@ -805,7 +965,7 @@ export class JmapClient {
       // drafts this client creates via reply_email send=false).
       ...(existingEmail.inReplyTo && { inReplyTo: existingEmail.inReplyTo }),
       ...(existingEmail.references && { references: existingEmail.references }),
-      ...(carriedAttachments.length && { attachments: carriedAttachments }),
+      ...(finalAttachments.length && { attachments: finalAttachments }),
     };
 
     Object.assign(emailObject, buildBodyParts({ textBody: textBodyValue, htmlBody: htmlBodyValue }));
@@ -1369,23 +1529,12 @@ export class JmapClient {
     // Resolve relative paths against the allowed download directory rather than
     // the process cwd (which is unpredictable for an MCP server launched by a
     // client). Absolute paths are taken as-is; either way the containment check
-    // below is the security boundary. So a bare filename lands safely in the
-    // configured dir in one step, and an absolute path inside that dir writes
-    // exactly there.
-    const resolved = resolve(allowedDir, normalize(savePath));
-
-    if (resolved.includes('\0')) {
-      throw new Error('Save path contains null bytes');
-    }
-
-    if (!resolved.startsWith(allowedDir + sep) && resolved !== allowedDir) {
-      throw new Error(
-        `Save path must be within ${allowedDir}. ` +
-        `Received: ${savePath}`
-      );
-    }
-
-    return resolved;
+    // is the security boundary. So a bare filename lands safely in the configured
+    // dir in one step, and an absolute path inside that dir writes exactly there.
+    // Write side keeps a byte-exact (case-sensitive) compare so download behaviour
+    // is unchanged; the read guard opts into case-insensitive containment on Win32.
+    // Throws PathAccessError so the index layer maps it to InvalidParams uniformly.
+    return lexicalContainedPath(savePath, allowedDir, false);
   }
 
   /**
@@ -1416,7 +1565,7 @@ export class JmapClient {
         missingSegments.unshift(basename(ancestor));
         const parent = dirname(ancestor);
         if (parent === ancestor) {
-          throw new Error(`Could not find existing ancestor for save path: ${lexical}`);
+          throw new PathAccessError(`Could not find an existing ancestor for path: ${lexical}`);
         }
         ancestor = parent;
       }
@@ -1425,8 +1574,8 @@ export class JmapClient {
     // Canonicalize the existing ancestor — this is what catches symlink escapes.
     const canonicalAncestor = await realpath(ancestor);
     if (canonicalAncestor !== canonicalAllowed && !canonicalAncestor.startsWith(canonicalAllowed + sep)) {
-      throw new Error(
-        `Save path resolves to '${canonicalAncestor}' which is outside the allowed directory '${canonicalAllowed}'. ` +
+      throw new PathAccessError(
+        `path resolves to '${canonicalAncestor}' which is outside the allowed directory '${canonicalAllowed}'. ` +
         `Refusing to follow symlink escape.`,
       );
     }
@@ -1439,13 +1588,204 @@ export class JmapClient {
     try {
       const lst = await lstat(safePath);
       if (lst.isSymbolicLink()) {
-        throw new Error(`Refusing to overwrite an existing symlink at the target: ${safePath}`);
+        throw new PathAccessError(`Refusing to overwrite an existing symlink at the target: ${safePath}`);
       }
     } catch (e: any) {
       if (e.code !== 'ENOENT') throw e;
     }
 
     return safePath;
+  }
+
+  // Per-file / aggregate fail-fast guards. NOT authoritative — Fastmail's own ceiling
+  // governs; these just bound the in-memory read and reject obviously-too-large inputs
+  // before we upload. The per-file cap also bounds the fd read in uploadAttachments.
+  static readonly MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+  static readonly MAX_TOTAL_ATTACHMENT_BYTES = 45 * 1024 * 1024;
+
+  /**
+   * Read-shaped, handle-based path confinement for the attachment-send capability.
+   * Distinct from the write-shaped safeWritePath (which mkdir -p's the root and walks
+   * MISSING segments) — a read creates nothing and must validate the OPEN file:
+   *
+   *  - attachDir undefined → throw the opt-in error BEFORE any fs syscall (the hard
+   *    gate; an exfiltration capability stays disabled until the operator sets the var);
+   *  - reject the Windows escape shapes and lexically contain the path (case-insensitively
+   *    on Win32) against the resolved root;
+   *  - open(path,'r') ONCE, then fstat the handle (require a regular file) and realpath
+   *    the FULL target (not an ancestor), re-verifying canonical containment. The caller
+   *    reads from the returned handle, so the bytes uploaded are the bytes of the file we
+   *    validated — TOCTOU is narrowed, not eliminated (see docs/security-model.md).
+   *
+   * Returns the open handle and its size; the CALLER must close the handle.
+   */
+  static async safeReadPath(inputPath: string, attachDir: string | undefined): Promise<{ handle: FileHandle; size: number }> {
+    if (!attachDir) {
+      throw new PathAccessError(
+        'Sending attachments is disabled. Set FASTMAIL_ATTACH_DIR to the directory attachable files live in, then restart the server to enable it.'
+      );
+    }
+
+    rejectWindowsPathEscapes(inputPath);
+
+    const allowedDir = resolve(normalize(attachDir));
+    const caseInsensitive = process.platform === 'win32';
+    const lexical = lexicalContainedPath(inputPath, allowedDir, caseInsensitive);
+
+    // The attach root itself must exist — a missing root is a config error, reported
+    // distinctly from the opt-in gate above (not a raw realpath ENOENT).
+    let canonicalAllowed: string;
+    try {
+      canonicalAllowed = await realpath(allowedDir);
+    } catch (e: any) {
+      if (e.code === 'ENOENT') {
+        throw new PathAccessError(`FASTMAIL_ATTACH_DIR (${allowedDir}) does not exist. Create it or fix the path, then restart.`);
+      }
+      throw e;
+    }
+
+    let handle: FileHandle;
+    try {
+      handle = await open(lexical, 'r');
+    } catch (e: any) {
+      if (e.code === 'ENOENT') {
+        throw new PathAccessError(`File not found: ${inputPath} (resolved under ${allowedDir}).`);
+      }
+      if (e.code === 'EISDIR') {
+        throw new PathAccessError(`Not a regular file: ${inputPath}.`);
+      }
+      throw e;
+    }
+
+    try {
+      const st = await handle.stat();
+      if (!st.isFile()) {
+        throw new PathAccessError(`Not a regular file: ${inputPath}.`);
+      }
+      // Re-verify against the canonical full target — this catches a symlinked leaf or
+      // an intermediate-dir symlink that escapes the root.
+      const canonicalTarget = await realpath(lexical);
+      if (!isPathContained(canonicalTarget, canonicalAllowed, caseInsensitive)) {
+        throw new PathAccessError(
+          `path resolves to '${canonicalTarget}' which is outside the allowed directory '${canonicalAllowed}'. Refusing to follow symlink escape.`
+        );
+      }
+      return { handle, size: st.size };
+    } catch (e) {
+      await handle.close().catch(() => {});
+      throw e;
+    }
+  }
+
+  /**
+   * Upload a single blob and return its server-assigned blobId. POSTs the raw bytes to
+   * the {accountId}-substituted session uploadUrl with ONLY Authorization + the given
+   * Content-Type — deliberately NOT spreading getAuthHeaders() (which hardcodes
+   * application/json) and NOT JSON.stringifying the body (unlike every other call here).
+   * The server-returned `type` is authoritative for the stored blob (it echoes the
+   * Content-Type we sent — a best-effort hint, not content sniffing).
+   */
+  async uploadBlob(data: Buffer, contentType: string): Promise<{ blobId: string; type: string; size: number }> {
+    const session = await this.getSession();
+    if (!session.uploadUrl) {
+      throw new Error('Upload capability not available in session');
+    }
+
+    const url = session.uploadUrl.replace('{accountId}', session.accountId);
+    // POST the raw bytes — no JSON.stringify, unlike every other call here. The copy
+    // constructor `new Uint8Array(data)` yields a concrete Uint8Array<ArrayBuffer> (not the
+    // ArrayBufferLike-backed view a Buffer/`.subarray` carries), which IS assignable to
+    // fetch's BodyInit — so this stays fully type-checked, no `any` escape hatch.
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': this.auth.getAuthHeaders()['Authorization'],
+        'Content-Type': contentType,
+      },
+      body: new Uint8Array(data),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Blob upload failed: ${response.status} ${response.statusText}`);
+    }
+
+    const result = await response.json() as any;
+    if (!result || typeof result.blobId !== 'string') {
+      throw new Error('Blob upload returned no blobId');
+    }
+    return { blobId: result.blobId, type: result.type || contentType, size: result.size ?? data.length };
+  }
+
+  /**
+   * Confine, read, and upload each file spec, returning the JMAP attachment parts to
+   * splat into an Email. Re-checks the opt-in gate (so a caller that skipped safeReadPath
+   * can't bypass it), validates the caller contentType against the MIME token grammar,
+   * rejects an over-cap file via fstat.size BEFORE reading, then does a bounded read from
+   * the confined handle. Each part is a FRESH 4-key literal (NOT the carriedAttachments
+   * shape, which passes through size/cid that a strict server rejects or that would
+   * mislabel a plain file).
+   */
+  async uploadAttachments(
+    specs: { path: string; name?: string; contentType?: string }[],
+    attachDir: string | undefined,
+  ): Promise<AttachmentPart[]> {
+    if (!attachDir) {
+      throw new PathAccessError(
+        'Sending attachments is disabled. Set FASTMAIL_ATTACH_DIR to the directory attachable files live in, then restart the server to enable it.'
+      );
+    }
+
+    // Two passes so a confinement/size failure orphans NO blobs. Pass 1 validates and
+    // opens every file (path confinement + per-file/total size caps) before a single
+    // upload; a bad path or oversize file anywhere in the batch rejects with zero blobs
+    // uploaded. Pass 2 reads + uploads the already-validated handles. (A network failure
+    // mid-upload can still orphan a blob — unavoidable without server-side transactions;
+    // Fastmail garbage-collects unreferenced blobs.)
+    const opened: { handle: FileHandle; size: number; contentType: string; name: string }[] = [];
+    try {
+      let totalBytes = 0;
+      for (let i = 0; i < specs.length; i++) {
+        const spec = specs[i];
+        // contentType grammar is validated before any fs work (no handle to leak yet).
+        const contentType = spec.contentType
+          ? validateContentType(spec.contentType, i)
+          : guessContentType(spec.path);
+        const { handle, size } = await JmapClient.safeReadPath(spec.path, attachDir);
+        // Push BEFORE the size checks so the finally closes this handle even if a cap throws.
+        opened.push({ handle, size, contentType, name: spec.name ?? basename(spec.path) });
+        if (size > JmapClient.MAX_ATTACHMENT_BYTES) {
+          throw new PathAccessError(
+            `attachments[${i}] (${basename(spec.path)}) is ${size} bytes, over the ${JmapClient.MAX_ATTACHMENT_BYTES}-byte per-file guard. Fastmail's own limit ultimately governs.`
+          );
+        }
+        totalBytes += size;
+        if (totalBytes > JmapClient.MAX_TOTAL_ATTACHMENT_BYTES) {
+          throw new PathAccessError(
+            `attachments total exceeds the ${JmapClient.MAX_TOTAL_ATTACHMENT_BYTES}-byte fail-fast guard. Fastmail's own limit ultimately governs.`
+          );
+        }
+      }
+
+      const parts: AttachmentPart[] = [];
+      for (const o of opened) {
+        // Bounded read of exactly `size` bytes from the validated handle (never read the
+        // whole handle then check .length — that buffers a hostile oversize file first).
+        const buffer = Buffer.alloc(o.size);
+        const { bytesRead } = await o.handle.read(buffer, 0, o.size, 0);
+        const data = bytesRead === o.size ? buffer : buffer.subarray(0, bytesRead);
+
+        const uploaded = await this.uploadBlob(data, o.contentType);
+        parts.push({
+          blobId: uploaded.blobId,
+          type: uploaded.type,
+          name: o.name,
+          disposition: 'attachment',
+        });
+      }
+      return parts;
+    } finally {
+      for (const o of opened) await o.handle.close().catch(() => {});
+    }
   }
 
   async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, downloadDir?: string): Promise<{ url: string; bytesWritten: number; savedPath: string }> {

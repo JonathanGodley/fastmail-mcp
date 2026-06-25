@@ -1,7 +1,9 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceBool } from './coerce.js';
+import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
+import type { AttachmentSpec } from './coerce.js';
 import { isBlank } from './body-format.js';
 import { buildReplyBodies } from './reply-quote.js';
+import type { AttachmentPart } from './jmap-client.js';
 
 // Parameters passed to createDraft/sendEmail for a reply (matches their input shapes).
 export interface ReplyParams {
@@ -15,6 +17,9 @@ export interface ReplyParams {
   inReplyTo: string[];
   references: string[];
   replyTo?: string[];
+  // Set by the reply_email handler AFTER buildReplyParams (which stays pure / no I/O);
+  // threaded into both the send and save-as-draft branches.
+  attachments?: AttachmentPart[];
 }
 
 // Assemble the reply parameters from the caller's args and the already-fetched original
@@ -77,4 +82,57 @@ export function buildReplyParams(
       replyTo,
     },
   };
+}
+
+// The minimal client surface composeReply needs; JmapClient satisfies it structurally.
+// Declared here (rather than importing JmapClient) so the orchestration stays unit-
+// testable with a mock and free of a hard dependency on the concrete client.
+export interface ReplyClient {
+  getEmailById(id: string): Promise<any>;
+  uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
+  createDraft(params: ReplyParams): Promise<string>;
+  sendEmail(params: ReplyParams): Promise<string>;
+}
+
+export interface ComposeReplyResult {
+  sent: boolean;
+  subject: string;
+  emailId?: string;      // set on the draft (send=false) branch
+  submissionId?: string; // set on the send branch
+}
+
+// Orchestrate a reply end to end: fetch the original, assemble the (pure) reply params,
+// upload any attachments and thread them into whichever branch runs, then create the
+// draft or send. Extracted from the index tool handler so the attachment-threading seam
+// (the one piece that touches I/O via the injected client) is unit-testable without the
+// MCP server or a live account — the handler is now a thin wrapper over this. attachDir
+// is passed in (resolved by the caller) so this function reads no environment itself.
+export async function composeReply(
+  args: any,
+  client: ReplyClient,
+  attachDir: string | undefined,
+): Promise<ComposeReplyResult> {
+  const originalEmailId = args?.originalEmailId;
+  if (!originalEmailId) {
+    throw new McpError(ErrorCode.InvalidParams, 'originalEmailId is required');
+  }
+
+  // Fetch the original, then assemble the reply (threading headers, Re: subject, recipient
+  // defaulting, the attributed quote, body validation) via the pure, unit-tested builder.
+  const originalEmail = await client.getEmailById(originalEmailId);
+  const { shouldSend, replyParams } = buildReplyParams(args, originalEmail);
+
+  // Upload attachments (if any) after the pure builder, then thread the parts into
+  // whichever branch runs (send or save-as-draft).
+  const specs = coerceAttachments(args?.attachments);
+  if (specs?.length) {
+    replyParams.attachments = await client.uploadAttachments(specs, attachDir);
+  }
+
+  if (!shouldSend) {
+    const emailId = await client.createDraft(replyParams);
+    return { sent: false, subject: replyParams.subject, emailId };
+  }
+  const submissionId = await client.sendEmail(replyParams);
+  return { sent: true, subject: replyParams.subject, submissionId };
 }

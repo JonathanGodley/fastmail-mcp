@@ -1,5 +1,17 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
+// Tagged error for filesystem-path access decisions (path confinement and the
+// attachment opt-in gate). Thrown by the path guards and attachment upload in
+// jmap-client.ts, which deliberately stays free of MCP SDK types — the index
+// boundary maps every PathAccessError to McpError(InvalidParams). instanceof is
+// the discriminator, so the message text carries no routing burden.
+export class PathAccessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PathAccessError';
+  }
+}
+
 // Some MCP clients (e.g. Claude Cowork as of 2026-04-08, issue #54) stringify
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.
@@ -120,4 +132,81 @@ export function parseAddress(input: string): { name?: string; email: string } {
     return name ? { name, email } : { email };
   }
   return { email: trimmed };
+}
+
+// One file-to-attach spec as it arrives from a tool call (before path confinement
+// and upload, which happen in jmap-client.ts).
+export interface AttachmentSpec {
+  path: string;
+  name?: string;
+  contentType?: string;
+}
+
+const ATTACHMENT_KEYS = new Set(['path', 'name', 'contentType']);
+
+// Coerce the `attachments` tool param into AttachmentSpec[] | undefined. Accepts a
+// real array, or a JSON-string array from lenient clients (mirroring
+// coerceStringArray). Per element it REJECTS — never silently drops — a non-object,
+// a spec missing `path`, or an unexpected per-item key, naming the index so the
+// caller can fix it (assertKnownParams is top-level only and won't catch nested
+// keys, so this is the sole guard for the item shape). A bare string element is
+// rejected rather than guessed as a path (too magic); a JSON-object string is parsed.
+export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  let arr: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    try {
+      arr = JSON.parse(trimmed);
+    } catch {
+      throw new McpError(ErrorCode.InvalidParams, 'attachments must be an array of { path, name?, contentType? } objects.');
+    }
+  }
+
+  if (!Array.isArray(arr)) {
+    throw new McpError(ErrorCode.InvalidParams, 'attachments must be an array of { path, name?, contentType? } objects.');
+  }
+
+  const specs: AttachmentSpec[] = [];
+  for (let i = 0; i < arr.length; i++) {
+    let item: unknown = arr[i];
+    if (typeof item === 'string') {
+      const t = item.trim();
+      if (t.startsWith('{') && t.endsWith('}')) {
+        try {
+          item = JSON.parse(t);
+        } catch {
+          throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] is a string that isn't valid JSON; pass an object with a path.`);
+        }
+      } else {
+        throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] must be an object with a path, not a bare string.`);
+      }
+    }
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] must be an object with a path.`);
+    }
+    const obj = item as Record<string, unknown>;
+    const unknownKeys = Object.keys(obj).filter(k => !ATTACHMENT_KEYS.has(k));
+    if (unknownKeys.length > 0) {
+      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...ATTACHMENT_KEYS].join(', ')}`);
+    }
+    if (typeof obj.path !== 'string' || obj.path.trim() === '') {
+      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] is missing a non-empty 'path'.`);
+    }
+    // Trim the path (consistent with coerceStringArray's lenient coercion): an accidental
+    // leading/trailing space would otherwise reach the filesystem and read as "file not found".
+    const spec: AttachmentSpec = { path: obj.path.trim() };
+    if (obj.name !== undefined) {
+      if (typeof obj.name !== 'string') throw new McpError(ErrorCode.InvalidParams, `attachments[${i}].name must be a string.`);
+      spec.name = obj.name;
+    }
+    if (obj.contentType !== undefined) {
+      if (typeof obj.contentType !== 'string') throw new McpError(ErrorCode.InvalidParams, `attachments[${i}].contentType must be a string.`);
+      spec.contentType = obj.contentType;
+    }
+    specs.push(spec);
+  }
+  return specs;
 }
