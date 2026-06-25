@@ -146,6 +146,15 @@ describe('composeReply — attachment threading into both branches', () => {
     assert.equal(calls.send, undefined);                 // send branch not taken
   });
 
+  it('defaults to the DRAFT branch when send is omitted (orchestrator level)', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, '/attach/root');
+    assert.equal(r.sent, false);
+    assert.equal(r.emailId, 'draft-9');
+    assert.ok(calls.draft);               // draft branch taken without an explicit send:false
+    assert.equal(calls.send, undefined);  // nothing transmitted
+  });
+
   it('does not call uploadAttachments when no attachments are given', async () => {
     let uploadCalled = false;
     const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
