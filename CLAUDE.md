@@ -62,7 +62,7 @@ When summarizing a review, state each finding's disposition plainly rather than 
 
 Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). `gh` defaults to the upstream `MadLlama25/fastmail-mcp`, so pass `--repo JonathanGodley/fastmail-mcp` on every release, tag, and issue command. Cut a release only when the user asks for it. The step-by-step checklist (with the outward steps grouped behind a checkpoint) is the `/release` skill (`.claude/skills/release/SKILL.md`); this section is the rationale behind it.
 
-Prefer batching related changes into one release: every shipped change pays the documentation + 3-file version-bump tax (see **Version**), so bundling a cluster of related work amortizes it — for a two-line fix the tax is most of the work.
+Prefer batching related changes into one release: every shipped change pays the documentation + 3-file version-bump tax (see **Version**), so bundling a cluster of related work amortizes it — for a two-line fix the tax is most of the work. **Exception: a safety or security fix warrants its own immediate release even when small** — the value of getting the safer default in front of users now outweighs the amortization. Batching is the default for ordinary fixes/features, not for a fix whose whole point is reducing a footgun.
 
 1. Bump the version (see **Version**), then verify clean: `npx tsc --noEmit`, `npm test`, `npm run build`.
 2. Tag and publish the GitHub release on `origin`.
@@ -90,7 +90,7 @@ The dividing line: **an issue explains why ONE tool behaves as it does; a docs f
 
 **Offering a fix back (our work → theirs).** Any fix that addresses an upstream issue or a general bug (not a fork-differentiator feature) should be offered back as a focused, single-purpose PR once it lands and tests pass on the fork: cut a branch with just that fix (a `git worktree` off `upstream/main` keeps the fork's tree clean), reference the issue it closes, and don't drag in fork-only changes. Fork-only differentiators (the simplification system, etc.) are not auto-offered — upstream wants their own (issue #40).
 
-**⛔ Never comment on an upstream PR or issue directly.** Drafting the text is fine; a human posts it. The rule is about writing in *someone else's* repo. The fork's OWN issues are fine for Claude to open, comment on, and close. **Close a fork issue as part of shipping its fix — but validate first:** confirm the fix is actually released (tag + GitHub release on origin, carried in the built `dist/`) and genuinely resolves the issue, then close with a release/commit-citing comment (see the `github-comments-human-only` memory).
+**⛔ Never comment on an upstream PR or issue directly.** Drafting the text is fine; a human posts it. The rule is about writing in *someone else's* repo. The fork's OWN issues are fine for Claude to open, comment on, and close. **Close a fork issue as part of shipping its fix — but validate first:** confirm the fix is complete, genuinely resolves the issue, and is **pushed to `origin/main`** (carried in the built `dist/`), then close with a commit-citing comment. A *tagged release is NOT a precondition* for closing — the issue is resolved when the fix is done and on the mainline, not when a release happens to be cut (releases batch on their own cadence). If the fix is pushed with a `Closes #N` commit, GitHub auto-closes it on push; otherwise close it manually. See the `github-comments-human-only` memory.
 
 ## Artifacts read as standalone work
 
