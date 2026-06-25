@@ -6,7 +6,6 @@ dist/
 .DS_Store
 *.tsbuildinfo
 coverage/
-PLAN.md
 .claude/*
 !.claude/skills/
 .claude/skills/**

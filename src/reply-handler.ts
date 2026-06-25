@@ -36,7 +36,7 @@ export function buildReplyParams(
   const a = args ?? {};
   const { from, textBody, htmlBody, send } = a;
   const { to: toArray, cc, bcc, replyTo } = coerceRecipients(a);
-  const shouldSend = coerceBool(send) ?? true;
+  const shouldSend = coerceBool(send) ?? false;
   const quoteOriginal = coerceBool(a.quoteOriginal) ?? true;
 
   // Trim/zero-width-aware so a whitespace-only htmlBody can't slip through and produce a

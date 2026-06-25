@@ -324,7 +324,7 @@ const TOOLS = [
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default sends immediately; set send=false to save as a draft instead. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address.',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -361,7 +361,7 @@ const TOOLS = [
             },
             send: {
               type: ['boolean', 'string'],
-              description: 'Whether to send the reply immediately (default: true). Set to false to save as draft instead.',
+              description: 'Whether to send the reply immediately (default: false). By default the reply is saved as a draft; set send=true to transmit it.',
             },
             quoteOriginal: {
               type: ['boolean', 'string'],

@@ -59,14 +59,14 @@ describe('buildReplyParams — quoteOriginal wiring', () => {
 });
 
 describe('buildReplyParams — send flag', () => {
-  it('defaults shouldSend to true', () => {
-    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal()).shouldSend, true);
+  it('defaults shouldSend to false (draft is the safe default)', () => {
+    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal()).shouldSend, false);
   });
-  it('send=false → shouldSend false (draft path)', () => {
-    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', send: false }, makeOriginal()).shouldSend, false);
+  it('send=true → shouldSend true (transmit path)', () => {
+    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', send: true }, makeOriginal()).shouldSend, true);
   });
-  it('coerces a stringified send ("false")', () => {
-    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', send: 'false' }, makeOriginal()).shouldSend, false);
+  it('coerces a stringified send ("true")', () => {
+    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', send: 'true' }, makeOriginal()).shouldSend, true);
   });
 });
 
@@ -90,11 +90,11 @@ describe('buildReplyParams — subject, recipients, threading', () => {
 
 describe('buildReplyParams — validation', () => {
   it('rejects a body-less send (trim/zero-width-aware)', () => {
-    assert.throws(() => buildReplyParams({ originalEmailId: 'e1', htmlBody: '   ' }, makeOriginal()), /Either textBody or htmlBody is required/);
-    assert.throws(() => buildReplyParams({ originalEmailId: 'e1' }, makeOriginal()), /Either textBody or htmlBody is required/);
+    assert.throws(() => buildReplyParams({ originalEmailId: 'e1', htmlBody: '   ', send: true }, makeOriginal()), /Either textBody or htmlBody is required/);
+    assert.throws(() => buildReplyParams({ originalEmailId: 'e1', send: true }, makeOriginal()), /Either textBody or htmlBody is required/);
   });
-  it('allows a body-less DRAFT (send=false) — does not throw', () => {
-    assert.doesNotThrow(() => buildReplyParams({ originalEmailId: 'e1', send: false }, makeOriginal()));
+  it('allows a body-less DRAFT (default send=false) — does not throw', () => {
+    assert.doesNotThrow(() => buildReplyParams({ originalEmailId: 'e1' }, makeOriginal()));
   });
   it('throws when the original has no Message-ID', () => {
     assert.throws(() => buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal({ messageId: undefined })), /does not have a Message-ID/);
