@@ -101,6 +101,16 @@ function readBodyList(
 
 const QUOTE_OPEN = '<blockquote type="cite" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">';
 
+// True if html carries a cited blockquote (the marker buildReplyBodies emits for a reply
+// quote). Tolerant of attribute order and quote style ("..." / '...' / bare). This is a
+// PRESENCE check, not a content check: any cited blockquote counts and an empty cite shell
+// passes — edit_draft's guard treats originalEmailId as the authoritative way to keep/
+// regenerate the quote, so a loose marker here only governs whether the guard fires.
+export function hasQuoteMarker(html: string | null | undefined): boolean {
+  if (!html) return false;
+  return /<blockquote[^>]*\btype\s*=\s*["']?cite/i.test(html);
+}
+
 export function buildReplyBodies(input: {
   original: any;            // raw JMAP email from getEmailById (textBody/htmlBody arrays + bodyValues + date)
   textBody?: string;        // caller's new text

@@ -1,6 +1,30 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReplyBodies } from './reply-quote.js';
+import { buildReplyBodies, hasQuoteMarker } from './reply-quote.js';
+
+describe('hasQuoteMarker (#37 reply-quote detection)', () => {
+  it('detects the marker buildReplyBodies emits', () => {
+    const html = buildReplyBodies({
+      original: { from: [{ email: 'a@b.com' }], textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [], bodyValues: { t: { value: 'hi' } } },
+      htmlBody: '<p>reply</p>', quoteOriginal: true,
+    }).htmlBody!;
+    assert.equal(hasQuoteMarker(html), true);
+  });
+  it('is tolerant of quote style and attribute order', () => {
+    assert.equal(hasQuoteMarker('<blockquote type="cite">x</blockquote>'), true);
+    assert.equal(hasQuoteMarker("<blockquote type='cite'>x</blockquote>"), true);
+    assert.equal(hasQuoteMarker('<blockquote type=cite>x</blockquote>'), true);
+    assert.equal(hasQuoteMarker('<blockquote class="q" type="cite">x</blockquote>'), true);
+    assert.equal(hasQuoteMarker('<blockquote  TYPE = "cite">x</blockquote>'), true);
+  });
+  it('returns false for plain html and empty/nullish input', () => {
+    assert.equal(hasQuoteMarker('<p>just a reply, no quote</p>'), false);
+    assert.equal(hasQuoteMarker('<blockquote>not a cite</blockquote>'), false);
+    assert.equal(hasQuoteMarker(''), false);
+    assert.equal(hasQuoteMarker(null), false);
+    assert.equal(hasQuoteMarker(undefined), false);
+  });
+});
 
 // Build a raw-JMAP-shaped original. Single-format inputs alias their one part into both
 // lists (matching Fastmail), which the alias-safe reader must handle.

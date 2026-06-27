@@ -830,7 +830,141 @@ describe('updateDraft', () => {
     assert.equal(result.id, 'draft-2');
     assert.equal(result.orphanedOldDraftId, 'draft-1');
   });
+
+  // ---- reply-quote preservation on body edit (#37) ----
+
+  // A reply draft: htmlBody carries the cited quote; inReplyTo is set (what marks it a reply).
+  const REPLY_DRAFT = {
+    id: 'draft-1',
+    subject: 'Re: Hello',
+    from: [{ email: 'me@example.com' }],
+    to: [{ email: 'bob@example.com' }],
+    cc: [], bcc: [],
+    textBody: [{ partId: 't', type: 'text/plain' }],
+    htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: {
+      t: { value: 'my reply\n\nOn ... wrote:\n> quoted original' },
+      h: { value: '<p>my reply</p><blockquote type="cite">quoted original</blockquote>' },
+    },
+    mailboxIds: { 'mb-drafts': true },
+    keywords: { $draft: true },
+    inReplyTo: ['orig-msg@example.com'],
+    references: ['orig-msg@example.com'],
+  };
+
+  // The message the reply draft replies to (distinct id 'orig-1'; fully body-valued so the
+  // regenerate path produces a real quote we can assert against).
+  const ORIGINAL_FOR_REPLY = {
+    id: 'orig-1',
+    messageId: ['orig-msg@example.com'],
+    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
+    sentAt: '2026-06-15T03:29:02Z',
+    subject: 'Hello',
+    textBody: [{ partId: 'ot', type: 'text/plain' }],
+    htmlBody: [{ partId: 'oh', type: 'text/html' }],
+    bodyValues: { ot: { value: 'ORIGINAL TEXT BODY' }, oh: { value: '<p>ORIGINAL HTML BODY</p>' } },
+  };
+
+  // Dispatch Email/get BY ID — draft fixture for the draft id, original fixture for
+  // 'orig-1'. A single-fixture mock would make the regenerate test quote the DRAFT as its
+  // own original and prove nothing, so id-dispatch is mandatory here. 'orig-missing' →
+  // notFound (drives the not-found path). getEmailById issues Email/get + Mailbox/get;
+  // we answer only Email/get (its mailbox read is defensive/optional).
+  function mockReplyUpdate(c: JmapClient) {
+    return mock.method(c, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        const id = params.ids?.[0];
+        if (id === 'orig-1') return { methodResponses: [['Email/get', { list: [ORIGINAL_FOR_REPLY] }, 'email']] };
+        if (id === 'orig-missing') return { methodResponses: [['Email/get', { list: [], notFound: ['orig-missing'] }, 'email']] };
+        return { methodResponses: [['Email/get', { list: [REPLY_DRAFT] }, 'getEmail']] };
+      }
+      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
+    });
+  }
+
+  // Find the create call by predicate — the regenerate path inserts a second Email/get, so
+  // the create is no longer at a fixed index.
+  function createdDraft(makeReq: ReturnType<typeof mock.method>) {
+    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
+    return call!.arguments[0].methodCalls[0][1].create.draft;
+  }
+
+  it('rejects a quote-dropping htmlBody edit on a reply draft (no flag)', async () => {
+    mockReplyUpdate(client);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>just my new reply</p>' }),
+      /would drop the quoted original.*originalEmailId/s,
+    );
+  });
+
+  it('regenerates and keeps the quote from originalEmailId', async () => {
+    const makeReq = mockReplyUpdate(client);
+    await client.updateDraft('draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    // Regenerated html carries the caller's new text AND the ORIGINAL's body (not the draft's).
+    assert.match(draft.bodyValues.html.value, /my edited reply/);
+    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
+    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
+    // A non-empty text fallback regenerates from the combined html (quote-bearing).
+    assert.ok(!isBlankStr(draft.bodyValues.text.value));
+    assert.match(draft.bodyValues.text.value, /ORIGINAL HTML BODY/);
+  });
+
+  it('drops the quote on dropQuote:true (no second fetch)', async () => {
+    const makeReq = mockReplyUpdate(client);
+    await client.updateDraft('draft-1', { htmlBody: '<p>bare reply</p>', dropQuote: true });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.html.value, '<p>bare reply</p>');
+    // No quote → no second Email/get for an original.
+    const getCalls = makeReq.mock.calls.filter((c: any) => c.arguments[0].methodCalls[0][0] === 'Email/get');
+    assert.equal(getCalls.length, 1);
+  });
+
+  it('throws when originalEmailId and dropQuote are both given', async () => {
+    mockReplyUpdate(client);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1', dropQuote: true }),
+      /not both/,
+    );
+  });
+
+  it('throws an actionable error when originalEmailId is not found', async () => {
+    mockReplyUpdate(client);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-missing' }),
+      /originalEmailId 'orig-missing' could not be fetched/,
+    );
+  });
+
+  it('accepts a new htmlBody that already contains the quote marker (no flag needed)', async () => {
+    const makeReq = mockReplyUpdate(client);
+    const html = '<p>my edited reply</p><blockquote type="cite">quoted original</blockquote>';
+    await client.updateDraft('draft-1', { htmlBody: html });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, html);
+  });
+
+  it('does not fire the guard on a NON-reply draft (no inReplyTo)', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT); // no inReplyTo
+    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' });
+    assert.equal(draftFromCall(makeReq).bodyValues.html.value, '<p>NEW</p>');
+  });
+
+  it('keeps the "> " text quote on clearFields:["htmlBody"] of a reply draft (regression)', async () => {
+    const makeReq = mockReplyUpdate(client);
+    await client.updateDraft('draft-1', { clearFields: ['htmlBody'] });
+    const draft = createdDraft(makeReq);
+    // Plain-text conversion: html gone, the existing "> "-prefixed text quote preserved.
+    assert.equal(draft.htmlBody, undefined);
+    assert.match(draft.bodyValues.text.value, /> quoted original/);
+  });
 });
+
+// Local non-empty check for the regenerate-fallback assertion.
+function isBlankStr(s: string | undefined): boolean {
+  return !s || s.trim() === '';
+}
 
 // ---------- sendDraft ----------
 

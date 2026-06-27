@@ -2,6 +2,7 @@ import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank } from './body-format.js';
+import { buildReplyBodies, hasQuoteMarker } from './reply-quote.js';
 import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
 import type { FileHandle } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
@@ -722,6 +723,12 @@ export class JmapClient {
     clearFields?: string[];
     attachments?: AttachmentPart[];
     removeAttachments?: string[];
+    // Reply-quote preservation on body edit (#37). When editing a reply draft's htmlBody to
+    // one that no longer carries the quoted original, the caller must say what to do:
+    // originalEmailId = regenerate and keep the quote from that (caller-named) message;
+    // dropQuote = deliberately drop it. Absent both, the edit is rejected (no silent loss).
+    originalEmailId?: string;
+    dropQuote?: boolean;
   }): Promise<{ id: string; orphanedOldDraftId?: string }> {
     const session = await this.getSession();
 
@@ -833,6 +840,43 @@ export class JmapClient {
     }
     // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
     // discarded so stored bodies keep their exact (untrimmed) value below.
+
+    // ---- Reply-quote preservation guard (#37) ----
+    // A reply draft keeps the quoted original inside its htmlBody (buildReplyBodies appends
+    // a cited <blockquote>). Writing a quote-free htmlBody would replace the whole body and
+    // silently drop that quote. So when editing a REPLY draft's htmlBody to one without the
+    // marker, force the caller to choose: regenerate+keep from a caller-named originalEmailId,
+    // or deliberately dropQuote. Detection is on the caller's NEW html only (never the stored
+    // body), so there's no silent-loss path and no dependence on how Fastmail re-serialized
+    // the saved quote. clearFields:['htmlBody'] (plain-text conversion) leaves updates.htmlBody
+    // undefined and so never trips this; it already preserves the "> " text quote below.
+    const isReply = !!existingEmail.inReplyTo?.length;
+    const droppingQuote = isReply && updates.htmlBody !== undefined && !hasQuoteMarker(updates.htmlBody);
+    if (droppingQuote) {
+      if (updates.originalEmailId && updates.dropQuote === true) {
+        throw new Error('Pass either originalEmailId (keep the quote) or dropQuote (discard it), not both.');
+      } else if (updates.originalEmailId) {
+        // Regenerate from the caller-named original — never re-resolved from the draft's
+        // In-Reply-To (which is attacker-controllable), so there's no spoof surface. The id
+        // is trusted, not validated against the draft's In-Reply-To (that check would
+        // false-reject legitimate cases, e.g. correcting a wrong original). getEmailById
+        // throws on not-found; rethrow with a message naming the param so the caller can fix
+        // it (it surfaces via index's error wrap like this function's other guards).
+        let original: any;
+        try {
+          original = await this.getEmailById(updates.originalEmailId);
+        } catch {
+          throw new Error(`originalEmailId '${updates.originalEmailId}' could not be fetched (no such message, or not accessible). Pass the id of the message this draft replies to.`);
+        }
+        updates.htmlBody = buildReplyBodies({ original, htmlBody: updates.htmlBody, quoteOriginal: true }).htmlBody;
+      } else if (updates.dropQuote === true) {
+        // Proceed: the quote is dropped on explicit request.
+      } else {
+        // Error names ONLY the data-preserving keep path; dropQuote is deliberately omitted
+        // so the model is never nudged toward discarding the quote (it stays in the schema).
+        throw new Error("Changing this reply draft's htmlBody would drop the quoted original. Pass originalEmailId (the message this draft replies to) to regenerate and keep the quote.");
+      }
+    }
 
     // Merge non-body fields: updates override existing; clearFields force the empty value.
     const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));

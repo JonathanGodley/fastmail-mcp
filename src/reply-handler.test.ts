@@ -75,8 +75,12 @@ describe('buildReplyParams — subject, recipients, threading', () => {
     assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal({ subject: 'Hello' })).replyParams.subject, 'Re: Hello');
     assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal({ subject: 'Re: Hello' })).replyParams.subject, 'Re: Hello');
   });
-  it('defaults the recipient to the original sender', () => {
-    assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal()).replyParams.to, ['jon@example.com']);
+  it('defaults the recipient to the original sender, preserving the display name (#31)', () => {
+    assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal()).replyParams.to, ['Jon Godley <jon@example.com>']);
+  });
+  it('defaults to a bare address when the original sender has no display name (#31)', () => {
+    const orig = makeOriginal({ from: [{ email: 'noname@example.com' }] });
+    assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, orig).replyParams.to, ['noname@example.com']);
   });
   it('uses an explicit to over the original sender', () => {
     assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', to: ['alice@x.com'] }, makeOriginal()).replyParams.to, ['alice@x.com']);

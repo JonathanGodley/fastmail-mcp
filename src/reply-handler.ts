@@ -3,6 +3,7 @@ import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { isBlank } from './body-format.js';
 import { buildReplyBodies } from './reply-quote.js';
+import { formatAddress } from './email-formatter.js';
 import type { AttachmentPart } from './jmap-client.js';
 
 // Parameters passed to createDraft/sendEmail for a reply (matches their input shapes).
@@ -57,9 +58,13 @@ export function buildReplyParams(
     subject = `Re: ${subject}`;
   }
 
+  // Default the recipient to the original sender, preserving the display name via the
+  // shared formatAddress ("Name <email>"). The result round-trips through parseAddress
+  // downstream (split on the last <>), and this default array bypasses coerceStringArray
+  // so a comma in the name is never re-split into a bogus second recipient (#31).
   const to = (toArray && toArray.length > 0)
     ? toArray
-    : (Array.isArray(originalEmail.from) ? originalEmail.from.map((addr: any) => addr.email).filter(Boolean) : []);
+    : (Array.isArray(originalEmail.from) ? originalEmail.from.filter((a: any) => a?.email).map(formatAddress) : []);
   if (to.length === 0) {
     throw new McpError(ErrorCode.InvalidParams, 'Could not determine reply recipient. Please provide "to" explicitly.');
   }
