@@ -522,13 +522,13 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        description: 'Search emails by subject or content. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one). Drafts are included by default; set excludeDrafts=true to omit draft messages from results (and from the total count).',
+        description: 'Full-text email search: matches the query as free text across subject, body, and participants (from/to/cc/bcc). It does NOT interpret operator/search syntax — a query like "from:alice@example.com" is matched as literal words rather than a sender filter, so it may return irrelevant results. To filter by sender, recipient, subject, date, attachment, or mailbox, use advanced_search (which has dedicated from/to/subject/... parameters). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one). Drafts are included by default; set excludeDrafts=true to omit draft messages from results (and from the total count).',
         inputSchema: {
           type: 'object',
           properties: {
             query: {
               type: 'string',
-              description: 'Search query string',
+              description: 'Free-text terms (subject/body/participants). Operator syntax like "from:"/"to:"/"subject:" (or boolean AND/OR) is matched literally, not parsed — use advanced_search\'s dedicated from/to/subject params for those, e.g. advanced_search with from="alice@example.com".',
             },
             limit: {
               type: ['number', 'string'],
@@ -975,13 +975,13 @@ const TOOLS = [
       },
       {
         name: 'advanced_search',
-        description: 'Advanced email search with multiple criteria. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
+        description: 'Advanced email search with dedicated filters — from, to, subject, date range (after/before), hasAttachment, isUnread/isPinned, mailbox. Use the dedicated params when you know the field; use the optional query field for free-text terms across the whole message (subject/body/participants). Neither parses operator syntax (a "from:" prefix is matched literally). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
         inputSchema: {
           type: 'object',
           properties: {
             query: {
               type: 'string',
-              description: 'Text to search for in subject/body',
+              description: 'Optional free-text terms matched across subject, body, and participants (same engine as search_emails; not operator syntax). For sender/recipient/subject filtering use the dedicated from/to/subject params, not this field.',
             },
             from: {
               type: 'string',
