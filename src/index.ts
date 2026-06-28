@@ -2126,7 +2126,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'test_bulk_operations': {
-        const { dryRun = true, limit = 3 } = args as any;
+        const { limit = 3 } = args as any;
+        // Coerce dryRun for lenient clients: a stringified "false" is otherwise truthy
+        // and would silently keep the diagnostic in dry-run mode. Defaults to dry-run
+        // (the safe, non-acting direction).
+        const dryRun = coerceBool((args as any).dryRun) ?? true;
         const client = initializeClient();
         
         // Get some recent emails to test with

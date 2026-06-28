@@ -48,8 +48,9 @@ deliberately the only reject.
 ## The asymmetric edit coupling
 
 Because the text part is an auto-managed fallback of the HTML, `edit_draft`'s
-cross-format coupling is asymmetric, not symmetric. The guards live at
-`src/jmap-client.ts:704-714`:
+cross-format coupling is asymmetric, not symmetric. The guards live in `updateDraft`
+in `src/jmap-client.ts` (the textBody-alone-while-html and clearFields:['textBody']-
+while-html rejects, plus the no-body-result reject):
 
 - Edit `htmlBody` alone: the text fallback is regenerated from the new HTML. No throw.
 - Edit `textBody` alone while a non-empty `htmlBody` survives: rejected. Editing the

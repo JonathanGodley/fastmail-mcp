@@ -90,6 +90,15 @@ a ref that matches nothing or a name matching more than one; `clearFields:['atta
 removes all. Passing `attachments` together with `clearFields:['attachments']` is a rejected
 conflict. An attachment-only edit stays body-invariant (it must not inject or strip a body).
 
+**Accepted residual — orphaned blobs on a late reject.** The handlers upload new
+attachment blobs *before* the draft create/recreate runs, so a rejection raised by a later
+guard (e.g. `edit_draft`'s inline-cid reject, a non-text/html body part, an unresolvable
+`removeAttachments` ref, or the no-body-result guard) leaves the just-uploaded blobs
+unreferenced. `uploadAttachments` orphans zero blobs *within its own batch* (a two-pass
+design), but that guarantee ends at its return; the upload-then-reject ordering reopens a
+window. Accepted because Fastmail garbage-collects unreferenced blobs (the same GC the code
+already relies on for a mid-batch upload failure) — no unbounded growth, no data exposure.
+
 ## `originalEmailId` is an in-account read-and-embed primitive (accepted residual)
 
 `reply_email` and `edit_draft`'s reply-quote keep path both take an `originalEmailId` and, on

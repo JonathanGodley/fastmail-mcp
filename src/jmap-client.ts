@@ -155,14 +155,14 @@ export interface ExclusionResult {
 }
 
 // Shared Email/get property lists — keep in sync per CLAUDE.md rules.
-// COMPACT: used by list/search tools in default mode and getThread(compact=true)
+// COMPACT: used by the list/search tools and getThread (metadata + preview, no bodies)
 export const EMAIL_PROPERTIES_COMPACT = [
   'id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt',
   'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo',
   'hasAttachment', 'header:List-Unsubscribe:asURLs', 'blobId', 'size', 'mailboxIds',
 ] as const;
 
-// VERBOSE: superset with body properties — used by verbose mode, getEmailById, getThread(compact=false)
+// VERBOSE: superset with body properties — used by verbose mode and getEmailById
 // `sentAt` is here (a get-path superset addition, allowed by the property-consistency rule)
 // for the reply-quote attribution (when the original was actually written), not in COMPACT.
 export const EMAIL_PROPERTIES_VERBOSE = [
@@ -1973,6 +1973,13 @@ export class JmapClient {
     const result = await response.json() as any;
     if (!result || typeof result.blobId !== 'string') {
       throw new Error('Blob upload returned no blobId');
+    }
+    // End-to-end integrity check: the stored blob size the server reports back must equal
+    // the byte count we sent. A mismatch means a truncated/corrupted upload (proxy or
+    // transport), so fail loudly rather than attach a corrupt file. (Only checked when the
+    // server returns a numeric size.)
+    if (typeof result.size === 'number' && result.size !== data.length) {
+      throw new Error(`Blob upload size mismatch: sent ${data.length} bytes, server stored ${result.size}.`);
     }
     return { blobId: result.blobId, type: result.type || contentType, size: result.size ?? data.length };
   }
