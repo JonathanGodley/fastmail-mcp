@@ -172,30 +172,87 @@ export const EMAIL_PROPERTIES_VERBOSE = [
 
 export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name'] as const;
 
-// Build an id -> human name lookup from a Mailbox/get list. We key on the real
-// `name` (not `role`) so custom labels — which have role:null — resolve too;
-// default mailboxes already carry names like "Trash"/"Archive". (#10)
-export function buildMailboxNameMap(mailboxes: any[]): Map<string, string> {
-  const map = new Map<string, string>();
+export interface MailboxInfo {
+  name: string;
+  // The stable JMAP role (lowercased), or null for a custom folder/label. Only
+  // the Mailbox object carries a role; the Email object never does (RFC 8621).
+  role: string | null;
+}
+
+// Build an id -> {name, role} lookup from a Mailbox/get list. We require a real
+// string `name` (so a malformed/missing name leaves the id unresolvable — surfaced
+// later, not silently dropped) but key on the id, so custom labels — which have
+// role:null — still resolve their name; default mailboxes carry names like
+// "Trash"/"Archive" AND a role. Role is lowercased here so callers get the
+// docs-promised lowercase form regardless of server casing. (#10, #49)
+export function buildMailboxInfoMap(mailboxes: any[]): Map<string, MailboxInfo> {
+  const map = new Map<string, MailboxInfo>();
   for (const mb of mailboxes || []) {
-    if (mb && mb.id && typeof mb.name === 'string') map.set(mb.id, mb.name);
+    if (mb && mb.id && typeof mb.name === 'string') {
+      const role = typeof mb.role === 'string' && mb.role ? mb.role.toLowerCase() : null;
+      map.set(mb.id, { name: mb.name, role });
+    }
   }
   return map;
 }
 
-// Attach the resolved mailbox/label names onto each raw email as a NON-enumerable
-// `_mailboxNames` so JSON.stringify (the raw:true paths) omits it while
-// simplifyEmail can still read it. Attach only when the email actually has
-// mailboxIds and at least one resolved to a name — otherwise omit, don't
-// fabricate (an empty/unresolvable set leaves the field absent). (#10)
-export function attachMailboxNames(emails: any[], map: Map<string, string>): void {
+// Attach the resolved mailbox/label location onto each raw email as NON-enumerable
+// properties (`_mailboxNames`, `_mailboxRoles`, `_unresolvedMailboxIds`) so
+// JSON.stringify — the raw:true paths — omits all three while simplifyEmail can
+// still read them. Raw output therefore stays pure JMAP (opaque mailboxIds), and
+// the simplified output carries friendly names + stable roles.
+//
+// NEVER-SILENT, NON-THROWING resolution (#53). For each of the email's mailboxIds:
+//   - resolves to a name  -> name goes to `_mailboxNames`; its role (if any) to `_mailboxRoles`.
+//   - does NOT resolve    -> the raw id goes to `_unresolvedMailboxIds` (the fallback +
+//                            the explicit "this couldn't be named" indicator).
+// So a promised location is never silently dropped: it appears either as a friendly
+// name or as a raw id flagged in `unresolvedMailboxIds`. This function does NOT throw
+// on an unresolved id, and it never fabricates a name.
+//
+// WHY not throw, and WHY not silently omit (do not "fix" this back to either):
+//   - An unresolved id is rare and benign — a just-created custom folder, a TOCTOU
+//     mailbox-creation race on the separately-fetched list/search mailbox list, or a
+//     mailbox with a malformed/missing `name`. Trash/Spam (and all role mailboxes)
+//     ALWAYS resolve, so the location that motivated #49/#53 is never the unresolved one.
+//   - Strict-throw was rejected as disproportionate: it would fail a whole
+//     list_emails/search_emails page over one rare/benign id, against the codebase's
+//     documented best-effort resolver posture.
+//   - Silently omitting the id (the prior behaviour) WAS the #53 bug — a promised
+//     field vanished with no trace.
+// A genuine Mailbox/get `error` response is a different thing and still throws via the
+// callers' existing catches (a real failure stays loud); that is not this path.
+//
+// `_mailboxRoles` and `_unresolvedMailboxIds` are attached only when non-empty (so the
+// formatter's addIf omits them); `_mailboxNames` keeps its existing attach-when-non-empty
+// behaviour. `roles` and `mailboxes` are INDEPENDENT sets, not parallel arrays — a custom
+// folder contributes a name but no role, so their lengths can differ. (#10, #49, #53)
+export function attachMailboxInfo(emails: any[], map: Map<string, MailboxInfo>): void {
   for (const email of emails || []) {
     if (!email || !email.mailboxIds) continue;
     const ids = Object.keys(email.mailboxIds);
     if (ids.length === 0) continue;
-    const names = ids.map(id => map.get(id)).filter(Boolean) as string[];
-    if (names.length === 0) continue;
-    Object.defineProperty(email, '_mailboxNames', { value: names, enumerable: false, configurable: true });
+    const names: string[] = [];
+    const roles: string[] = [];
+    const unresolved: string[] = [];
+    for (const id of ids) {
+      const info = map.get(id);
+      if (info) {
+        names.push(info.name);
+        if (info.role) roles.push(info.role);
+      } else {
+        unresolved.push(id);
+      }
+    }
+    if (names.length > 0) {
+      Object.defineProperty(email, '_mailboxNames', { value: names, enumerable: false, configurable: true });
+    }
+    if (roles.length > 0) {
+      Object.defineProperty(email, '_mailboxRoles', { value: roles, enumerable: false, configurable: true });
+    }
+    if (unresolved.length > 0) {
+      Object.defineProperty(email, '_unresolvedMailboxIds', { value: unresolved, enumerable: false, configurable: true });
+    }
   }
 }
 
@@ -504,7 +561,7 @@ export class JmapClient {
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
         }, 'email'],
-        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
+        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name', 'role'] }, 'mailboxes']
       ]
     };
 
@@ -520,7 +577,7 @@ export class JmapClient {
       throw new Error(`Email with ID '${id}' not found or not accessible`);
     }
 
-    attachMailboxNames([email], buildMailboxNameMap(this.readListResultIfPresent(response, 1)));
+    attachMailboxInfo([email], buildMailboxInfoMap(this.readListResultIfPresent(response, 1)));
     return email;
   }
 
@@ -1415,8 +1472,8 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     const result = this.getQueryResult(response, 0, 1);
-    // Reuse the mailbox list already fetched above to resolve names — no extra methodCall.
-    attachMailboxNames(result.items, buildMailboxNameMap(mailboxes));
+    // Reuse the mailbox list already fetched above to resolve names + roles — no extra methodCall.
+    attachMailboxInfo(result.items, buildMailboxInfoMap(mailboxes));
     return result;
   }
 
@@ -2155,7 +2212,7 @@ export class JmapClient {
       methodCalls,
     });
     const result = this.getQueryResult(response, 0, 1);
-    attachMailboxNames(result.items, buildMailboxNameMap(mailboxes));
+    attachMailboxInfo(result.items, buildMailboxInfoMap(mailboxes));
 
     // Populate exclusion metadata whenever an exclusion was INTENDED — even if
     // excludeIds came back empty (a role couldn't be resolved), so the handler still
@@ -2294,7 +2351,7 @@ export class JmapClient {
           ids: [actualThreadId]
         }, 'getThread'],
         ['Email/get', emailGetParams, 'emails'],
-        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
+        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name', 'role'] }, 'mailboxes']
       ]
     };
 
@@ -2309,7 +2366,7 @@ export class JmapClient {
     // Resolve mailbox names onto the FULL list before filtering, so the draft
     // filter below doesn't skip the attach for retained messages.
     const emails = this.getListResult(response, 1);
-    attachMailboxNames(emails, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
+    attachMailboxInfo(emails, buildMailboxInfoMap(this.readListResultIfPresent(response, 2)));
 
     // Drafts (e.g. an in-progress reply) are noise when reading a conversation,
     // so exclude them by default. Identify by the $draft keyword (survives a

@@ -59,12 +59,16 @@ Object.defineProperty(email, '_mailboxNames', { value: names, enumerable: false,
 ```
 
 `JSON.stringify` (every `raw: true` path) omits non-enumerable properties, while
-`simplifyEmail` reads `raw._mailboxNames` directly. This is how the `mailboxes` field
-reaches simplified output — mailbox ids are resolved to names in `src/jmap-client.ts`
-(`buildMailboxNameMap` / `attachMailboxNames`) and ride along the email object through
-every read path — with **zero signature changes** to `simplifyEmail` /
-`formatEmailQueryResult`, keeping the formatter pure and testable. The convention for the
-next computed field: resolve in the client layer, attach non-enumerably under a
+`simplifyEmail` reads `raw._mailboxNames` directly. This is how the `mailboxes`, `roles`,
+and `unresolvedMailboxIds` fields reach simplified output — mailbox ids are resolved to
+names + stable roles in `src/jmap-client.ts` (`buildMailboxInfoMap` / `attachMailboxInfo`,
+which attach `_mailboxNames`, `_mailboxRoles`, and `_unresolvedMailboxIds` non-enumerably)
+and ride along the email object through every read path — with **zero signature changes**
+to `simplifyEmail` / `formatEmailQueryResult`, keeping the formatter pure and testable.
+`attachMailboxInfo` is **never-silent but non-throwing**: an id that can't be resolved to a
+name is surfaced as a raw id in `_unresolvedMailboxIds` rather than dropped (the #53 fix);
+see its in-code comment for why it neither throws nor omits. The convention for the next
+computed field: resolve in the client layer, attach non-enumerably under a
 leading-underscore name, and read it in the simplifier via `addIf` (so it is omitted when
 absent). Do not thread it through function signatures, and do not make it enumerable — it
 would leak into raw output.

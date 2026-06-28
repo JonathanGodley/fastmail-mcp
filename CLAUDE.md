@@ -25,7 +25,13 @@ All email list/search methods in `src/jmap-client.ts` must request the same set 
 - `getRecentEmails()`
 - `getThread()` (full mode) and `getEmailById()` request additional body properties and must be a superset of the list set, so that `raw: true` returns a complete JMAP response.
 
-When you append an extra method call to an existing batch (e.g. a trailing `Mailbox/get` to resolve mailbox names), read its result **defensively** with `readListResultIfPresent`, not a hard index. `getMethodResult`/`getListResult` throw on a missing index, and existing tests stub only the original method responses, so a hard index would make them throw — and a real server that drops the trailing method would error in production. Degrade gracefully (empty result → feature simply absent) instead.
+When you append an extra method call to an existing batch (e.g. a trailing `Mailbox/get` to resolve mailbox names), read its result **defensively** with `readListResultIfPresent`, not a hard index. `getMethodResult`/`getListResult` throw on a missing index, and existing tests stub only the original method responses, so a hard index would make them throw — and a real server that drops the trailing method would error in production. The tolerant read **stays**: a dropped trailing method is a benign degrade.
+
+But "tolerant read" is **not** "silently drop the promised field." A read tool promises `mailboxes`/`roles`; if a mailbox id can't be resolved to a name, the id is surfaced in `unresolvedMailboxIds` (never omitted with no trace). That was the #53 bug — `readListResultIfPresent` returning `[]` made the resolver silently emit nothing. The resolver (`attachMailboxInfo`) is therefore **never-silent but non-throwing**: resolved → name/role, unresolved → raw id in `unresolvedMailboxIds`. See its in-code comment for the full reasoning (why not throw, why not omit).
+
+**Never silently drop a promised field.** When a resolution/enrichment can't complete, surface the degradation explicitly (e.g. the `unresolvedMailboxIds` fallback) OR error on a genuine failure — never let a promised output field vanish with no trace. And never weaken a production behavior just to satisfy an under-stubbed test: fix the test instead.
+
+**Index-read caveat (RFC 8620 §3.4).** A JMAP response returns one entry per method call, in order, but errors are `error` entries — not absences. Our `getMethodResult`/`getListResult` index reads are safe ONLY because `Email/get`/`Mailbox/get`/`Thread/get` are each single-response in our batches; match method responses by their **call-id**, not a positional index, before generalizing index reads to any batch where a method could appear more than once or be reordered.
 
 ## Version
 

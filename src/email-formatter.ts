@@ -15,7 +15,11 @@ export interface SimplifiedEmail {
   isRead?: boolean;
   isFlagged?: boolean;
   isDraft?: boolean;
+  isAnswered?: boolean;
+  isForwarded?: boolean;
   mailboxes?: string[];
+  roles?: string[];
+  unresolvedMailboxIds?: string[];
   preview?: string;
   listUnsubscribe?: string[];
   hasAttachment?: boolean;
@@ -42,7 +46,24 @@ export interface SimplifyOptions {
   timezone?: string;
 }
 
-const STANDARD_KEYWORDS = new Set(['$seen', '$flagged', '$draft', '$answered', '$forwarded']);
+// Single source of truth for the canonical message-state keywords (RFC 3501/5788/
+// 8621): each maps a JMAP keyword to the simplified boolean it promotes to. Two
+// concerns are derived from this one map so they can never drift (the bug behind
+// #49: $answered/$forwarded were listed as "standard" — excluded from passthrough —
+// but had no promotion line, so they vanished from output entirely):
+//   1. Promotion — every entry produces its `is*` flag (see the loop in simplifyEmail).
+//   2. Passthrough exclusion — STANDARD_KEYWORDS (the keys) is what the non-standard
+//      `keywords` map omits, so a promoted flag is never also echoed in `keywords`.
+// Adding a keyword here both promotes it AND excludes it from passthrough in one step.
+export const KEYWORD_FLAGS: Record<string, string> = {
+  $seen: 'isRead',
+  $flagged: 'isFlagged',
+  $draft: 'isDraft',
+  $answered: 'isAnswered',
+  $forwarded: 'isForwarded',
+};
+
+const STANDARD_KEYWORDS = new Set(Object.keys(KEYWORD_FLAGS));
 
 // Static deployment config: the timezone all emails render their `date` in,
 // resolved once at startup from FASTMAIL_TIMEZONE (see setDefaultTimezone). An
@@ -179,7 +200,9 @@ function addIf<T>(obj: Record<string, any>, key: string, value: T): void {
 
 // Only these specific flags are noise when false — omit them to save tokens.
 // Other booleans (including unknown future ones) pass through as-is.
-const DROP_WHEN_FALSE = new Set(['isReply', 'isFlagged', 'isDraft', 'hasAttachment']);
+// NOTE: isRead is deliberately NOT here — isRead:false is the only reliable "unread"
+// signal (JMAP has no $unseen; absence of $seen is ambiguous), so it's always shown.
+const DROP_WHEN_FALSE = new Set(['isReply', 'isFlagged', 'isDraft', 'isAnswered', 'isForwarded', 'hasAttachment']);
 
 function addFlag(obj: Record<string, any>, key: string, value: boolean): void {
   if (!value && DROP_WHEN_FALSE.has(key)) return;
@@ -203,13 +226,26 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   addIf(result, 'replyTo', (raw.replyTo ?? []).map(formatAddress));
   addIf(result, 'inReplyTo', raw.inReplyTo);
   addFlag(result, 'isReply', !!(raw.inReplyTo?.length));
-  addFlag(result, 'isRead', !!(raw.keywords?.$seen));
-  addFlag(result, 'isFlagged', !!(raw.keywords?.$flagged));
-  addFlag(result, 'isDraft', !!(raw.keywords?.$draft));
-  // Human-readable mailbox/label location, resolved in the client layer and
-  // attached as a non-enumerable `_mailboxNames`. Omitted when unresolvable.
-  // Disambiguates e.g. a trashed draft (["Trash"], still isDraft:true) from a live one. (#10)
+  // Promote the canonical message-state keywords to `is*` flags from the single
+  // KEYWORD_FLAGS map (subsumes the old hand-written isRead/isFlagged/isDraft lines
+  // and adds isAnswered/isForwarded for free). DROP_WHEN_FALSE then decides which
+  // show only when true (isRead always shows; the rest are dropped when false).
+  for (const [kw, flag] of Object.entries(KEYWORD_FLAGS)) {
+    addFlag(result, flag, !!(raw.keywords?.[kw]));
+  }
+  // Two AXES of message metadata, intentionally separate (do not dedupe them):
+  //   - KEYWORD axis (`is*`): what the message IS / what's been done to it.
+  //   - LOCATION axis (`mailboxes`/`roles`): where it's filed. Resolved in the client
+  //     layer and attached as non-enumerable `_mailboxNames`/`_mailboxRoles`.
+  // They normally agree (isDraft + roles:["drafts"]) but can legitimately diverge — a
+  // draft moved to Trash is isDraft:true with roles:["trash"], and both are correct.
+  // `mailboxes` (display names, user-renamable) and `roles` (stable JMAP roles) describe
+  // the SAME set but are NOT parallel arrays — a custom folder appears in `mailboxes`
+  // with no `roles` entry, so they can differ in length. Any id that couldn't be
+  // resolved to a name surfaces in `unresolvedMailboxIds` (never silently dropped). (#10, #49, #53)
   addIf(result, 'mailboxes', raw._mailboxNames);
+  addIf(result, 'roles', raw._mailboxRoles);
+  addIf(result, 'unresolvedMailboxIds', raw._unresolvedMailboxIds);
   addIf(result, 'preview', raw.preview);
   addIf(result, 'listUnsubscribe', raw['header:List-Unsubscribe:asURLs']);
   // hasAttachment is redundant when attachments array is present

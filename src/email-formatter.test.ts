@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyEmail, formatAddress, toLocalIso, setDefaultTimezone, formatReplyDate } from './email-formatter.js';
+import { simplifyEmail, formatAddress, toLocalIso, setDefaultTimezone, formatReplyDate, KEYWORD_FLAGS } from './email-formatter.js';
 
 describe('formatAddress', () => {
   it('formats name and email', () => {
@@ -272,6 +272,27 @@ describe('simplifyEmail', () => {
     assert.equal(result.isRead, false, 'isRead false should be preserved (unread is meaningful)');
     assert.equal(result.isFlagged, undefined, 'isFlagged false should be omitted');
     assert.equal(result.isDraft, undefined, 'isDraft false should be omitted');
+    assert.equal(result.isAnswered, undefined, 'isAnswered false should be omitted');
+    assert.equal(result.isForwarded, undefined, 'isForwarded false should be omitted');
+  });
+
+  it('promotes $answered/$forwarded to isAnswered/isForwarded (#49)', () => {
+    const result = simplifyEmail({ id: 'e13', keywords: { $answered: true, $forwarded: true } });
+    assert.equal(result.isAnswered, true);
+    assert.equal(result.isForwarded, true);
+    // Promoted flags must NOT also leak into the non-standard passthrough map.
+    assert.equal(result.keywords, undefined, 'standard keywords should be consumed by flags, not passed through');
+  });
+
+  it('single-source KEYWORD_FLAGS: every keyword promotes to its flag and is excluded from passthrough', () => {
+    for (const [kw, flag] of Object.entries(KEYWORD_FLAGS)) {
+      const result: any = simplifyEmail({ id: 'k1', keywords: { [kw]: true } });
+      assert.equal(result[flag], true, `${kw} should promote to ${flag}`);
+      assert.ok(
+        result.keywords === undefined || result.keywords[kw] === undefined,
+        `${kw} is standard and must not appear in the passthrough keywords map`,
+      );
+    }
   });
 
   it('omits null/empty fields', () => {
@@ -611,5 +632,83 @@ describe('simplifyEmail mailboxes (#10)', () => {
     assert.equal(JSON.stringify(raw).includes('_mailboxNames'), false);
     assert.equal(Object.keys(raw).includes('_mailboxNames'), false);
     assert.deepEqual(raw._mailboxNames, ['Inbox']); // property is still readable for the formatter
+  });
+});
+
+describe('simplifyEmail roles + unresolvedMailboxIds (#49, #53)', () => {
+  // Attach the non-enumerable info fields the way attachMailboxInfo does.
+  function withInfo(raw: any, fields: { names?: string[]; roles?: string[]; unresolved?: string[] }): any {
+    if (fields.names !== undefined) Object.defineProperty(raw, '_mailboxNames', { value: fields.names, enumerable: false, configurable: true });
+    if (fields.roles !== undefined) Object.defineProperty(raw, '_mailboxRoles', { value: fields.roles, enumerable: false, configurable: true });
+    if (fields.unresolved !== undefined) Object.defineProperty(raw, '_unresolvedMailboxIds', { value: fields.unresolved, enumerable: false, configurable: true });
+    return raw;
+  }
+  const base = { id: 'r1', subject: 'Hi', from: [{ email: 'a@b.com' }] };
+
+  it('surfaces roles from _mailboxRoles', () => {
+    const result = simplifyEmail(withInfo({ ...base }, { names: ['Trash'], roles: ['trash'] }));
+    assert.deepEqual(result.roles, ['trash']);
+    assert.deepEqual(result.mailboxes, ['Trash']);
+  });
+
+  it('omits roles when empty/absent but keeps mailboxes (custom-folder-only message)', () => {
+    const result = simplifyEmail(withInfo({ ...base }, { names: ['Receipts'] }));
+    assert.equal('roles' in result, false);
+    assert.deepEqual(result.mailboxes, ['Receipts']);
+  });
+
+  it('roles and mailboxes are independent sets (different lengths)', () => {
+    const result = simplifyEmail(withInfo({ ...base }, { names: ['Inbox', 'Receipts'], roles: ['inbox'] }));
+    assert.deepEqual(result.mailboxes, ['Inbox', 'Receipts']);
+    assert.deepEqual(result.roles, ['inbox']); // Receipts has no role — not positionally aligned
+  });
+
+  it('includes inbox and drafts roles (no carve-out)', () => {
+    const inbox = simplifyEmail(withInfo({ ...base }, { names: ['Inbox'], roles: ['inbox'] }));
+    assert.deepEqual(inbox.roles, ['inbox']);
+    const drafts = simplifyEmail(withInfo({ ...base, keywords: { $draft: true } }, { names: ['Drafts'], roles: ['drafts'] }));
+    assert.deepEqual(drafts.roles, ['drafts']);
+    assert.equal(drafts.isDraft, true);
+  });
+
+  it('axis independence: a draft filed in Trash is isDraft:true with roles:["trash"]', () => {
+    const result = simplifyEmail(withInfo({ ...base, keywords: { $draft: true } }, { names: ['Trash'], roles: ['trash'] }));
+    assert.equal(result.isDraft, true);
+    assert.deepEqual(result.roles, ['trash']);
+  });
+
+  it('surfaces an unresolved id (never silently dropped) alongside resolved names', () => {
+    const result = simplifyEmail(withInfo({ ...base }, { names: ['Inbox'], roles: ['inbox'], unresolved: ['mb-new'] }));
+    assert.deepEqual(result.mailboxes, ['Inbox']);
+    assert.deepEqual(result.unresolvedMailboxIds, ['mb-new']);
+  });
+
+  it('omits unresolvedMailboxIds when there are none', () => {
+    const result = simplifyEmail(withInfo({ ...base }, { names: ['Inbox'], roles: ['inbox'] }));
+    assert.equal('unresolvedMailboxIds' in result, false);
+  });
+
+  it('raw purity: none of the info fields are injected into JSON, but keywords survive', () => {
+    const raw: any = withInfo({ ...base, keywords: { $answered: true } }, { names: ['Inbox'], roles: ['inbox'], unresolved: ['mb-x'] });
+    const json = JSON.stringify(raw);
+    assert.equal(json.includes('_mailboxNames'), false);
+    assert.equal(json.includes('_mailboxRoles'), false);
+    assert.equal(json.includes('_unresolvedMailboxIds'), false);
+    assert.equal(json.includes('roles'), false);
+    assert.ok(json.includes('$answered'), 'natural JMAP keyword stays in raw');
+  });
+
+  it('raw purity holds for the get_thread array case (raw:true serializes a list of emails)', () => {
+    // raw:true on get_thread returns the array of raw email objects untouched; the
+    // non-enumerable info fields must not leak from any element.
+    const arr: any[] = [
+      withInfo({ ...base, id: 'a', keywords: { $answered: true } }, { names: ['Inbox'], roles: ['inbox'] }),
+      withInfo({ ...base, id: 'b' }, { names: ['Trash'], roles: ['trash'], unresolved: ['mb-x'] }),
+    ];
+    const json = JSON.stringify(arr);
+    assert.equal(json.includes('_mailboxNames'), false);
+    assert.equal(json.includes('_mailboxRoles'), false);
+    assert.equal(json.includes('_unresolvedMailboxIds'), false);
+    assert.ok(json.includes('$answered'), 'natural JMAP keyword stays in raw');
   });
 });

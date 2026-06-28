@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxNameMap, attachMailboxNames, resolveMailbox, computeExclusion } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion } from './jmap-client.js';
 import { InvalidInputError } from './coerce.js';
 import { buildExclusionNote } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
@@ -944,7 +944,7 @@ describe('mailbox location (#10)', () => {
     ],
   };
 
-  it('getEmails attaches resolved names from getMailboxes (multi-membership; unresolved omitted)', async () => {
+  it('getEmails attaches resolved names + roles from getMailboxes (multi-membership; unresolved surfaced)', async () => {
     mock.method(client, 'getMailboxes', async () => NAME_MAILBOXES);
     const makeReq = mock.method(client, 'makeRequest', async () => NAME_QUERY_RESPONSE);
 
@@ -956,11 +956,14 @@ describe('mailbox location (#10)', () => {
     assert.equal(calls.some((c: any) => c[0] === 'Mailbox/get'), false);
 
     assert.deepEqual((result.items[0] as any)._mailboxNames, ['Inbox', 'Receipts']);
-    // e2's only mailbox id didn't resolve → no field at all (don't fabricate).
+    // roles is an independent set — Receipts has role null, so only 'inbox'.
+    assert.deepEqual((result.items[0] as any)._mailboxRoles, ['inbox']);
+    // e2's only mailbox id didn't resolve → surfaced as a raw id, never silently dropped (#53).
     assert.equal('_mailboxNames' in (result.items[1] as any), false);
+    assert.deepEqual((result.items[1] as any)._unresolvedMailboxIds, ['mb-unknown']);
   });
 
-  it('attaches nothing (does NOT throw) when an email\'s mailbox id is not in the fetched list', async () => {
+  it('surfaces an unresolved id (does NOT throw) when an email\'s mailbox id is not in the fetched list (#53)', async () => {
     mock.method(client, 'getMailboxes', async () => [{ id: 'mb-inbox', name: 'Inbox', role: 'inbox' }]);
     stubMakeRequest(client, {
       methodResponses: [
@@ -972,31 +975,38 @@ describe('mailbox location (#10)', () => {
     const result = await client.getEmails({ mailbox: 'mb-inbox', limit: 5 });
     assert.equal(result.items.length, 1);
     assert.equal('_mailboxNames' in (result.items[0] as any), false);
+    assert.deepEqual((result.items[0] as any)._unresolvedMailboxIds, ['mb-other']);
   });
 
-  it('searchEmails attaches names from getMailboxes', async () => {
+  it('searchEmails attaches names + roles and surfaces an unresolved id from getMailboxes (#53)', async () => {
     mock.method(client, 'getMailboxes', async () => NAME_MAILBOXES);
     const makeReq = mock.method(client, 'makeRequest', async () => NAME_QUERY_RESPONSE);
     // includeTrash/includeSpam true => no exclusion/count query, just query + get.
     const result = await client.searchEmails({ query: 'x', limit: 5, includeTrash: true, includeSpam: true });
     assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls.length, 2);
     assert.deepEqual((result.items[0] as any)._mailboxNames, ['Inbox', 'Receipts']);
+    assert.deepEqual((result.items[0] as any)._mailboxRoles, ['inbox']);
+    // e2's id is not in the map → surfaced, not dropped.
+    assert.deepEqual((result.items[1] as any)._unresolvedMailboxIds, ['mb-unknown']);
   });
 
-  it('getEmailById attaches names from its appended Mailbox/get (index 1)', async () => {
+  it('getEmailById attaches names + roles from its appended Mailbox/get (index 1), requesting role', async () => {
     const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
         ['Email/get', { list: [{ id: 'e1', subject: 'A', mailboxIds: { 'mb-trash': true } }] }, 'email'],
-        ['Mailbox/get', { list: [{ id: 'mb-trash', name: 'Trash' }] }, 'mailboxes'],
+        ['Mailbox/get', { list: [{ id: 'mb-trash', name: 'Trash', role: 'trash' }] }, 'mailboxes'],
       ],
     }));
 
     const email = await client.getEmailById('e1');
-    assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls[1][0], 'Mailbox/get');
+    const mailboxGet = makeReq.mock.calls[0].arguments[0].methodCalls[1];
+    assert.equal(mailboxGet[0], 'Mailbox/get');
+    assert.deepEqual(mailboxGet[1].properties, ['id', 'name', 'role']);
     assert.deepEqual((email as any)._mailboxNames, ['Trash']);
+    assert.deepEqual((email as any)._mailboxRoles, ['trash']);
   });
 
-  it('getRecentEmails reuses its existing getMailboxes list (no third methodCall) and attaches names', async () => {
+  it('getRecentEmails reuses its existing getMailboxes list (no third methodCall) and attaches names + roles', async () => {
     stubMailboxes(client); // INBOX/DRAFTS/TRASH/SENT
     const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
@@ -1009,10 +1019,11 @@ describe('mailbox location (#10)', () => {
     // Reuses getMailboxes — the request stays a 2-call batch, no appended Mailbox/get.
     assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls.length, 2);
     assert.deepEqual((result.items[0] as any)._mailboxNames, ['Inbox']);
+    assert.deepEqual((result.items[0] as any)._mailboxRoles, ['inbox']);
   });
 
-  it('getThread attaches names to retained messages before the draft filter runs', async () => {
-    stubMakeRequest(client, {
+  it('getThread attaches names + roles to retained messages before the draft filter, requesting role', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
         ['Thread/get', { list: [{ id: 't1', emailIds: ['e1', 'e2'] }] }, 'getThread'],
         ['Email/get', { list: [
@@ -1020,60 +1031,97 @@ describe('mailbox location (#10)', () => {
           { id: 'e2', subject: 'Draft', keywords: { $draft: true }, mailboxIds: { 'mb-drafts': true } },
         ] }, 'emails'],
         ['Mailbox/get', { list: [
-          { id: 'mb-inbox', name: 'Inbox' },
-          { id: 'mb-drafts', name: 'Drafts' },
+          { id: 'mb-inbox', name: 'Inbox', role: 'inbox' },
+          { id: 'mb-drafts', name: 'Drafts', role: 'drafts' },
         ] }, 'mailboxes'],
       ],
-    });
+    }));
 
     const { emails } = await client.getThread('t1'); // drafts excluded by default
+    // getThread makes two requests: an email-id probe, then the Thread/Email/Mailbox batch.
+    const mailboxGet = makeReq.mock.calls[1].arguments[0].methodCalls[2];
+    assert.equal(mailboxGet[0], 'Mailbox/get');
+    assert.deepEqual(mailboxGet[1].properties, ['id', 'name', 'role']);
     assert.equal(emails.length, 1);
     assert.equal(emails[0].id, 'e1');
     assert.deepEqual((emails[0] as any)._mailboxNames, ['Inbox']);
+    assert.deepEqual((emails[0] as any)._mailboxRoles, ['inbox']);
   });
 
-  describe('buildMailboxNameMap', () => {
-    it('maps id -> name, keying on the real name (custom labels included)', () => {
-      const map = buildMailboxNameMap([
+  describe('buildMailboxInfoMap', () => {
+    it('maps id -> {name, role}, keying on the real name (custom labels included)', () => {
+      const map = buildMailboxInfoMap([
         { id: 'a', name: 'Inbox', role: 'inbox' },
         { id: 'b', name: 'My Label', role: null }, // role null but still mapped
       ]);
-      assert.equal(map.get('a'), 'Inbox');
-      assert.equal(map.get('b'), 'My Label');
+      assert.deepEqual(map.get('a'), { name: 'Inbox', role: 'inbox' });
+      assert.deepEqual(map.get('b'), { name: 'My Label', role: null });
+    });
+
+    it('lowercases the role (docs promise lowercase regardless of server casing)', () => {
+      const map = buildMailboxInfoMap([{ id: 'a', name: 'Spam', role: 'Junk' }]);
+      assert.equal(map.get('a')!.role, 'junk');
     });
 
     it('returns an empty map for [] (the degradation input)', () => {
-      assert.equal(buildMailboxNameMap([]).size, 0);
+      assert.equal(buildMailboxInfoMap([]).size, 0);
     });
 
     it('skips entries lacking an id or a string name', () => {
-      const map = buildMailboxNameMap([{ id: 'a' }, { name: 'x' }, null as any]);
+      const map = buildMailboxInfoMap([{ id: 'a' }, { name: 'x' }, null as any]);
       assert.equal(map.size, 0);
     });
   });
 
-  describe('attachMailboxNames', () => {
-    const map = new Map([['a', 'Inbox'], ['b', 'Receipts']]);
+  describe('attachMailboxInfo', () => {
+    const map = new Map([
+      ['a', { name: 'Inbox', role: 'inbox' }],
+      ['b', { name: 'Receipts', role: null }],
+    ]);
 
-    it('attaches a non-enumerable _mailboxNames (absent from JSON, readable directly)', () => {
+    it('attaches non-enumerable _mailboxNames + _mailboxRoles (absent from JSON, readable directly)', () => {
       const email: any = { id: 'e', mailboxIds: { a: true, b: true } };
-      attachMailboxNames([email], map);
+      attachMailboxInfo([email], map);
       assert.deepEqual(email._mailboxNames, ['Inbox', 'Receipts']);
-      assert.equal(JSON.stringify(email).includes('_mailboxNames'), false);
+      // Independent sets: Receipts has role null, so only 'inbox'.
+      assert.deepEqual(email._mailboxRoles, ['inbox']);
+      const json = JSON.stringify(email);
+      assert.equal(json.includes('_mailboxNames'), false);
+      assert.equal(json.includes('_mailboxRoles'), false);
     });
 
-    it('omits the field when no id resolves', () => {
+    it('surfaces an unresolved id in _unresolvedMailboxIds (never silently dropped, never throws) (#53)', () => {
       const email: any = { id: 'e', mailboxIds: { z: true } };
-      attachMailboxNames([email], map);
+      attachMailboxInfo([email], map);
       assert.equal('_mailboxNames' in email, false);
+      assert.deepEqual(email._unresolvedMailboxIds, ['z']);
+      assert.equal(JSON.stringify(email).includes('_unresolvedMailboxIds'), false);
     });
 
-    it('omits the field when mailboxIds is absent or empty', () => {
+    it('partial: resolves the known id and surfaces the unknown one (#53)', () => {
+      const email: any = { id: 'e', mailboxIds: { a: true, z: true } };
+      attachMailboxInfo([email], map);
+      assert.deepEqual(email._mailboxNames, ['Inbox']);
+      assert.deepEqual(email._mailboxRoles, ['inbox']);
+      assert.deepEqual(email._unresolvedMailboxIds, ['z']);
+    });
+
+    it('dropped trailing Mailbox/get (empty map): every id surfaced, no throw (#53)', () => {
+      const email: any = { id: 'e', mailboxIds: { a: true, z: true } };
+      attachMailboxInfo([email], new Map()); // [] from readListResultIfPresent
+      assert.equal('_mailboxNames' in email, false);
+      assert.equal('_mailboxRoles' in email, false);
+      assert.deepEqual(email._unresolvedMailboxIds, ['a', 'z']);
+    });
+
+    it('omits every field when mailboxIds is absent or empty (NOT an unresolved case)', () => {
       const noIds: any = { id: 'e' };
       const emptyIds: any = { id: 'e', mailboxIds: {} };
-      attachMailboxNames([noIds, emptyIds], map);
+      attachMailboxInfo([noIds, emptyIds], map);
       assert.equal('_mailboxNames' in noIds, false);
+      assert.equal('_unresolvedMailboxIds' in noIds, false);
       assert.equal('_mailboxNames' in emptyIds, false);
+      assert.equal('_unresolvedMailboxIds' in emptyIds, false);
     });
   });
 });
