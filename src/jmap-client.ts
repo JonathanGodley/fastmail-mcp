@@ -418,7 +418,7 @@ export class JmapClient {
   // hidden-count query.
   private findByExactRole(mailboxes: any[], role: string): any | undefined {
     const target = role.toLowerCase();
-    return (mailboxes || []).find(mb => typeof mb.role === 'string' && mb.role.toLowerCase() === target);
+    return (mailboxes || []).find(mb => mb && typeof mb.role === 'string' && mb.role.toLowerCase() === target);
   }
 
   // Resolve an optional mailbox input to an id. undefined/blank -> undefined (no filter).
@@ -1385,10 +1385,12 @@ export class JmapClient {
 
     // Resolve the target mailbox EXACTLY (id/role/name) — replaces the old substring
     // match, so this stays consistent with the #12 sweep and carries no substring
-    // injection-steering primitive. Defaults to the inbox role. Throws InvalidInputError
-    // on an unknown mailbox.
+    // injection-steering primitive. A blank/whitespace mailbox falls back to the inbox
+    // default (matching the resolveMailboxId blank handling the swept tools use), rather
+    // than throwing. Throws InvalidInputError on a non-blank unknown mailbox.
+    const target = mailbox && mailbox.trim() ? mailbox : 'inbox';
     const mailboxes = await this.getMailboxes();
-    const targetMailbox = resolveMailbox(mailboxes, mailbox);
+    const targetMailbox = resolveMailbox(mailboxes, target);
 
     const emailGetParams: any = {
       accountId: session.accountId,

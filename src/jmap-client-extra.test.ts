@@ -140,6 +140,20 @@ describe('getRecentEmails', () => {
     const result = await client.getRecentEmails(5, 'inbox');
     assert.deepEqual(result.items, []);
   });
+
+  it('falls back to inbox for a blank mailbox (does not throw)', async () => {
+    stubMailboxes(client);
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/query', { ids: [] }, 'query'],
+        ['Email/get', { list: [] }, 'emails'],
+      ],
+    }));
+
+    await client.getRecentEmails(5, '   ');
+    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    assert.equal(filter.inMailbox, 'mb-inbox');
+  });
 });
 
 // ---------- getEmails ----------
