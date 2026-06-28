@@ -129,8 +129,9 @@ Carve-outs — quote-preserving *by construction*, so no flag is required:
 **Cross-session recovery.** In-session the caller already has `originalEmailId` (it was just
 passed to `reply_email`). Cross-session, a saved reply draft exposes its `inReplyTo` only as a
 *Message-ID* string, not the JMAP id `originalEmailId` needs; recovering the keep path then
-requires resolving the original first (`search_emails` for that Message-ID) before passing
-`originalEmailId`. The redesign makes `originalEmailId` the only keep path (there is no
+requires resolving the original first (`search_emails` for that Message-ID, with
+`includeTrash:true`/`includeSpam:true` so a filed-away original isn't hidden by the default
+Trash/Spam exclusion) before passing `originalEmailId`. The redesign makes `originalEmailId` the only keep path (there is no
 inline-keep shortcut, deliberately — see below), so this lookup is the standard cross-session
 keep recipe.
 

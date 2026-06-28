@@ -12,8 +12,8 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatEmailQueryResult, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError } from './coerce.js';
+import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
+import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { composeReply } from './reply-handler.js';
 
 const server = new Server(
@@ -190,6 +190,28 @@ function getTimezone(): string | undefined {
   ]).value;
 }
 
+// Shared scope-control descriptions for the read tools (search_emails + list_emails),
+// defined once so the per-flag strings and the reliability-contract clause stay in sync
+// between the two tools rather than drifting as hand-copied strings.
+const EXCLUDE_DRAFTS_DESC =
+  'Drafts are included by default; set true to omit them from results (and from the total count). (Note: get_thread differs on BOTH axes — it uses includeDrafts AND excludes drafts by default.)';
+const INCLUDE_TRASH_DESC =
+  'Trash is excluded by default; set true to also include Trash in the results.';
+const INCLUDE_SPAM_DESC =
+  'The Spam/Junk folder is excluded by default; set true to also include it in the results.';
+
+// The reliability contract that makes silence trustworthy. Lead with the no-note
+// guarantee as its own sentence (a skimming model must hit "no note => trustworthy"
+// first), then the per-signal actions; scoped to the default all-mailbox scope.
+const SCOPE_RELIABILITY_CONTRACT =
+  'When you search the default scope (no mailbox set): NO note means no Trash/Spam message matched this search — do not re-run with includeTrash/includeSpam just to re-check the same query. ' +
+  'A "N in Trash/Spam excluded" note means re-run (includeTrash:true / includeSpam:true, or mailbox:"trash"/"junk") to see those matches. ' +
+  'A "count could not be confirmed" or "folder not found; not excluded" note means re-run to be sure. ' +
+  'Setting mailbox searches only that folder (no note, by definition).';
+
+const MAILBOX_PARAM_DESC =
+  'Mailbox to scope to: an id, a role (inbox, trash, junk, sent, drafts, archive), or a folder name (e.g. Receipts). Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion. Unknown mailbox is rejected with the valid list.';
+
 // Single source of truth for the tool catalog. Hoisted to module scope so the
 // CallTool handler can derive each tool's declared parameter set for the
 // unknown-parameter guard (#11) — no drift from what clients see via ListTools.
@@ -213,13 +235,13 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List emails from a mailbox. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
         inputSchema: {
           type: 'object',
           properties: {
-            mailboxId: {
+            mailbox: {
               type: 'string',
-              description: 'ID of the mailbox to list emails from (optional, defaults to all)',
+              description: MAILBOX_PARAM_DESC,
             },
             limit: {
               type: ['number', 'string'],
@@ -229,6 +251,18 @@ const TOOLS = [
             ascending: {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
+            },
+            excludeDrafts: {
+              type: 'boolean',
+              description: EXCLUDE_DRAFTS_DESC,
+            },
+            includeTrash: {
+              type: 'boolean',
+              description: INCLUDE_TRASH_DESC,
+            },
+            includeSpam: {
+              type: 'boolean',
+              description: INCLUDE_SPAM_DESC,
             },
             raw: {
               type: 'boolean',
@@ -286,9 +320,9 @@ const TOOLS = [
               type: 'string',
               description: 'Sender email address (optional, defaults to account primary email)',
             },
-            mailboxId: {
+            mailbox: {
               type: 'string',
-              description: 'Mailbox ID to save the email to (optional, defaults to Drafts folder)',
+              description: 'Mailbox to SAVE the draft into — id, role, or name (optional, defaults to Drafts). Does not set From or recipients. Unknown mailbox is rejected with the valid list.',
             },
             subject: {
               type: 'string',
@@ -402,9 +436,9 @@ const TOOLS = [
               type: 'string',
               description: 'Sender email address (optional, defaults to account primary email)',
             },
-            mailboxId: {
+            mailbox: {
               type: 'string',
-              description: 'Mailbox ID to save the draft to (optional, defaults to Drafts folder)',
+              description: 'Mailbox to SAVE the draft into — id, role, or name (optional, defaults to Drafts). Does not set From or recipients. Unknown mailbox is rejected with the valid list.',
             },
             subject: {
               type: 'string',
@@ -522,17 +556,61 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        description: 'Full-text email search: matches the query as free text across subject, body, and participants (from/to/cc/bcc). It does NOT interpret operator/search syntax — a query like "from:alice@example.com" is matched as literal words rather than a sender filter, so it may return irrelevant results. To filter by sender, recipient, subject, date, attachment, or mailbox, use advanced_search (which has dedicated from/to/subject/... parameters). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one). Drafts are included by default; set excludeDrafts=true to omit draft messages from results (and from the total count).',
+        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). Simplified output includes a "mailboxes" array of the human-readable names each message belongs to. query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100.',
         inputSchema: {
           type: 'object',
           properties: {
             query: {
               type: 'string',
-              description: 'Free-text terms (subject/body/participants). Operator syntax like "from:"/"to:"/"subject:" (or boolean AND/OR) is matched literally, not parsed — use advanced_search\'s dedicated from/to/subject params for those, e.g. advanced_search with from="alice@example.com".',
+              description: 'Free-text terms matched across subject, body, and participants. Operator syntax like "from:"/"to:"/"subject:" (or boolean AND/OR) is matched literally, not parsed — use the dedicated from/to/cc/bcc/subject params for those. Optional.',
+            },
+            from: {
+              type: 'string',
+              description: 'Filter by sender email',
+            },
+            to: {
+              type: 'string',
+              description: 'Filter by recipient (To) email',
+            },
+            cc: {
+              type: 'string',
+              description: 'Filter by Cc email (mail where this address is cc\'d)',
+            },
+            bcc: {
+              type: 'string',
+              description: 'Filter by Bcc email',
+            },
+            subject: {
+              type: 'string',
+              description: 'Filter by subject',
+            },
+            hasAttachment: {
+              type: 'boolean',
+              description: 'Filter emails with attachments',
+            },
+            isUnread: {
+              type: 'boolean',
+              description: 'true = only unread; false = only read',
+            },
+            isPinned: {
+              type: 'boolean',
+              description: 'true = only pinned/flagged; false = only un-pinned',
+            },
+            mailbox: {
+              type: 'string',
+              description: MAILBOX_PARAM_DESC,
+            },
+            after: {
+              type: 'string',
+              description: 'Emails after this date (ISO 8601)',
+            },
+            before: {
+              type: 'string',
+              description: 'Emails before this date (ISO 8601)',
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of results (default: 20)',
+              description: 'Maximum number of results (default: 20, max: 100)',
               default: 20,
             },
             ascending: {
@@ -541,14 +619,21 @@ const TOOLS = [
             },
             excludeDrafts: {
               type: 'boolean',
-              description: 'Omit draft messages from results (default: false, drafts included). Filtered server-side, so the total count reflects the exclusion.',
+              description: EXCLUDE_DRAFTS_DESC,
+            },
+            includeTrash: {
+              type: 'boolean',
+              description: INCLUDE_TRASH_DESC,
+            },
+            includeSpam: {
+              type: 'boolean',
+              description: INCLUDE_SPAM_DESC,
             },
             raw: {
               type: 'boolean',
               description: 'Return original JMAP response instead of simplified format',
             },
           },
-          required: ['query'],
         },
       },
       {
@@ -804,7 +889,7 @@ const TOOLS = [
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from inbox (like top-ten). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
+        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -813,9 +898,9 @@ const TOOLS = [
               description: 'Number of recent emails to retrieve (default: 10, max: 50)',
               default: 10,
             },
-            mailboxName: {
+            mailbox: {
               type: 'string',
-              description: 'Mailbox to search (default: inbox)',
+              description: 'Mailbox to read — id, role, or name (default: inbox). Unknown mailbox is rejected with the valid list.',
               default: 'inbox',
             },
             ascending: {
@@ -883,7 +968,7 @@ const TOOLS = [
       },
       {
         name: 'move_email',
-        description: 'Move an email to a different mailbox',
+        description: 'Move an email to a different mailbox (replaces its mailbox membership). The destination accepts an id, role, or name. An unknown destination is rejected with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -891,17 +976,17 @@ const TOOLS = [
               type: 'string',
               description: 'ID of the email to move',
             },
-            targetMailboxId: {
+            targetMailbox: {
               type: 'string',
-              description: 'ID of the target mailbox',
+              description: 'Destination mailbox — id, role (e.g. archive, trash), or name. Unknown mailbox is rejected with the valid list.',
             },
           },
-          required: ['emailId', 'targetMailboxId'],
+          required: ['emailId', 'targetMailbox'],
         },
       },
       {
         name: 'add_labels',
-        description: 'Add labels (mailboxes) to an email without removing existing ones',
+        description: 'Add labels (mailboxes) to an email without removing existing ones. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -912,7 +997,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs to add as labels',
+              description: 'Array of mailbox IDs (NOT names or roles) to add as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
             },
           },
           required: ['emailId', 'mailboxIds'],
@@ -920,7 +1005,7 @@ const TOOLS = [
       },
       {
         name: 'remove_labels',
-        description: 'Remove specific labels (mailboxes) from an email',
+        description: 'Remove specific labels (mailboxes) from an email. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -931,7 +1016,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs to remove as labels',
+              description: 'Array of mailbox IDs (NOT names or roles) to remove as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
             },
           },
           required: ['emailId', 'mailboxIds'],
@@ -974,70 +1059,8 @@ const TOOLS = [
         },
       },
       {
-        name: 'advanced_search',
-        description: 'Advanced email search with dedicated filters — from, to, subject, date range (after/before), hasAttachment, isUnread/isPinned, mailbox. Use the dedicated params when you know the field; use the optional query field for free-text terms across the whole message (subject/body/participants). Neither parses operator syntax (a "from:" prefix is matched literally). Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names the message belongs to (disambiguates e.g. a trashed draft from a live one).',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: {
-              type: 'string',
-              description: 'Optional free-text terms matched across subject, body, and participants (same engine as search_emails; not operator syntax). For sender/recipient/subject filtering use the dedicated from/to/subject params, not this field.',
-            },
-            from: {
-              type: 'string',
-              description: 'Filter by sender email',
-            },
-            to: {
-              type: 'string',
-              description: 'Filter by recipient email',
-            },
-            subject: {
-              type: 'string',
-              description: 'Filter by subject',
-            },
-            hasAttachment: {
-              type: 'boolean',
-              description: 'Filter emails with attachments',
-            },
-            isUnread: {
-              type: 'boolean',
-              description: 'Filter unread emails',
-            },
-            isPinned: {
-              type: 'boolean',
-              description: 'Filter pinned emails',
-            },
-            mailboxId: {
-              type: 'string',
-              description: 'Search within specific mailbox',
-            },
-            after: {
-              type: 'string',
-              description: 'Emails after this date (ISO 8601)',
-            },
-            before: {
-              type: 'string',
-              description: 'Emails before this date (ISO 8601)',
-            },
-            limit: {
-              type: ['number', 'string'],
-              description: 'Maximum results (default: 50)',
-              default: 50,
-            },
-            ascending: {
-              type: 'boolean',
-              description: 'Sort oldest first instead of newest first (default: false)',
-            },
-            raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
-            },
-          },
-        },
-      },
-      {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names each message belongs to (disambiguates e.g. a trashed draft from a live one). Draft messages are excluded by default; set includeDrafts=true to include in-progress drafts in the thread.',
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. Simplified output includes a "mailboxes" array of the human-readable mailbox/label names each message belongs to (disambiguates e.g. a trashed draft from a live one). Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. Set includeDrafts=true to include them.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1047,7 +1070,7 @@ const TOOLS = [
             },
             includeDrafts: {
               type: 'boolean',
-              description: 'Include draft messages in the thread (default: false, drafts excluded).',
+              description: 'Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.',
             },
             raw: {
               type: 'boolean',
@@ -1059,13 +1082,13 @@ const TOOLS = [
       },
       {
         name: 'get_mailbox_stats',
-        description: 'Get statistics for a mailbox (unread count, total emails, etc.)',
+        description: 'Get statistics for a mailbox (unread count, total emails, etc.). Pass mailbox as an id, role, or name; omit it for stats across all mailboxes. An unknown mailbox is rejected with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
-            mailboxId: {
+            mailbox: {
               type: 'string',
-              description: 'ID of the mailbox (optional, defaults to all mailboxes)',
+              description: 'Mailbox to report on — id, role, or name (optional, defaults to all mailboxes). Unknown mailbox is rejected with the valid list.',
             },
           },
         },
@@ -1120,7 +1143,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_move',
-        description: 'Move multiple emails to a mailbox',
+        description: 'Move multiple emails to a mailbox (replaces each one\'s mailbox membership). The destination accepts an id, role, or name. An unknown destination is rejected with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1129,12 +1152,12 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Array of email IDs to move',
             },
-            targetMailboxId: {
+            targetMailbox: {
               type: 'string',
-              description: 'ID of target mailbox',
+              description: 'Destination mailbox — id, role (e.g. archive, trash), or name. Unknown mailbox is rejected with the valid list.',
             },
           },
-          required: ['emailIds', 'targetMailboxId'],
+          required: ['emailIds', 'targetMailbox'],
         },
       },
       {
@@ -1154,7 +1177,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_add_labels',
-        description: 'Add labels to multiple emails simultaneously',
+        description: 'Add labels to multiple emails simultaneously. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1166,7 +1189,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs to add as labels',
+              description: 'Array of mailbox IDs (NOT names or roles) to add as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
             },
           },
           required: ['emailIds', 'mailboxIds'],
@@ -1174,7 +1197,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_remove_labels',
-        description: 'Remove labels from multiple emails simultaneously',
+        description: 'Remove labels from multiple emails simultaneously. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1186,7 +1209,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs to remove as labels',
+              description: 'Array of mailbox IDs (NOT names or roles) to remove as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
             },
           },
           required: ['emailIds', 'mailboxIds'],
@@ -1265,14 +1288,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_emails': {
-        const { mailboxId, limit, ascending, raw } = args as any;
+        const { mailbox, limit, ascending, raw } = args as any;
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
-        const result = await client.getEmails(mailboxId, validLimit, !!ascending);
+        const result = await client.getEmails({
+          mailbox,
+          limit: validLimit,
+          ascending: !!ascending,
+          includeTrash: coerceBool((args as any).includeTrash) ?? false,
+          includeSpam: coerceBool((args as any).includeSpam) ?? false,
+          excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
+        });
+        // Append the exclusion note (if any) to the formatter's string — same out-of-band
+        // discipline on both raw + simplified; the JSON block stays parseable.
+        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result);
         return {
           content: [
             {
               type: 'text',
-              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
+              text: body + buildExclusionNote(result.exclusion),
             },
           ],
         };
@@ -1295,7 +1328,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'send_email': {
-        const { from, mailboxId, subject, textBody, htmlBody, inReplyTo, references } = args as any;
+        const { from, mailbox, subject, textBody, htmlBody, inReplyTo, references } = args as any;
         const { to: toArray, cc, bcc, replyTo } = coerceRecipients(args as any);
         if (!toArray || toArray.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'to field is required and must be a non-empty array');
@@ -1317,7 +1350,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           cc,
           bcc,
           from,
-          mailboxId,
+          mailbox,
           subject,
           textBody,
           htmlBody,
@@ -1349,7 +1382,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'create_draft': {
-        const { from, mailboxId, subject, textBody, htmlBody, inReplyTo, references } = args as any;
+        const { from, mailbox, subject, textBody, htmlBody, inReplyTo, references } = args as any;
         const { to, cc, bcc, replyTo } = coerceRecipients(args as any);
         // Coerce attachments BEFORE the contentless guard so an attachment-only draft
         // (a legitimate "stash this file" artifact, consistent with edit_draft accepting
@@ -1370,7 +1403,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           cc,
           bcc,
           from,
-          mailboxId,
+          mailbox,
           subject,
           textBody,
           htmlBody,
@@ -1461,23 +1494,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: `Draft sent successfully. Submission ID: ${submissionId}`,
-            },
-          ],
-        };
-      }
-
-      case 'search_emails': {
-        const { query, limit, ascending, raw, excludeDrafts } = args as any;
-        if (!query) {
-          throw new McpError(ErrorCode.InvalidParams, 'query is required');
-        }
-        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
-        const result = await client.searchEmails(query, validLimit, !!ascending, coerceBool(excludeDrafts) ?? false);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
             },
           ],
         };
@@ -1633,9 +1649,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_recent_emails': {
-        const { limit = 10, mailboxName = 'inbox', ascending, raw } = args as any;
+        const { limit = 10, mailbox = 'inbox', ascending, raw } = args as any;
         const client = initializeClient();
-        const result = await client.getRecentEmails(limit, mailboxName, !!ascending);
+        const result = await client.getRecentEmails(limit, mailbox, !!ascending);
         return {
           content: [
             {
@@ -1700,12 +1716,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'move_email': {
-        const { emailId, targetMailboxId } = args as any;
-        if (!emailId || !targetMailboxId) {
-          throw new McpError(ErrorCode.InvalidParams, 'emailId and targetMailboxId are required');
+        const { emailId, targetMailbox } = args as any;
+        if (!emailId || !targetMailbox) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailId and targetMailbox are required');
         }
         const client = initializeClient();
-        await client.moveEmail(emailId, targetMailboxId);
+        await client.moveEmail(emailId, targetMailbox);
         return {
           content: [
             {
@@ -1821,18 +1837,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      case 'advanced_search': {
-        const { query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit, ascending, raw } = args as any;
+      case 'search_emails': {
+        const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit, ascending, raw } = args as any;
         const client = initializeClient();
-        const validLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
-        const result = await client.advancedSearch({
-          query, from, to, subject, hasAttachment, isUnread, isPinned, mailboxId, after, before, limit: validLimit, ascending
+        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+        const result = await client.searchEmails({
+          query, from, to, cc, bcc, subject,
+          hasAttachment: coerceBool(hasAttachment),
+          isUnread: coerceBool(isUnread),
+          isPinned: coerceBool(isPinned),
+          mailbox, after, before, limit: validLimit, ascending: !!ascending,
+          excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
+          includeTrash: coerceBool((args as any).includeTrash) ?? false,
+          includeSpam: coerceBool((args as any).includeSpam) ?? false,
         });
+        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result);
         return {
           content: [
             {
               type: 'text',
-              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
+              text: body + buildExclusionNote(result.exclusion),
             },
           ],
         };
@@ -1845,36 +1869,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const client = initializeClient();
         try {
-          const thread = await client.getThread(threadId, coerceBool(includeDrafts) ?? false);
+          const { emails, hiddenDraftCount } = await client.getThread(threadId, coerceBool(includeDrafts) ?? false);
           if (raw) {
+            // raw is a pure-JSON escape valve that external clients may JSON.parse
+            // wholesale; the draft note (below) is appended only on the simplified
+            // path so raw output stays faithfully parseable. hiddenDraftCount never
+            // leaks into the raw JSON — a raw consumer can pass includeDrafts itself.
             return {
               content: [
                 {
                   type: 'text',
-                  text: JSON.stringify(thread, null, 2),
+                  text: JSON.stringify(emails, null, 2),
                 },
               ],
             };
           }
-          const simplified = thread.map(e => simplifyEmail(e));
+          const simplified = emails.map(e => simplifyEmail(e));
+          let text = JSON.stringify(simplified, null, 2);
+          if (hiddenDraftCount > 0) {
+            text += `\n\nNote: ${hiddenDraftCount} draft(s) in this thread are hidden; set includeDrafts:true to include them.`;
+          }
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify(simplified, null, 2),
+                text,
               },
             ],
           };
         } catch (error) {
-          // Provide helpful error information
+          // NOTE: this local catch maps EVERY error to InternalError, shadowing the
+          // top-level InvalidInputError->InvalidParams mapping. get_thread is NOT in
+          // the resolver sweep, so it can't throw InvalidInputError today; a future
+          // change adding `mailbox` to get_thread must revisit this so a bad-input
+          // error isn't mislabeled InternalError.
           throw new McpError(ErrorCode.InternalError, `Thread access failed: ${redactBearerTokens(error instanceof Error ? error.message : String(error))}`);
         }
       }
 
       case 'get_mailbox_stats': {
-        const { mailboxId } = args as any;
+        const { mailbox } = args as any;
         const client = initializeClient();
-        const stats = await client.getMailboxStats(mailboxId);
+        const stats = await client.getMailboxStats(mailbox);
         return {
           content: [
             {
@@ -1935,16 +1971,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_move': {
-        const { targetMailboxId } = args as any;
+        const { targetMailbox } = args as any;
         const emailIds = coerceStringArray((args as any).emailIds);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
-        if (!targetMailboxId) {
-          throw new McpError(ErrorCode.InvalidParams, 'targetMailboxId is required');
+        if (!targetMailbox) {
+          throw new McpError(ErrorCode.InvalidParams, 'targetMailbox is required');
         }
         const client = initializeClient();
-        await client.bulkMove(emailIds, targetMailboxId);
+        await client.bulkMove(emailIds, targetMailbox);
         return {
           content: [
             {
@@ -2036,7 +2072,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             functions: [
               'list_mailboxes', 'list_emails', 'get_email', 'send_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
               'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email',
-              'get_email_attachments', 'download_attachment', 'advanced_search', 'get_thread',
+              'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
               'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'
             ]
@@ -2197,6 +2233,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // locally and never reaches here.)
     if (error instanceof PathAccessError) {
       throw new McpError(ErrorCode.InvalidParams, error.message);
+    }
+    // A semantically-invalid caller input (unresolvable mailbox, label id that is
+    // really a name). Map to InvalidParams like PathAccessError above, but DO run it
+    // through redactBearerTokens — unlike PathAccessError these messages reflect
+    // caller input and mailbox names, so token-shaped redaction is cheap insurance.
+    // This branch is placed after the PathAccessError branch and before the generic
+    // wrap so an InvalidInputError can't fall through to InternalError.
+    if (error instanceof InvalidInputError) {
+      throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
     }
     const raw = error instanceof Error ? error.message : String(error);
     throw new McpError(

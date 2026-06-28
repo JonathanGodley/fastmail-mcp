@@ -173,7 +173,7 @@ All data-returning tools simplify responses by default to reduce token usage. Tw
 | Tool | `verbose` | `raw` |
 |------|-----------|-------|
 | `get_email` | ✅ | ✅ |
-| `list_emails`, `search_emails`, `get_recent_emails`, `advanced_search`, `get_thread` | — | ✅ |
+| `list_emails`, `search_emails`, `get_recent_emails`, `get_thread` | — | ✅ |
 | `list_mailboxes` | ✅ | ✅ |
 | `list_identities` | ✅ | ✅ |
 | `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ |
@@ -182,7 +182,7 @@ Email list/search tools don't support `verbose` — they always return metadata 
 
 ### Parameter validation
 
-Unknown or misspelled parameters are rejected with an `InvalidParams` error that lists the offending key(s) and the valid keys for that tool (e.g. passing `mailbox` instead of `mailboxId`). This is deliberate: a silently dropped parameter would let a tool run with defaults and return confident but wrong results. Note this is key-strictness only; values are still coerced leniently (e.g. a stringified `"true"`/`"20"` for a boolean/number param is accepted).
+Unknown or misspelled parameters are rejected with an `InvalidParams` error that lists the offending key(s) and the valid keys for that tool (e.g. passing `folder` instead of `mailbox`, or the now-renamed `mailboxId`). This is deliberate: a silently dropped parameter would let a tool run with defaults and return confident but wrong results. Note this is key-strictness only; values are still coerced leniently (e.g. a stringified `"true"`/`"20"` for a boolean/number param is accepted).
 
 ### Email fields
 
@@ -231,13 +231,13 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 - Notes extracted from JMAP's `{hash: {note}}` object format
 - Verbose: addresses as objects, titles as strings, online/URLs as URIs
 
-## Available Tools (40 Total)
+## Available Tools (39 Total)
 
 **🎯 Most Popular Tools:**
 - **check_function_availability**: Check what's available and get setup guidance  
 - **test_bulk_operations**: Safely test bulk operations with dry-run mode
 - **send_email**: Full-featured email sending with proper draft/sent handling
-- **advanced_search**: Powerful multi-criteria email filtering
+- **search_emails**: Free-text + structured email search (from/to/cc/bcc/subject/date/mailbox), with Trash and Spam excluded by default
 - **get_recent_emails**: Quick access to recent emails from any mailbox
 
 ### Email Tools
@@ -248,16 +248,16 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 
 - **list_mailboxes**: Get all mailboxes in your account
   - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
-- **list_emails**: List emails from a specific mailbox or all mailboxes
-  - Parameters: `mailboxId` (optional), `limit` (default: 20), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
+- **list_emails**: List recent emails across all mailboxes (or one, via `mailbox`). **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam` to include them); drafts are included (set `excludeDrafts` to omit them). When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing in Trash/Spam matched, and you need not re-search to check.
+  - Parameters: `mailbox` (optional — id, role, or name; scoping to a mailbox ignores the default exclusion), `limit` (default: 20), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `raw` (optional, return original JMAP response)
 - **get_email**: Get a specific email by ID. Returns plain text body with HTML omitted (bodyHtmlSize hint provided). Only use `verbose` if you specifically need the HTML body — it can be very large for marketing emails.
   - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `raw` (optional, return original JMAP response)
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
-  - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
+  - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailbox` (optional — id/role/name to save into, defaults to Drafts), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Saves a draft by default; set `send=true` to transmit immediately. The original is **quoted by default** (attributed, top-posted, matching the web client with a portable quote-bar style); set `quoteOriginal=false` to omit it. Quoted HTML is reproduced **sanitised** (script/style/event handlers stripped; formatting and real `http(s)` images kept; inline `cid:` images omitted — see [#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)) and is re-sent under your From address. (This tool returns a status string, not email data, so `raw`/simplification do not apply.)
   - Parameters: `originalEmailId` (required), `to` (optional array, defaults to the original sender — preserving their display name as `Name <email>`), `cc` (optional array), `bcc` (optional array), `from` (optional), `textBody` (optional), `htmlBody` (optional), `send` (optional boolean, default: false — saves a draft; set true to transmit), `quoteOriginal` (optional boolean, default: true), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **create_draft**: Create an email draft without sending. Supports threading headers for replies. Each call creates a new draft.
-  - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailboxId` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
+  - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailbox` (optional — id/role/name to save into, defaults to Drafts), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **edit_draft**: Edit an existing draft email. Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new). The edit preserves the draft's threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can't be removed, you may be left with a duplicate draft rather than none. A draft containing inline (`cid:`) images, or a body part that isn't plain text or HTML, can't be preserved by editing and is **rejected** — recreate it instead (see [#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)). Only fields you provide are changed; omit a field to leave it unchanged.
   - Parameters: `emailId` (required), `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `replyTo` (optional array), `clearFields` (optional array), `attachments` (optional array — **appends**), `removeAttachments` (optional array of blobId/name), `originalEmailId` (optional — for reply-quote preservation, below), `noQuote` (optional boolean)
   - **Attachments on edit.** `attachments` **appends** to the draft's existing attachments (they are kept). Remove specific ones with `removeAttachments` (pass the `blobId` from `get_email_attachments`; a unique attachment name also works — a ref matching nothing, or a name matching more than one, is rejected). Remove all with `clearFields:['attachments']`. Passing `attachments` together with `clearFields:['attachments']` is rejected as a conflict. See [Sending attachments](#sending-attachments).
@@ -265,15 +265,14 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
   - **`clearFields`**: list of field names to clear to empty/none. Allowed: `to`, `cc`, `bcc`, `replyTo`, `subject`, `textBody`, `htmlBody`, `attachments`. `from` cannot be cleared (a draft always has a sender, matching the Fastmail UI). You cannot both pass a field as a value and list it in `clearFields`. A cleared draft is still a valid draft; it just may not be sendable (e.g. with no recipients).
   - **The text body is an auto-managed fallback of the HTML.** Editing `htmlBody` alone **regenerates** `textBody` from the new HTML (so an html-alone edit discards any custom `textBody` the draft had). Editing `textBody` alone while `htmlBody` is present is **rejected** — it would not change what recipients render (the HTML), and the fallback is managed automatically; to change the message edit `htmlBody`, or supply both bodies to store a custom plain-text alternative. `clearFields:['textBody']` while `htmlBody` is present is **rejected** for the same reason; use `clearFields:['htmlBody']` to convert the draft to a plain-text email. A subject/recipient-only edit (no body written) leaves both bodies untouched. An edit that would leave the draft with no body at all is **rejected**.
   - **Reply-quote preservation (`originalEmailId` / `noQuote`).** A reply draft keeps the quoted original inside its body — in the `htmlBody` for an HTML draft, or as a `> `-prefixed block in the `textBody` for a text-only one. Editing the body of a reply draft that **still has its quoted original** would silently discard the quote, so the edit is **rejected** unless you say what to do: pass `originalEmailId` (the id of the message the draft replies to — *not* the draft's own `emailId`) to regenerate the body and **keep** the quote, or `noQuote: true` to deliberately **drop** it. The check is made on the draft's *existing* body (the quote this server generated), not on your new text, so it can't be bypassed by including quote-shaped content. It applies uniformly to HTML and text-only reply drafts. Two edits keep the quote automatically and need neither flag: a metadata-only edit (subject/recipients/attachments), and a plain-text conversion (`clearFields:['htmlBody']`, which leaves the `> ` text quote in place). Supplying `htmlBody` to a text-only reply draft converts it to HTML. The regenerated body re-quotes the named original from scratch (it never reassembles the stored quote). Each successive quote-keeping body edit must pass `originalEmailId` again.
-    - **Cross-session keep.** In the same session you already have `originalEmailId` (you passed it to `reply_email`). For a draft saved earlier, the only thing the draft exposes is its `In-Reply-To` *Message-ID*, not the JMAP id `originalEmailId` needs — so resolve the original first with `search_emails` for that Message-ID, then pass its id as `originalEmailId`. (There is no shortcut that lets re-including the quote in your new body count as "keep": that would be bypassable, so the lookup is the deliberate keep path.)
+    - **Cross-session keep.** In the same session you already have `originalEmailId` (you passed it to `reply_email`). For a draft saved earlier, the only thing the draft exposes is its `In-Reply-To` *Message-ID*, not the JMAP id `originalEmailId` needs — so resolve the original first with `search_emails` for that Message-ID (pass `includeTrash:true`/`includeSpam:true` so a filed-away original isn't hidden by the default exclusion), then pass its id as `originalEmailId`. (There is no shortcut that lets re-including the quote in your new body count as "keep": that would be bypassable, so the lookup is the deliberate keep path.)
     - **Limitation — reply drafts created by another client.** The guard recognizes the common machine-emitted quote shapes — `<blockquote type="cite">` (this server, Apple Mail, the Fastmail web UI) and Gmail's `class="gmail_quote"`, plus most clients' `> `-prefixed plain text — but not every shape (e.g. Outlook's `<div>`-based quoting). A reply draft authored in a client whose quote shape isn't recognized may have its quote dropped on a body edit **without** prompting for `originalEmailId`/`noQuote`. This is the widest edge of this protection — wider than the in-session cases above. If you're editing a reply draft you didn't create here, treat the quote as unprotected and pass `originalEmailId` explicitly to rebuild it.
 - **send_draft**: Send an existing draft email. The draft must have recipients and a from address. Moves the email to the Sent folder. An **HTML-only draft with real content** (e.g. an image-only message) sends as-is — image-only/HTML-only mail is valid. Only a **genuinely empty body part** (e.g. a blank `htmlBody` alongside real text, which can happen for drafts created in other clients) is **rejected**: an empty `text/html` part renders blank and shadows a real `text/plain`, so the recipient would see nothing. Edit the draft to supply or clear that body first. (Drafts created by this server never carry an empty part; every send/draft path drops empty bodies on write.)
   - Parameters: `emailId` (required)
-- **search_emails**: Full-text search across subject, body, and participants. Does **not** support operator syntax - a query like `from:alice@example.com` is matched as literal words, not a sender filter. Use `advanced_search` for structured sender/recipient/subject/date filters.
-  - Parameters: `query` (required), `limit` (default: 20), `ascending` (optional, oldest first), `excludeDrafts` (optional, omit draft messages), `raw` (optional, return original JMAP response)
-  - Drafts are **included by default**. Set `excludeDrafts: true` to filter them out server-side (the total count reflects the exclusion).
-- **get_recent_emails**: Get the most recent emails from a mailbox (inspired by JMAP-Samples top-ten)
-  - Parameters: `limit` (default: 10, max: 50), `mailboxName` (default: 'inbox'), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
+- **search_emails**: Email search. Free-text `query` matches subject/body/participants (plain words, **not** operator syntax — `from:alice@example.com` is matched literally; use the dedicated `from`/`to`/`cc`/`bcc`/`subject` params instead). All filters combine with AND. **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam`); drafts are included. `query` is optional — with no query it returns recent mail matching only the structural filters. When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing in Trash/Spam matched, and you need not re-search to check.
+  - Parameters: `query` (optional), `from` (optional), `to` (optional), `cc` (optional), `bcc` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailbox` (optional — id/role/name; scoping ignores the default exclusion), `after` (optional ISO 8601), `before` (optional ISO 8601), `limit` (default: 20, max: 100), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `raw` (optional, return original JMAP response)
+- **get_recent_emails**: Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion) use `list_emails`.
+  - Parameters: `limit` (default: 10, max: 50), `mailbox` (default: 'inbox' — id/role/name; e.g. `mailbox:"trash"` to read Trash directly), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **mark_email_read**: Mark an email as read or unread
   - Parameters: `emailId` (required), `read` (default: true)
 - **pin_email**: Pin or unpin an email
@@ -281,11 +280,11 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 - **delete_email**: Delete an email (move to trash)
   - Parameters: `emailId` (required)
 - **move_email**: Move an email to a different mailbox (replaces all mailboxes)
-  - Parameters: `emailId` (required), `targetMailboxId` (required)
+  - Parameters: `emailId` (required), `targetMailbox` (required — id, role, or name)
 - **add_labels**: Add labels (mailboxes) to an email without removing existing ones
-  - Parameters: `emailId` (required), `mailboxIds` (required array)
+  - Parameters: `emailId` (required), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
 - **remove_labels**: Remove specific labels (mailboxes) from an email
-  - Parameters: `emailId` (required), `mailboxIds` (required array)
+  - Parameters: `emailId` (required), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
 
 ### Advanced Email Features
 
@@ -294,13 +293,11 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 - **download_attachment**: Download an email attachment. If path is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.
   - Parameters: `emailId` (required), `attachmentId` (required), `path` (optional)
   - `path` may be absolute or relative. Relative paths (including a bare filename) resolve against the download directory, so an attachment lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected. To save directly into your own location, set `FASTMAIL_DOWNLOAD_DIR` to that root (see [Setup](#setup)) — confinement stays on, scoped to the directory you choose.
-- **advanced_search**: Advanced email search with multiple criteria. Use the dedicated `from`/`to`/`subject`/date filters when you know the field; the optional `query` field is free-text (subject/body/participants), not operator syntax.
-  - Parameters: `query` (optional), `from` (optional), `to` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailboxId` (optional), `after` (optional), `before` (optional), `limit` (default: 50), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
 - **get_thread**: Get all emails in a conversation thread. Returns metadata + preview for each email.
   - Parameters: `threadId` (required), `includeDrafts` (optional, include in-progress drafts), `raw` (optional, return original JMAP response)
-  - Draft messages are **excluded by default** (an in-progress reply is noise when reading a conversation). Set `includeDrafts: true` to include them.
+  - Draft messages are **excluded by default** (an in-progress reply is noise when reading a conversation). When any are present, a trailing note reports **how many drafts are hidden** (so a draft reply you already started isn't missed) — the drafts themselves are not surfaced. Set `includeDrafts: true` to include them. (The note is on the simplified path only; `raw` output stays pure JSON.)
 
-> **Draft handling is asymmetric by design.** `get_thread` excludes drafts by default while `search_emails` includes them: a draft reply is noise when reconstructing a conversation, but a search should still find everything you've written. Drafts are identified by the `$draft` keyword (robust even if a draft is moved out of the Drafts mailbox), not by mailbox role. Use `includeDrafts` / `excludeDrafts` to override either default.
+> **Draft handling is asymmetric by design.** `get_thread` excludes drafts by default while `search_emails`/`list_emails` include them: a draft reply is noise when reconstructing a conversation, but a search/list should still find everything you've written. `get_thread` does not hide them silently — it reports a hidden-draft count so you can tell a draft reply already exists. Drafts are identified by the `$draft` keyword (robust even if a draft is moved out of the Drafts mailbox), not by mailbox role. Use `includeDrafts` (get_thread) / `excludeDrafts` (search/list) to override either default.
 
 ### Sending attachments
 
@@ -319,7 +316,7 @@ On `edit_draft`, `attachments` **appends** (existing attachments are kept). Use 
 ### Email Statistics & Analytics
 
 - **get_mailbox_stats**: Get statistics for a mailbox (unread count, total emails, etc.)
-  - Parameters: `mailboxId` (optional, defaults to all mailboxes)
+  - Parameters: `mailbox` (optional — id, role, or name; defaults to all mailboxes)
 - **get_account_summary**: Get overall account summary with statistics
 
 ### Bulk Operations
@@ -329,13 +326,13 @@ On `edit_draft`, `attachments` **appends** (existing attachments are kept). Use 
 - **bulk_pin**: Pin or unpin multiple emails
   - Parameters: `emailIds` (required array), `pinned` (default: true)
 - **bulk_move**: Move multiple emails to a mailbox
-  - Parameters: `emailIds` (required array), `targetMailboxId` (required)
+  - Parameters: `emailIds` (required array), `targetMailbox` (required — id, role, or name)
 - **bulk_delete**: Delete multiple emails (move to trash)
   - Parameters: `emailIds` (required array)
 - **bulk_add_labels**: Add labels to multiple emails simultaneously
-  - Parameters: `emailIds` (required array), `mailboxIds` (required array)
+  - Parameters: `emailIds` (required array), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
 - **bulk_remove_labels**: Remove labels from multiple emails simultaneously
-  - Parameters: `emailIds` (required array), `mailboxIds` (required array)
+  - Parameters: `emailIds` (required array), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
 
 ### Contact Tools
 

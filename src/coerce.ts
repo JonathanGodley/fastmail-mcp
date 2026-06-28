@@ -12,6 +12,23 @@ export class PathAccessError extends Error {
   }
 }
 
+// Tagged error for caller-supplied input that is well-formed JSON but semantically
+// invalid (e.g. a `mailbox` that resolves to nothing, or a label `mailboxIds`
+// element that isn't a real id). Thrown from jmap-client.ts (which stays free of
+// MCP SDK types); the index boundary maps every InvalidInputError to
+// McpError(InvalidParams), mirroring PathAccessError. instanceof is the
+// discriminator. Unlike the PathAccessError branch, the index mapping runs this
+// message through redactBearerTokens — these messages can reflect caller input
+// and mailbox names, so redaction is cheap defense-in-depth against a
+// token-shaped echo (it is NOT what makes the reflected-input oracle acceptable;
+// see docs/security-model.md).
+export class InvalidInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidInputError';
+  }
+}
+
 // Some MCP clients (e.g. Claude Cowork as of 2026-04-08, issue #54) stringify
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.

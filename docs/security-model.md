@@ -112,3 +112,54 @@ stripped, schemes pinned) — a safety floor for re-sending under the user's `Fr
 privacy control. Documented here as an accepted residual: the mitigation for misuse is the
 same opt-in/authorization posture that governs sending mail at all, not a restriction on which
 in-account message may be quoted.
+
+## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
+
+The read surface gained one `mailbox` param (id/role/name) resolved **exactly** across the
+read + single-mailbox-write tools, and `search_emails`/`list_emails` hide Trash and Spam by
+default with a hidden-count note. Several residuals are accepted here, framed honestly rather
+than overclaimed:
+
+- **The default Trash/Spam exclusion is a product/noise default — NO security property is
+  claimed.** It is *not* an anti-prompt-injection control: an injected agent simply passes
+  `includeSpam:true` (or reads Spam via `get_recent_emails mailbox:"junk"`). Treating it as a
+  security boundary would be the same overclaim as "redaction neutralizes the oracle" — so it
+  isn't claimed. The `includeTrash`/`includeSpam` descriptions stay plain (no injection caution).
+- **The hidden-count note is TRANSPARENCY for a cooperative reader, not an injection control.**
+  `get_mailbox_stats mailbox:"junk"` returns Trash/Spam totals directly with zero friction, and
+  `get_recent_emails mailbox:"trash"` reads them outright — so a determined/injected agent
+  trivially bypasses the note. Its purpose is honesty (disclose what default-scope hid), not a
+  boundary. The fail-closed degraded note exists so the published "no note ⇒ nothing in
+  Trash/Spam matched" contract can be *trusted by a cooperative caller*, not to stop an attacker.
+- **Count-into-Trash/Spam oracle, and the more direct `get_mailbox_stats` total-oracle.** The
+  hidden-count discloses how many matches sit in Trash/Spam; `get_mailbox_stats mailbox:"trash"`/
+  `"junk"` (single-mailbox = an explicit-scope override) hands those totals directly — the
+  lowest-effort volume probe. Accepted; it's the caller's own account.
+- **Exact resolution hardens *mis-resolution*, NOT deliberate steering.** Switching every
+  read/delete/move target from substring (`findMailboxByRoleOrName`'s name fallback, which could
+  mis-hit e.g. a custom "Junk mail rules" mailbox and silently hide real mail) to exact id/role/
+  name removes *fuzzy* mis-targeting. It does **not** close *deliberate* steering: an injected
+  agent with `move_email`/`bulk_move` access can still aim mail at `"trash"`/`"Archive"` by exact
+  name. Move-to-any stays open **by design** (a move-target restriction is tracked as fork #43).
+  Name/role resolution also **lowers the steering bar** from "must know a valid opaque id (needs a
+  prior `list_mailboxes`)" to "blind one-shot by literal name" — a real, if modest, escalation.
+- **The hidden-count note covers ONLY Trash/Spam.** It does **not** disclose a `move_email` to
+  `Archive` or a custom folder — that conceals mail with **zero disclosure**. So move concealment
+  is not "mitigated by the note" for non-Trash/Spam destinations; this is stated plainly rather
+  than implied covered.
+- **Resolver error message is an information oracle, reachable account-wide.** A bad `mailbox`/
+  `targetMailbox`/`mailboxIds` to *any* swept tool (search, list, stats, move, compose, labels)
+  reflects the caller's input and a capped list of mailbox names **reachable by the configured
+  token** (the real boundary is the token's reach, not "the user's own account" — a delegated/
+  scoped token sees only its slice). `InvalidInputError` messages are run through
+  `redactBearerTokens` as defense-in-depth (a token can't actually appear in them), but that is
+  **not** what makes the oracle acceptable — recoverability (naming valid mailboxes so a caller
+  can retry) is, and it's the caller's own reachable names. Accepted, capped, framed honestly.
+- **`get_mailbox_stats` and the label tools reject a real id that is absent from the fetched
+  list.** Reading stats off the shared `getMailboxes()` list (and validating label `mailboxIds`
+  against it) means a hidden/role-less mailbox's id now throws `InvalidInputError` rather than
+  returning data. Accepted; "valid" is defined as "matches some `mailbox.id` in the fetched list."
+- **Two-query hidden-count race.** The visible query and the count query run in the same
+  `makeRequest` (one atomic snapshot — no race) where possible; the derivation tolerates a missing/
+  garbled count by failing closed to the degraded note. A message moving between *any* two reads is
+  an inherent, accepted residual, not a temporal guarantee.

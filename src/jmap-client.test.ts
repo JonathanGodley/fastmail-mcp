@@ -232,9 +232,12 @@ describe('createDraft', () => {
     );
   });
 
-  // 9. Custom mailboxId used instead of auto-lookup
-  it('uses provided mailboxId without looking up mailboxes', async () => {
-    const getMailboxes = client.getMailboxes as ReturnType<typeof mock.method>;
+  // 9. Provided mailbox (id/role/name) resolved against the mailbox list
+  it('saves into the provided mailbox, resolved against the mailbox list', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      DRAFTS_MAILBOX,
+      { id: 'mb-custom', name: 'Project X', role: null },
+    ]);
 
     const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
@@ -242,13 +245,27 @@ describe('createDraft', () => {
       ],
     }));
 
-    await client.createDraft({ subject: 'Custom', mailboxId: 'mb-custom' });
-
-    // getMailboxes should not have been called
-    assert.equal(getMailboxes.mock.calls.length, 0);
+    // Resolve by name -> the custom mailbox's id.
+    await client.createDraft({ subject: 'Custom', mailbox: 'Project X' });
 
     const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
     assert.equal(emailObj.mailboxIds['mb-custom'], true);
+  });
+
+  it('throws InvalidInputError when the provided mailbox is unknown', async () => {
+    mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX]);
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { created: { draft: { id: 'x' } } }, 'createDraft']],
+    });
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Custom', mailbox: 'nope' }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /not found/);
+        return true;
+      },
+    );
   });
 
   // 10. HTML body constructed correctly
@@ -1425,9 +1442,9 @@ describe('JMAP response validation', () => {
         ['error', { type: 'serverFail', description: 'oops' }, 'query'],
       ],
     });
-    // getEmails uses getListResult(response, 1) but only 1 response exists
+    // The visible Email/query came back as an error tag, so getMethodResult throws.
     await assert.rejects(
-      () => client.getEmails(undefined, 10),
+      () => client.getEmails({}),
       (err: Error) => {
         assert.ok(err.message.length > 0);
         return true;
@@ -1458,14 +1475,18 @@ describe('searchEmails', () => {
     client = makeClient();
   });
 
+  // makeClient() stubs getMailboxes -> [DRAFTS_MAILBOX] (no trash/junk role), so the
+  // default Trash/Spam exclusion resolves nothing here: no inMailboxOtherThan key and no
+  // count query are added, and getMailboxes is mocked (not via makeRequest), so the
+  // Email/query batch stays makeRequest.calls[0].
   it('returns email list on success', async () => {
     stubMakeRequest(client, {
       methodResponses: [
-        ['Email/query', { ids: ['e1'] }, 'query'],
+        ['Email/query', { ids: ['e1'], total: 1 }, 'query'],
         ['Email/get', { list: [{ id: 'e1', subject: 'Test' }] }, 'emails'],
       ],
     });
-    const results = await client.searchEmails('test', 10);
+    const results = await client.searchEmails({ query: 'test', limit: 10 });
     assert.equal(results.items.length, 1);
     assert.equal(results.items[0].subject, 'Test');
   });
@@ -1473,11 +1494,11 @@ describe('searchEmails', () => {
   it('returns empty array when no results', async () => {
     stubMakeRequest(client, {
       methodResponses: [
-        ['Email/query', { ids: [] }, 'query'],
+        ['Email/query', { ids: [], total: 0 }, 'query'],
         ['Email/get', { list: [] }, 'emails'],
       ],
     });
-    const results = await client.searchEmails('nonexistent');
+    const results = await client.searchEmails({ query: 'nonexistent' });
     assert.deepEqual(results.items, []);
   });
 
@@ -1489,7 +1510,7 @@ describe('searchEmails', () => {
       ],
     });
     await assert.rejects(
-      () => client.searchEmails('test'),
+      () => client.searchEmails({ query: 'test' }),
       (err: Error) => {
         assert.match(err.message, /invalidArguments/);
         return true;
@@ -1497,27 +1518,29 @@ describe('searchEmails', () => {
     );
   });
 
-  it('excludeDrafts pushes notKeyword $draft into the server-side filter', async () => {
+  it('excludeDrafts adds a notKeyword $draft condition (AND-wrapped with the query)', async () => {
     const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
-        ['Email/query', { ids: [] }, 'query'],
+        ['Email/query', { ids: [], total: 0 }, 'query'],
         ['Email/get', { list: [] }, 'emails'],
       ],
     }));
-    await client.searchEmails('quarterly', 10, false, true);
+    await client.searchEmails({ query: 'quarterly', limit: 10, excludeDrafts: true });
     const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
-    assert.equal(filter.text, 'quarterly');
-    assert.equal(filter.notKeyword, '$draft');
+    // text in the base, $draft as its own keyword condition, AND-wrapped.
+    assert.equal(filter.operator, 'AND');
+    assert.ok(filter.conditions.some((c: any) => c.text === 'quarterly'));
+    assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$draft'));
   });
 
-  it('includes drafts by default (no notKeyword in the filter)', async () => {
+  it('includes drafts by default (no notKeyword; flat text filter)', async () => {
     const makeReq = mock.method(client, 'makeRequest', async () => ({
       methodResponses: [
-        ['Email/query', { ids: [] }, 'query'],
+        ['Email/query', { ids: [], total: 0 }, 'query'],
         ['Email/get', { list: [] }, 'emails'],
       ],
     }));
-    await client.searchEmails('quarterly', 10);
+    await client.searchEmails({ query: 'quarterly', limit: 10 });
     const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
     assert.equal(filter.text, 'quarterly');
     assert.equal(filter.notKeyword, undefined);

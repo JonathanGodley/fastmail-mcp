@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError, InvalidInputError } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker } from './reply-quote.js';
 import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
@@ -133,6 +133,25 @@ export interface JmapResponse {
 export interface QueryResult<T = any> {
   items: T[];
   total?: number;
+  // Out-of-band metadata for the default Trash/Spam exclusion. Populated by
+  // searchEmails/getEmails when an exclusion was active; read by the handlers to
+  // emit a trailing note. NEVER serialized into the JSON body or the raw path
+  // (same discipline as getThread's hiddenDraftCount). `hidden:null` = the hidden
+  // count could not be computed (degraded — emit the fail-closed note).
+  exclusion?: {
+    hidden: number | null;
+    excludedRoles: string[];   // roles actually excluded (note fires iff hidden>0)
+    unresolvedRoles: string[]; // roles intended-but-NOT-excluded (fail-loud note)
+  };
+}
+
+// Result of computeExclusion: the mailbox ids to exclude via inMailboxOtherThan,
+// the display labels of roles actually excluded, and the labels of roles we meant
+// to exclude but couldn't resolve (fail-loud, never silently included).
+export interface ExclusionResult {
+  excludeIds: string[];
+  excludedRoles: string[];
+  unresolvedRoles: string[];
 }
 
 // Shared Email/get property lists — keep in sync per CLAUDE.md rules.
@@ -178,6 +197,74 @@ export function attachMailboxNames(emails: any[], map: Map<string, string>): voi
     if (names.length === 0) continue;
     Object.defineProperty(email, '_mailboxNames', { value: names, enumerable: false, configurable: true });
   }
+}
+
+// Cap the mailbox names listed in a not-found error so a large account doesn't
+// produce a huge message; the list_mailboxes pointer keeps a truncated list actionable.
+const MAILBOX_LIST_CAP = 30;
+
+function formatMailboxNotFound(input: string, mailboxes: any[]): string {
+  const entries = (mailboxes || [])
+    .filter(mb => mb && typeof mb.name === 'string')
+    .map(mb => (mb.role ? `${mb.name} (${mb.role})` : mb.name));
+  const shown = entries.slice(0, MAILBOX_LIST_CAP);
+  let list = shown.join(', ');
+  if (entries.length > shown.length) {
+    list += `, …and ${entries.length - shown.length} more — call list_mailboxes for the full list`;
+  }
+  return `Mailbox '${input}' not found. Use a name, or a role (inbox/archive/sent/drafts/trash/junk). Valid: ${list}`;
+}
+
+// Exact-only mailbox resolution: exact id -> role (case-insensitive) -> exact name
+// (case-insensitive); else throw InvalidInputError with a (capped) valid list. NO
+// substring matching (substring is an injection-steering primitive on write paths and
+// can mis-resolve). Edge: a custom mailbox literally named after a role (e.g. "Archive")
+// is shadowed by the role branch — acceptable, and the reason the docs use "Receipts"
+// not "Archive" as the name example. Exported pure for unit testing.
+export function resolveMailbox(mailboxes: any[], input: string): any {
+  const list = mailboxes || [];
+  const raw = String(input).trim();
+  const byId = list.find(mb => mb && mb.id === raw);
+  if (byId) return byId;
+  const lower = raw.toLowerCase();
+  const byRole = list.find(mb => mb && typeof mb.role === 'string' && mb.role.toLowerCase() === lower);
+  if (byRole) return byRole;
+  const byName = list.find(mb => mb && typeof mb.name === 'string' && mb.name.toLowerCase() === lower);
+  if (byName) return byName;
+  throw new InvalidInputError(formatMailboxNotFound(raw, list));
+}
+
+// Compute the default Trash/Spam exclusion. Resolves trash/junk by EXACT role only
+// (case-insensitive) — NEVER findMailboxByRoleOrName, whose substring name fallback
+// could mis-hit a custom mailbox (e.g. "Junk mail rules") and silently hide real mail.
+// When an explicit mailbox is set, exclusion is off (the explicit scope wins). When we
+// intend to exclude a role we can't resolve (role absent, OR an empty/degraded mailbox
+// list), DO NOT silently include it: flag it in unresolvedRoles so the handler emits a
+// fail-loud "not excluded" note — never run a default search/list with zero exclusion
+// ids and zero disclosure. Exported pure for unit testing.
+export function computeExclusion(
+  mailboxes: any[],
+  opts: { includeTrash?: boolean; includeSpam?: boolean; hasExplicitMailbox?: boolean },
+): ExclusionResult {
+  const excludeIds: string[] = [];
+  const excludedRoles: string[] = [];
+  const unresolvedRoles: string[] = [];
+  if (opts.hasExplicitMailbox) {
+    return { excludeIds, excludedRoles, unresolvedRoles };
+  }
+  const list = mailboxes || [];
+  const findRole = (role: string) => list.find(mb => mb && typeof mb.role === 'string' && mb.role.toLowerCase() === role);
+  if (!opts.includeTrash) {
+    const tb = findRole('trash');
+    if (tb) { excludeIds.push(tb.id); excludedRoles.push('Trash'); }
+    else unresolvedRoles.push('Trash');
+  }
+  if (!opts.includeSpam) {
+    const jb = findRole('junk');
+    if (jb) { excludeIds.push(jb.id); excludedRoles.push('Spam'); }
+    else unresolvedRoles.push('Spam');
+  }
+  return { excludeIds, excludedRoles, unresolvedRoles };
 }
 
 /** Match an email address against an identity, supporting wildcard identities (e.g. *@example.com). */
@@ -315,9 +402,33 @@ export class JmapClient {
     return data as JmapResponse;
   }
 
+  // Resolve a fixed role with a SUBSTRING name fallback. The substring fallback is an
+  // injection-steering / mis-resolution hazard on any exclusion/delete/move target, so
+  // this is kept ONLY for the compose path (drafts/sent save target), where it resolves
+  // a benign save destination. Default-exclusion uses computeExclusion (exact role),
+  // delete/move/the #12 sweep use resolveMailbox / resolveMailboxId (exact only).
   protected findMailboxByRoleOrName(mailboxes: any[], role: string, nameFallback?: string): any | undefined {
     return mailboxes.find(mb => mb.role === role) ||
            (nameFallback ? mailboxes.find(mb => mb.name.toLowerCase().includes(nameFallback)) : undefined);
+  }
+
+  // Resolve trash/junk for the default Trash/Spam exclusion by EXACT role only
+  // (case-insensitive) — used by both searchEmails and getEmails. Fixed-role lookup
+  // with a private helper to share the resolved id between the visible filter and the
+  // hidden-count query.
+  private findByExactRole(mailboxes: any[], role: string): any | undefined {
+    const target = role.toLowerCase();
+    return (mailboxes || []).find(mb => typeof mb.role === 'string' && mb.role.toLowerCase() === target);
+  }
+
+  // Resolve an optional mailbox input to an id. undefined/blank -> undefined (no filter).
+  // Else resolve EXACTLY against a passed-in list (shared, no double-fetch) or one
+  // getMailboxes(); throws InvalidInputError on no match. Used by every swept tool
+  // (reads + writes) — safe to share now that matching is exact.
+  private async resolveMailboxId(input?: string, mailboxes?: any[]): Promise<string | undefined> {
+    if (input === undefined || input === null || String(input).trim() === '') return undefined;
+    const list = mailboxes ?? await this.getMailboxes();
+    return resolveMailbox(list, input).id;
   }
 
   async getMailboxes(): Promise<any[]> {
@@ -334,37 +445,44 @@ export class JmapClient {
     return this.getListResult(response, 0);
   }
 
-  async getEmails(mailboxId?: string, limit: number = 20, ascending: boolean = false): Promise<QueryResult> {
-    const session = await this.getSession();
+  // Options-object signature (a positional add of the three scope bools would be
+  // fragile). When no explicit `mailbox` is set, applies the same default Trash/Spam
+  // exclusion + hidden-count as searchEmails. Its only structural filter is the
+  // excludeDrafts keyword — isUnread/isPinned are NOT exposed on list_emails.
+  async getEmails(opts: {
+    mailbox?: string;
+    limit?: number;
+    ascending?: boolean;
+    includeTrash?: boolean;
+    includeSpam?: boolean;
+    excludeDrafts?: boolean;
+  } = {}): Promise<QueryResult> {
+    const mailboxes = await this.getMailboxes();
+    const resolvedMailboxId = await this.resolveMailboxId(opts.mailbox, mailboxes);
 
-    const filter = mailboxId ? { inMailbox: mailboxId } : {};
+    const base: any = {};
+    if (resolvedMailboxId) base.inMailbox = resolvedMailboxId;
 
-    const emailGetParams: any = {
-      accountId: session.accountId,
-      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-    };
+    const conds: any[] = [];
+    if (opts.excludeDrafts) conds.push({ notKeyword: '$draft' });
 
-    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
+    const hasExplicitMailbox = !!resolvedMailboxId;
+    const exclusion = computeExclusion(mailboxes, {
+      includeTrash: opts.includeTrash,
+      includeSpam: opts.includeSpam,
+      hasExplicitMailbox,
+    });
+    const exclusionIntended = !hasExplicitMailbox && (!opts.includeTrash || !opts.includeSpam);
 
-    const request: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/query', {
-          accountId: session.accountId,
-          filter,
-          sort: [{ property: 'receivedAt', isAscending: ascending }],
-          limit,
-          calculateTotal: true
-        }, 'query'],
-        ['Email/get', emailGetParams, 'emails'],
-        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
-      ]
-    };
-
-    const response = await this.makeRequest(request);
-    const result = this.getQueryResult(response, 0, 1);
-    attachMailboxNames(result.items, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
-    return result;
+    return this.runFilteredQuery({
+      base,
+      conds,
+      exclusion,
+      exclusionIntended,
+      limit: opts.limit ?? 20,
+      ascending: opts.ascending ?? false,
+      mailboxes,
+    });
   }
 
   async getEmailById(id: string): Promise<any> {
@@ -437,7 +555,7 @@ export class JmapClient {
     textBody?: string;
     htmlBody?: string;
     from?: string;
-    mailboxId?: string;
+    mailbox?: string;
     inReplyTo?: string[];
     references?: string[];
     replyTo?: string[];
@@ -479,8 +597,10 @@ export class JmapClient {
       throw new Error('Could not find Sent mailbox to move email after sending');
     }
 
-    // Use provided mailboxId or default to drafts for initial creation
-    const initialMailboxId = email.mailboxId || draftsMailbox.id;
+    // Use provided mailbox (resolved id/role/name) or default to drafts for initial
+    // creation. Resolving shares the already-fetched list (no double-fetch); an unknown
+    // mailbox throws InvalidInputError, and an id is validated against the list too.
+    const initialMailboxId = email.mailbox ? resolveMailbox(mailboxes, email.mailbox).id : draftsMailbox.id;
 
     // Ensure we have at least one body type (zero-width/whitespace-only counts as absent).
     if (isBlank(email.textBody) && isBlank(email.htmlBody)) {
@@ -578,7 +698,7 @@ export class JmapClient {
     textBody?: string;
     htmlBody?: string;
     from?: string;
-    mailboxId?: string;
+    mailbox?: string;
     inReplyTo?: string[];
     references?: string[];
     replyTo?: string[];
@@ -612,12 +732,14 @@ export class JmapClient {
 
     const fromEmail = email.from || selectedIdentity.email;
 
-    // Resolve drafts mailbox
+    // Resolve the save target. Fetch the mailbox list unconditionally now (a name/role
+    // needs it, and an explicit id is validated against it too) and share it. An unknown
+    // mailbox throws InvalidInputError; otherwise default to the Drafts mailbox.
+    const mailboxes = await this.getMailboxes();
     let draftMailboxId: string;
-    if (email.mailboxId) {
-      draftMailboxId = email.mailboxId;
+    if (email.mailbox) {
+      draftMailboxId = resolveMailbox(mailboxes, email.mailbox).id;
     } else {
-      const mailboxes = await this.getMailboxes();
       const draftsMailbox = this.findMailboxByRoleOrName(mailboxes, 'drafts', 'draft');
       if (!draftsMailbox) {
         throw new Error('Could not find Drafts mailbox');
@@ -1258,19 +1380,15 @@ export class JmapClient {
     return submissionId;
   }
 
-  async getRecentEmails(limit: number = 10, mailboxName: string = 'inbox', ascending: boolean = false): Promise<QueryResult> {
+  async getRecentEmails(limit: number = 10, mailbox: string = 'inbox', ascending: boolean = false): Promise<QueryResult> {
     const session = await this.getSession();
 
-    // Find the specified mailbox (default to inbox)
+    // Resolve the target mailbox EXACTLY (id/role/name) — replaces the old substring
+    // match, so this stays consistent with the #12 sweep and carries no substring
+    // injection-steering primitive. Defaults to the inbox role. Throws InvalidInputError
+    // on an unknown mailbox.
     const mailboxes = await this.getMailboxes();
-    const targetMailbox = mailboxes.find(mb =>
-      mb.role === mailboxName.toLowerCase() ||
-      mb.name.toLowerCase().includes(mailboxName.toLowerCase())
-    );
-
-    if (!targetMailbox) {
-      throw new Error(`Could not find mailbox: ${mailboxName}`);
-    }
+    const targetMailbox = resolveMailbox(mailboxes, mailbox);
 
     const emailGetParams: any = {
       accountId: session.accountId,
@@ -1354,10 +1472,13 @@ export class JmapClient {
 
   async deleteEmail(emailId: string): Promise<void> {
     const session = await this.getSession();
-    
-    // Find the trash mailbox
+
+    // Find the trash mailbox by EXACT role only (case-insensitive). NOT the substring
+    // findMailboxByRoleOrName: a custom "Trash bin rules" mailbox (no trash role) must
+    // never be the delete destination, and computeExclusion's exact-role Trash would
+    // then never count mail mis-filed there.
     const mailboxes = await this.getMailboxes();
-    const trashMailbox = this.findMailboxByRoleOrName(mailboxes, 'trash', 'trash');
+    const trashMailbox = this.findByExactRole(mailboxes, 'trash');
 
     if (!trashMailbox) {
       throw new Error('Could not find Trash mailbox');
@@ -1388,8 +1509,16 @@ export class JmapClient {
     }
   }
 
-  async moveEmail(emailId: string, targetMailboxId: string): Promise<void> {
+  async moveEmail(emailId: string, target: string): Promise<void> {
     const session = await this.getSession();
+
+    // Resolve the destination EXACTLY (id/role/name) — a new capability (moveEmail
+    // previously took a raw id with no resolution). Exact-only, so it carries no
+    // substring mis-resolution; deliberate move-to-any-mailbox stays open by design
+    // (a move-target restriction is tracked separately, fork #43). Throws
+    // InvalidInputError on an unknown destination.
+    const mailboxes = await this.getMailboxes();
+    const targetMailboxId = resolveMailbox(mailboxes, target).id;
 
     // Fetch current mailboxIds to build a proper JMAP patch
     const getRequest: JmapRequest = {
@@ -1434,8 +1563,26 @@ export class JmapClient {
     }
   }
 
+  // The label tools take mailbox IDs only (no name/role resolution — full name
+  // resolution there is tracked as fork #50). Reject any element that isn't a real
+  // mailbox id BEFORE the Email/set, so a caller who learned `mailbox:"Archive"` works
+  // elsewhere gets a guided error here instead of a silent no-op or a cryptic JMAP
+  // failure. "Valid" = matches some mailbox.id in the fetched list (a real id absent
+  // from the list is rejected too — accepted residual, see docs/security-model.md).
+  private async assertValidMailboxIds(mailboxIds: string[]): Promise<void> {
+    const mailboxes = await this.getMailboxes();
+    const validIds = new Set((mailboxes || []).map((mb: any) => mb.id));
+    const invalid = mailboxIds.filter(id => !validIds.has(id));
+    if (invalid.length > 0) {
+      throw new InvalidInputError(
+        `Not valid mailbox id(s): ${invalid.join(', ')}. The label tools accept mailbox IDs only (not names or roles) — use list_mailboxes to resolve a name to its id.`,
+      );
+    }
+  }
+
   async addLabels(emailId: string, mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
+    await this.assertValidMailboxIds(mailboxIds);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};
@@ -1465,6 +1612,7 @@ export class JmapClient {
 
   async removeLabels(emailId: string, mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
+    await this.assertValidMailboxIds(mailboxIds);
 
     // Build patch object to remove specific mailboxIds
     const patch: Record<string, any> = {};
@@ -1494,6 +1642,7 @@ export class JmapClient {
 
   async bulkAddLabels(emailIds: string[], mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
+    await this.assertValidMailboxIds(mailboxIds);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};
@@ -1526,6 +1675,7 @@ export class JmapClient {
 
   async bulkRemoveLabels(emailIds: string[], mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
+    await this.assertValidMailboxIds(mailboxIds);
 
     // Build patch object to remove specific mailboxIds
     const patch: Record<string, any> = {};
@@ -1917,116 +2067,180 @@ export class JmapClient {
     return { url, bytesWritten: buffer.length, savedPath: safePath };
   }
 
-  async advancedSearch(filters: {
+  // Shared engine for searchEmails + getEmails: assemble the filter from a flat base
+  // FilterCondition plus a list of single-keyword condition objects, inject the default
+  // Trash/Spam exclusion, run the visible query + a hidden-count query, and populate
+  // QueryResult.exclusion. Both callers fetch `mailboxes` themselves (to resolve their
+  // `mailbox` param + compute the exclusion) and pass it in, so names attach with no
+  // extra round-trip and there is no in-batch Mailbox/get.
+  private async runFilteredQuery(opts: {
+    base: any;
+    conds: any[];
+    exclusion: ExclusionResult;
+    exclusionIntended: boolean;
+    limit: number;
+    ascending: boolean;
+    mailboxes: any[];
+  }): Promise<QueryResult> {
+    const session = await this.getSession();
+    const { base, conds, exclusion, exclusionIntended, limit, ascending, mailboxes } = opts;
+
+    const doExclude = exclusion.excludeIds.length > 0;
+    // Inject the exclusion into `base` BEFORE computing baseEmpty — otherwise an
+    // exclusion-only query (no text/from fields) would see base as {} and take the
+    // conds[0]-alone branch, silently dropping the folder exclusion (fail-open).
+    if (doExclude) base.inMailboxOtherThan = exclusion.excludeIds;
+
+    // Combine the base FilterCondition with N single-keyword conditions. Each keyword
+    // is its own condition object because a single JMAP FilterCondition allows only one
+    // hasKeyword/notKeyword. baseEmpty alone + one cond -> the lone cond; else AND-wrap.
+    const combine = (b: any, c: any[], bEmpty: boolean) =>
+      c.length === 0 ? b
+      : (bEmpty && c.length === 1) ? c[0]
+      : { operator: 'AND', conditions: [...(bEmpty ? [] : [b]), ...c] };
+
+    const baseEmpty = Object.keys(base).length === 0;
+    const visibleFilter = combine(base, conds, baseEmpty);
+
+    const emailGetParams: any = {
+      accountId: session.accountId,
+      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
+      properties: [...EMAIL_PROPERTIES_COMPACT],
+    };
+
+    const methodCalls: [string, any, string][] = [
+      ['Email/query', {
+        accountId: session.accountId,
+        filter: visibleFilter,
+        sort: [{ property: 'receivedAt', isAscending: ascending }],
+        limit,
+        calculateTotal: true,
+      }, 'query'],
+      ['Email/get', emailGetParams, 'emails'],
+    ];
+
+    if (doExclude) {
+      // Hidden-count query = the visible filter with ONLY inMailboxOtherThan removed, so
+      // hidden = broaderTotal - visibleTotal = matches withheld to Trash/Spam (the
+      // complement, which never overcounts a message cross-filed in {Trash, a visible
+      // mailbox} — that message is in both totals). Reconstruct from a COPY of base
+      // minus the key, then re-run the identical combine: a naive top-level delete on
+      // the assembled filter would no-op when the key sits inside conditions[0] under
+      // the AND-wrap (count == visible -> note never fires, fail-open). Issued in the
+      // SAME makeRequest at a higher index: one atomic snapshot (no two-query race) and
+      // one fewer round-trip; the visible indices 0/1 are unchanged.
+      const countBase = { ...base };
+      delete countBase.inMailboxOtherThan;
+      const countBaseEmpty = Object.keys(countBase).length === 0;
+      const countFilter = combine(countBase, conds, countBaseEmpty);
+      methodCalls.push(['Email/query', {
+        accountId: session.accountId,
+        filter: countFilter,
+        limit: 0,
+        calculateTotal: true,
+      }, 'count']);
+    }
+
+    const response = await this.makeRequest({
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls,
+    });
+    const result = this.getQueryResult(response, 0, 1);
+    attachMailboxNames(result.items, buildMailboxNameMap(mailboxes));
+
+    // Populate exclusion metadata whenever an exclusion was INTENDED — even if
+    // excludeIds came back empty (a role couldn't be resolved), so the handler still
+    // fires the fail-loud "not excluded" note rather than silently running unfiltered.
+    if (exclusionIntended) {
+      let hidden: number | null = 0;
+      if (doExclude) {
+        // FAIL-CLOSED: the published "no note => nothing hidden" contract is only safe
+        // if a missing/garbled count fails loud. calculateTotal is server-discretionary
+        // and the count methodCall can error. If either total is non-numeric, or the
+        // count method errored, or hidden computes negative (a wrong total:0 on the
+        // broader query), set hidden=null (degraded note) — never clamp to 0.
+        const visibleTotal = result.total;
+        let broaderTotal: number | undefined;
+        try { broaderTotal = this.getMethodResult(response, 2)?.total; } catch { broaderTotal = undefined; }
+        if (typeof visibleTotal !== 'number' || typeof broaderTotal !== 'number') {
+          hidden = null;
+        } else {
+          const h = broaderTotal - visibleTotal;
+          hidden = h < 0 ? null : h;
+        }
+      }
+      result.exclusion = {
+        hidden,
+        excludedRoles: exclusion.excludedRoles,
+        unresolvedRoles: exclusion.unresolvedRoles,
+      };
+    }
+
+    return result;
+  }
+
+  async searchEmails(filters: {
     query?: string;
     from?: string;
     to?: string;
+    cc?: string;
+    bcc?: string;
     subject?: string;
     hasAttachment?: boolean;
     isUnread?: boolean;
     isPinned?: boolean;
-    mailboxId?: string;
+    mailbox?: string;
     after?: string;
     before?: string;
     limit?: number;
     ascending?: boolean;
+    excludeDrafts?: boolean;
+    includeTrash?: boolean;
+    includeSpam?: boolean;
   }): Promise<QueryResult> {
-    const session = await this.getSession();
+    const mailboxes = await this.getMailboxes();
+    const resolvedMailboxId = await this.resolveMailboxId(filters.mailbox, mailboxes);
 
-    // Build JMAP filter object
-    const filter: any = {};
+    const base: any = {};
+    if (filters.query) base.text = filters.query;
+    if (filters.from) base.from = filters.from;
+    if (filters.to) base.to = filters.to;
+    if (filters.cc) base.cc = filters.cc;
+    if (filters.bcc) base.bcc = filters.bcc;
+    if (filters.subject) base.subject = filters.subject;
+    if (filters.hasAttachment !== undefined) base.hasAttachment = filters.hasAttachment;
+    if (filters.after) base.after = filters.after;
+    if (filters.before) base.before = filters.before;
+    if (resolvedMailboxId) base.inMailbox = resolvedMailboxId;
 
-    if (filters.query) filter.text = filters.query;
-    if (filters.from) filter.from = filters.from;
-    if (filters.to) filter.to = filters.to;
-    if (filters.subject) filter.subject = filters.subject;
-    if (filters.hasAttachment !== undefined) filter.hasAttachment = filters.hasAttachment;
-    if (filters.isUnread === true) filter.notKeyword = '$seen';
-    else if (filters.isUnread === false) filter.hasKeyword = '$seen';
-    if (filters.isPinned === true) filter.hasKeyword = '$flagged';
-    if (filters.isPinned === false) filter.notKeyword = '$flagged';
-    if (filters.mailboxId) filter.inMailbox = filters.mailboxId;
-    if (filters.after) filter.after = filters.after;
-    if (filters.before) filter.before = filters.before;
+    // Each keyword is its own condition (mixed polarities can't share one FilterCondition).
+    const conds: any[] = [];
+    if (filters.isUnread === true) conds.push({ notKeyword: '$seen' });
+    else if (filters.isUnread === false) conds.push({ hasKeyword: '$seen' });
+    if (filters.isPinned === true) conds.push({ hasKeyword: '$flagged' });
+    else if (filters.isPinned === false) conds.push({ notKeyword: '$flagged' });
+    if (filters.excludeDrafts) conds.push({ notKeyword: '$draft' });
 
-    // When both isUnread and isPinned are set, hasKeyword/notKeyword may conflict.
-    // JMAP FilterCondition only supports one hasKeyword, so wrap in an AND operator.
-    let finalFilter: any = filter;
-    if (filters.isUnread !== undefined && filters.isPinned !== undefined) {
-      delete filter.hasKeyword;
-      delete filter.notKeyword;
-      const conditions: any[] = [filter];
-      conditions.push(filters.isUnread ? { notKeyword: '$seen' } : { hasKeyword: '$seen' });
-      conditions.push(filters.isPinned ? { hasKeyword: '$flagged' } : { notKeyword: '$flagged' });
-      finalFilter = { operator: 'AND', conditions };
-    }
+    const hasExplicitMailbox = !!resolvedMailboxId;
+    const exclusion = computeExclusion(mailboxes, {
+      includeTrash: filters.includeTrash,
+      includeSpam: filters.includeSpam,
+      hasExplicitMailbox,
+    });
+    const exclusionIntended = !hasExplicitMailbox && (!filters.includeTrash || !filters.includeSpam);
 
-    const emailGetParams: any = {
-      accountId: session.accountId,
-      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-    };
-
-    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
-
-    const request: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/query', {
-          accountId: session.accountId,
-          filter: finalFilter,
-          sort: [{ property: 'receivedAt', isAscending: filters.ascending ?? false }],
-          limit: Math.min(filters.limit || 50, 100),
-          calculateTotal: true
-        }, 'query'],
-        ['Email/get', emailGetParams, 'emails'],
-        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
-      ]
-    };
-
-    const response = await this.makeRequest(request);
-    const result = this.getQueryResult(response, 0, 1);
-    attachMailboxNames(result.items, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
-    return result;
+    return this.runFilteredQuery({
+      base,
+      conds,
+      exclusion,
+      exclusionIntended,
+      limit: Math.min(filters.limit || 20, 100),
+      ascending: filters.ascending ?? false,
+      mailboxes,
+    });
   }
 
-  async searchEmails(query: string, limit: number = 20, ascending: boolean = false, excludeDrafts: boolean = false): Promise<QueryResult> {
-    const session = await this.getSession();
-
-    const emailGetParams: any = {
-      accountId: session.accountId,
-      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-    };
-
-    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
-
-    // A JMAP FilterCondition ANDs its properties, so text + notKeyword means
-    // "matches the query AND is not a draft". Server-side, so calculateTotal
-    // stays honest (no post-filtering).
-    const filter: any = { text: query };
-    if (excludeDrafts) filter.notKeyword = '$draft';
-
-    const request: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/query', {
-          accountId: session.accountId,
-          filter,
-          sort: [{ property: 'receivedAt', isAscending: ascending }],
-          limit,
-          calculateTotal: true
-        }, 'query'],
-        ['Email/get', emailGetParams, 'emails'],
-        ['Mailbox/get', { accountId: session.accountId, properties: ['id', 'name'] }, 'mailboxes']
-      ]
-    };
-
-    const response = await this.makeRequest(request);
-    const result = this.getQueryResult(response, 0, 1);
-    attachMailboxNames(result.items, buildMailboxNameMap(this.readListResultIfPresent(response, 2)));
-    return result;
-  }
-
-  async getThread(threadId: string, includeDrafts: boolean = false): Promise<any[]> {
+  async getThread(threadId: string, includeDrafts: boolean = false): Promise<{ emails: any[]; hiddenDraftCount: number }> {
     const session = await this.getSession();
 
     // First, check if threadId is actually an email ID and resolve the thread
@@ -2091,40 +2305,42 @@ export class JmapClient {
     // Drafts (e.g. an in-progress reply) are noise when reading a conversation,
     // so exclude them by default. Identify by the $draft keyword (survives a
     // draft moved out of the Drafts mailbox); opt back in via includeDrafts.
-    return includeDrafts ? emails : emails.filter((e: any) => !e.keywords?.$draft);
+    // Return the hidden count (no extra query — derived from the already-fetched
+    // thread) so the handler can ANNOUNCE that drafts were hidden without surfacing
+    // them (the duplicate-draft trap: an agent reading a thread to reply must not
+    // miss that a draft reply already exists). Assumes the full thread is returned
+    // (Thread/get -> Email/get, no limit); threads are small so this holds.
+    if (includeDrafts) {
+      return { emails, hiddenDraftCount: 0 };
+    }
+    const filtered = emails.filter((e: any) => !e.keywords?.$draft);
+    return { emails: filtered, hiddenDraftCount: emails.length - filtered.length };
   }
 
-  async getMailboxStats(mailboxId?: string): Promise<any> {
-    const session = await this.getSession();
-    
-    if (mailboxId) {
-      // Get stats for specific mailbox
-      const request: JmapRequest = {
-        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-        methodCalls: [
-          ['Mailbox/get', {
-            accountId: session.accountId,
-            ids: [mailboxId],
-            properties: ['id', 'name', 'role', 'totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads']
-          }, 'mailbox']
-        ]
-      };
+  async getMailboxStats(mailbox?: string): Promise<any> {
+    // Fetch the full mailbox list once and read counts off it (getMailboxes returns all
+    // fields, including the stat fields — it must NOT be narrowed). Resolving a specific
+    // mailbox by id/role/name shares this list rather than issuing a second Mailbox/get.
+    const mailboxes = await this.getMailboxes();
+    const toStats = (mb: any) => ({
+      id: mb.id,
+      name: mb.name,
+      role: mb.role,
+      totalEmails: mb.totalEmails || 0,
+      unreadEmails: mb.unreadEmails || 0,
+      totalThreads: mb.totalThreads || 0,
+      unreadThreads: mb.unreadThreads || 0,
+    });
 
-      const response = await this.makeRequest(request);
-      return this.getListResult(response, 0)[0];
-    } else {
-      // Get stats for all mailboxes
-      const mailboxes = await this.getMailboxes();
-      return mailboxes.map(mb => ({
-        id: mb.id,
-        name: mb.name,
-        role: mb.role,
-        totalEmails: mb.totalEmails || 0,
-        unreadEmails: mb.unreadEmails || 0,
-        totalThreads: mb.totalThreads || 0,
-        unreadThreads: mb.unreadThreads || 0
-      }));
+    if (mailbox !== undefined && String(mailbox).trim() !== '') {
+      // Exact resolution (id/role/name); throws InvalidInputError on unknown. A real id
+      // present but absent from the fetched list (a hidden/role-less mailbox) now throws
+      // rather than returning stats — accepted residual (see docs/security-model.md).
+      const mb = resolveMailbox(mailboxes, mailbox);
+      return toStats(mb);
     }
+    // Stats for all mailboxes.
+    return mailboxes.map(toStats);
   }
 
   async getAccountSummary(): Promise<any> {
@@ -2211,8 +2427,13 @@ export class JmapClient {
     }
   }
 
-  async bulkMove(emailIds: string[], targetMailboxId: string): Promise<void> {
+  async bulkMove(emailIds: string[], target: string): Promise<void> {
     const session = await this.getSession();
+
+    // Resolve the destination EXACTLY (id/role/name) — see moveEmail for the rationale
+    // (new capability, exact-only, deliberate move-to-any stays open per fork #43).
+    const mailboxes = await this.getMailboxes();
+    const targetMailboxId = resolveMailbox(mailboxes, target).id;
 
     // Fetch current mailboxIds for all emails to build proper JMAP patches
     const getRequest: JmapRequest = {
@@ -2262,9 +2483,9 @@ export class JmapClient {
   async bulkDelete(emailIds: string[]): Promise<void> {
     const session = await this.getSession();
 
-    // Find the trash mailbox
+    // Find the trash mailbox by EXACT role only (case-insensitive) — see deleteEmail.
     const mailboxes = await this.getMailboxes();
-    const trashMailbox = this.findMailboxByRoleOrName(mailboxes, 'trash', 'trash');
+    const trashMailbox = this.findByExactRole(mailboxes, 'trash');
 
     if (!trashMailbox) {
       throw new Error('Could not find Trash mailbox');

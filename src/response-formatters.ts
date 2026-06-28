@@ -22,6 +22,45 @@ export function formatEmailQueryResult(result: QueryResult): string {
   return `${summary}\n${JSON.stringify(simplified, null, 2)}`;
 }
 
+// Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the
+// out-of-band metadata that searchEmails/getEmails populate; the formatters above
+// deliberately ignore it). Returns '' when there is nothing to disclose. The note is
+// appended by the handler to the formatter's string (raw + simplified), so the JSON
+// block stays parseable. Three independent signals, fail-loud ones FRONT-LOADED with
+// the imperative so a model that learned "no note = safe" can't skim past them:
+//   - unresolved role  -> the folder couldn't be found, so it was NOT excluded
+//   - hidden === null   -> excluded, but the count couldn't be confirmed (degraded)
+//   - hidden > 0        -> N matches were withheld to Trash/Spam
+//   - hidden === 0      -> NO note (silence is the published "nothing matched" signal)
+export function buildExclusionNote(exclusion?: QueryResult['exclusion']): string {
+  if (!exclusion) return '';
+  const { hidden, excludedRoles, unresolvedRoles } = exclusion;
+  const flagFor = (role: string) => (role === 'Trash' ? 'includeTrash:true' : 'includeSpam:true');
+  const notes: string[] = [];
+
+  if (unresolvedRoles && unresolvedRoles.length > 0) {
+    notes.push(
+      `Re-run to be sure: the ${unresolvedRoles.join('/')} folder couldn't be found, so it was NOT excluded — these results may include ${unresolvedRoles.join('/')} mail.`,
+    );
+  }
+
+  if (excludedRoles && excludedRoles.length > 0) {
+    const flags = excludedRoles.map(flagFor).join(' / ');
+    if (hidden === null) {
+      notes.push(
+        `Re-run with ${flags}: ${excludedRoles.join('/')} were excluded but the hidden count couldn't be confirmed.`,
+      );
+    } else if (hidden > 0) {
+      notes.push(
+        `Note: ${hidden} message(s) in ${excludedRoles.join('/')} were excluded; set ${flags} (or mailbox:"trash"/"junk") to include them.`,
+      );
+    }
+    // hidden === 0 -> no note: silence is the trustworthy "nothing matched in Trash/Spam" signal.
+  }
+
+  return notes.length ? `\n\n${notes.join('\n')}` : '';
+}
+
 export function simplifyMailbox(raw: any, options?: { verbose?: boolean }): any {
   const result: any = {
     id: raw.id,
