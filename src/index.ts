@@ -19,7 +19,7 @@ import { composeReply } from './reply-handler.js';
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.4-fork.9',
+    version: '1.9.4-fork.10',
   },
   {
     capabilities: {
