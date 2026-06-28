@@ -50,11 +50,12 @@ Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
 
 ## Review findings get a disposition
 
-A surfaced issue — from a review, a subagent, or a self-check — must end with an explicit disposition; never a silent drop. "Minor / nit / non-blocking" is a *severity*, not a disposition: a non-blocking issue that is neither fixed nor tracked is invisible to the next reader and hides forever. Each finding resolves to exactly one of:
+A surfaced issue — from a review, a subagent, or a self-check — must end with an explicit disposition; never a silent drop. "Minor / nit / non-blocking" is a *severity*, not a disposition: a non-blocking issue that is neither fixed nor tracked is invisible to the next reader and hides forever. Likewise **"out of scope" is not a disposition** — it is a scope decision, and a scope decision is the user's to make, not one to bury in an "Out of scope:" line. This is sharpest when the scoped-out item is a gap in the very thing the current work fixes (e.g. #37 guarded a quote-dropping `htmlBody` edit but the symmetric `textBody`-on-a-text-only-reply-draft quote-drop was quietly scoped out — and worse, with a justification that was factually wrong). A scope call wearing a false justification looks dispositioned but isn't. Each finding resolves to exactly one of:
 
 1. **Fixed now** — preferred for anything cheap and real (e.g. a guard that rejects valid input).
 2. **Tracked** — a fork GitHub issue (`--repo JonathanGodley/fastmail-mcp`). NOT a code `TODO`/comment: deferred work belongs in the issue tracker where it stays visible and triageable, not buried in a comment that never resurfaces.
 3. **Consciously declined** — allowed, but the *reason for declining* must live where the next reader will hit it: an in-code comment for a local call, or the `docs/*` rationale files for a cross-cutting/accepted residual (e.g. an inherent path-guard TOCTOU limit). This is for decisions that need no future action; anything meant to be revisited is deferred work and goes in an issue (2), not here. "We decided not to" with no written home does not count.
+4. **Surfaced to the user** — REQUIRED for anything that changes intended scope, behaviour, or a user-visible contract, including every "this is out of scope" call. The driver may fix / track / decline *implementation-level* findings on its own, but a scope/contract/behaviour call is the user's: state the gap and a recommendation, and let them veto. When unsure which side a finding falls on, surface it — a needless question is far cheaper than silently redrawing scope.
 
 When summarizing a review, state each finding's disposition plainly rather than burying declined items in a parenthetical, so the decision can be vetoed.
 
