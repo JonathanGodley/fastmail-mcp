@@ -89,3 +89,26 @@ recreate and then applies the requested change: `attachments` **appends**;
 a ref that matches nothing or a name matching more than one; `clearFields:['attachments']`
 removes all. Passing `attachments` together with `clearFields:['attachments']` is a rejected
 conflict. An attachment-only edit stays body-invariant (it must not inject or strip a body).
+
+## `originalEmailId` is an in-account read-and-embed primitive (accepted residual)
+
+`reply_email` and `edit_draft`'s reply-quote keep path both take an `originalEmailId` and, on
+the keep path, fetch that message's body and embed it (sanitized via `sanitizeForQuote`) into
+a draft the caller may then send. Stated plainly: this lets a caller move one message's
+content into outgoing mail addressed to arbitrary recipients under the user's own `From`. A
+prompt-injected agent could use it to exfiltrate the content of any message in the account by
+quoting it into a reply it sends to an attacker-chosen address.
+
+The id is **trusted and unscoped within the connected account** — it may name *any* message,
+deliberately, so a caller can correct a draft built against the wrong original. It is **never
+re-resolved from the draft's `In-Reply-To`** (an attacker-controllable header), so there is no
+confused-deputy / quote-spoofing surface from that direction, and there is **no cross-account
+reach** (the fetch is scoped to `session.accountId`).
+
+This introduces **no new capability class** versus the already-shipped `reply_email`, which
+quotes any `originalEmailId` the same way; `edit_draft`'s keep path just reuses it. The
+embedded html is run through `sanitizeForQuote` (script/style/handlers/unscoped attributes
+stripped, schemes pinned) — a safety floor for re-sending under the user's `From`, not a
+privacy control. Documented here as an accepted residual: the mitigation for misuse is the
+same opt-in/authorization posture that governs sending mail at all, not a restriction on which
+in-account message may be quoted.

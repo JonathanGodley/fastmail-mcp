@@ -2,7 +2,7 @@ import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank } from './body-format.js';
-import { buildReplyBodies, hasQuoteMarker } from './reply-quote.js';
+import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker } from './reply-quote.js';
 import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
 import type { FileHandle } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
@@ -723,12 +723,13 @@ export class JmapClient {
     clearFields?: string[];
     attachments?: AttachmentPart[];
     removeAttachments?: string[];
-    // Reply-quote preservation on body edit (#37). When editing a reply draft's htmlBody to
-    // one that no longer carries the quoted original, the caller must say what to do:
-    // originalEmailId = regenerate and keep the quote from that (caller-named) message;
-    // dropQuote = deliberately drop it. Absent both, the edit is rejected (no silent loss).
+    // Reply-quote preservation on body edit (#37, redesigned #42). If a reply draft already
+    // carries the quoted original (detected on its EXISTING body, which this server generated)
+    // and the edit would touch the body in a way that could drop the quote, the caller must
+    // say what to do: originalEmailId = regenerate and keep the quote from that (caller-named)
+    // message; noQuote = deliberately drop it. Absent both, the edit is rejected (no silent loss).
     originalEmailId?: string;
-    dropQuote?: boolean;
+    noQuote?: boolean;
   }): Promise<{ id: string; orphanedOldDraftId?: string }> {
     const session = await this.getSession();
 
@@ -841,40 +842,103 @@ export class JmapClient {
     // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
     // discarded so stored bodies keep their exact (untrimmed) value below.
 
-    // ---- Reply-quote preservation guard (#37) ----
-    // A reply draft keeps the quoted original inside its htmlBody (buildReplyBodies appends
-    // a cited <blockquote>). Writing a quote-free htmlBody would replace the whole body and
-    // silently drop that quote. So when editing a REPLY draft's htmlBody to one without the
-    // marker, force the caller to choose: regenerate+keep from a caller-named originalEmailId,
-    // or deliberately dropQuote. Detection is on the caller's NEW html only (never the stored
-    // body), so there's no silent-loss path and no dependence on how Fastmail re-serialized
-    // the saved quote. clearFields:['htmlBody'] (plain-text conversion) leaves updates.htmlBody
-    // undefined and so never trips this; it already preserves the "> " text quote below.
+    // ---- Reply-quote preservation guard (#37, redesigned #42) ----
+    // A reply draft keeps the quoted original in its body (buildReplyBodies appends a cited
+    // <blockquote> to html and a "> "-quoted block to text). An edit that rewrites or clears
+    // that body would silently drop the quote. We decide on the EXISTING (stored) body — which
+    // THIS server generated, so its quote shape is reliable — never on the caller's NEW body
+    // (untrusted: it can't tell the real quote from any quote-shaped content, and prose can
+    // false-positive). When the draft has a quote and the edit touches the body in a way that
+    // isn't quote-preserving by construction, force the caller to choose: regenerate+keep from
+    // a caller-named originalEmailId, or deliberately noQuote. Supersedes the fork.8 new-body-
+    // scan (bypassable + html-only); see docs/email-bodies.md and #42.
     const isReply = !!existingEmail.inReplyTo?.length;
-    const droppingQuote = isReply && updates.htmlBody !== undefined && !hasQuoteMarker(updates.htmlBody);
-    if (droppingQuote) {
-      if (updates.originalEmailId && updates.dropQuote === true) {
-        throw new Error('Pass either originalEmailId (keep the quote) or dropQuote (discard it), not both.');
+    const oldHtmlQuoted = hasQuoteMarker(existingHtmlValue);
+    const oldTextQuoted = hasTextQuoteMarker(existingTextValue);
+    const draftHasQuote = isReply && (oldHtmlQuoted || oldTextQuoted);
+
+    // Pre-merge signals: what the edit does to each body. existingHtmlValue/existingTextValue
+    // were fetched above; these are the same inputs the coupling guards below use.
+    const wroteHtml = updates.htmlBody !== undefined;
+    const wroteText = updates.textBody !== undefined;
+    const clearedHtml = clear.has('htmlBody');
+    const clearedText = clear.has('textBody');
+    const touchesBody = wroteHtml || wroteText || clearedHtml || clearedText;
+
+    // The quote survives WITHOUT inspecting any new content in exactly two shapes:
+    //  - a metadata-only edit (no body written or cleared) leaves both bodies untouched;
+    //  - a plain-text conversion (clearFields:['htmlBody'] alone) keeps the old text, but only
+    //    counts as quote-preserving when that surviving text actually carries the "> " quote
+    //    (oldTextQuoted — always true for drafts this server made). If it doesn't, this is NOT
+    //    a clean carve-out and the edit correctly falls through to the guard below.
+    const quoteKeptByConstruction =
+         !touchesBody
+      || (clearedHtml && !wroteHtml && !wroteText && !clearedText && oldTextQuoted);
+
+    // Text-side edits while a non-empty html survives are owned by the two coupling guards
+    // further down (textBody-alone; clearFields:['textBody']-while-html), which emit the
+    // correct remedy and (for guard ii) need the post-merge mergedHtmlRaw, so they can't move
+    // up here. Exclude those cases so this pre-merge guard doesn't pre-empt them. On a text-
+    // only draft existingHtmlValue is blank, so this is false → a text edit there correctly
+    // falls through to the guard (exactly the #42 case this guard exists to catch).
+    const coupledTextEdit =
+      !wroteHtml && !clearedHtml && !isBlank(existingHtmlValue) && (wroteText || clearedText);
+
+    if (draftHasQuote && touchesBody && !quoteKeptByConstruction && !coupledTextEdit) {
+      if (updates.originalEmailId && updates.noQuote === true) {
+        throw new Error('Pass either originalEmailId (keep the quote) or noQuote (discard it), not both.');
       } else if (updates.originalEmailId) {
         // Regenerate from the caller-named original — never re-resolved from the draft's
-        // In-Reply-To (which is attacker-controllable), so there's no spoof surface. The id
-        // is trusted, not validated against the draft's In-Reply-To (that check would
-        // false-reject legitimate cases, e.g. correcting a wrong original). getEmailById
-        // throws on not-found; rethrow with a message naming the param so the caller can fix
-        // it (it surfaces via index's error wrap like this function's other guards).
+        // In-Reply-To (which is attacker-controllable), so there's no spoof surface. The id is
+        // trusted, not validated against the draft's In-Reply-To (that check would false-reject
+        // legitimate cases, e.g. correcting a wrong original). getEmailById throws on not-found;
+        // rethrow with a message naming the param so the caller can fix it (it surfaces via
+        // index's error wrap like this function's other guards).
         let original: any;
         try {
           original = await this.getEmailById(updates.originalEmailId);
         } catch {
           throw new Error(`originalEmailId '${updates.originalEmailId}' could not be fetched (no such message, or not accessible). Pass the id of the message this draft replies to.`);
         }
-        updates.htmlBody = buildReplyBodies({ original, htmlBody: updates.htmlBody, quoteOriginal: true }).htmlBody;
-      } else if (updates.dropQuote === true) {
+        // Regenerate the quote into EVERY body the edit is writing — both, when the caller
+        // supplies both (a new html + a custom text alternative), so neither side silently
+        // loses the quote on the keep path. buildReplyBodies quotes exactly the formats passed.
+        // A clear-only edit writes neither body, so there's nowhere to regenerate into — reject
+        // loudly rather than silently no-op the keep intent. This pre-empts the downstream
+        // no-body reject for a clear-the-last-body edit (the caller sees the regenerate message,
+        // not the no-body one); both are loud and lose no data, and the throw means no double-fire.
+        if (wroteHtml || wroteText) {
+          const rebuilt = buildReplyBodies({
+            original,
+            ...(wroteHtml && { htmlBody: updates.htmlBody }),
+            ...(wroteText && { textBody: updates.textBody }),
+            quoteOriginal: true,
+          });
+          if (wroteHtml) updates.htmlBody = rebuilt.htmlBody;
+          if (wroteText) updates.textBody = rebuilt.textBody;
+          // Loud-fail a self-inconsistent keep request: the caller asked to KEEP via
+          // originalEmailId, but the named message has no quotable content (attachment-only /
+          // calendar-only / cid-image-only), so buildReplyBodies passed the body through
+          // unquoted. This is reachable only by naming the WRONG/empty original — a draft naming
+          // its own original can't hit it (a quote exists only if that original was quotable, and
+          // JMAP message content is immutable). It loses no caller input (the new body is kept);
+          // it just turns a confusing quote-less result into an actionable error instead of a
+          // silent one. The `||` accepts the edit if ANY written format kept a marker, so a
+          // partially-quotable original still keeps.
+          const restored = (wroteHtml && hasQuoteMarker(updates.htmlBody))
+            || (wroteText && hasTextQuoteMarker(updates.textBody));
+          if (!restored) {
+            throw new Error(`originalEmailId '${updates.originalEmailId}' has no quotable content (e.g. an attachment-only or calendar-only message), so the quote can't be restored. Check the id, or use noQuote to drop the quote deliberately.`);
+          }
+        } else {
+          throw new Error("originalEmailId can't regenerate a quote on a body you're not writing — edit the body (htmlBody or textBody) to keep the quote, or use noQuote to drop it.");
+        }
+      } else if (updates.noQuote === true) {
         // Proceed: the quote is dropped on explicit request.
       } else {
-        // Error names ONLY the data-preserving keep path; dropQuote is deliberately omitted
-        // so the model is never nudged toward discarding the quote (it stays in the schema).
-        throw new Error("Changing this reply draft's htmlBody would drop the quoted original. Pass originalEmailId (the message this draft replies to) to regenerate and keep the quote.");
+        // Error names ONLY the data-preserving keep path; noQuote is deliberately omitted so
+        // the model is never nudged toward discarding the quote (it stays in the schema).
+        throw new Error("Editing this reply draft's body would drop the quoted original. Pass originalEmailId (the message it replies to) to keep the quote. If you only have the draft, resolve the original from its In-Reply-To Message-ID via search_emails first.");
       }
     }
 
@@ -891,8 +955,9 @@ export class JmapClient {
     //  - editing textBody alone (while a non-empty html survives) is rejected — it won't
     //    change what most recipients render (the html), and the fallback is auto-managed;
     //  - a metadata-only edit (no body written) stays body-invariant (both bodies kept).
-    const wroteText = updates.textBody !== undefined;
-    const wroteHtml = updates.htmlBody !== undefined;
+    // wroteText/wroteHtml are computed once at the reply-quote guard above (same values; the
+    // originalEmailId path only ever replaces an already-written body with another, so their
+    // truth doesn't change). Reuse them here.
     const wroteAnyBody = wroteText || wroteHtml;
 
     // Raw merge: a written body drops the unwritten partner (single-format intent);

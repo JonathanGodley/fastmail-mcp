@@ -19,7 +19,7 @@ import { composeReply } from './reply-handler.js';
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.4-fork.8',
+    version: '1.9.4-fork.9',
   },
   {
     capabilities: {
@@ -439,7 +439,7 @@ const TOOLS = [
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Editing a reply draft\'s htmlBody to one that omits the quoted original is rejected; pass originalEmailId to regenerate the body and keep the quote (or dropQuote:true to discard it). Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can\'t be removed, you may be left with a duplicate draft rather than none. A draft containing inline (cid:) images, or a body part that isn\'t plain text or HTML, can\'t be preserved by editing and is rejected — recreate it instead.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Editing the body of a reply draft that still carries the quoted original requires you to say what happens to the quote: pass originalEmailId (the id of the message this draft replies to) to rebuild the body and keep the quote, or noQuote:true to drop it. Metadata-only edits (subject/recipients/attachments) and plain-text conversion (clearFields:[\'htmlBody\']) keep the quote automatically; each successive body edit that should keep the quote must pass originalEmailId again. Supplying htmlBody to a text-only reply draft converts it to HTML. Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can\'t be removed, you may be left with a duplicate draft rather than none. A draft containing inline (cid:) images, or a body part that isn\'t plain text or HTML, can\'t be preserved by editing and is rejected — recreate it instead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -472,19 +472,19 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed).',
+              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed). For a TEXT-ONLY reply draft, editing textBody is a quote-bearing edit: pass originalEmailId to rebuild and keep the quoted original, or noQuote:true to drop it.',
             },
             htmlBody: {
               type: 'string',
-              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically. For a REPLY draft: a new htmlBody that omits the quoted original is rejected unless you also pass originalEmailId (regenerates and keeps the quote) or dropQuote:true (discards it). Each successive body edit that should keep the quote must pass originalEmailId again.',
+              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically. For a REPLY draft that carries the quoted original, editing the body is rejected unless you pass originalEmailId (rebuilds and keeps the quote) or noQuote:true (drops it). Supplying htmlBody to a text-only reply draft converts it to HTML.',
             },
             originalEmailId: {
               type: 'string',
-              description: "When editing a REPLY draft's htmlBody, the id of the message this draft is a reply to (NOT this draft's own id, which is emailId). Pass it to regenerate the body and keep the quoted original. Without it, a quote-dropping edit is rejected.",
+              description: "When editing the body of a REPLY draft (its htmlBody, or a text-only reply draft's textBody), the id of the message this draft is a reply to (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original. Without it, a quote-dropping body edit is rejected.",
             },
-            dropQuote: {
+            noQuote: {
               type: 'boolean',
-              description: "Deliberate-discard escape: set true to drop the quoted original when editing a reply draft's htmlBody (instead of keeping it via originalEmailId).",
+              description: "Set true to DISCARD the quoted original when editing a reply draft's body (instead of keeping it via originalEmailId). Deliberate-discard escape; without it a quote-dropping body edit is rejected.",
             },
             replyTo: {
               type: 'array',
@@ -1404,7 +1404,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const removeAttachments = coerceStringArray((args as any).removeAttachments);
         // Coerce to a real boolean (lenient clients send "true"/"false"); a non-bool like
         // "garbage" yields undefined, never true — so it can never silently drop the quote.
-        const dropQuote = coerceBool((args as any).dropQuote) === true;
+        const noQuote = coerceBool((args as any).noQuote) === true;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -1427,7 +1427,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           attachments: editAttachments,
           removeAttachments,
           originalEmailId,
-          dropQuote,
+          noQuote,
         });
 
         // JMAP content is immutable, so an edit creates a replacement draft and removes

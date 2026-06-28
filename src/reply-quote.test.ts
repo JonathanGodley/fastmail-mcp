@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReplyBodies, hasQuoteMarker } from './reply-quote.js';
+import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker } from './reply-quote.js';
 
 describe('hasQuoteMarker (#37 reply-quote detection)', () => {
   it('detects the marker buildReplyBodies emits', () => {
@@ -17,12 +17,72 @@ describe('hasQuoteMarker (#37 reply-quote detection)', () => {
     assert.equal(hasQuoteMarker('<blockquote class="q" type="cite">x</blockquote>'), true);
     assert.equal(hasQuoteMarker('<blockquote  TYPE = "cite">x</blockquote>'), true);
   });
+  it('recognizes Gmail\'s class="gmail_quote" shape (no type="cite")', () => {
+    assert.equal(hasQuoteMarker('<blockquote class="gmail_quote">x</blockquote>'), true);
+    assert.equal(hasQuoteMarker('<blockquote class="gmail_quote" style="margin:0 0 0 .8ex">x</blockquote>'), true);
+    assert.equal(hasQuoteMarker('<blockquote class="foo gmail_quote">x</blockquote>'), true); // multi-class
+    assert.equal(hasQuoteMarker("<blockquote class='gmail_quote'>x</blockquote>"), true);
+    // A different class is not a marker (only gmail_quote / type=cite are machine-emitted reply quotes).
+    assert.equal(hasQuoteMarker('<blockquote class="pullquote">x</blockquote>'), false);
+  });
   it('returns false for plain html and empty/nullish input', () => {
     assert.equal(hasQuoteMarker('<p>just a reply, no quote</p>'), false);
     assert.equal(hasQuoteMarker('<blockquote>not a cite</blockquote>'), false);
     assert.equal(hasQuoteMarker(''), false);
     assert.equal(hasQuoteMarker(null), false);
     assert.equal(hasQuoteMarker(undefined), false);
+  });
+});
+
+describe('hasTextQuoteMarker (#42 text reply-quote detection)', () => {
+  // Pin against the RAW text shapes Fastmail returns (captured from a live store/fetch round-
+  // trip 2026-06-28), NOT just our buildReplyBodies output — the runtime guard reads Fastmail's
+  // re-serialized bodyValues. Two shapes occur: a caller-supplied text body comes back as
+  // "wrote:\n> " (one newline); the html-DERIVED text fallback comes back as "wrote:\n\n> "
+  // (a blank line). The blank-line tolerance is load-bearing for the derived case.
+  const RAW_DIRECT_TEXT = 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:\n> 2/2 Rowe St Eastwood NSW 2122: Change of Use and Fitout of Pilates Studio\n> \n> Contact us if you have questions.';
+  const RAW_DERIVED_TEXT = 'my reply\n\n\n\nOn Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:\n\n> 1 new planning application near 6/30-32 Doomben Ave\n> 2/2 Rowe St Eastwood NSW 2122';
+
+  it('matches the raw caller-supplied text shape ("wrote:\\n> ")', () => {
+    assert.equal(hasTextQuoteMarker(RAW_DIRECT_TEXT), true);
+  });
+  it('matches the raw html-derived fallback shape ("wrote:\\n\\n> ", blank line)', () => {
+    assert.equal(hasTextQuoteMarker(RAW_DERIVED_TEXT), true);
+  });
+
+  // Generation-side pin: the live buildReplyBodies output must keep matching, so a future
+  // change to the attribution/quote format fails CI here (direct text + html-derived text).
+  it('matches live buildReplyBodies output (direct text quote)', () => {
+    const r = buildReplyBodies({
+      original: makeOriginal({ text: 'orig line', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' }),
+      textBody: 'my reply', quoteOriginal: true, timezone: TZ,
+    });
+    assert.equal(hasTextQuoteMarker(r.textBody!), true);
+  });
+  it('matches live buildReplyBodies output (html-derived text quote)', () => {
+    const r = buildReplyBodies({
+      original: makeOriginal({ html: '<p>orig <b>html</b></p>', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' }),
+      textBody: 'my reply', quoteOriginal: true, timezone: TZ,
+    });
+    assert.equal(hasTextQuoteMarker(r.textBody!), true);
+  });
+
+  it('matches a dated and an undated attribution', () => {
+    assert.equal(hasTextQuoteMarker('reply\n\nOn Mon, Jun 15, 2026, at 1:29 PM, Jon wrote:\n> quoted'), true);
+    assert.equal(hasTextQuoteMarker('reply\n\nJon wrote:\n> quoted'), true);
+  });
+  it('tolerates CRLF line endings', () => {
+    assert.equal(hasTextQuoteMarker('reply\r\n\r\nJon wrote:\r\n> quoted'), true);
+  });
+  it('returns false for plain text, prose ending in "wrote:", and empty/nullish input', () => {
+    assert.equal(hasTextQuoteMarker('just my reply, no quote here'), false);
+    // Prose that merely ends with "wrote:" but has no following "> " quote line must NOT match
+    // (the old over-loose new-body scan false-positived on exactly this).
+    assert.equal(hasTextQuoteMarker('As I wrote: please review the attached document.'), false);
+    assert.equal(hasTextQuoteMarker('She wrote:\nthen continued without quoting'), false);
+    assert.equal(hasTextQuoteMarker(''), false);
+    assert.equal(hasTextQuoteMarker(null), false);
+    assert.equal(hasTextQuoteMarker(undefined), false);
   });
 });
 

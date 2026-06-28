@@ -831,26 +831,52 @@ describe('updateDraft', () => {
     assert.equal(result.orphanedOldDraftId, 'draft-1');
   });
 
-  // ---- reply-quote preservation on body edit (#37) ----
+  // ---- reply-quote preservation on body edit (#37, redesigned #42) ----
+  //
+  // The guard decides on the EXISTING (stored) body, so these fixtures use the RAW body shapes
+  // Fastmail returns for reply drafts — captured from a live store/fetch round-trip (2026-06-28)
+  // and trimmed of the bulk quoted body but BYTE-EXACT in the marker region the guard reads.
+  // Pinning to Fastmail's re-serialized shape (not our buildReplyBodies output) is the point:
+  // an html-derived text fallback comes back as "wrote:\n\n> " (blank line). The coercion of
+  // noQuote ("true"/"garbage") lives at the index.ts handler seam and is pinned by coerce.test.ts
+  // (coerceBool) + the live harness; updateDraft only ever sees a real boolean, so it is not
+  // re-tested here.
+  const RAW_HTML_QUOTE = '<p>my reply</p><div><br></div><div>On Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:</div><blockquote type="cite" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">\n  1 new planning application near 6/30-32 Doomben Ave\n</blockquote>';
+  const RAW_TEXT_QUOTE = 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:\n> 2/2 Rowe St Eastwood NSW 2122: Change of Use and Fitout of Pilates Studio\n> \n> Contact us if you have questions.';
+  // Quote-LESS bodies (no marker) — for the asymmetric / oldTextQuoted-precondition cells.
+  const PLAIN_TEXT = 'my reply with no quote at all';
+  const PLAIN_HTML = '<p>my reply with no quote at all</p>';
 
-  // A reply draft: htmlBody carries the cited quote; inReplyTo is set (what marks it a reply).
-  const REPLY_DRAFT = {
-    id: 'draft-1',
-    subject: 'Re: Hello',
-    from: [{ email: 'me@example.com' }],
-    to: [{ email: 'bob@example.com' }],
+  const REPLY_BASE = {
+    id: 'draft-1', subject: 'Re: Hello',
+    from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }],
     cc: [], bcc: [],
-    textBody: [{ partId: 't', type: 'text/plain' }],
-    htmlBody: [{ partId: 'h', type: 'text/html' }],
-    bodyValues: {
-      t: { value: 'my reply\n\nOn ... wrote:\n> quoted original' },
-      h: { value: '<p>my reply</p><blockquote type="cite">quoted original</blockquote>' },
-    },
-    mailboxIds: { 'mb-drafts': true },
-    keywords: { $draft: true },
-    inReplyTo: ['orig-msg@example.com'],
-    references: ['orig-msg@example.com'],
+    mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
+    inReplyTo: ['orig-msg@example.com'], references: ['orig-msg@example.com'],
   };
+  // dual: text/plain + text/html, both quoted (the common shape this server creates).
+  const DUAL_REPLY = { ...REPLY_BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: RAW_TEXT_QUOTE }, h: { value: RAW_HTML_QUOTE } } };
+  // text-only: the ONE text/plain part aliases into BOTH lists (so bodyValueForType('text/html')
+  // is undefined → existingHtmlValue blank). This is the #42 shape.
+  const TEXT_ONLY_REPLY = { ...REPLY_BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
+    bodyValues: { t: { value: RAW_TEXT_QUOTE } } };
+  // html-only: the ONE text/html part aliases into both lists (a foreign-client shape — an
+  // html-only reply_email is actually stored dual; included to exercise the html-only path).
+  const HTML_ONLY_REPLY = { ...REPLY_BASE,
+    textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { h: { value: RAW_HTML_QUOTE } } };
+  // asymmetric: html present but quote-LESS; the quote lives only in the text.
+  const ASYMMETRIC_REPLY = { ...REPLY_BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: RAW_TEXT_QUOTE }, h: { value: PLAIN_HTML } } };
+  // dual where only the HTML carries the quote; the text is plain (pins the oldTextQuoted
+  // precondition on the plain-text-conversion carve-out).
+  const HTMLQUOTE_ONLY_REPLY = { ...REPLY_BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: PLAIN_TEXT }, h: { value: RAW_HTML_QUOTE } } };
 
   // The message the reply draft replies to (distinct id 'orig-1'; fully body-valued so the
   // regenerate path produces a real quote we can assert against).
@@ -865,19 +891,31 @@ describe('updateDraft', () => {
     bodyValues: { ot: { value: 'ORIGINAL TEXT BODY' }, oh: { value: '<p>ORIGINAL HTML BODY</p>' } },
   };
 
-  // Dispatch Email/get BY ID — draft fixture for the draft id, original fixture for
-  // 'orig-1'. A single-fixture mock would make the regenerate test quote the DRAFT as its
-  // own original and prove nothing, so id-dispatch is mandatory here. 'orig-missing' →
-  // notFound (drives the not-found path). getEmailById issues Email/get + Mailbox/get;
-  // we answer only Email/get (its mailbox read is defensive/optional).
-  function mockReplyUpdate(c: JmapClient) {
+  // A non-quotable original (attachment-only: no text/html parts) — buildReplyBodies skips the
+  // quote AND attribution for it, so the keep path can't restore a quote and must reject loudly.
+  const NONQUOTABLE_ORIGINAL = {
+    id: 'orig-empty',
+    messageId: ['orig-msg@example.com'],
+    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
+    sentAt: '2026-06-15T03:29:02Z',
+    subject: 'Hello',
+    textBody: [], htmlBody: [], bodyValues: {},
+  };
+
+  // Dispatch Email/get BY ID — the chosen draft fixture for the draft id, the original fixture
+  // for 'orig-1'. A single-fixture mock would make the regenerate test quote the DRAFT as its
+  // own original and prove nothing, so id-dispatch is mandatory here. 'orig-missing' → notFound
+  // (drives the not-found path). getEmailById issues Email/get + Mailbox/get; we answer only
+  // Email/get (its mailbox read is defensive/optional).
+  function mockReplyUpdate(c: JmapClient, draft: any = DUAL_REPLY) {
     return mock.method(c, 'makeRequest', async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         const id = params.ids?.[0];
         if (id === 'orig-1') return { methodResponses: [['Email/get', { list: [ORIGINAL_FOR_REPLY] }, 'email']] };
+        if (id === 'orig-empty') return { methodResponses: [['Email/get', { list: [NONQUOTABLE_ORIGINAL] }, 'email']] };
         if (id === 'orig-missing') return { methodResponses: [['Email/get', { list: [], notFound: ['orig-missing'] }, 'email']] };
-        return { methodResponses: [['Email/get', { list: [REPLY_DRAFT] }, 'getEmail']] };
+        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
       }
       if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
       return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
@@ -891,16 +929,30 @@ describe('updateDraft', () => {
     return call!.arguments[0].methodCalls[0][1].create.draft;
   }
 
-  it('rejects a quote-dropping htmlBody edit on a reply draft (no flag)', async () => {
-    mockReplyUpdate(client);
+  // -- dual-body reply draft --
+
+  it('rejects editing htmlBody on a dual reply draft without a flag', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
     await assert.rejects(
       () => client.updateDraft('draft-1', { htmlBody: '<p>just my new reply</p>' }),
       /would drop the quoted original.*originalEmailId/s,
     );
   });
 
-  it('regenerates and keeps the quote from originalEmailId', async () => {
-    const makeReq = mockReplyUpdate(client);
+  it('rejects editing htmlBody even when the new html itself has a quote marker (no new-body scan)', async () => {
+    // Under the redesign the decision is on the OLD body, so a caller-supplied quote in the new
+    // html does NOT exempt the edit (the fork.8 #37 behavior — "new html with marker passes" —
+    // is deliberately reversed: it was bypassable).
+    mockReplyUpdate(client, DUAL_REPLY);
+    const html = '<p>my edited reply</p><blockquote type="cite">a different quote</blockquote>';
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: html }),
+      /would drop the quoted original/,
+    );
+  });
+
+  it('regenerates and keeps the html quote from originalEmailId (dual)', async () => {
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
     await client.updateDraft('draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-1' });
     const draft = createdDraft(makeReq);
     // Regenerated html carries the caller's new text AND the ORIGINAL's body (not the draft's).
@@ -912,52 +964,237 @@ describe('updateDraft', () => {
     assert.match(draft.bodyValues.text.value, /ORIGINAL HTML BODY/);
   });
 
-  it('drops the quote on dropQuote:true (no second fetch)', async () => {
-    const makeReq = mockReplyUpdate(client);
-    await client.updateDraft('draft-1', { htmlBody: '<p>bare reply</p>', dropQuote: true });
+  it('regenerates the quote into BOTH bodies when both are written + originalEmailId (no silent text-side drop)', async () => {
+    // A caller editing both a new html and a custom text alternative on the keep path must NOT
+    // lose the quote on the text side: the quote is rebuilt into both formats.
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>edited html</p>', textBody: 'edited text', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.html.value, /edited html/);
+    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);          // html quote kept
+    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
+    assert.match(draft.bodyValues.text.value, /edited text/);
+    assert.match(draft.bodyValues.text.value, /> ORIGINAL TEXT BODY/);              // text quote kept too
+  });
+
+  it('drops the quote from BOTH bodies on noQuote:true when both are written', async () => {
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>bare html</p>', textBody: 'bare text', noQuote: true });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.html.value, '<p>bare html</p>');
+    assert.equal(draft.bodyValues.text.value, 'bare text');
+  });
+
+  it('drops the quote on noQuote:true (no second fetch)', async () => {
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>bare reply</p>', noQuote: true });
     const draft = createdDraft(makeReq);
     assert.equal(draft.bodyValues.html.value, '<p>bare reply</p>');
-    // No quote → no second Email/get for an original.
+    // No keep → no second Email/get for an original.
     const getCalls = makeReq.mock.calls.filter((c: any) => c.arguments[0].methodCalls[0][0] === 'Email/get');
     assert.equal(getCalls.length, 1);
   });
 
-  it('throws when originalEmailId and dropQuote are both given', async () => {
-    mockReplyUpdate(client);
+  it('throws when originalEmailId and noQuote are both given', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1', dropQuote: true }),
+      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1', noQuote: true }),
       /not both/,
     );
   });
 
   it('throws an actionable error when originalEmailId is not found', async () => {
-    mockReplyUpdate(client);
+    mockReplyUpdate(client, DUAL_REPLY);
     await assert.rejects(
       () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-missing' }),
       /originalEmailId 'orig-missing' could not be fetched/,
     );
   });
 
-  it('accepts a new htmlBody that already contains the quote marker (no flag needed)', async () => {
-    const makeReq = mockReplyUpdate(client);
-    const html = '<p>my edited reply</p><blockquote type="cite">quoted original</blockquote>';
-    await client.updateDraft('draft-1', { htmlBody: html });
-    assert.equal(createdDraft(makeReq).bodyValues.html.value, html);
+  it('rejects a self-inconsistent keep: originalEmailId names a non-quotable original', async () => {
+    // Reachable only by naming a wrong/empty original (a draft naming its own original can't, by
+    // immutability). The keep can't be honored, so fail loudly with an actionable error rather
+    // than store a quote-less body — no caller input is lost either way.
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-empty' }),
+      /has no quotable content.*noQuote/s,
+    );
   });
+
+  // -- text-only reply draft (#42) --
+
+  it('rejects editing textBody on a text-only reply draft without a flag (#42)', async () => {
+    mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: 'just my new reply' }),
+      /would drop the quoted original.*originalEmailId/s,
+    );
+  });
+
+  it('regenerates the text quote from originalEmailId and stays text-only', async () => {
+    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await client.updateDraft('draft-1', { textBody: 'my edited reply', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.text.value, /my edited reply/);
+    assert.match(draft.bodyValues.text.value, /> ORIGINAL TEXT BODY/); // regenerated "> " text quote
+    assert.equal(draft.htmlBody, undefined);                            // stays text-only
+  });
+
+  it('drops the text quote on noQuote:true (text-only, stays text-only)', async () => {
+    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await client.updateDraft('draft-1', { textBody: 'bare reply', noQuote: true });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.text.value, 'bare reply');
+    assert.equal(draft.htmlBody, undefined);
+  });
+
+  it('format-flip: htmlBody + originalEmailId on a text-only reply draft becomes dual-body', async () => {
+    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>now html</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    // Accepted, pinned behavior: the caller chose to add html.
+    assert.match(draft.bodyValues.html.value, /now html/);
+    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
+    assert.ok(!isBlankStr(draft.bodyValues.text.value)); // derived text fallback → dual
+  });
+
+  // -- carve-outs (quote-preserving by construction) --
+
+  it('carve-out: a subject-only edit on a quoted reply draft preserves both bodies', async () => {
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { subject: 'Re: Hello (edited)' });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.text.value, RAW_TEXT_QUOTE);
+    assert.equal(draft.bodyValues.html.value, RAW_HTML_QUOTE);
+  });
+
+  it('carve-out: clearFields:["htmlBody"] on a dual reply draft keeps the "> " text quote', async () => {
+    // The load-bearing carve-out the over-strict regex would have wrongly rejected.
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { clearFields: ['htmlBody'] });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.htmlBody, undefined);
+    assert.equal(draft.bodyValues.text.value, RAW_TEXT_QUOTE);
+  });
+
+  // -- guard / coupling-guard interactions --
+
+  it('rejects clearFields:["htmlBody"] + a quote-free textBody on a dual reply draft', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['htmlBody'], textBody: 'plain reply, no quote' }),
+      /would drop the quoted original/,
+    );
+  });
+
+  it('regenerates a text-only quote on clearFields:["htmlBody"] + textBody + originalEmailId', async () => {
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { clearFields: ['htmlBody'], textBody: 'my reply', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.htmlBody, undefined);
+    assert.match(draft.bodyValues.text.value, /> ORIGINAL TEXT BODY/);
+  });
+
+  it('clearFields:["textBody"] on a dual reply draft hits the textBody-coupling guard, not the quote guard', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['textBody'] }),
+      /textBody can't be cleared on its own while htmlBody is present/,
+    );
+  });
+
+  it('regression: textBody alone on a dual reply draft still hits the textBody-coupling guard', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: 'new text' }),
+      /editing textBody alone won't change what most recipients see/,
+    );
+  });
+
+  it('precedence: textBody-alone + originalEmailId on a dual draft is owned by the coupling guard (loud reject, no data loss)', async () => {
+    // A text-only edit while html survives can't change what recipients render, so the coupling
+    // guard rejects regardless of originalEmailId — the keep-intent is moot because the whole
+    // edit is rejected (nothing is written). The remedy ("edit htmlBody") then keeps the quote.
+    // Pinned so this precedence is intended, not accidental.
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: 'new text', originalEmailId: 'orig-1' }),
+      /editing textBody alone won't change what most recipients see/,
+    );
+  });
+
+  it('asymmetric draft (quote-less html, quoted text): editing textBody alone → textBody-coupling guard', async () => {
+    // Pins coupledTextEdit case (i) on an asymmetric draft, not just the symmetric one.
+    mockReplyUpdate(client, ASYMMETRIC_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: 'new text' }),
+      /editing textBody alone won't change what most recipients see/,
+    );
+  });
+
+  it('clearFields:["htmlBody"] where only the html is quoted falls through to the quote guard', async () => {
+    // Pins the oldTextQuoted precondition on the plain-text-conversion carve-out: the surviving
+    // text is quote-LESS, so this is NOT a clean carve-out → REJECT.
+    mockReplyUpdate(client, HTMLQUOTE_ONLY_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['htmlBody'] }),
+      /would drop the quoted original/,
+    );
+  });
+
+  it('htmlBody + clearFields:["textBody"] + originalEmailId: quote regenerates, then the textBody-clear coupling guard rejects', async () => {
+    // Odd-but-safe: the quote is preserved into the html, then the pre-existing clearFields-
+    // textBody coupling guard (shipped behavior, independent of this feature) rejects.
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', clearFields: ['textBody'], originalEmailId: 'orig-1' }),
+      /textBody can't be cleared on its own while htmlBody is present/,
+    );
+  });
+
+  it('originalEmailId on a clear-only edit (nothing to regenerate into) rejects loudly', async () => {
+    // dual, quote-less text, clearFields:['htmlBody'] + originalEmailId → no body is being
+    // written, so the keep intent can't be honored: loud reject, NOT a silent no-op.
+    mockReplyUpdate(client, HTMLQUOTE_ONLY_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['htmlBody'], originalEmailId: 'orig-1' }),
+      /can't regenerate a quote on a body you're not writing/,
+    );
+  });
+
+  // -- html-only reply draft (foreign-client shape) --
+
+  it('rejects editing htmlBody on an html-only reply draft without a flag', async () => {
+    mockReplyUpdate(client, HTML_ONLY_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>just my new reply</p>' }),
+      /would drop the quoted original/,
+    );
+  });
+
+  it('regenerates and keeps the quote from originalEmailId on an html-only reply draft', async () => {
+    const makeReq = mockReplyUpdate(client, HTML_ONLY_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>edited html-only</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.html.value, /edited html-only/);
+    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
+    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
+  });
+
+  it('drops the quote on noQuote:true on an html-only reply draft', async () => {
+    const makeReq = mockReplyUpdate(client, HTML_ONLY_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>bare html-only</p>', noQuote: true });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.html.value, '<p>bare html-only</p>');
+  });
+
+  // -- non-reply draft --
 
   it('does not fire the guard on a NON-reply draft (no inReplyTo)', async () => {
     const makeReq = mockUpdate(client, EXISTING_DRAFT); // no inReplyTo
     await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' });
     assert.equal(draftFromCall(makeReq).bodyValues.html.value, '<p>NEW</p>');
-  });
-
-  it('keeps the "> " text quote on clearFields:["htmlBody"] of a reply draft (regression)', async () => {
-    const makeReq = mockReplyUpdate(client);
-    await client.updateDraft('draft-1', { clearFields: ['htmlBody'] });
-    const draft = createdDraft(makeReq);
-    // Plain-text conversion: html gone, the existing "> "-prefixed text quote preserved.
-    assert.equal(draft.htmlBody, undefined);
-    assert.match(draft.bodyValues.text.value, /> quoted original/);
   });
 });
 

@@ -101,14 +101,34 @@ function readBodyList(
 
 const QUOTE_OPEN = '<blockquote type="cite" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">';
 
-// True if html carries a cited blockquote (the marker buildReplyBodies emits for a reply
-// quote). Tolerant of attribute order and quote style ("..." / '...' / bare). This is a
-// PRESENCE check, not a content check: any cited blockquote counts and an empty cite shell
-// passes — edit_draft's guard treats originalEmailId as the authoritative way to keep/
-// regenerate the quote, so a loose marker here only governs whether the guard fires.
+// True if html carries a reply-quote blockquote. Recognizes two machine-emitted shapes:
+// `type="cite"` (what buildReplyBodies emits, also Apple Mail and the Fastmail web client) and
+// Gmail's `class="gmail_quote"`. Both are tool-generated on a <blockquote>, so neither
+// false-positives on a hand-written prose blockquote — a bare <blockquote> is deliberately NOT
+// a marker. Tolerant of attribute order and quote style ("..." / '...' / bare). This is a
+// PRESENCE check, not a content check: any such blockquote counts and an empty shell passes —
+// edit_draft's guard treats originalEmailId as the authoritative way to keep/regenerate the
+// quote, so a loose marker here only governs whether the guard fires. Other clients (e.g.
+// Outlook's div-based quoting) aren't recognized; see the recognition residual in
+// docs/email-bodies.md.
 export function hasQuoteMarker(html: string | null | undefined): boolean {
   if (!html) return false;
-  return /<blockquote[^>]*\btype\s*=\s*["']?cite/i.test(html);
+  return /<blockquote[^>]*\b(?:type\s*=\s*["']?cite|class\s*=\s*["'][^"']*\bgmail_quote\b)/i.test(html);
+}
+
+// True if plain text carries our reply quote: an attribution line ("… wrote:") immediately
+// followed (allowing blank lines between) by a "> "-prefixed quote line. buildReplyBodies
+// emits exactly `${attribution}\n${quoteText(...)}`, so the runtime form is `wrote:\n> `;
+// the blank-line / CRLF tolerance is belt-and-suspenders for how a store/fetch round-trip or
+// a future format tweak might re-serialize it. Used ONLY on the OLD (stored) text, never on
+// caller input — see edit_draft's guard. Like hasQuoteMarker this is a PRESENCE check that
+// only governs whether the guard fires; originalEmailId is the authoritative keep path.
+// NOTE: each `([ \t]*\r?\n)*` iteration consumes a mandatory `\r?\n` over a class disjoint
+// from `\n` (no zero-width match), so this can't catastrophically backtrack — do NOT relax it
+// into a `\s*` / nested-quantifier form that could.
+export function hasTextQuoteMarker(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /\bwrote:[ \t]*\r?\n([ \t]*\r?\n)*[ \t]*>/.test(text);
 }
 
 export function buildReplyBodies(input: {
