@@ -270,6 +270,8 @@ describe('getEmailById', () => {
       () => client.getEmailById('missing'),
       (err: Error) => {
         assert.match(err.message, /not found/);
+        // a bad id is caller-fixable input → InvalidInputError → InvalidParams (#41)
+        assert.equal(err.name, 'InvalidInputError');
         return true;
       },
     );
@@ -286,6 +288,7 @@ describe('getEmailById', () => {
       () => client.getEmailById('gone'),
       (err: Error) => {
         assert.match(err.message, /not found/);
+        assert.equal(err.name, 'InvalidInputError');
         return true;
       },
     );
@@ -328,7 +331,8 @@ describe('moveEmail', () => {
     assert.equal(callCount, 2);
   });
 
-  it('throws when update fails', async () => {
+  // Drive a notUpdated failure with a chosen SetError, returning the get then the set.
+  function stubMoveFailure(setError: { type: string; description?: string }) {
     let callCount = 0;
     mock.method(client, 'makeRequest', async () => {
       callCount++;
@@ -341,15 +345,38 @@ describe('moveEmail', () => {
       }
       return {
         methodResponses: [
-          ['Email/set', { notUpdated: { 'e1': { type: 'notFound' } } }, 'moveEmail'],
+          ['Email/set', { notUpdated: { 'e1': setError } }, 'moveEmail'],
         ],
       };
     });
+  }
+
+  it('throws InvalidInputError with the JMAP reason when the id is notFound (#22 + #41)', async () => {
+    stubMoveFailure({ type: 'notFound' });
 
     await assert.rejects(
       () => client.moveEmail('e1', 'mb-archive'),
       (err: Error) => {
-        assert.match(err.message, /Failed to move/);
+        // #22: the server's reason is surfaced (not a bare "Failed to move email.")
+        assert.match(err.message, /Failed to move email: notFound/);
+        // type-only SetError → no dangling " - " from describeSetError
+        assert.doesNotMatch(err.message, / - /);
+        // #41: notFound is a caller-fixable bad id → InvalidInputError → InvalidParams
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+
+  it('surfaces type AND description, and stays a plain Error for an operational failure (#22 + #41)', async () => {
+    stubMoveFailure({ type: 'forbidden', description: 'mailbox is read-only' });
+
+    await assert.rejects(
+      () => client.moveEmail('e1', 'mb-archive'),
+      (err: Error) => {
+        assert.match(err.message, /Failed to move email: forbidden - mailbox is read-only/);
+        // a server refusal is not caller-fixable by re-forming args → plain Error → InternalError
+        assert.equal(err.name, 'Error');
         return true;
       },
     );
@@ -480,7 +507,7 @@ describe('bulkMarkRead', () => {
     assert.deepEqual(update['e2'], { 'keywords/$seen': null });
   });
 
-  it('throws when some emails fail to update', async () => {
+  it('throws when some emails fail to update, surfacing counts + failing ids + reason (#22)', async () => {
     stubMakeRequest(client, {
       methodResponses: [
         ['Email/set', { notUpdated: { 'e2': { type: 'notFound' } } }, 'bulkUpdate'],
@@ -490,7 +517,106 @@ describe('bulkMarkRead', () => {
     await assert.rejects(
       () => client.bulkMarkRead(['e1', 'e2']),
       (err: Error) => {
-        assert.match(err.message, /Failed to update/);
+        // counts: 1 of 2 failed, 1 succeeded; failing id grouped by its reason
+        assert.match(err.message, /Failed to mark as read 1 of 2 emails \(1 succeeded\)/);
+        assert.match(err.message, /notFound: e2/);
+        // every failure is notFound (a bad id) → caller-fixable → InvalidInputError (#41)
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+});
+
+// ---------- bulk set-error formatting (#22 + #41) ----------
+
+describe('bulk set-error formatting', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client);
+  });
+
+  // bulkMove issues an Email/get (to read mailboxIds) then the Email/set; drive the set
+  // to a notUpdated map of our choosing.
+  function stubBulkMoveFailure(notUpdated: Record<string, { type: string; description?: string }>) {
+    let callCount = 0;
+    mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return {
+          methodResponses: [
+            ['Email/get', { list: [{ id: 'e1', mailboxIds: { 'mb-inbox': true } }, { id: 'e2', mailboxIds: { 'mb-inbox': true } }] }, 'getEmails'],
+          ],
+        };
+      }
+      return { methodResponses: [['Email/set', { notUpdated }, 'bulkMove']] };
+    });
+  }
+
+  it('groups failing ids by reason, surfacing type AND description (#22)', async () => {
+    stubBulkMoveFailure({
+      e1: { type: 'invalidArguments', description: 'bad patch' },
+      e2: { type: 'invalidArguments', description: 'bad patch' },
+    });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
+      (err: Error) => {
+        assert.match(err.message, /Failed to move 2 of 2 emails \(0 succeeded\)/);
+        // both ids share one reason → grouped under it together
+        assert.match(err.message, /invalidArguments - bad patch: e1, e2/);
+        // invalidArguments is not a bad id → operational → plain Error → InternalError
+        assert.equal(err.name, 'Error');
+        return true;
+      },
+    );
+  });
+
+  it('throws InvalidInputError only when EVERY failure is notFound (#41)', async () => {
+    stubBulkMoveFailure({ e1: { type: 'notFound' }, e2: { type: 'notFound' } });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
+      (err: Error) => {
+        assert.match(err.message, /notFound: e1, e2/);
+        // type-only entries → no dangling " - "
+        assert.doesNotMatch(err.message, / - /);
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+
+  it('stays a plain Error when failures are MIXED (one operational keeps the whole batch InternalError)', async () => {
+    stubBulkMoveFailure({ e1: { type: 'notFound' }, e2: { type: 'forbidden' } });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
+      (err: Error) => {
+        assert.equal(err.name, 'Error');
+        return true;
+      },
+    );
+  });
+
+  it('marks a truncated id list as partial and idempotent-retryable (never reads as complete)', async () => {
+    // 12 ids under one reason exceeds the 10-per-reason cap.
+    const ids = Array.from({ length: 12 }, (_, i) => `id${i}`);
+    const notUpdated: Record<string, { type: string }> = {};
+    ids.forEach(id => { notUpdated[id] = { type: 'notFound' }; });
+    // bulkDelete issues only the Email/set (no pre-get), so a single stub suffices.
+    stubMakeRequest(client, { methodResponses: [['Email/set', { notUpdated }, 'bulkDelete']] });
+
+    await assert.rejects(
+      () => client.bulkDelete(ids),
+      (err: Error) => {
+        assert.match(err.message, /Failed to delete 12 of 12 emails/);
+        assert.match(err.message, /Partial list/);
+        assert.match(err.message, /idempotent/);
+        // the 11th/12th ids are NOT shown (capped at 10)
+        assert.doesNotMatch(err.message, /id11/);
         return true;
       },
     );
@@ -678,6 +804,29 @@ describe('getThread', () => {
     assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
     assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
     assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+  });
+
+  it('throws InvalidInputError when the thread is not found (a bad id is caller-fixable input, #41)', async () => {
+    let callCount = 0;
+    mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        // probe resolves the email's threadId
+        return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-gone' }] }, 'checkEmail']] };
+      }
+      // Thread/get reports the thread missing
+      return { methodResponses: [['Thread/get', { list: [], notFound: ['thread-gone'] }, 'getThread']] };
+    });
+
+    await assert.rejects(
+      () => client.getThread('e1'),
+      (err: Error) => {
+        assert.match(err.message, /Thread with ID 'thread-gone' not found/);
+        // the get_thread index local catch re-raises this BARE so the top-level maps it to InvalidParams
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
   });
 
   // A thread containing a normal email plus an in-progress draft reply.

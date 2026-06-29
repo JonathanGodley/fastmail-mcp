@@ -359,9 +359,98 @@ export class JmapClient {
     }
     const [tag, result] = entry;
     if (tag === 'error') {
+      // This is a top-level method-`error` entry (RFC 8620 §3.6.1) — a DIFFERENT
+      // shape from the per-id SetError that describeSetError() formats. Same {type,
+      // description} fields, distinct error class, so this copy is intentionally
+      // separate rather than routed through that helper.
       throw new Error(`JMAP error: ${result.type}${result.description ? ' - ' + result.description : ''}`);
     }
     return result;
+  }
+
+  /**
+   * Format a JMAP SetError (RFC 8620 §5.3) for a human-readable message. The single
+   * chokepoint every throwing notCreated/notUpdated set-error site routes through, so
+   * the "type - description" format lives in one place and can't drift.
+   *
+   * SetError.type is required by the spec (so no missing-type guard is needed — a
+   * guard there would silently reintroduce a reasonless message); description is
+   * optional. We concatenate ONLY the server-authored type/description — we never
+   * attach our own copy of the message body. (A server may put a snippet in its own
+   * description; that is the server's text, identical to what the notCreated path has
+   * always shipped — so the promise is "we add no content," not "no content can ever
+   * appear.") Caller-supplied failing ids are added by the bulk callers, not here.
+   */
+  protected describeSetError(entry: { type: string; description?: string }): string {
+    return `${entry.type}${entry.description ? ' - ' + entry.description : ''}`;
+  }
+
+  /**
+   * Throw the correctly-classified error for a single-id Email/set failure, surfacing
+   * the server's reason (#22) and discriminating the MCP code by SetError type (#41):
+   * a `notFound` is a bad id the caller can fix → InvalidInputError (InvalidParams);
+   * any other type (`forbidden`, `serverFail`, …) is an operational failure the caller
+   * can't fix by re-forming args → plain Error (InternalError). `action` is the verb
+   * phrase, e.g. "move email", yielding "Failed to move email: notFound - …".
+   */
+  protected throwSingleSetError(entry: { type: string; description?: string }, action: string): never {
+    const message = `Failed to ${action}: ${this.describeSetError(entry)}`;
+    if (entry.type === 'notFound') {
+      throw new InvalidInputError(message);
+    }
+    throw new Error(message);
+  }
+
+  /**
+   * Throw the correctly-classified error for a bulk Email/set partial failure. Reports
+   * success/fail counts plus the caller's own failing ids grouped by reason (#22), so an
+   * agent can retry exactly the failures. Iterates ONLY the caller's input ids
+   * (Object.keys(notUpdated)) — never echoes a server-originated id or message content.
+   * Caps the ids-per-reason and reason count; on truncation it says the list is PARTIAL
+   * (so a truncated list never reads as complete) and points at re-running the full input
+   * set, which is safe because these mutators are idempotent. Classified per #41: if every
+   * failure is `notFound` the whole batch is caller-fixable bad ids → InvalidInputError
+   * (InvalidParams); any other type means at least one operational failure → plain Error
+   * (InternalError).
+   */
+  protected throwBulkSetError(
+    notUpdated: Record<string, { type: string; description?: string }>,
+    total: number,
+    action: string,
+  ): never {
+    const MAX_REASONS = 5;
+    const MAX_IDS_PER_REASON = 10;
+
+    const failedIds = Object.keys(notUpdated);
+    const failCount = failedIds.length;
+    const successCount = total - failCount;
+
+    // Group failing ids by their server-stated reason.
+    const byReason = new Map<string, string[]>();
+    for (const id of failedIds) {
+      const reason = this.describeSetError(notUpdated[id]);
+      const ids = byReason.get(reason);
+      if (ids) ids.push(id);
+      else byReason.set(reason, [id]);
+    }
+
+    let truncated = false;
+    const reasonEntries = [...byReason.entries()];
+    if (reasonEntries.length > MAX_REASONS) truncated = true;
+    const groups = reasonEntries.slice(0, MAX_REASONS).map(([reason, ids]) => {
+      if (ids.length > MAX_IDS_PER_REASON) truncated = true;
+      return `${reason}: ${ids.slice(0, MAX_IDS_PER_REASON).join(', ')}`;
+    });
+
+    let message = `Failed to ${action} ${failCount} of ${total} emails (${successCount} succeeded). ${groups.join('; ')}`;
+    if (truncated) {
+      message += '. (Partial list — not every failure is shown. These operations are idempotent, so re-run with the full input set to retry every failure safely.)';
+    }
+
+    if (failedIds.every(id => notUpdated[id].type === 'notFound')) {
+      throw new InvalidInputError(message);
+    }
+    throw new Error(message);
   }
 
   /**
@@ -569,12 +658,12 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notFound && result.notFound.includes(id)) {
-      throw new Error(`Email with ID '${id}' not found`);
+      throw new InvalidInputError(`Email with ID '${id}' not found`);
     }
 
     const email = result.list?.[0];
     if (!email) {
-      throw new Error(`Email with ID '${id}' not found or not accessible`);
+      throw new InvalidInputError(`Email with ID '${id}' not found or not accessible`);
     }
 
     attachMailboxInfo([email], buildMailboxInfoMap(this.readListResultIfPresent(response, 1)));
@@ -632,7 +721,7 @@ export class JmapClient {
       // Validate that the from address matches an available identity
       selectedIdentity = identities.find(id => matchesIdentity(id.email, email.from!));
       if (!selectedIdentity) {
-        throw new Error('From address is not verified for sending. Choose one of your verified identities.');
+        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
       }
     } else {
       // Use default identity
@@ -661,7 +750,7 @@ export class JmapClient {
 
     // Ensure we have at least one body type (zero-width/whitespace-only counts as absent).
     if (isBlank(email.textBody) && isBlank(email.htmlBody)) {
-      throw new Error('Either textBody or htmlBody must be provided');
+      throw new InvalidInputError('Either textBody or htmlBody must be provided');
     }
 
     const initialMailboxIds: Record<string, boolean> = {};
@@ -724,8 +813,7 @@ export class JmapClient {
 
     const emailResult = this.getMethodResult(response, 0);
     if (emailResult.notCreated?.draft) {
-      const err = emailResult.notCreated.draft;
-      throw new Error(`Failed to create email: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      throw new Error(`Failed to create email: ${this.describeSetError(emailResult.notCreated.draft)}`);
     }
 
     const emailId = emailResult.created?.draft?.id;
@@ -735,8 +823,7 @@ export class JmapClient {
 
     const submissionResult = this.getMethodResult(response, 1);
     if (submissionResult.notCreated?.submission) {
-      const err = submissionResult.notCreated.submission;
-      throw new Error(`Failed to submit email: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      throw new Error(`Failed to submit email: ${this.describeSetError(submissionResult.notCreated.submission)}`);
     }
 
     const submissionId = submissionResult.created?.submission?.id;
@@ -768,7 +855,7 @@ export class JmapClient {
     // draft is a valid artifact (and is consistent with edit_draft, which preserves a
     // body-less draft that carries attachments).
     if (!email.to?.length && !email.subject && isBlank(email.textBody) && isBlank(email.htmlBody) && !email.attachments?.length) {
-      throw new Error('At least one of to, subject, textBody, htmlBody, or attachments must be provided');
+      throw new InvalidInputError('At least one of to, subject, textBody, htmlBody, or attachments must be provided');
     }
 
     // Get all identities to resolve from address
@@ -781,7 +868,7 @@ export class JmapClient {
     if (email.from) {
       selectedIdentity = identities.find(id => matchesIdentity(id.email, email.from!));
       if (!selectedIdentity) {
-        throw new Error('From address is not verified for sending. Choose one of your verified identities.');
+        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
       }
     } else {
       selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
@@ -842,8 +929,7 @@ export class JmapClient {
 
     // Propagate server-provided error details from notCreated
     if (result.notCreated?.draft) {
-      const err = result.notCreated.draft;
-      throw new Error(`Failed to create draft: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      throw new Error(`Failed to create draft: ${this.describeSetError(result.notCreated.draft)}`);
     }
 
     // Throw if created ID is missing instead of returning silently
@@ -885,7 +971,7 @@ export class JmapClient {
   private shapeBodies(textBody?: string, htmlBody?: string) {
     const normalized = normalizeBodies({ textBody, htmlBody });
     if (normalized.htmlOnly && !htmlHasVisibleContent(htmlBody!)) {
-      throw new Error('This message has no readable body; add text or visible content.');
+      throw new InvalidInputError('This message has no readable body; add text or visible content.');
     }
     return buildBodyParts(normalized);
   }
@@ -933,12 +1019,12 @@ export class JmapClient {
     const getResponse = await this.makeRequest(getRequest);
     const existingEmail = this.getListResult(getResponse, 0)[0];
     if (!existingEmail) {
-      throw new Error(`Email with ID '${emailId}' not found`);
+      throw new InvalidInputError(`Email with ID '${emailId}' not found`);
     }
 
     // Verify it's a draft
     if (!existingEmail.keywords?.$draft) {
-      throw new Error('Cannot edit a non-draft email');
+      throw new InvalidInputError('Cannot edit a non-draft email');
     }
 
     // Faithful-recreate guards. The recreate below rebuilds the message from flat
@@ -951,14 +1037,14 @@ export class JmapClient {
     // carried fine. Inline-image authoring/editing is tracked as fork issue #13.)
     const existingAttachments: any[] = existingEmail.attachments || [];
     if (existingAttachments.some((a: any) => a.disposition === 'inline')) {
-      throw new Error('This draft has inline images, which editing can\'t preserve yet. Recreate the draft instead (see issue #13).');
+      throw new InvalidInputError('This draft has inline images, which editing can\'t preserve yet. Recreate the draft instead (see issue #13).');
     }
     // Alias-aware: a single-format draft aliases its one part into BOTH lists with its
     // real MIME type, so a text-only draft lists text/plain twice — not a reject. Only a
     // genuinely non-text/non-html typed part trips this; a typeless part is left alone.
     const allBodyParts = [...(existingEmail.textBody || []), ...(existingEmail.htmlBody || [])];
     if (allBodyParts.some((p: any) => p.type && p.type !== 'text/plain' && p.type !== 'text/html')) {
-      throw new Error('This draft has a body part that isn\'t plain text or HTML, which editing can\'t preserve. Recreate the draft instead.');
+      throw new InvalidInputError('This draft has a body part that isn\'t plain text or HTML, which editing can\'t preserve. Recreate the draft instead.');
     }
 
     // Resolve identity
@@ -971,7 +1057,7 @@ export class JmapClient {
     if (updates.from) {
       selectedIdentity = identities.find(id => matchesIdentity(id.email, updates.from!));
       if (!selectedIdentity) {
-        throw new Error('From address is not verified for sending. Choose one of your verified identities.');
+        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
       }
     } else {
       // Use existing from, or fall back to default identity
@@ -1015,7 +1101,7 @@ export class JmapClient {
     if (updates.from     !== undefined) requireNonEmpty(updates.from, 'from'); // not clearable; no hint about clearFields
     for (const f of ['to', 'cc', 'bcc', 'replyTo'] as const) {
       if (updates[f] !== undefined && !clear.has(f) && updates[f]!.length === 0) {
-        throw new Error(`${f} cannot be empty; ${clearHint}`);
+        throw new InvalidInputError(`${f} cannot be empty; ${clearHint}`);
       }
     }
     // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
@@ -1065,7 +1151,7 @@ export class JmapClient {
 
     if (draftHasQuote && touchesBody && !quoteKeptByConstruction && !coupledTextEdit) {
       if (updates.originalEmailId && updates.noQuote === true) {
-        throw new Error('Pass either originalEmailId (keep the quote) or noQuote (discard it), not both.');
+        throw new InvalidInputError('Pass either originalEmailId (keep the quote) or noQuote (discard it), not both.');
       } else if (updates.originalEmailId) {
         // Regenerate from the caller-named original — never re-resolved from the draft's
         // In-Reply-To (which is attacker-controllable), so there's no spoof surface. The id is
@@ -1077,7 +1163,7 @@ export class JmapClient {
         try {
           original = await this.getEmailById(updates.originalEmailId);
         } catch {
-          throw new Error(`originalEmailId '${updates.originalEmailId}' could not be fetched (no such message, or not accessible). Pass the id of the message this draft replies to.`);
+          throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' could not be fetched (no such message, or not accessible). Pass the id of the message this draft replies to.`);
         }
         // Regenerate the quote into EVERY body the edit is writing — both, when the caller
         // supplies both (a new html + a custom text alternative), so neither side silently
@@ -1107,17 +1193,17 @@ export class JmapClient {
           const restored = (wroteHtml && hasQuoteMarker(updates.htmlBody))
             || (wroteText && hasTextQuoteMarker(updates.textBody));
           if (!restored) {
-            throw new Error(`originalEmailId '${updates.originalEmailId}' has no quotable content (e.g. an attachment-only or calendar-only message), so the quote can't be restored. Check the id, or use noQuote to drop the quote deliberately.`);
+            throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' has no quotable content (e.g. an attachment-only or calendar-only message), so the quote can't be restored. Check the id, or use noQuote to drop the quote deliberately.`);
           }
         } else {
-          throw new Error("originalEmailId can't regenerate a quote on a body you're not writing — edit the body (htmlBody or textBody) to keep the quote, or use noQuote to drop it.");
+          throw new InvalidInputError("originalEmailId can't regenerate a quote on a body you're not writing — edit the body (htmlBody or textBody) to keep the quote, or use noQuote to drop it.");
         }
       } else if (updates.noQuote === true) {
         // Proceed: the quote is dropped on explicit request.
       } else {
         // Error names ONLY the data-preserving keep path; noQuote is deliberately omitted so
         // the model is never nudged toward discarding the quote (it stays in the schema).
-        throw new Error("Editing this reply draft's body would drop the quoted original. Pass originalEmailId (the message it replies to) to keep the quote. If you only have the draft, resolve the original from its In-Reply-To Message-ID via search_emails first.");
+        throw new InvalidInputError("Editing this reply draft's body would drop the quoted original. Pass originalEmailId (the message it replies to) to keep the quote. If you only have the draft, resolve the original from its In-Reply-To Message-ID via search_emails first.");
       }
     }
 
@@ -1151,7 +1237,7 @@ export class JmapClient {
     // Guard: editing textBody alone while a non-empty htmlBody survives (checked against
     // the EXISTING html, since the raw merge has already dropped the unwritten partner).
     if (wroteText && !wroteHtml && !clear.has('htmlBody') && !isBlank(existingHtmlValue)) {
-      throw new Error('editing textBody alone won\'t change what most recipients see (they render htmlBody). To change the message, edit htmlBody (the text fallback regenerates automatically); to save a custom plain-text alternative, supply htmlBody alongside it; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
+      throw new InvalidInputError('editing textBody alone won\'t change what most recipients see (they render htmlBody). To change the message, edit htmlBody (the text fallback regenerates automatically); to save a custom plain-text alternative, supply htmlBody alongside it; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
     }
 
     // Guard: clearFields:['textBody'] while htmlBody survives — the text fallback is
@@ -1159,7 +1245,7 @@ export class JmapClient {
     // clearing it on its own is rejected. Evaluated against the MERGED html and BEFORE the
     // fallback step runs (else that step would silently refill it). Allowed when html is also cleared.
     if (clear.has('textBody') && !clear.has('htmlBody') && !isBlank(mergedHtmlRaw)) {
-      throw new Error('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
+      throw new InvalidInputError('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
     }
 
     // Generate the text fallback, but ONLY when a body was actually written — a
@@ -1174,7 +1260,7 @@ export class JmapClient {
       textBodyValue = normalized.textBody;
       htmlBodyValue = normalized.htmlBody;
       if (normalized.htmlOnly && !htmlHasVisibleContent(mergedHtmlRaw!)) {
-        throw new Error('This message has no readable body; add text or visible content.');
+        throw new InvalidInputError('This message has no readable body; add text or visible content.');
       }
     }
 
@@ -1189,7 +1275,7 @@ export class JmapClient {
     // present), so the two can't both match.
     const clearedAnyBody = clear.has('textBody') || clear.has('htmlBody');
     if ((wroteAnyBody || clearedAnyBody) && isBlank(textBodyValue) && isBlank(htmlBodyValue)) {
-      throw new Error('a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
+      throw new InvalidInputError('a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
     }
 
     // Carry existing (non-inline) attachments by referencing their existing blobIds.
@@ -1282,10 +1368,9 @@ export class JmapClient {
     const createResult = this.getMethodResult(createResponse, 0);
 
     if (createResult.notCreated?.draft) {
-      const err = createResult.notCreated.draft;
       // Create failed → old draft is untouched (no destroy was issued). This is the
       // data-loss-prevention path: surface the error, leave the draft as-is.
-      throw new Error(`Failed to create updated draft: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      throw new Error(`Failed to create updated draft: ${this.describeSetError(createResult.notCreated.draft)}`);
     }
 
     const newEmailId = createResult.created?.draft?.id;
@@ -1338,11 +1423,11 @@ export class JmapClient {
     const getResponse = await this.makeRequest(getRequest);
     const email = this.getListResult(getResponse, 0)[0];
     if (!email) {
-      throw new Error(`Email with ID '${emailId}' not found`);
+      throw new InvalidInputError(`Email with ID '${emailId}' not found`);
     }
 
     if (!email.keywords?.$draft) {
-      throw new Error('Cannot send a non-draft email');
+      throw new InvalidInputError('Cannot send a non-draft email');
     }
 
     // Reject an empty body part before an irreversible send. sendDraft submits the draft by
@@ -1356,10 +1441,10 @@ export class JmapClient {
     const textVal = this.bodyValueForType(email.textBody, 'text/plain', email.bodyValues || {});
     const htmlVal = this.bodyValueForType(email.htmlBody, 'text/html', email.bodyValues || {});
     if (htmlVal !== undefined && htmlVal.trim() === '') {
-      throw new Error('This draft has an empty htmlBody that would render blank to recipients. Edit the draft to supply or clear htmlBody before sending.');
+      throw new InvalidInputError('This draft has an empty htmlBody that would render blank to recipients. Edit the draft to supply or clear htmlBody before sending.');
     }
     if (textVal !== undefined && textVal.trim() === '') {
-      throw new Error('This draft has an empty textBody that would render blank for plain-text recipients. Edit the draft to supply or clear textBody before sending.');
+      throw new InvalidInputError('This draft has an empty textBody that would render blank for plain-text recipients. Edit the draft to supply or clear textBody before sending.');
     }
 
     // Collect all recipients for the envelope
@@ -1370,19 +1455,19 @@ export class JmapClient {
     ];
 
     if (allRecipients.length === 0) {
-      throw new Error('Draft has no recipients');
+      throw new InvalidInputError('Draft has no recipients. Edit the draft to add a to/cc/bcc recipient before sending.');
     }
 
     // Determine identity from the email's from field
     const fromEmail = email.from?.[0]?.email;
     if (!fromEmail) {
-      throw new Error('Draft has no from address');
+      throw new InvalidInputError('Draft has no from address. Edit the draft to set a from address before sending.');
     }
 
     const identities = await this.getIdentities();
     const selectedIdentity = identities.find(id => matchesIdentity(id.email, fromEmail));
     if (!selectedIdentity) {
-      throw new Error('From address on draft does not match any sending identity');
+      throw new InvalidInputError('From address on draft does not match any sending identity. Edit the draft to set a from address matching one of your verified identities before sending.');
     }
 
     // Find the Sent mailbox
@@ -1425,8 +1510,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const submissionResult = this.getMethodResult(response, 0);
     if (submissionResult.notCreated?.submission) {
-      const err = submissionResult.notCreated.submission;
-      throw new Error(`Failed to submit draft: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      throw new Error(`Failed to submit draft: ${this.describeSetError(submissionResult.notCreated.submission)}`);
     }
 
     const submissionId = submissionResult.created?.submission?.id;
@@ -1499,7 +1583,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
     
     if (result.notUpdated && result.notUpdated[emailId]) {
-      throw new Error(`Failed to mark email as ${read ? 'read' : 'unread'}.`);
+      this.throwSingleSetError(result.notUpdated[emailId], `mark email as ${read ? 'read' : 'unread'}`);
     }
   }
 
@@ -1525,7 +1609,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && result.notUpdated[emailId]) {
-      throw new Error(`Failed to ${pinned ? 'pin' : 'unpin'} email.`);
+      this.throwSingleSetError(result.notUpdated[emailId], `${pinned ? 'pin' : 'unpin'} email`);
     }
   }
 
@@ -1564,7 +1648,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
     
     if (result.notUpdated && result.notUpdated[emailId]) {
-      throw new Error('Failed to delete email.');
+      this.throwSingleSetError(result.notUpdated[emailId], 'delete email');
     }
   }
 
@@ -1618,7 +1702,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && result.notUpdated[emailId]) {
-      throw new Error('Failed to move email.');
+      this.throwSingleSetError(result.notUpdated[emailId], 'move email');
     }
   }
 
@@ -1665,7 +1749,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && result.notUpdated[emailId]) {
-      throw new Error('Failed to add labels to email.');
+      this.throwSingleSetError(result.notUpdated[emailId], 'add labels to email');
     }
   }
 
@@ -1695,7 +1779,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && result.notUpdated[emailId]) {
-      throw new Error('Failed to remove labels from email.');
+      this.throwSingleSetError(result.notUpdated[emailId], 'remove labels from email');
     }
   }
 
@@ -1728,7 +1812,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      throw new Error('Failed to add labels to some emails.');
+      this.throwBulkSetError(result.notUpdated, emailIds.length, 'add labels to');
     }
   }
 
@@ -1761,7 +1845,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      throw new Error('Failed to remove labels from some emails.');
+      this.throwBulkSetError(result.notUpdated, emailIds.length, 'remove labels from');
     }
   }
 
@@ -2360,7 +2444,7 @@ export class JmapClient {
 
     // Check if thread was found
     if (threadResult.notFound && threadResult.notFound.includes(actualThreadId)) {
-      throw new Error(`Thread with ID '${actualThreadId}' not found`);
+      throw new InvalidInputError(`Thread with ID '${actualThreadId}' not found`);
     }
 
     // Resolve mailbox names onto the FULL list before filtering, so the draft
@@ -2461,7 +2545,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
     
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      throw new Error('Failed to update some emails.');
+      this.throwBulkSetError(result.notUpdated, emailIds.length, `mark as ${read ? 'read' : 'unread'}`);
     }
   }
 
@@ -2489,7 +2573,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      throw new Error('Failed to pin/unpin some emails.');
+      this.throwBulkSetError(result.notUpdated, emailIds.length, `${pinned ? 'pin' : 'unpin'}`);
     }
   }
 
@@ -2542,7 +2626,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      throw new Error('Failed to move some emails.');
+      this.throwBulkSetError(result.notUpdated, emailIds.length, 'move');
     }
   }
 
@@ -2579,7 +2663,7 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      throw new Error('Failed to delete some emails.');
+      this.throwBulkSetError(result.notUpdated, emailIds.length, 'delete');
     }
   }
 }

@@ -48,6 +48,45 @@ mailbox).
 - Like coercion, this is unreachable through the normal harness (a compliant client
   cannot send an undeclared key), so verify it with the same raw-JSON-RPC harness.
 
+## Error classification: `InvalidParams` vs `InternalError`
+
+The same recover-clear-intent / refuse-to-guess principle extends to *which* MCP error
+code a failure surfaces. MCP clients read `error.code` as a distinct structured field, and
+the two codes drive different recovery: `InvalidParams` (-32602) says **"the input is
+wrong — re-form it; don't blind-retry as-is,"** while `InternalError` (-32603) says
+**"server-side; a bare retry might succeed."** So the dividing line is recoverability:
+
+- **Caller-fixable → `InvalidParams`.** A failure the caller can resolve by re-forming the
+  call's arguments OR by editing the object (e.g. the draft) the call operates on. This
+  covers bad/empty fields, a not-found id (`get_email`/`get_thread`, `originalEmailId`, a
+  draft-mutation target), the body-coupling rejects, an unverified `from`, the
+  `send_draft` draft-state guards (no recipients / no from / from not matching an
+  identity), and a server-side `notFound` SetError on a mutation. These throw the tagged
+  `InvalidInputError` (`src/coerce.ts`), which the top-level CallTool catch maps to
+  `InvalidParams` (after `redactBearerTokens`).
+- **Operational / server → `InternalError`.** A failure the caller cannot fix by changing
+  input: zero sending identities, a missing system mailbox (Drafts/Sent/Trash), a
+  transport error, a `notCreated`/non-`notFound` set-error (server refusal), or a
+  post-condition like "returned no ID." These stay a plain `Error`.
+
+This rule is **tool-family-agnostic.** Because the calendar tools share the same
+`requireNonEmpty` / `validateClearFields` helpers from `src/coerce.ts`, their input
+rejects (`create_calendar_event` / `update_calendar_event`) are `InvalidParams` too — the
+classification is a property of the shared helpers, not of email specifically.
+
+**One deliberate carve-out:** `download_attachment` returns `InternalError` for a bad
+`emailId`/`attachmentId`. Its local catch collapses non-path errors to a generic message
+on purpose, so it does not leak attachment metadata (see `docs/security-model.md`). So a
+bad id is `InvalidParams` on `get_email`/`get_thread` but `InternalError` on
+`download_attachment` — an accepted, documented asymmetry.
+
+The JMAP set-error reason itself is surfaced (not just the code): every throwing
+`Email/set` failure routes its `SetError` through `describeSetError` in
+`src/jmap-client.ts` so the server's `type`/`description` reaches the caller, and bulk
+mutators additionally report success/fail counts and the caller's failing ids grouped by
+reason. The helper concatenates only server-authored text — we add no message body of our
+own.
+
 ## Surfacing computed fields without leaking into `raw: true`
 
 When the client layer resolves derived data to attach to a raw JMAP object so a

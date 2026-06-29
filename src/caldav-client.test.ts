@@ -1411,6 +1411,21 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     }
   });
 
+  it('empty title throws InvalidInputError so the index maps calendar input to InvalidParams (#41 collateral)', async () => {
+    // The calendar tools share requireNonEmpty from coerce.ts, so the #41 reclassification
+    // reaches them for free — pin it so it can't silently regress back to InternalError.
+    const ical = makeRichIcal('evtA@fm');
+    const { client, mockDAVClient } = createMockedPatchClient([{ data: ical, url: '/cal/evtA.ics' }]);
+    await assert.rejects(
+      () => client.updateCalendarEvent('evtA@fm', { title: '' }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
   it('updating only participants preserves SUMMARY/DESCRIPTION/LOCATION', async () => {
     const ical = makeRichIcal('evtB@fm');
     const objects = [{ data: ical, url: '/cal/evtB.ics' }];

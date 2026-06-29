@@ -110,7 +110,7 @@ export function coerceBool(value: unknown): boolean | undefined {
 // a field stays distinct from explicitly blanking it. Returns the trimmed value.
 export function requireNonEmpty(value: unknown, fieldName: string, hint = 'omit the field to leave it unchanged'): string {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`${fieldName} cannot be empty; ${hint}`);
+    throw new InvalidInputError(`${fieldName} cannot be empty; ${hint}`);
   }
   return value.trim();
 }
@@ -122,10 +122,10 @@ export function validateClearFields(clearFields: string[] | undefined, allowed: 
   if (!clearFields || clearFields.length === 0) return;
   for (const field of clearFields) {
     if (!allowed.has(field)) {
-      throw new Error(`Cannot clear "${field}"; clearable fields are: ${[...allowed].join(', ')}`);
+      throw new InvalidInputError(`Cannot clear "${field}"; clearable fields are: ${[...allowed].join(', ')}`);
     }
     if (provided.has(field)) {
-      throw new Error(`cannot both set and clear ${field}; pass it as a value or in clearFields, not both`);
+      throw new InvalidInputError(`cannot both set and clear ${field}; pass it as a value or in clearFields, not both`);
     }
   }
 }

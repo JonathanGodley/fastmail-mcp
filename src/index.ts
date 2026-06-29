@@ -1907,11 +1907,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ],
           };
         } catch (error) {
-          // NOTE: this local catch maps EVERY error to InternalError, shadowing the
-          // top-level InvalidInputError->InvalidParams mapping. get_thread is NOT in
-          // the resolver sweep, so it can't throw InvalidInputError today; a future
-          // change adding `mailbox` to get_thread must revisit this so a bad-input
-          // error isn't mislabeled InternalError.
+          // Re-raise the tagged caller-input errors BARE so the top-level catch applies
+          // its InvalidParams mapping (with redaction for InvalidInputError) — otherwise
+          // this local catch would collapse them to InternalError. getThread throws
+          // InvalidInputError on a not-found threadId (a bad id is caller-fixable input);
+          // PathAccessError is re-raised too for parity with download_attachment, though
+          // get_thread has no path input today. Everything else is an operational thread
+          // failure → InternalError (redacted here, since it doesn't reach a tagged branch).
+          if (error instanceof PathAccessError || error instanceof InvalidInputError) {
+            throw error;
+          }
           throw new McpError(ErrorCode.InternalError, `Thread access failed: ${redactBearerTokens(error instanceof Error ? error.message : String(error))}`);
         }
       }
@@ -2215,7 +2220,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 ...operation,
                 status: 'FAILED',
                 executed: false,
-                error: error instanceof Error ? error.message : String(error),
+                // Folded into result JSON rather than raised, so the top-level catch's
+                // redaction never sees it — redact here for defense-in-depth parity now
+                // that richer #22 reasons flow through this path.
+                error: redactBearerTokens(error instanceof Error ? error.message : String(error)),
                 timestamp: new Date().toISOString()
               });
             }

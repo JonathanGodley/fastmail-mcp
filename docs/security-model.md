@@ -168,6 +168,16 @@ than overclaimed:
   list.** Reading stats off the shared `getMailboxes()` list (and validating label `mailboxIds`
   against it) means a hidden/role-less mailbox's id now throws `InvalidInputError` rather than
   returning data. Accepted; "valid" is defined as "matches some `mailbox.id` in the fetched list."
+- **Per-message id-existence is a distinct oracle class.** A not-found id on `get_email`,
+  `get_thread`, or `originalEmailId` now returns `InvalidParams` (a crisper signal than the prior
+  `InternalError`), so it confirms whether a given *message/thread id* exists. This is a different
+  class from the mailbox-resolver oracle above (which reflects reachable mailbox *names*) — it is
+  per-message existence, and is likewise bounded by the **token's reach**, not "the user's own
+  account." Accepted on the same footing: recoverability is the point, and it is dominated by the
+  existing `get_email` read (the same probe already exists), so it adds no capability a caller with
+  these tools lacked. The one read path that deliberately does NOT expose this is
+  `download_attachment`, whose local catch keeps a generic `InternalError` for a bad
+  `emailId`/`attachmentId` so it leaks no attachment metadata.
 - **Two-query hidden-count race.** The visible query and the count query run in the same
   `makeRequest` (one atomic snapshot — no race) where possible; the derivation tolerates a missing/
   garbled count by failing closed to the degraded note. A message moving between *any* two reads is

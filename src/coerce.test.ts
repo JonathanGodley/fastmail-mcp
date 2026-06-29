@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -199,6 +199,10 @@ describe('requireNonEmpty', () => {
       /subject cannot be empty; list it in clearFields to clear it/,
     );
   });
+
+  it('throws InvalidInputError so the index maps it to InvalidParams (#41)', () => {
+    assert.throws(() => requireNonEmpty('', 'title'), InvalidInputError);
+  });
 });
 
 describe('validateClearFields', () => {
@@ -228,6 +232,14 @@ describe('validateClearFields', () => {
     assert.throws(
       () => validateClearFields(['description'], allowed, new Set(['description'])),
       /cannot both set and clear description/
+    );
+  });
+
+  it('throws InvalidInputError so the index maps it to InvalidParams (#41)', () => {
+    assert.throws(() => validateClearFields(['title'], allowed, new Set()), InvalidInputError);
+    assert.throws(
+      () => validateClearFields(['description'], allowed, new Set(['description'])),
+      InvalidInputError,
     );
   });
 });

@@ -126,6 +126,8 @@ describe('createDraft', () => {
       (err: Error) => {
         assert.match(err.message, /invalidProperties/);
         assert.match(err.message, /subject too long/);
+        // a server-side create refusal is operational → plain Error → InternalError
+        assert.equal(err.name, 'Error');
         return true;
       },
     );
@@ -143,6 +145,9 @@ describe('createDraft', () => {
       () => client.createDraft({ subject: 'X' }),
       (err: Error) => {
         assert.match(err.message, /no email ID/);
+        // operational post-condition (not caller-fixable) stays a plain Error → InternalError;
+        // pins the #41 classification boundary against over-migration.
+        assert.equal(err.name, 'Error');
         return true;
       },
     );
@@ -484,7 +489,12 @@ describe('updateDraft', () => {
     mockUpdate(client, RICH_DRAFT);
     await assert.rejects(
       () => client.updateDraft('draft-1', { textBody: 'NEW text' }),
-      /editing textBody alone.*edit htmlBody.*clearFields:\['htmlBody'\]/s,
+      (err: Error) => {
+        assert.match(err.message, /editing textBody alone.*edit htmlBody.*clearFields:\['htmlBody'\]/s);
+        // body-coupling reject is caller-fixable input → InvalidInputError → InvalidParams (#41)
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
     );
   });
 
@@ -560,7 +570,11 @@ describe('updateDraft', () => {
     mockUpdate(client, EXISTING_DRAFT);
     await assert.rejects(
       () => client.updateDraft('draft-1', { htmlBody: '<p></p>' }),
-      /no readable body/,
+      (err: Error) => {
+        assert.match(err.message, /no readable body/);
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
     );
   });
 
@@ -1024,7 +1038,12 @@ describe('updateDraft', () => {
     mockReplyUpdate(client, DUAL_REPLY);
     await assert.rejects(
       () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-missing' }),
-      /originalEmailId 'orig-missing' could not be fetched/,
+      (err: Error) => {
+        assert.match(err.message, /originalEmailId 'orig-missing' could not be fetched/);
+        // the #37 not-found originalEmailId reject is now InvalidInputError → InvalidParams (#41)
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
     );
   });
 
@@ -2446,7 +2465,12 @@ describe('attachments on send/create', () => {
     const client = makeClient();
     await assert.rejects(
       () => client.createDraft({}),
-      /At least one of to, subject, textBody, htmlBody, or attachments/,
+      (err: Error) => {
+        assert.match(err.message, /At least one of to, subject, textBody, htmlBody, or attachments/);
+        // compose-path input reject → InvalidInputError → InvalidParams (#41)
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
     );
   });
 });
