@@ -260,7 +260,10 @@ export function attachMailboxInfo(emails: any[], map: Map<string, MailboxInfo>):
 // produce a huge message; the list_mailboxes pointer keeps a truncated list actionable.
 const MAILBOX_LIST_CAP = 30;
 
-function formatMailboxNotFound(input: string, mailboxes: any[]): string {
+// The shared "Valid: …" tail listing known mailboxes (name + role), capped so a large
+// account can't produce a huge message. Reused by both the single-input and the multi-input
+// (label array) not-found messages so they truncate identically and read consistently.
+function mailboxListHint(mailboxes: any[]): string {
   const entries = (mailboxes || [])
     .filter(mb => mb && typeof mb.name === 'string')
     .map(mb => (mb.role ? `${mb.name} (${mb.role})` : mb.name));
@@ -269,16 +272,38 @@ function formatMailboxNotFound(input: string, mailboxes: any[]): string {
   if (entries.length > shown.length) {
     list += `, …and ${entries.length - shown.length} more — call list_mailboxes for the full list`;
   }
-  return `Mailbox '${input}' not found. Use a name, or a role (inbox/archive/sent/drafts/trash/junk). Valid: ${list}`;
+  return `Use a name, or a role (inbox/archive/sent/drafts/trash/junk). Valid: ${list}`;
 }
 
-// Exact-only mailbox resolution: exact id -> role (case-insensitive) -> exact name
-// (case-insensitive); else throw InvalidInputError with a (capped) valid list. NO
-// substring matching (substring is an injection-steering primitive on write paths and
-// can mis-resolve). Edge: a custom mailbox literally named after a role (e.g. "Archive")
-// is shadowed by the role branch — acceptable, and the reason the docs use "Receipts"
-// not "Archive" as the name example. Exported pure for unit testing.
-export function resolveMailbox(mailboxes: any[], input: string): any {
+function formatMailboxNotFound(input: string, mailboxes: any[]): string {
+  return `Mailbox '${input}' not found. ${mailboxListHint(mailboxes)}`;
+}
+
+// Multi-input not-found variant for the label arrays: name EVERY unresolved value in one
+// message (so an agent fixes all typos in a single retry), then the same shared hint so it
+// reads as a natural superset of the single-input message. The reflected values are the
+// caller's own input (redacted at the top-level catch), but bound the volume anyway: cap
+// the count with a "…and N more" tail and clamp each value's length so a huge/long
+// mailboxIds array can't be reflected wholesale.
+const UNRESOLVED_VALUE_MAXLEN = 80;
+function formatMailboxesNotFound(unresolved: string[], mailboxes: any[]): string {
+  const clamp = (v: string) => (v.length > UNRESOLVED_VALUE_MAXLEN ? `${v.slice(0, UNRESOLVED_VALUE_MAXLEN)}…` : v);
+  const shown = unresolved.slice(0, MAILBOX_LIST_CAP).map(v => `'${clamp(v)}'`);
+  let listed = shown.join(', ');
+  if (unresolved.length > shown.length) {
+    listed += `, …and ${unresolved.length - shown.length} more`;
+  }
+  return `Mailbox(es) not found: ${listed}. ${mailboxListHint(mailboxes)}`;
+}
+
+// Exact-only mailbox match: exact id -> role (case-insensitive) -> exact name
+// (case-insensitive); returns undefined on a miss. NO substring matching (substring is an
+// injection-steering primitive on write paths and can mis-resolve). Edge: a custom mailbox
+// literally named after a role (e.g. "Archive") is shadowed by the role branch — acceptable,
+// and the reason the docs use "Receipts" not "Archive" as the name example. Input is
+// trimmed/stringified HERE so every caller (the single-mailbox params and the label arrays)
+// normalises identically. Exported pure for unit testing.
+export function findMailboxExact(mailboxes: any[], input: string): any {
   const list = mailboxes || [];
   const raw = String(input).trim();
   const byId = list.find(mb => mb && mb.id === raw);
@@ -288,7 +313,15 @@ export function resolveMailbox(mailboxes: any[], input: string): any {
   if (byRole) return byRole;
   const byName = list.find(mb => mb && typeof mb.name === 'string' && mb.name.toLowerCase() === lower);
   if (byName) return byName;
-  throw new InvalidInputError(formatMailboxNotFound(raw, list));
+  return undefined;
+}
+
+// Throwing wrapper over findMailboxExact for the single-mailbox callers: resolve one input
+// or throw InvalidInputError with the (capped) valid list. Exported pure for unit testing.
+export function resolveMailbox(mailboxes: any[], input: string): any {
+  const found = findMailboxExact(mailboxes, input);
+  if (found) return found;
+  throw new InvalidInputError(formatMailboxNotFound(String(input).trim(), mailboxes || []));
 }
 
 // Compute the default Trash/Spam exclusion. Resolves trash/junk by EXACT role only
@@ -1581,9 +1614,41 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
-    
+
     if (result.notUpdated && result.notUpdated[emailId]) {
       this.throwSingleSetError(result.notUpdated[emailId], `mark email as ${read ? 'read' : 'unread'}`);
+    }
+  }
+
+  // Additively set one or more keyword flags on an email (e.g. $answered, $seen) without
+  // clobbering the others: a per-keyword `keywords/${k}: true` patch. Mirrors markEmailRead
+  // (a single Email/set routing a notUpdated entry through throwSingleSetError). Used by the
+  // reply path for best-effort thread-state maintenance (#52/#54).
+  async addKeywords(emailId: string, keywords: string[]): Promise<void> {
+    const session = await this.getSession();
+
+    const patch: Record<string, any> = {};
+    keywords.forEach(k => {
+      patch[`keywords/${k}`] = true;
+    });
+
+    const request: JmapRequest = {
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/set', {
+          accountId: session.accountId,
+          update: {
+            [emailId]: patch
+          }
+        }, 'addKeywords']
+      ]
+    };
+
+    const response = await this.makeRequest(request);
+    const result = this.getMethodResult(response, 0);
+
+    if (result.notUpdated && result.notUpdated[emailId]) {
+      this.throwSingleSetError(result.notUpdated[emailId], 'add keywords to email');
     }
   }
 
@@ -1706,30 +1771,36 @@ export class JmapClient {
     }
   }
 
-  // The label tools take mailbox IDs only (no name/role resolution — full name
-  // resolution there is tracked as fork #50). Reject any element that isn't a real
-  // mailbox id BEFORE the Email/set, so a caller who learned `mailbox:"Archive"` works
-  // elsewhere gets a guided error here instead of a silent no-op or a cryptic JMAP
-  // failure. "Valid" = matches some mailbox.id in the fetched list (a real id absent
-  // from the list is rejected too — accepted residual, see docs/security-model.md).
-  private async assertValidMailboxIds(mailboxIds: string[]): Promise<void> {
+  // Resolve each label mailbox input to a real mailbox id by id/role/name (exact —
+  // findMailboxExact, no substring), so the label arrays accept the same id/role/name a
+  // caller learned works on every other mailbox-taking tool (fork #50). Collects EVERY
+  // unresolved input so the caller fixes all typos in one retry. All-or-nothing: if any
+  // input can't be resolved, throw InvalidInputError and apply no labels (avoids a
+  // half-applied mutation the caller must reconcile). Duplicate inputs (an id and its own
+  // name) collapse downstream since the Email/set patch keys by id. A real id absent from
+  // the live list is still rejected — accepted residual, see docs/security-model.md.
+  private async resolveLabelMailboxIds(inputs: string[]): Promise<string[]> {
     const mailboxes = await this.getMailboxes();
-    const validIds = new Set((mailboxes || []).map((mb: any) => mb.id));
-    const invalid = mailboxIds.filter(id => !validIds.has(id));
-    if (invalid.length > 0) {
-      throw new InvalidInputError(
-        `Not valid mailbox id(s): ${invalid.join(', ')}. The label tools accept mailbox IDs only (not names or roles) — use list_mailboxes to resolve a name to its id.`,
-      );
+    const resolved: string[] = [];
+    const unresolved: string[] = [];
+    for (const input of inputs) {
+      const mb = findMailboxExact(mailboxes, input);
+      if (mb) resolved.push(mb.id);
+      else unresolved.push(String(input).trim());
     }
+    if (unresolved.length > 0) {
+      throw new InvalidInputError(formatMailboxesNotFound(unresolved, mailboxes || []));
+    }
+    return resolved;
   }
 
   async addLabels(emailId: string, mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    await this.assertValidMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};
-    mailboxIds.forEach(mailboxId => {
+    resolvedIds.forEach(mailboxId => {
       patch[`mailboxIds/${mailboxId}`] = true;
     });
 
@@ -1755,11 +1826,11 @@ export class JmapClient {
 
   async removeLabels(emailId: string, mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    await this.assertValidMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
 
     // Build patch object to remove specific mailboxIds
     const patch: Record<string, any> = {};
-    mailboxIds.forEach(mailboxId => {
+    resolvedIds.forEach(mailboxId => {
       patch[`mailboxIds/${mailboxId}`] = null;
     });
 
@@ -1785,11 +1856,11 @@ export class JmapClient {
 
   async bulkAddLabels(emailIds: string[], mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    await this.assertValidMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};
-    mailboxIds.forEach(mailboxId => {
+    resolvedIds.forEach(mailboxId => {
       patch[`mailboxIds/${mailboxId}`] = true;
     });
 
@@ -1818,11 +1889,11 @@ export class JmapClient {
 
   async bulkRemoveLabels(emailIds: string[], mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    await this.assertValidMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
 
     // Build patch object to remove specific mailboxIds
     const patch: Record<string, any> = {};
-    mailboxIds.forEach(mailboxId => {
+    resolvedIds.forEach(mailboxId => {
       patch[`mailboxIds/${mailboxId}`] = null;
     });
 

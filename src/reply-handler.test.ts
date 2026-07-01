@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildReplyParams, composeReply } from './reply-handler.js';
 import type { ReplyClient } from './reply-handler.js';
+import { InvalidInputError } from './coerce.js';
 
 // A raw-JMAP-shaped original (as getEmailById returns it).
 function makeOriginal(over: any = {}) {
@@ -120,6 +121,7 @@ describe('composeReply — attachment threading into both branches', () => {
       uploadAttachments: async (specs, dir) => { calls.upload = { specs, dir }; return UPLOADED; },
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
       sendEmail: async (p) => { calls.send = p; return 'sub-9'; },
+      addKeywords: async (id, kw) => { calls.keywords = { id, kw }; },
       ...over,
     };
     return { client, calls };
@@ -136,6 +138,40 @@ describe('composeReply — attachment threading into both branches', () => {
     assert.deepEqual(calls.upload, { specs: [{ path: 'a.pdf' }], dir: '/attach/root' });
     assert.deepEqual(calls.send.attachments, UPLOADED); // threaded into sendEmail
     assert.equal(calls.draft, undefined);               // draft branch not taken
+    // #52/#54: the send branch marks the original answered + read and reports it.
+    assert.deepEqual(calls.keywords, { id: 'o1', kw: ['$answered', '$seen'] });
+    assert.equal(r.markedAnswered, true);
+  });
+
+  it('marks the original answered+read on a bare send (no attachments)', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, client, undefined);
+    assert.equal(r.sent, true);
+    assert.deepEqual(calls.keywords, { id: 'o1', kw: ['$answered', '$seen'] });
+    assert.equal(r.markedAnswered, true);
+  });
+
+  it('does NOT mark keywords on the DRAFT branch (a draft answered nothing)', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeReply({ originalEmailId: 'o1', send: false, textBody: 'hi' }, client, undefined);
+    assert.equal(r.sent, false);
+    assert.equal(calls.keywords, undefined);
+    assert.equal(r.markedAnswered, undefined);
+  });
+
+  it('swallows a keyword-set failure best-effort (reply already sent) — notFound class', async () => {
+    const { client } = spyClient({ addKeywords: async () => { throw new InvalidInputError('nope'); } });
+    const r = await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, client, undefined);
+    assert.equal(r.sent, true);          // send success is NOT masked by the keyword failure
+    assert.equal(r.submissionId, 'sub-9');
+    assert.equal(r.markedAnswered, false);
+  });
+
+  it('swallows a keyword-set failure best-effort — plain Error class', async () => {
+    const { client } = spyClient({ addKeywords: async () => { throw new Error('boom'); } });
+    const r = await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, client, undefined);
+    assert.equal(r.sent, true);
+    assert.equal(r.markedAnswered, false);
   });
 
   it('threads parts into the DRAFT branch (send=false)', async () => {

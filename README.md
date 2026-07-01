@@ -261,7 +261,7 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
   - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `raw` (optional, return original JMAP response)
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailbox` (optional — id/role/name to save into, defaults to Drafts), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
-- **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Saves a draft by default; set `send=true` to transmit immediately. The original is **quoted by default** (attributed, top-posted, matching the web client with a portable quote-bar style); set `quoteOriginal=false` to omit it. Quoted HTML is reproduced **sanitised** (script/style/event handlers stripped; formatting and real `http(s)` images kept; inline `cid:` images omitted — see [#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)) and is re-sent under your From address. (This tool returns a status string, not email data, so `raw`/simplification do not apply.)
+- **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Saves a draft by default; set `send=true` to transmit immediately. The original is **quoted by default** (attributed, top-posted, matching the web client with a portable quote-bar style); set `quoteOriginal=false` to omit it. Quoted HTML is reproduced **sanitised** (script/style/event handlers stripped; formatting and real `http(s)` images kept; inline `cid:` images omitted — see [#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)) and is re-sent under your From address. On `send=true` the original message is marked answered and read (best-effort; the success message reports it when the mark succeeds). (This tool returns a status string, not email data, so `raw`/simplification do not apply.)
   - Parameters: `originalEmailId` (required), `to` (optional array, defaults to the original sender — preserving their display name as `Name <email>`), `cc` (optional array), `bcc` (optional array), `from` (optional), `textBody` (optional), `htmlBody` (optional), `send` (optional boolean, default: false — saves a draft; set true to transmit), `quoteOriginal` (optional boolean, default: true), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **create_draft**: Create an email draft without sending. Supports threading headers for replies. Each call creates a new draft.
   - Parameters: `to` (optional array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailbox` (optional — id/role/name to save into, defaults to Drafts), `subject` (optional), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
@@ -289,9 +289,9 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 - **move_email**: Move an email to a different mailbox (replaces all mailboxes)
   - Parameters: `emailId` (required), `targetMailbox` (required — id, role, or name)
 - **add_labels**: Add labels (mailboxes) to an email without removing existing ones
-  - Parameters: `emailId` (required), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
+  - Parameters: `emailId` (required), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
 - **remove_labels**: Remove specific labels (mailboxes) from an email
-  - Parameters: `emailId` (required), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
+  - Parameters: `emailId` (required), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
 
 ### Advanced Email Features
 
@@ -337,9 +337,9 @@ On `edit_draft`, `attachments` **appends** (existing attachments are kept). Use 
 - **bulk_delete**: Delete multiple emails (move to trash)
   - Parameters: `emailIds` (required array)
 - **bulk_add_labels**: Add labels to multiple emails simultaneously
-  - Parameters: `emailIds` (required array), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
+  - Parameters: `emailIds` (required array), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
 - **bulk_remove_labels**: Remove labels from multiple emails simultaneously
-  - Parameters: `emailIds` (required array), `mailboxIds` (required array — **mailbox IDs only**, not names/roles; use `list_mailboxes` to resolve)
+  - Parameters: `emailIds` (required array), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
 
 ### Contact Tools
 

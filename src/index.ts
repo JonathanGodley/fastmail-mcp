@@ -367,7 +367,7 @@ const TOOLS = [
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address.',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address. On send=true the original is marked answered and read (best-effort; reported in the success message when it succeeds).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -995,7 +995,7 @@ const TOOLS = [
       },
       {
         name: 'add_labels',
-        description: 'Add labels (mailboxes) to an email without removing existing ones. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
+        description: 'Add labels (mailboxes) to an email without removing existing ones. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1006,7 +1006,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs (NOT names or roles) to add as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
+              description: 'Array of mailboxes to add as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
             },
           },
           required: ['emailId', 'mailboxIds'],
@@ -1014,7 +1014,7 @@ const TOOLS = [
       },
       {
         name: 'remove_labels',
-        description: 'Remove specific labels (mailboxes) from an email. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
+        description: 'Remove specific labels (mailboxes) from an email. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1025,7 +1025,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs (NOT names or roles) to remove as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
+              description: 'Array of mailboxes to remove as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
             },
           },
           required: ['emailId', 'mailboxIds'],
@@ -1186,7 +1186,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_add_labels',
-        description: 'Add labels to multiple emails simultaneously. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
+        description: 'Add labels to multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1198,7 +1198,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs (NOT names or roles) to add as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
+              description: 'Array of mailboxes to add as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
             },
           },
           required: ['emailIds', 'mailboxIds'],
@@ -1206,7 +1206,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_remove_labels',
-        description: 'Remove labels from multiple emails simultaneously. Accepts mailbox IDs only (use list_mailboxes to resolve names to ids).',
+        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1218,7 +1218,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailbox IDs (NOT names or roles) to remove as labels. Use list_mailboxes to resolve a name to its id; a value that isn\'t a valid mailbox id is rejected.',
+              description: 'Array of mailboxes to remove as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
             },
           },
           required: ['emailIds', 'mailboxIds'],
@@ -1385,7 +1385,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // with a mock client; this handler just maps the result to the response text.
         const result = await composeReply(args, client, getAttachDir());
         const text = result.sent
-          ? `Reply sent successfully. Submission ID: ${result.submissionId}`
+          ? `Reply sent successfully. Submission ID: ${result.submissionId}${result.markedAnswered ? ' Original marked answered and read.' : ''}`
           : `Reply draft saved successfully (Email ID: ${result.emailId}). Subject: ${result.subject}`;
         return { content: [{ type: 'text', text }] };
       }

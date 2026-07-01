@@ -469,6 +469,46 @@ describe('markEmailRead', () => {
   });
 });
 
+// ---------- addKeywords ----------
+
+describe('addKeywords', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it('emits an additive keywords/<k>:true patch for each keyword', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/set', { updated: { 'e1': null } }, 'addKeywords'],
+      ],
+    }));
+
+    await client.addKeywords('e1', ['$answered', '$seen']);
+
+    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    assert.deepEqual(update['e1'], { 'keywords/$answered': true, 'keywords/$seen': true });
+  });
+
+  it('routes a notUpdated entry through throwSingleSetError', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { notUpdated: { 'e1': { type: 'notFound' } } }, 'addKeywords'],
+      ],
+    });
+
+    await assert.rejects(
+      () => client.addKeywords('e1', ['$answered']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Failed to add keywords to email/);
+        return true;
+      },
+    );
+  });
+});
+
 // ---------- bulkMarkRead ----------
 
 describe('bulkMarkRead', () => {
@@ -1552,32 +1592,145 @@ describe('bulkMove resolution', () => {
   });
 });
 
-// ---------- label tools reject non-id mailbox values ----------
+// ---------- label tools resolve mailbox inputs by id/role/name (#50) ----------
 
-describe('label mailboxId validation', () => {
+// A name-only mailbox (no role) so name resolution is provably distinct from the role
+// branch — "Archive" resolves via role, so it does NOT exercise name matching.
+const RECEIPTS_MAILBOX = { id: 'mb-receipts', name: 'Receipts' };
+const LABEL_MAILBOXES = [...DEFAULT_MAILBOXES, RECEIPTS_MAILBOX];
+
+describe('label mailboxId resolution (#50)', () => {
   let client: JmapClient;
 
   beforeEach(() => {
     client = makeClient();
-    stubMailboxes(client);
+    stubMailboxes(client, LABEL_MAILBOXES);
   });
 
-  it('addLabels rejects a value that is not a real mailbox id', async () => {
+  function stubSet(c: JmapClient, callId: string) {
+    return mock.method(c, 'makeRequest', async () =>
+      ({ methodResponses: [['Email/set', { updated: { e1: null } }, callId]] }));
+  }
+
+  it('resolves a ROLE to its id and emits the mailboxIds/<id> patch', async () => {
+    const makeReq = stubSet(client, 'addLabels');
+    await client.addLabels('e1', ['archive']); // role
+    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+  });
+
+  it('resolves a NAME (name-only mailbox, no role) to its id', async () => {
+    const makeReq = stubSet(client, 'addLabels');
+    await client.addLabels('e1', ['Receipts']); // name, resolves via the name branch only
+    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    assert.equal(update.e1['mailboxIds/mb-receipts'], true);
+  });
+
+  it('accepts a raw id (resolves to itself)', async () => {
+    const makeReq = stubSet(client, 'addLabels');
+    await client.addLabels('e1', ['mb-archive']);
+    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+  });
+
+  it('collapses a duplicate id + its own name into one patch key', async () => {
+    const makeReq = stubSet(client, 'addLabels');
+    // Receipts is name-only, so this exercises id + NAME collapse (not id + role): both
+    // 'mb-receipts' and 'Receipts' resolve to the same id and dedupe to one patch key.
+    await client.addLabels('e1', ['mb-receipts', 'Receipts']);
+    const patch = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update.e1;
+    const labelKeys = Object.keys(patch).filter(k => k.startsWith('mailboxIds/'));
+    assert.deepEqual(labelKeys, ['mailboxIds/mb-receipts']);
+  });
+
+  it('names ALL unresolved values and applies nothing (all-or-nothing)', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => { throw new Error('should not be called'); });
     await assert.rejects(
-      () => client.addLabels('e1', ['Archive']), // a name, not an id
+      () => client.addLabels('e1', ['nope', 'alsobad']),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
-        assert.match(err.message, /mailbox IDs only/);
+        assert.match(err.message, /'nope'/);
+        assert.match(err.message, /'alsobad'/);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 0); // rejected before any Email/set
+  });
+
+  it('rejects the whole call when one value of a mix is unresolved', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => { throw new Error('should not be called'); });
+    await assert.rejects(
+      () => client.addLabels('e1', ['archive', 'nope']),
+      (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
+    );
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('rejects a SUBSTRING input (exact-only, no injection-steering)', async () => {
+    await assert.rejects(
+      () => client.addLabels('e1', ['Arch']), // substring of Archive
+      (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
+    );
+  });
+
+  it('caps the reflected unresolved list with a "…and N more" tail', async () => {
+    const many = Array.from({ length: 32 }, (_, i) => `bad${i}`);
+    await assert.rejects(
+      () => client.addLabels('e1', many),
+      (err: Error) => { assert.match(err.message, /…and 2 more/); return true; },
+    );
+  });
+
+  it('clamps an over-long unresolved value in the error message', async () => {
+    const long = 'x'.repeat(200);
+    await assert.rejects(
+      () => client.addLabels('e1', [long]),
+      (err: Error) => {
+        assert.ok(!err.message.includes(long)); // full value not reflected wholesale
+        assert.match(err.message, /xxx…/);       // clamped with an ellipsis
         return true;
       },
     );
   });
 
-  it('bulkAddLabels accepts real ids and proceeds', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
-      ({ methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkAddLabels']] }));
-    await client.bulkAddLabels(['e1'], ['mb-archive']);
-    assert.equal(makeReq.mock.calls.length, 1);
+  it('removeLabels resolves a role and emits the null patch', async () => {
+    const makeReq = stubSet(client, 'removeLabels');
+    await client.removeLabels('e1', ['archive']);
+    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    assert.equal(update.e1['mailboxIds/mb-archive'], null);
+  });
+
+  it('bulkAddLabels resolves a name/role across the array', async () => {
+    const makeReq = stubSet(client, 'bulkAddLabels');
+    await client.bulkAddLabels(['e1'], ['Receipts', 'archive']);
+    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    assert.equal(update.e1['mailboxIds/mb-receipts'], true);
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+  });
+
+  it('bulkAddLabels still rejects a genuinely-unresolvable value', async () => {
+    await assert.rejects(
+      () => client.bulkAddLabels(['e1'], ['nope']),
+      (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
+    );
+  });
+});
+
+// The single-input not-found message must stay byte-identical after factoring the shared
+// mailboxListHint out of formatMailboxNotFound (the label array message is a superset of it).
+describe('resolveMailbox not-found message (byte-stable after hint refactor)', () => {
+  it('produces the exact single-input message', () => {
+    assert.throws(
+      () => resolveMailbox(DEFAULT_MAILBOXES, 'nope'),
+      (err: Error) => {
+        assert.equal(
+          err.message,
+          "Mailbox 'nope' not found. Use a name, or a role (inbox/archive/sent/drafts/trash/junk). " +
+          'Valid: Inbox (inbox), Drafts (drafts), Trash (trash), Sent (sent), Archive (archive), Spam (junk)',
+        );
+        return true;
+      },
+    );
   });
 });
 

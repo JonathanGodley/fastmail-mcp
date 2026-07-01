@@ -97,13 +97,15 @@ export interface ReplyClient {
   uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
   createDraft(params: ReplyParams): Promise<string>;
   sendEmail(params: ReplyParams): Promise<string>;
+  addKeywords(emailId: string, keywords: string[]): Promise<void>;
 }
 
 export interface ComposeReplyResult {
   sent: boolean;
   subject: string;
-  emailId?: string;      // set on the draft (send=false) branch
-  submissionId?: string; // set on the send branch
+  emailId?: string;        // set on the draft (send=false) branch
+  submissionId?: string;   // set on the send branch
+  markedAnswered?: boolean; // true when the original was marked answered+read after a send
 }
 
 // Orchestrate a reply end to end: fetch the original, assemble the (pure) reply params,
@@ -139,5 +141,16 @@ export async function composeReply(
     return { sent: false, subject: replyParams.subject, emailId };
   }
   const submissionId = await client.sendEmail(replyParams);
-  return { sent: true, subject: replyParams.subject, submissionId };
+  // Best-effort thread-state maintenance (#52/#54): mark the original answered + read.
+  // The reply already sent; a keyword-set FAILURE must NOT mask that success, so swallow it.
+  // ($seen here clears the original's unread state — benign: it only happens as a side effect
+  //  of actually sending a reply, and mark_email_read already grants standalone $seen writes.)
+  let markedAnswered = false;
+  try {
+    await client.addKeywords(originalEmailId, ['$answered', '$seen']);
+    markedAnswered = true;
+  } catch {
+    /* best-effort: reply already sent */
+  }
+  return { sent: true, subject: replyParams.subject, submissionId, markedAnswered };
 }

@@ -48,6 +48,18 @@ mailbox).
 - Like coercion, this is unreachable through the normal harness (a compliant client
   cannot send an undeclared key), so verify it with the same raw-JSON-RPC harness.
 
+## Mailbox resolution is uniform (id / role / name, exact)
+
+Every mailbox-taking parameter resolves through one exact matcher (`findMailboxExact` in
+`src/jmap-client.ts`: exact id, then role, then name, case-insensitive, no substring). This
+now spans the label tools' `mailboxIds` arrays too (`add_labels` / `remove_labels` /
+`bulk_add_labels` / `bulk_remove_labels`), closing the last asymmetry from the #12
+single-mailbox consolidation (#50): a caller can label by the same id/role/name that works on
+`move_email`, not opaque ids only. The array resolver is **all-or-nothing** — if any entry
+can't be resolved it names every unresolved value in one error (so all typos are fixable in a
+single retry) and applies no labels, rather than half-applying a mutation the caller must
+reconcile. `resolveMailbox` is the throwing single-input wrapper over the same core.
+
 ## Error classification: `InvalidParams` vs `InternalError`
 
 The same recover-clear-intent / refuse-to-guess principle extends to *which* MCP error

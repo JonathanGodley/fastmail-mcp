@@ -122,6 +122,14 @@ privacy control. Documented here as an accepted residual: the mitigation for mis
 same opt-in/authorization posture that governs sending mail at all, not a restriction on which
 in-account message may be quoted.
 
+The reply path also **writes two keyword flags** (`$answered`, `$seen`) to that same unscoped
+`originalEmailId` after a send succeeds (#52/#54). This rides the identical unscoped-id posture
+above (it may name any in-account message, not necessarily the one the user was viewing), but
+adds no capability class: two boolean keyword sets, no move/delete/body write, scoped to
+`session.accountId`, and dominated by `mark_email_read`, which already grants a standalone
+`$seen` write to any id. The write is best-effort (a failure is swallowed so it can't mask the
+already-sent reply). Accepted on the same footing as the read-and-embed primitive.
+
 ## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
 
 The read surface gained one `mailbox` param (id/role/name) resolved **exactly** across the
@@ -152,6 +160,10 @@ than overclaimed:
   name. Move-to-any stays open **by design** (a move-target restriction is tracked as fork #43).
   Name/role resolution also **lowers the steering bar** from "must know a valid opaque id (needs a
   prior `list_mailboxes`)" to "blind one-shot by literal name" — a real, if modest, escalation.
+  **The label tools join this class (#50):** `add_labels`/`remove_labels`/`bulk_add_labels`/
+  `bulk_remove_labels` now resolve their `mailboxIds` arrays by exact id/role/name too, so an
+  injected agent can label a message into e.g. `"trash"` blind-one-shot-by-name, the same modest
+  escalation as move. Accepted on the same footing; not a new capability class.
 - **The hidden-count note covers ONLY Trash/Spam.** It does **not** disclose a `move_email` to
   `Archive` or a custom folder — that conceals mail with **zero disclosure**. So move concealment
   is not "mitigated by the note" for non-Trash/Spam destinations; this is stated plainly rather
@@ -165,9 +177,10 @@ than overclaimed:
   **not** what makes the oracle acceptable — recoverability (naming valid mailboxes so a caller
   can retry) is, and it's the caller's own reachable names. Accepted, capped, framed honestly.
 - **`get_mailbox_stats` and the label tools reject a real id that is absent from the fetched
-  list.** Reading stats off the shared `getMailboxes()` list (and validating label `mailboxIds`
+  list.** Reading stats off the shared `getMailboxes()` list (and resolving label `mailboxIds`
   against it) means a hidden/role-less mailbox's id now throws `InvalidInputError` rather than
-  returning data. Accepted; "valid" is defined as "matches some `mailbox.id` in the fetched list."
+  returning data. Accepted; "resolvable" is defined as "matches some `mailbox.id`/role/name in
+  the fetched list."
 - **Per-message id-existence is a distinct oracle class.** A not-found id on `get_email`,
   `get_thread`, or `originalEmailId` now returns `InvalidParams` (a crisper signal than the prior
   `InternalError`), so it confirms whether a given *message/thread id* exists. This is a different
