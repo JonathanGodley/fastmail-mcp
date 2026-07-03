@@ -178,7 +178,7 @@ All data-returning tools simplify responses by default to reduce token usage. Tw
 | `list_identities` | ✅ | ✅ |
 | `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ |
 
-Email list/search tools don't support `verbose` — they always return metadata and preview. Use `get_email` for full email content.
+Email list/search tools don't support `verbose` — they always return metadata and preview. Use `get_email` for full email content. `preview` is a truncated snippet (~256 chars max), not the full body; these tools also return `bodyTextSize` (the full text-body size in bytes) so you can tell a short snippet apart from a long message — when `bodyTextSize` is much larger than the preview, fetch `get_email` before concluding content is absent. `size` is the whole-message size (including attachments and inline images), so it is not a body-length proxy.
 
 ### Parameter validation
 
@@ -189,6 +189,8 @@ Error codes follow the same recoverability logic: a failure you can fix by chang
 ### Email fields
 
 **Default fields** (all email tools): `id`, `subject`, `from`, `date`, `threadId`, `messageId`, `references`, `to`, `cc`, `bcc`, `replyTo`, `inReplyTo`, `isRead`, `isReply`, `isFlagged`, `isDraft`, `isAnswered`, `isForwarded`, `mailboxes`, `roles`, `keywords`, `preview`, `hasAttachment`, `attachments`, `listUnsubscribe`, `blobId`, `size`
+
+**List/search tools also include**: `bodyTextSize` (byte-size hint for the text body, so a truncated `preview` isn't mistaken for the whole message; an upper bound — includes quoted history, excludes inline images)
 
 **`get_email` also includes**: `bodyText`, `bodyHtmlSize` (character count hint — HTML omitted by default)
 

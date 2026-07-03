@@ -26,6 +26,7 @@ export interface SimplifiedEmail {
   bodyText?: string;
   bodyHtml?: string;
   bodyHtmlSize?: number;
+  bodyTextSize?: number;
   blobId?: string;
   size?: number;
   keywords?: Record<string, boolean>;
@@ -280,6 +281,25 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   } else if (bodyHtml) {
     // Include size so agent knows HTML exists and can request it
     addIf(result, 'bodyHtmlSize', bodyHtml.length);
+  }
+
+  // bodyTextSize: in compact (list/search) mode we fetch the textBody part *structure*
+  // (sizes) but no bodyValues, so no body is extracted above. Surface the total text-body
+  // size in bytes so an agent can tell a ~256-char `preview` snippet apart from a large
+  // message and knows to fetch get_email before concluding content is absent (#59). It is
+  // an UPPER BOUND: quoted history is included (inside the text part) but inline image
+  // parts are excluded — only text/* parts are summed. Mirrors the bodyHtmlSize idiom:
+  // emitted only when no body content is present (redundant once verbose/get_email returns
+  // the body), and omitted when there's no text part or it's empty.
+  if (!bodyText && !bodyHtml && Array.isArray(raw.textBody)) {
+    const textBytes = raw.textBody.reduce(
+      (sum: number, p: any) =>
+        typeof p?.type === 'string' && p.type.startsWith('text/') && typeof p.size === 'number'
+          ? sum + p.size
+          : sum,
+      0
+    );
+    if (textBytes > 0) addIf(result, 'bodyTextSize', textBytes);
   }
 
   const attachments = (raw.attachments ?? []).map((a: any) => {

@@ -124,6 +124,43 @@ leading-underscore name, and read it in the simplifier via `addIf` (so it is omi
 absent). Do not thread it through function signatures, and do not make it enumerable — it
 would leak into raw output.
 
+## `hasAttachment` is a server heuristic — passed through by design
+
+`hasAttachment` in simplified output is the server's value, untouched. This is a
+deliberate decision (researched for #59, 2026-07-03), not an oversight; do not "fix" it
+by deriving our own boolean from the `attachments` list.
+
+**What the server actually does.** RFC 8621 leaves `hasAttachment` to server discretion
+(the SHOULD is disposition-based; a MAY allows arbitrary heuristics). Fastmail's
+implementation — upstream Cyrus, which Fastmail maintains and runs in production with
+only a handful of site patches — ignores the disposition rule and answers the semantic
+question "is this part content or decoration?" (`jmap_email_hasattachment` in Cyrus
+`imap/jmap_mail_query.c`):
+
+- image parts: `Content-Disposition: attachment` → true; otherwise **true iff both pixel
+  dimensions ≥ 256** (signature logos excluded by size, pasted screenshots included);
+  **unknown dimensions → true** (falls back to the false positive, the safe direction);
+- any part with a filename → true; PDFs, `message/*`, `text/rfc822`, `text/calendar` → true;
+- PGP/S-MIME signature parts and unnamed `application/octet-stream` → false.
+
+**Why passthrough beats a deterministic derivation.** A spec-anchored derivation
+(`attachments.length > 0`, which deterministically includes every cid inline image) was
+considered and declined: it would flag every corporate reply carrying an `image001.png`
+signature logo as `hasAttachment: true` — amplifying exactly the decoration noise the
+Cyrus heuristic is built to filter, and burying the signal (the #59 incident was an agent
+wasting attention on two signature logos). No vendor does better: MS Graph excludes
+inline-only by design (a documented complaint generator), Gmail and Thunderbird have
+their own long-standing inline-image gray zones. There is no industry-standard answer;
+Fastmail's dimension heuristic is the most thoughtful of the lot, and passthrough also
+keeps the field consistent with the server-side `hasAttachment` **search filter** (RFC
+8621 §4.4.1 defines the filter as a direct comparison against this property) and with
+what Fastmail's own UI shows.
+
+**The residual accepted:** the value can change if Fastmail evolves the heuristic, and a
+sub-256px image that IS content (a small but meaningful figure) reads as false. Both are
+inherent to any heuristic; the mitigations are `bodyTextSize` (an agent can see there is
+body to read regardless) and `get_email`/`get_email_attachments` for ground truth.
+
 ## Local-time formatting and the U+202F trap
 
 Date rendering for humans (`toLocalIso` and `formatReplyDate` in

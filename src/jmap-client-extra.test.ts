@@ -810,8 +810,10 @@ describe('getThread', () => {
     const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
     assert.ok(emailGetArgs.properties.includes('preview'), 'should request preview');
     assert.ok(emailGetArgs.properties.includes('inReplyTo'), 'should request inReplyTo');
+    // textBody *structure* is requested for the bodyTextSize hint (#59), but no body
+    // *content*: bodyValues / fetchTextBodyValues are absent, so this stays "no bodies".
+    assert.ok(emailGetArgs.properties.includes('textBody'), 'should request textBody structure');
     assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
-    assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
     assert.ok(!emailGetArgs.properties.includes('htmlBody'), 'should NOT request htmlBody');
     assert.ok(!emailGetArgs.properties.includes('attachments'), 'should NOT request attachments');
     assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
@@ -841,8 +843,9 @@ describe('getThread', () => {
     await client.getThread('e1');
 
     const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
+    // No body *content* in compact mode: bodyValues / fetchTextBodyValues stay absent.
+    // (textBody structure is requested for the bodyTextSize hint — asserted above.)
     assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
-    assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
     assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
   });
 
@@ -957,8 +960,9 @@ describe('list method property checks', () => {
     const { makeReq, result } = mockAndCall('getEmails', () => client.getEmails());
     await result;
     const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    // textBody structure requested (bodyTextSize hint, #59); body content still not.
+    assert.ok(emailGetArgs.properties.includes('textBody'), 'should request textBody structure');
     assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
-    assert.ok(!emailGetArgs.properties.includes('textBody'), 'should NOT request textBody');
     assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
   });
 
@@ -1000,15 +1004,21 @@ describe('JMAP property consistency', () => {
     }
   });
 
-  it('verbose includes body-specific properties that compact does not', () => {
-    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('textBody'));
+  it('verbose includes body-content properties that compact does not', () => {
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('htmlBody'));
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('bodyValues'));
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('attachments'));
-    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('textBody'));
+    // Body *content* stays verbose-only; compact must never fetch it.
     assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('htmlBody'));
     assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('bodyValues'));
     assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('attachments'));
+  });
+
+  it('compact includes textBody structure (part sizes) for the bodyTextSize hint (#59)', () => {
+    // textBody is a compact property: it fetches the part *structure* (partId/type/size),
+    // not content, so the response stays "no bodies" while exposing the text part size.
+    assert.ok(EMAIL_PROPERTIES_COMPACT.includes('textBody'));
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('textBody'));
   });
 
   it('body properties include required fields', () => {

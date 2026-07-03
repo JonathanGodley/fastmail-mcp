@@ -155,19 +155,24 @@ export interface ExclusionResult {
 }
 
 // Shared Email/get property lists — keep in sync per CLAUDE.md rules.
-// COMPACT: used by the list/search tools and getThread (metadata + preview, no bodies)
+// COMPACT: used by the list/search tools and getThread (metadata + preview, no bodies).
+// `textBody` here fetches only the body-part *structure* (partId/type/size), NOT the
+// body content — no `bodyValues`/fetchTextBodyValues — so the response stays "no bodies"
+// while giving the formatter the text part size for the `bodyTextSize` hint (#59).
 export const EMAIL_PROPERTIES_COMPACT = [
   'id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt',
   'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo',
   'hasAttachment', 'header:List-Unsubscribe:asURLs', 'blobId', 'size', 'mailboxIds',
+  'textBody',
 ] as const;
 
-// VERBOSE: superset with body properties — used by verbose mode and getEmailById
-// `sentAt` is here (a get-path superset addition, allowed by the property-consistency rule)
-// for the reply-quote attribution (when the original was actually written), not in COMPACT.
+// VERBOSE: superset with body properties — used by verbose mode and getEmailById.
+// `textBody` is already in COMPACT (structure); VERBOSE adds the content (`bodyValues`)
+// and the html/attachment parts. `sentAt` is a get-path superset addition (allowed by the
+// property-consistency rule) for reply-quote attribution (when the original was written).
 export const EMAIL_PROPERTIES_VERBOSE = [
   ...EMAIL_PROPERTIES_COMPACT,
-  'textBody', 'htmlBody', 'attachments', 'bodyValues', 'sentAt',
+  'htmlBody', 'attachments', 'bodyValues', 'sentAt',
 ] as const;
 
 export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name'] as const;

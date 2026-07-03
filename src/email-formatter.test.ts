@@ -431,6 +431,76 @@ describe('simplifyEmail', () => {
     assert.equal(result.bodyHtmlSize, undefined);
   });
 
+  // --- bodyTextSize (compact list/search hint, #59) ---
+
+  it('emits bodyTextSize from textBody part sizes in compact mode (no bodyValues)', () => {
+    // Compact shape: textBody structure with sizes but no bodyValues, so no body is
+    // extracted — the hint tells an agent how much text exists behind the preview.
+    const raw = {
+      id: 'e40',
+      preview: 'Hi, see the table below...',
+      textBody: [{ partId: '1', type: 'text/plain', size: 48213 }],
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.bodyText, undefined);
+    assert.equal(result.bodyTextSize, 48213);
+  });
+
+  it('sums multiple text parts for bodyTextSize', () => {
+    const raw = {
+      id: 'e41',
+      textBody: [
+        { partId: '1', type: 'text/plain', size: 100 },
+        { partId: '2', type: 'text/plain', size: 250 },
+      ],
+    };
+    assert.equal(simplifyEmail(raw).bodyTextSize, 350);
+  });
+
+  it('excludes inline image parts from bodyTextSize (upper bound is text only)', () => {
+    // textBody can interleave image/* parts (inline images shown in the body flow);
+    // counting them would re-introduce the size-is-inflated trap, so only text/* counts.
+    const raw = {
+      id: 'e42',
+      textBody: [
+        { partId: '1', type: 'text/plain', size: 500 },
+        { partId: '2', type: 'image/png', size: 900000 },
+      ],
+    };
+    assert.equal(simplifyEmail(raw).bodyTextSize, 500);
+  });
+
+  it('emits bodyTextSize for an HTML-only message in compact mode (textBody -> html part)', () => {
+    const raw = {
+      id: 'e43',
+      textBody: [{ partId: '1', type: 'text/html', size: 12000 }],
+    };
+    assert.equal(simplifyEmail(raw).bodyTextSize, 12000);
+  });
+
+  it('omits bodyTextSize once a body is present (verbose/get_email mode)', () => {
+    const raw = {
+      id: 'e44',
+      textBody: [{ partId: '1', type: 'text/plain', size: 11 }],
+      bodyValues: { '1': { value: 'Plain text' } },
+    };
+    const result = simplifyEmail(raw);
+    assert.equal(result.bodyText, 'Plain text');
+    assert.equal(result.bodyTextSize, undefined);
+  });
+
+  it('omits bodyTextSize when there is no text part or its size is zero', () => {
+    assert.equal(simplifyEmail({ id: 'e45' }).bodyTextSize, undefined);
+    assert.equal(
+      simplifyEmail({ id: 'e46', textBody: [{ partId: '1', type: 'text/plain', size: 0 }] }).bodyTextSize,
+      undefined
+    );
+    assert.equal(
+      simplifyEmail({ id: 'e47', textBody: [{ partId: '1', type: 'image/png', size: 5000 }] }).bodyTextSize,
+      undefined
+    );
+  });
+
   it('parts with no type field pass through (defensive)', () => {
     const raw = {
       id: 'e34',
