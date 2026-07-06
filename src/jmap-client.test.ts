@@ -2582,3 +2582,324 @@ describe('updateDraft attachments', () => {
     );
   });
 });
+
+describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  const FWD_HEADER_PROP = 'header:X-Forwarded-Message-Id:asMessageIds';
+  // Body shapes as buildForwardBodies emits them (the live store/fetch round-trip is
+  // pinned separately by the release verification's marker round-trip check).
+  const FWD_HTML = '<p>note</p><div><br>----- Original message -----<br>From: Ada Lovelace &lt;ada@example.com&gt;<br>Subject: Hello<br></div><div type="cite"><p>orig body</p></div>';
+  const FWD_TEXT = 'note\n\n\n----- Original message -----\nFrom: Ada Lovelace <ada@example.com>\nSubject: Hello\n\norig text';
+  const PLAIN_FWD_TEXT = 'no marker here at all';
+  const PLAIN_FWD_HTML = '<p>no marker here at all</p>';
+
+  const FORWARD_BASE = {
+    id: 'fdraft-1', subject: 'Fwd: Hello',
+    from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }],
+    cc: [], bcc: [],
+    mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
+    // No inReplyTo/references — a forward starts a new conversation.
+    [FWD_HEADER_PROP]: ['fwd-orig-msg@example.com'],
+  };
+  // dual: both bodies carry the forwarded block (what forward_email stores).
+  const DUAL_FORWARD = { ...FORWARD_BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: FWD_TEXT }, h: { value: FWD_HTML } } };
+  // text-only forward (of a text-only original): one aliased text part.
+  const TEXT_ONLY_FORWARD = { ...FORWARD_BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
+    bodyValues: { t: { value: FWD_TEXT } } };
+  // Q2 cell: marker-bearing bodies but NO header (Message-ID-less original, or pasted content).
+  const { [FWD_HEADER_PROP]: _drop, ...HEADERLESS_BASE } = FORWARD_BASE as any;
+  const HEADERLESS_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: FWD_TEXT }, h: { value: FWD_HTML } } };
+  // Q6 floor cell: header present, bodies in NO recognizable shape (foreign client).
+  const HEADER_ONLY_FORWARD = { ...FORWARD_BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: PLAIN_FWD_TEXT }, h: { value: PLAIN_FWD_HTML } } };
+  // Pathological both-marker draft: inReplyTo + reply markers AND forward header + markers.
+  const BOTH_MARKER_DRAFT = { ...FORWARD_BASE,
+    inReplyTo: ['some-reply-target@example.com'], references: ['some-reply-target@example.com'],
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: {
+      t: { value: 'top\n\nOn Sun, Jun 28, 2026, at 12:46 AM, X wrote:\n> quoted\n\n' + FWD_TEXT },
+      h: { value: '<p>top</p><blockquote type="cite">quoted</blockquote>' + FWD_HTML },
+    } };
+  // asAttachment-style forward draft: NO header, non-marker filler body, .eml attachment.
+  const ASATTACH_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
+    bodyValues: { t: { value: 'Forwarded message attached.' } },
+    attachments: [{ partId: '2', blobId: 'blob-eml', type: 'message/rfc822', size: 999, name: 'Hello.eml', disposition: 'attachment', cid: null }] };
+  // A REPLY draft whose quoted content contains a forwarded-message line ("> "-prefixed):
+  // must dispatch to the REPLY variant (the quote-prefix anchor rejects the forward marker).
+  const REPLY_QUOTING_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
+    inReplyTo: ['r@example.com'], references: ['r@example.com'],
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
+    bodyValues: { t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 1:00 AM, Y wrote:\n> ----- Original message -----\n> From: someone\n> forwarded stuff' } } };
+
+  // The message the forward draft forwards (id 'orig-1', quotable) and a non-quotable one.
+  const ORIGINAL_FOR_FORWARD = {
+    id: 'orig-1',
+    messageId: ['fwd-orig-msg@example.com'],
+    from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
+    sentAt: '2026-06-15T03:29:02Z',
+    subject: 'Hello',
+    textBody: [{ partId: 'ot', type: 'text/plain' }],
+    htmlBody: [{ partId: 'oh', type: 'text/html' }],
+    bodyValues: { ot: { value: 'ORIGINAL TEXT BODY' }, oh: { value: '<p>ORIGINAL HTML BODY</p>' } },
+  };
+  const NONQUOTABLE_FOR_FORWARD = {
+    id: 'orig-empty',
+    messageId: ['fwd-orig-msg@example.com'],
+    from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
+    subject: 'Hello',
+    textBody: [], htmlBody: [], bodyValues: {},
+  };
+
+  function mockForwardUpdate(c: JmapClient, draft: any = DUAL_FORWARD) {
+    return mock.method(c, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        const id = params.ids?.[0];
+        if (id === 'orig-1') return { methodResponses: [['Email/get', { list: [ORIGINAL_FOR_FORWARD] }, 'email']] };
+        if (id === 'orig-empty') return { methodResponses: [['Email/get', { list: [NONQUOTABLE_FOR_FORWARD] }, 'email']] };
+        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
+      }
+      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'fdraft-2' } } }, 'createDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
+    });
+  }
+
+  function createdDraftObj(makeReq: any) {
+    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
+    return call!.arguments[0].methodCalls[0][1].create.draft;
+  }
+
+  it('fetches the forward-marking header with the draft (the guard reads it)', async () => {
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    await client.updateDraft('fdraft-1', { subject: 'X' });
+    const getProps = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].properties;
+    assert.ok(getProps.includes(FWD_HEADER_PROP));
+  });
+
+  it('rejects a body edit on a forward draft without a flag (normal case: runnable recovery recipe)', async () => {
+    mockForwardUpdate(client, DUAL_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>' }),
+      /would drop the forwarded-message block.*forwardedMessageId via get_email.*bare id/s,
+    );
+  });
+
+  it('originalEmailId keep: regenerates the block into the written body and carries the header', async () => {
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraftObj(makeReq);
+    const html = draft.bodyValues[draft.htmlBody[0].partId].value;
+    assert.match(html, /^<p>new note<\/p><div><br>----- Original message -----/);
+    assert.match(html, /ORIGINAL HTML BODY/);
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
+  });
+
+  it('originalEmailId keep regenerates BOTH bodies when both are written (custom text side kept)', async () => {
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>h</p>', textBody: 'my custom t', originalEmailId: 'orig-1' });
+    const draft = createdDraftObj(makeReq);
+    const text = draft.bodyValues[draft.textBody[0].partId].value;
+    assert.match(text, /^my custom t\n\n\n----- Original message -----/);
+    assert.match(text, /ORIGINAL TEXT BODY/);
+  });
+
+  it('forward keep with a body-less original still succeeds (block always regenerates; wrong-id asymmetry is intentional)', async () => {
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-empty' });
+    const draft = createdDraftObj(makeReq);
+    const html = draft.bodyValues[draft.htmlBody[0].partId].value;
+    assert.match(html, /----- Original message -----/);
+  });
+
+  it('noQuote drops the block AND clears the forward-marking header on the recreate', async () => {
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>bare note</p>', noQuote: true });
+    const draft = createdDraftObj(makeReq);
+    const html = draft.bodyValues[draft.htmlBody[0].partId].value;
+    assert.equal(html, '<p>bare note</p>');
+    assert.equal(draft[FWD_HEADER_PROP], undefined);
+  });
+
+  it('rejects originalEmailId + noQuote together (forward wording)', async () => {
+    mockForwardUpdate(client, DUAL_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1', noQuote: true }),
+      /either originalEmailId \(keep the forwarded block\) or noQuote/,
+    );
+  });
+
+  it('metadata-only edit is untouched by the guard and CARRIES the header', async () => {
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    const r = await client.updateDraft('fdraft-1', { subject: 'Fwd: renamed' });
+    assert.equal(r.id, 'fdraft-2');
+    const draft = createdDraftObj(makeReq);
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
+  });
+
+  it("plain-text conversion (clearFields:['htmlBody']) keeps the text-side block by construction — no challenge (recompute seam)", async () => {
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    const r = await client.updateDraft('fdraft-1', { clearFields: ['htmlBody'] });
+    assert.equal(r.id, 'fdraft-2');
+    const draft = createdDraftObj(makeReq);
+    const text = draft.bodyValues[draft.textBody[0].partId].value;
+    assert.match(text, /----- Original message -----/);
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
+  });
+
+  it('text-only forward draft: editing textBody challenges; originalEmailId keeps text-only', async () => {
+    mockForwardUpdate(client, TEXT_ONLY_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { textBody: 'new note' }),
+      /would drop the forwarded-message block/,
+    );
+    const makeReq = mockForwardUpdate(client, TEXT_ONLY_FORWARD);
+    await client.updateDraft('fdraft-1', { textBody: 'new note', originalEmailId: 'orig-1' });
+    const draft = createdDraftObj(makeReq);
+    const text = draft.bodyValues[draft.textBody[0].partId].value;
+    assert.match(text, /^new note\n\n\n----- Original message -----/);
+    assert.equal(draft.htmlBody, undefined);
+  });
+
+  it('Q2 cell — marker body, NO header: challenge leads with what happened and offers noQuote first', async () => {
+    mockForwardUpdate(client, HEADERLESS_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
+      (err: any) => {
+        assert.match(err.message, /body matches a forwarded-message marker/);
+        assert.match(err.message, /noQuote:true to drop that block/);
+        // The un-runnable get_email step must NOT appear (there is no recorded source).
+        assert.doesNotMatch(err.message, /forwardedMessageId via get_email/);
+        return true;
+      },
+    );
+  });
+
+  it('Q6 floor — header present, unrecognizable body: challenged with the recorded-source wording', async () => {
+    mockForwardUpdate(client, HEADER_ONLY_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
+      (err: any) => {
+        assert.match(err.message, /marked as a forward/);
+        assert.match(err.message, /isn't in a shape this server can regenerate in place/);
+        assert.match(err.message, /forwardedMessageId via get_email/);
+        return true;
+      },
+    );
+  });
+
+  it('Q6 floor — a noQuote resolution clears the header, so the NEXT edit is unchallenged', async () => {
+    const makeReq = mockForwardUpdate(client, HEADER_ONLY_FORWARD);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>rewritten</p>', noQuote: true });
+    const draft = createdDraftObj(makeReq);
+    assert.equal(draft[FWD_HEADER_PROP], undefined);
+    // Simulate the next edit on the recreated (header-less, marker-less) draft: no challenge.
+    const NEXT = { ...HEADER_ONLY_FORWARD, [FWD_HEADER_PROP]: undefined };
+    mockForwardUpdate(client, NEXT);
+    const r = await client.updateDraft('fdraft-1', { htmlBody: '<p>again</p>' });
+    assert.equal(r.id, 'fdraft-2');
+  });
+
+  it('both-marker draft: REPLY variant wins the dispatch (reply challenge wording)', async () => {
+    mockForwardUpdate(client, BOTH_MARKER_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
+      /would drop the quoted original/,
+    );
+  });
+
+  it('both-marker draft: a reply-variant noQuote ALSO clears the forward header in the same step', async () => {
+    const makeReq = mockForwardUpdate(client, BOTH_MARKER_DRAFT);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>bare</p>', noQuote: true });
+    const draft = createdDraftObj(makeReq);
+    assert.equal(draft[FWD_HEADER_PROP], undefined);
+  });
+
+  it('asAttachment-style draft (no header, filler body): note edits pass with NO challenge', async () => {
+    const makeReq = mockForwardUpdate(client, ASATTACH_FORWARD);
+    const r = await client.updateDraft('fdraft-1', { textBody: 'updated note about the attached message' });
+    assert.equal(r.id, 'fdraft-2');
+    // The .eml is an ordinary carried attachment on the recreate.
+    const draft = createdDraftObj(makeReq);
+    assert.equal(draft.attachments[0].type, 'message/rfc822');
+    assert.equal(draft.attachments[0].blobId, 'blob-eml');
+  });
+
+  it('a reply draft QUOTING a forward dispatches to the REPLY variant (quote-prefixed dashed line is not a forward marker)', async () => {
+    mockForwardUpdate(client, REPLY_QUOTING_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { textBody: 'new text' }),
+      /would drop the quoted original/,
+    );
+  });
+
+  it('keep with a DIFFERENT original re-points the recorded source to that original (no stale recovery pointer)', async () => {
+    // The draft records fwd-orig-msg@…; the caller corrects the source to orig-2. The
+    // recreate must carry orig-2's Message-ID — a stale carry would make the guard's
+    // advertised recovery rebuild the block for the wrong message on a later edit.
+    const ORIG2 = { ...ORIGINAL_FOR_FORWARD, id: 'orig-2', messageId: ['corrected-mid@example.com'] };
+    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        const id = params.ids?.[0];
+        if (id === 'orig-2') return { methodResponses: [['Email/get', { list: [ORIG2] }, 'email']] };
+        return { methodResponses: [['Email/get', { list: [DUAL_FORWARD] }, 'getEmail']] };
+      }
+      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'fdraft-2' } } }, 'createDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
+    });
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-2' });
+    const draft = createdDraftObj(makeReq);
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['corrected-mid@example.com']);
+  });
+
+  it('keep on a header-less (Q2) draft RECORDS the source, upgrading later challenges to the standard recipe', async () => {
+    const makeReq = mockForwardUpdate(client, HEADERLESS_FORWARD);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraftObj(makeReq);
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
+  });
+
+  it('keep naming an original with NO settable Message-ID keeps the existing carry (stale beats stripped)', async () => {
+    const ORIG_NOMID = { ...ORIGINAL_FOR_FORWARD, id: 'orig-nomid', messageId: undefined };
+    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        const id = params.ids?.[0];
+        if (id === 'orig-nomid') return { methodResponses: [['Email/get', { list: [ORIG_NOMID] }, 'email']] };
+        return { methodResponses: [['Email/get', { list: [DUAL_FORWARD] }, 'getEmail']] };
+      }
+      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'fdraft-2' } } }, 'createDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
+    });
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-nomid' });
+    const draft = createdDraftObj(makeReq);
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
+  });
+
+  it('inReplyTo + forward markers but NO reply markers → FORWARD variant engages (no first-match crack on isReply alone)', async () => {
+    // A draft with an In-Reply-To header whose body carries only the forward shape:
+    // replyGuardArmed requires reply MARKERS too, so dispatch must land on the forward
+    // variant — a regression that gated on isReply alone would emit the reply wording.
+    const INREPLYTO_FORWARD_BODY = { ...FORWARD_BASE,
+      inReplyTo: ['some-reply-target@example.com'], references: ['some-reply-target@example.com'],
+      textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { t: { value: FWD_TEXT }, h: { value: FWD_HTML } } };
+    mockForwardUpdate(client, INREPLYTO_FORWARD_BODY);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
+      /would drop the forwarded-message block/,
+    );
+  });
+});

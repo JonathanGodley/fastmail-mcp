@@ -782,3 +782,15 @@ describe('simplifyEmail roles + unresolvedMailboxIds (#49, #53)', () => {
     assert.ok(json.includes('$answered'), 'natural JMAP keyword stays in raw');
   });
 });
+
+describe('simplifyEmail — forwardedMessageId (#30)', () => {
+  it('surfaces the X-Forwarded-Message-Id header as forwardedMessageId', () => {
+    const raw = { id: 'e1', subject: 'Fwd: x', from: [{ email: 'a@b.com' }], 'header:X-Forwarded-Message-Id:asMessageIds': ['orig@example.com'] };
+    const result = simplifyEmail(raw);
+    assert.deepEqual(result.forwardedMessageId, ['orig@example.com']);
+  });
+  it('omits it when the header is absent or null (never an empty field)', () => {
+    assert.equal(simplifyEmail({ id: 'e1', subject: 's', from: [] }).forwardedMessageId, undefined);
+    assert.equal(simplifyEmail({ id: 'e1', subject: 's', from: [], 'header:X-Forwarded-Message-Id:asMessageIds': null }).forwardedMessageId, undefined);
+  });
+});

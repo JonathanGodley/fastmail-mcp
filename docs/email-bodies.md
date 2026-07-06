@@ -169,6 +169,112 @@ feature — wider than the non-quotable-original corner above, which needs a wro
 reach, whereas this needs only an unrecognized draft from another client. Documented and
 accepted; surfaced to users in the README's `edit_draft` notes.
 
+## Forwarding: the forwarded-message block + guard extension (#30)
+
+`buildForwardBodies` (`src/reply-quote.ts`) reproduces the original *verbatim* below a
+header block — no `> ` prefixing (that is reply quoting). The block matches the canonical
+Fastmail shape, probed live 2026-07-05 by generating a native forward through Fastmail's
+own official client and reading the draft back raw:
+
+```
+----- Original message -----
+From: Ada Lovelace <ada@example.com>
+To: Bob <bob@example.com>
+Cc: Carol <carol@example.com>        (only when present)
+Subject: Original subject
+Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
+```
+
+- **HTML form:** the same lines, each field escaped, in a plain `<div>` with `<br>`
+  separators, followed by the original wrapped in `<div type="cite">…</div>` — the
+  platform's own forward wrapper. Deliberately NOT a `<blockquote>`: reply markers are
+  blockquote-anchored, so the two marker families are disjoint by tag name (Fastmail's
+  official client confirms the split — replies get `<blockquote type="cite">`, forwards
+  `<div type="cite">`).
+- **Date line:** the `sentAt`/`receivedAt` string verbatim (ISO 8601 with offset), matching
+  the platform block — deliberately not the humanized `formatReplyDate` shape replies use.
+  Line-omission rule: a field with no usable value drops its whole line (no bare `Date:` /
+  `To:` / `Subject:`).
+- **Every interpolated field is attacker-controlled** (the original's From/To/Cc
+  names+addresses, Subject) and re-sent under the user's From: the HTML form escapes each
+  field; the text form whitespace-collapses each composed address/subject via
+  `normalizeName`, whose class is `\s` **plus an explicit U+0085** — NEL is a mandatory
+  line break per UAX #14 but is NOT in ECMAScript `\s` (verified empirically 2026-07-05).
+- **Emission rules:** the caller's note (optional) goes above the block in each format the
+  caller supplied; both supplied → both emitted with the caller's own text (a custom
+  text alternative is never replaced by a derived fallback). Caller supplied neither →
+  html only when the original has quotable html; a text-only original yields a TEXT
+  forward — the "never fabricate HTML from plain text" rule above holds for the tool's
+  own default choice. An attachment-only original gets the header block alone. The
+  reproduced html runs through the same `sanitizeForQuote` floor as reply quotes
+  (script/style/handlers stripped, real http(s) images kept, `cid:` images dropped).
+- **Threading:** no In-Reply-To/References — a forward starts a new conversation
+  (mainstream-client convention, confirmed by the official client). Instead the original's
+  Message-ID is recorded as `X-Forwarded-Message-Id` (Thunderbird prior art; **Fastmail's
+  official client sets the same header**, probed 2026-07-05).
+
+**The edit_draft guard extends to forward drafts** (see the reply-quote section above for
+the shared machinery; `guardVariant` dispatches mutually exclusively, reply-wins on a
+pathological both-marker draft). Forward gating differs from reply gating in one deliberate
+way: the variant engages when the header is present **OR** the body markers match
+(`hasForwardMarker` = `<div type="cite">`; `hasTextForwardMarker` = the Fastmail or Gmail
+dashed line, anchored so a `> `-quoted line never matches). Two postures produce that rule:
+
+- **Marker-alone gating** protects forwards of a Message-ID-less original (no header could
+  be set — and a malformed/hostile Message-ID is deliberately treated as absent, since
+  Fastmail rejects CRLF/non-ASCII header values and mangles embedded angle brackets,
+  probed 2026-07-05). Accepted false-positive cost, chosen data-loss-first: a draft whose
+  body merely *carries* the conventional dashed shape (e.g. pasted forwarded content) gets
+  challenged on a body edit — resolved in one step by `noQuote` (or `originalEmailId`),
+  never lossy. Side benefit: header-less drafts in the conventional shape gain protection.
+- **The header floor** challenges a forward draft whose block shape isn't recognizable
+  (foreign header-setting clients — including Fastmail's own — or our marker lost to
+  re-serialization). The challenge wording names the runnable recovery: `forwardedMessageId`
+  via `get_email`, then `search_emails` on the **bare** id (the full-text lookup matches
+  the bracket-less form; both probed working 2026-07-05, as is the RFC 8621 §4.4.1 `header`
+  filter, unused). `noQuote` on a forward draft **also clears the header** — from either
+  guard variant — so one step fully de-arms; otherwise the floor would re-challenge every
+  later edit.
+- The forward keep path has **no restored-marker check** (the block always regenerates, so
+  it would be tautological). Flip side, intentional: a WRONG `originalEmailId` produces a
+  valid-looking block for the wrong message with no loud fail — inherent to forwarding
+  (any original yields a block); no caller data is lost.
+- `asAttachment` forwards set no header and a deliberately non-marker filler body, so the
+  guard is genuinely inert on them; the `.eml` is an ordinary carried attachment.
+
+**Recognition residual (forward form, accepted).** Narrower than the reply residual: any
+client that sets `X-Forwarded-Message-Id` is challenged via the header floor regardless of
+its block shape. The remaining gap is a foreign forward draft with **neither** the header
+nor a recognized dashed/div-cite shape — the guard is inert there, same accepted posture
+(and same README surfacing) as the reply guard's foreign-quote residual. One structural
+sub-case: Gmail's forward *html* cannot be marker-recognized at all — its wrapper is
+class+text-keyed, and `hasForwardMarker` must key only on markup `sanitizeForQuote` strips
+from embedded content (attribute-based), or pasted/quoted forwards would false-trip it.
+Gmail's *text* dashed line IS recognized.
+
+**Remote-image tracker note (accepted, inherited).** Forwarded HTML keeps real http(s)
+images, same as reply quoting (the sanitizer is a safety floor, not a tracker filter) —
+matching mainstream clients. Forwarding *broadens* the reply-quote posture's blast radius:
+the new recipient's client loads the images, so the original sender learns the message was
+forwarded (and roughly when/where). Accepted to match client convention; `asAttachment`
+carries the original unrendered.
+
+**Live-probed forward facts (2026-07-05, recorded here so they aren't re-derived):**
+
+- `header:X-Forwarded-Message-Id:asMessageIds` is settable on `Email/set` create and
+  round-trips store/fetch AND destroy+recreate exactly. Fastmail validates the value:
+  embedded CRLF → rejected (`invalidProperties`); non-ASCII → rejected; embedded `<`/`>` →
+  accepted but split into two mangled ids; a 1500-char id → accepted and folded. Hence the
+  pre-vet in `forward-handler.ts` (printable ASCII, no whitespace/angles, ≤998 chars;
+  malformed → treated as absent).
+- Full-text `Email/query` finds a message by its **bare** Message-ID; the `<bracketed>`
+  form finds nothing. The spec `header` FilterCondition also works on Fastmail.
+- Attaching an existing Email's own `blobId` as a `message/rfc822` part stores a
+  **byte-identical** `.eml` (the server dedupes to the same blobId).
+- The official client's forward carries NO attachments (regular or inline) and dumps raw
+  HTML into the text part of an html-only original — this server's attachment carry and
+  `htmlToText` conversion are deliberate improvements, not parity.
+
 ## Why destroy + recreate is mandatory
 
 JMAP email body properties are immutable and server-set (RFC 8621 §4.1.4); only

@@ -248,3 +248,210 @@ describe('buildReplyBodies — sanitizeForQuote (via html quote output)', () => 
     assert.match(out, /<p>hi<\/p>/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Forward support (#30)
+// ---------------------------------------------------------------------------
+
+// Late imports for the forward suites (kept beside them rather than merged into the
+// header so the reply suites above stay byte-stable).
+import { buildForwardBodies, hasForwardMarker, hasTextForwardMarker } from './reply-quote.js';
+import { htmlToText } from './body-format.js';
+
+// A raw-JMAP-shaped original with both bodies, Cc, and a sent date.
+function fwdOriginal(over: any = {}) {
+  return {
+    from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
+    to: [{ name: 'Bob', email: 'bob@example.com' }],
+    cc: [{ email: 'carol@example.com' }],
+    subject: 'Original subject',
+    sentAt: '2026-07-01T09:14:00-04:00',
+    textBody: [{ partId: 't', type: 'text/plain' }],
+    htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: 'original text' }, h: { value: '<p>original html</p>' } },
+    ...over,
+  };
+}
+const textOnlyOriginal = () => fwdOriginal({ htmlBody: undefined, bodyValues: { t: { value: 'plain original' } } });
+const htmlOnlyOriginal = () => fwdOriginal({ textBody: undefined, bodyValues: { h: { value: '<p>rich original</p>' } } });
+const attachmentOnlyOriginal = () => fwdOriginal({ textBody: undefined, htmlBody: undefined, bodyValues: {} });
+
+describe('buildForwardBodies — header block (canonical Fastmail shape)', () => {
+  it('emits the dashed marker + From/To/Cc/Subject/Date lines with a verbatim ISO date', () => {
+    const { textBody } = buildForwardBodies({ original: fwdOriginal(), textBody: 'note' });
+    assert.match(textBody!, /note\n\n\n----- Original message -----\nFrom: Ada Lovelace <ada@example\.com>\nTo: Bob <bob@example\.com>\nCc: carol@example\.com\nSubject: Original subject\nDate: 2026-07-01T09:14:00-04:00\n\noriginal text/);
+  });
+  it('omits the Cc line when the original has no Cc', () => {
+    const { textBody } = buildForwardBodies({ original: fwdOriginal({ cc: [] }), textBody: 'n' });
+    assert.doesNotMatch(textBody!, /\nCc:/);
+  });
+  it('omits the whole Date line when sentAt and receivedAt are both absent (line-omission rule)', () => {
+    const { textBody } = buildForwardBodies({ original: fwdOriginal({ sentAt: undefined }), textBody: 'n' });
+    assert.doesNotMatch(textBody!, /\nDate:/);
+  });
+  it('falls back to receivedAt for the Date line', () => {
+    const { textBody } = buildForwardBodies({ original: fwdOriginal({ sentAt: undefined, receivedAt: '2026-07-02T00:00:00Z' }), textBody: 'n' });
+    assert.match(textBody!, /\nDate: 2026-07-02T00:00:00Z/);
+  });
+  it('omits the To line for a Bcc-only-received original, and the Subject line when empty', () => {
+    const { textBody } = buildForwardBodies({ original: fwdOriginal({ to: [], cc: [], subject: '' }), textBody: 'n' });
+    assert.doesNotMatch(textBody!, /\nTo:/);
+    assert.doesNotMatch(textBody!, /\nSubject:/);
+  });
+});
+
+describe('buildForwardBodies — format emission matrix', () => {
+  it('caller-neither with an html original emits an HTML forward only', () => {
+    const out = buildForwardBodies({ original: htmlOnlyOriginal() });
+    assert.equal(out.textBody, undefined);
+    assert.match(out.htmlBody!, /<div type="cite"><p>rich original<\/p><\/div>/);
+  });
+  it('caller-neither with a text-only original emits a TEXT forward only (never fabricates html)', () => {
+    const out = buildForwardBodies({ original: textOnlyOriginal() });
+    assert.equal(out.htmlBody, undefined);
+    assert.match(out.textBody!, /----- Original message -----[\s\S]*plain original/);
+  });
+  it('caller html only: html = note + block + sanitized original; text side left to the downstream fallback', () => {
+    const out = buildForwardBodies({ original: fwdOriginal(), htmlBody: '<p>see below</p>' });
+    assert.equal(out.textBody, undefined);
+    assert.match(out.htmlBody!, /^<p>see below<\/p><div><br>----- Original message -----/);
+  });
+  it('caller html only over a text-only original: original text escaped into the html (caller chose html)', () => {
+    const out = buildForwardBodies({ original: textOnlyOriginal(), htmlBody: '<p>note</p>' });
+    assert.match(out.htmlBody!, /<div type="cite">plain original<\/div>/);
+  });
+  it('caller text only over an html original: text = note + block + htmlToText(original html)', () => {
+    const out = buildForwardBodies({ original: htmlOnlyOriginal(), textBody: 'note' });
+    assert.equal(out.htmlBody, undefined);
+    assert.match(out.textBody!, /----- Original message -----[\s\S]*rich original/);
+  });
+  it('caller BOTH: both emitted, each with its own note; the custom text alternative is never replaced', () => {
+    const out = buildForwardBodies({ original: fwdOriginal(), textBody: 'my custom text', htmlBody: '<p>my html</p>' });
+    assert.match(out.textBody!, /^my custom text\n\n\n----- Original message -----/);
+    assert.match(out.textBody!, /original text/);
+    assert.match(out.htmlBody!, /^<p>my html<\/p><div><br>----- Original message -----/);
+  });
+  it('attachment-only original: the header block stands alone (no empty cite shell)', () => {
+    const out = buildForwardBodies({ original: attachmentOnlyOriginal() });
+    assert.equal(out.htmlBody, undefined);
+    assert.match(out.textBody!, /----- Original message -----/);
+    const htmlOut = buildForwardBodies({ original: attachmentOnlyOriginal(), htmlBody: '<p>fyi</p>' });
+    assert.doesNotMatch(htmlOut.htmlBody!, /<div type="cite">/);
+  });
+});
+
+describe('buildForwardBodies — hostile interpolated fields (re-sent under the user From)', () => {
+  it('escapes every header field in the HTML block (subject + display names)', () => {
+    const original = fwdOriginal({
+      subject: '<img src=x onerror=alert(1)>',
+      from: [{ name: '"><script>alert(2)</script>', email: 'evil@example.com' }],
+    });
+    const { htmlBody } = buildForwardBodies({ original, htmlBody: '<p>n</p>' });
+    assert.doesNotMatch(htmlBody!, /<img src=x onerror/);
+    assert.doesNotMatch(htmlBody!, /<script>/);
+    assert.match(htmlBody!, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  });
+  it('collapses line-splitting whitespace in text-block fields — incl. U+2028/U+2029/U+0085 (NEL is NOT in ECMAScript backslash-s)', () => {
+    // Invisible characters are built from char codes so no raw control char lives in
+    // this source file. The NEL assertion checks ACTUAL collapse, not just class behavior.
+    const nel = String.fromCharCode(0x85);
+    const ls = String.fromCharCode(0x2028);
+    const ps = String.fromCharCode(0x2029);
+    const original = fwdOriginal({
+      from: [{ name: 'Fake' + nel + 'To: victim@example.com' + ls + 'X:' + ps + 'Y', email: 'evil@example.com' }],
+      subject: 'line1\r\nline2',
+    });
+    const { textBody } = buildForwardBodies({ original, textBody: 'n' });
+    const fromLine = textBody!.split('\n').find((l) => l.startsWith('From: '))!;
+    assert.equal(fromLine.includes(nel), false);
+    assert.equal(fromLine.includes(ls), false);
+    assert.equal(fromLine.includes(ps), false);
+    assert.match(fromLine, /^From: Fake To: victim@example\.com X: Y <evil@example\.com>$/);
+    const subjectLine = textBody!.split('\n').find((l) => l.startsWith('Subject: '))!;
+    assert.equal(subjectLine, 'Subject: line1 line2');
+  });
+  it('sanitizes the reproduced original html (script stripped, http img kept, cid img dropped)', () => {
+    const original = fwdOriginal({
+      bodyValues: {
+        t: { value: 'x' },
+        h: { value: '<p onclick="x()">hi</p><script>evil()</script><img src="https://x.com/a.png"><img src="cid:img1">' },
+      },
+    });
+    const { htmlBody } = buildForwardBodies({ original, htmlBody: '' });
+    assert.doesNotMatch(htmlBody!, /<script|onclick/);
+    assert.match(htmlBody!, /<img src="https:\/\/x\.com\/a\.png" \/>/);
+    assert.doesNotMatch(htmlBody!, /cid:img1/);
+  });
+});
+
+describe('hasForwardMarker / hasTextForwardMarker (#30 forward detection)', () => {
+  it('detects what buildForwardBodies emits (html + text) and tolerates attribute variants', () => {
+    const out = buildForwardBodies({ original: fwdOriginal(), textBody: 'n', htmlBody: '<p>n</p>' });
+    assert.equal(hasForwardMarker(out.htmlBody), true);
+    assert.equal(hasTextForwardMarker(out.textBody), true);
+    assert.equal(hasForwardMarker('<div type=cite>x</div>'), true);
+    assert.equal(hasForwardMarker("<div class='q' type='cite'>x</div>"), true);
+    assert.equal(hasForwardMarker('<DIV TYPE="cite">x</DIV>'), true);
+  });
+  it("recognizes Gmail's dashed text line (mirroring hasQuoteMarker's dual recognition)", () => {
+    assert.equal(hasTextForwardMarker('---------- Forwarded message ---------'), true);
+    assert.equal(hasTextForwardMarker('note\n---------- Forwarded message ----------\nFrom: x'), true);
+  });
+  it('must match htmlToText(<the html block>) — the derived text fallback of an html-only forward (load-bearing)', () => {
+    const { htmlBody } = buildForwardBodies({ original: htmlOnlyOriginal(), htmlBody: '<p>note</p>' });
+    const derived = htmlToText(htmlBody!);
+    assert.equal(hasTextForwardMarker(derived), true);
+  });
+  it('rejects a "> "-quoted dashed line (a reply QUOTING a forward must dispatch to the reply variant)', () => {
+    assert.equal(hasTextForwardMarker('On x, y wrote:\n> ----- Original message -----\n> From: a'), false);
+    assert.equal(hasTextForwardMarker('> ---------- Forwarded message ----------'), false);
+  });
+  it('rejects prose, plain dashes, the asAttachment filler, and nullish input', () => {
+    assert.equal(hasTextForwardMarker('----- meeting notes -----'), false);
+    assert.equal(hasTextForwardMarker('the original message was lost'), false);
+    assert.equal(hasTextForwardMarker('Forwarded message attached.'), false);
+    assert.equal(hasTextForwardMarker('-----'), false);
+    assert.equal(hasTextForwardMarker(''), false);
+    assert.equal(hasTextForwardMarker(null), false);
+    assert.equal(hasForwardMarker('<div class="cite">x</div>'), false);
+    assert.equal(hasForwardMarker('<p>type="cite" mentioned in prose</p>'), false);
+    assert.equal(hasForwardMarker(null), false);
+  });
+});
+
+describe('cross-predicate disjointness (forward vs reply markers)', () => {
+  it('buildForwardBodies html output fails hasQuoteMarker (div, not blockquote)', () => {
+    const { htmlBody } = buildForwardBodies({ original: fwdOriginal(), htmlBody: '<p>n</p>' });
+    assert.equal(hasQuoteMarker(htmlBody), false);
+  });
+  it('buildReplyBodies html output fails hasForwardMarker (blockquote, not div)', () => {
+    const reply = buildReplyBodies({ original: fwdOriginal(), htmlBody: '<p>r</p>', quoteOriginal: true });
+    assert.equal(hasForwardMarker(reply.htmlBody), false);
+  });
+  it('forwarding a REPLY cannot false-trip hasQuoteMarker (sanitizer strips the embedded type=cite)', () => {
+    const replyOriginal = fwdOriginal({
+      bodyValues: { t: { value: 'x' }, h: { value: '<p>top</p><blockquote type="cite">quoted</blockquote>' } },
+    });
+    const fwd = buildForwardBodies({ original: replyOriginal, htmlBody: '<p>n</p>' });
+    assert.equal(hasQuoteMarker(fwd.htmlBody), false);
+    assert.match(fwd.htmlBody!, /<blockquote>quoted<\/blockquote>/); // content kept, attribute stripped
+  });
+  it('a reply QUOTING a forward cannot false-trip hasForwardMarker (embedded div loses type=cite)', () => {
+    const forwardOriginal = fwdOriginal({
+      bodyValues: { t: { value: 'x' }, h: { value: '<div><br>----- Original message -----<br>From: a</div><div type="cite">fwd body</div>' } },
+    });
+    const reply = buildReplyBodies({ original: forwardOriginal, htmlBody: '<p>r</p>', quoteOriginal: true });
+    assert.equal(hasForwardMarker(reply.htmlBody), false);
+  });
+});
+
+describe('normalizeName NEL widening also protects the reply attribution line', () => {
+  it('collapses U+0085 in a reply attribution display name', () => {
+    const nel = String.fromCharCode(0x85);
+    const original = fwdOriginal({ from: [{ name: 'Eve' + nel + 'Impostor', email: 'e@x.com' }] });
+    const { textBody } = buildReplyBodies({ original, textBody: 'r', quoteOriginal: true });
+    const attribution = textBody!.split('\n').find((l) => l.includes('wrote:'))!;
+    assert.equal(attribution.includes(nel), false);
+    assert.match(attribution, /Eve Impostor wrote:/);
+  });
+});

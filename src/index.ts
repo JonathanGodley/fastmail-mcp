@@ -15,6 +15,7 @@ import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { composeReply } from './reply-handler.js';
+import { composeForward } from './forward-handler.js';
 
 const server = new Server(
   {
@@ -165,7 +166,10 @@ function attachmentsDescription(forEdit: boolean): string {
     `To remove all, use clearFields:['attachments']. Passing attachments together with clearFields:['attachments'] is rejected as a conflict.`;
 }
 
-function attachmentsSchemaProperty(forEdit: boolean) {
+// `leadIn` prepends tool-specific context to the shared description (defaulted to ''
+// so send/reply/create/edit are untouched) — forward_email uses it to state how NEW
+// uploads relate to the original's own carried attachments.
+function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
   return {
     type: 'array',
     items: {
@@ -177,7 +181,7 @@ function attachmentsSchemaProperty(forEdit: boolean) {
       },
       required: ['path'],
     },
-    description: attachmentsDescription(forEdit),
+    description: leadIn + attachmentsDescription(forEdit),
   };
 }
 
@@ -428,6 +432,71 @@ const TOOLS = [
         },
       },
       {
+        name: 'forward_email',
+        description: 'Forward an existing email to new recipients. By default saves the forward as a draft; set send=true to transmit it immediately. `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional even when sending: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'. On send=true the original is marked forwarded and read (best-effort; reported in the success message when it succeeds; sending a saved draft later via send_draft does not do this).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            originalEmailId: {
+              type: 'string',
+              description: 'ID of the email to forward',
+            },
+            to: {
+              oneOf: [
+                { type: 'array', items: { type: 'string' } },
+                { type: 'string' },
+              ],
+              description: 'Recipient email addresses (array of strings, or a comma-separated string); required — a forward has no default recipient. Each entry may be "Name <email>" or a bare address.',
+            },
+            cc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+            },
+            bcc: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+            },
+            from: {
+              type: 'string',
+              description: 'Sender email address (optional, defaults to account primary email)',
+            },
+            subject: {
+              type: 'string',
+              description: "Override the subject (optional). When omitted: 'Fwd: <original subject>', without double-prefixing an existing Fwd:/Fw:/FW:.",
+            },
+            textBody: {
+              type: 'string',
+              description: 'Optional note placed ABOVE the forwarded-message block, in plain text — the original is reproduced below it automatically; omit for a bare FYI forward. NOTE: a text-only note produces a PLAIN-TEXT forward (the original\'s HTML formatting is reduced to text) — use htmlBody, or both, to preserve its formatting. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.)',
+            },
+            htmlBody: {
+              type: 'string',
+              description: 'Optional note placed ABOVE the forwarded-message block, in HTML (the preferred format; a plain-text alternative is derived automatically) — the original is reproduced below it. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.)',
+            },
+            send: {
+              type: ['boolean', 'string'],
+              description: 'Whether to send the forward immediately (default: false). By default the forward is saved as a draft; set send=true to transmit it.',
+            },
+            includeOriginalAttachments: {
+              type: ['boolean', 'string'],
+              description: "Carry the original message's attachments on the forward (default true; all-or-none — to drop individual ones, save the default draft and use edit_draft's removeAttachments). Embedded inline (cid:) images are never carried by an inline forward; use asAttachment for those. Ignored when asAttachment is set — the .eml already embeds every original attachment.",
+            },
+            asAttachment: {
+              type: ['boolean', 'string'],
+              description: 'Instead of reproducing the original inline, attach the entire original as a raw .eml file (message/rfc822): lossless, including embedded inline images; supersedes includeOriginalAttachments. NOTE: the raw message carries its full transport headers (Received chain, authentication results) and — when forwarding a message from Sent — any Bcc recipients (see docs/security-model.md), which an inline forward would not expose.',
+            },
+            replyTo: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
+            },
+            attachments: attachmentsSchemaProperty(false, "NEW files to upload and attach (the original's own attachments are carried automatically — see includeOriginalAttachments). "),
+          },
+          required: ['originalEmailId', 'to'],
+        },
+      },
+      {
         name: 'create_draft',
         description: 'Create an email draft without sending it. Supports threading headers for replies. IMPORTANT: each call creates a new draft — do not call twice for the same message.',
         inputSchema: {
@@ -489,13 +558,13 @@ const TOOLS = [
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Editing the body of a reply draft that still carries the quoted original requires you to say what happens to the quote: pass originalEmailId (the id of the message this draft replies to) to rebuild the body and keep the quote, or noQuote:true to drop it. Metadata-only edits (subject/recipients/attachments) and plain-text conversion (clearFields:[\'htmlBody\']) keep the quote automatically; each successive body edit that should keep the quote must pass originalEmailId again. Supplying htmlBody to a text-only reply draft converts it to HTML. Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can\'t be removed, you may be left with a duplicate draft rather than none. A draft containing inline (cid:) images, or a body part that isn\'t plain text or HTML, can\'t be preserved by editing and is rejected — recreate it instead.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Editing the body of a reply draft that still carries the quoted original — or of a forward draft that carries the forwarded-message block — requires you to say what happens to it: pass originalEmailId (the id of the message this draft replies to or forwards) to rebuild the body and keep it, or noQuote:true to drop it. Metadata-only edits (subject/recipients/attachments) and plain-text conversion (clearFields:[\'htmlBody\']) keep the quote automatically; each successive body edit that should keep the quote must pass originalEmailId again. Supplying htmlBody to a text-only reply draft converts it to HTML. Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can\'t be removed, you may be left with a duplicate draft rather than none. A draft containing inline (cid:) images, or a body part that isn\'t plain text or HTML, can\'t be preserved by editing and is rejected — recreate it instead.',
         inputSchema: {
           type: 'object',
           properties: {
             emailId: {
               type: 'string',
-              description: "The ID of the draft email to edit (this draft's own id). The message it replies to, needed to regenerate a quote, is a separate param: originalEmailId.",
+              description: "The ID of the draft email to edit (this draft's own id). The message it replies to or forwards, needed to regenerate a quote or forwarded block, is a separate param: originalEmailId.",
             },
             to: {
               type: 'array',
@@ -522,19 +591,19 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed). For a TEXT-ONLY reply draft, editing textBody is a quote-bearing edit: pass originalEmailId to rebuild and keep the quoted original, or noQuote:true to drop it.',
+              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed). For a TEXT-ONLY reply or forward draft, editing textBody is a quote-bearing edit: pass originalEmailId to rebuild and keep the quoted/forwarded original, or noQuote:true to drop it.',
             },
             htmlBody: {
               type: 'string',
-              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically. For a REPLY draft that carries the quoted original, editing the body is rejected unless you pass originalEmailId (rebuilds and keeps the quote) or noQuote:true (drops it). Supplying htmlBody to a text-only reply draft converts it to HTML.',
+              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically. For a REPLY or FORWARD draft that carries the quoted/forwarded original, editing the body is rejected unless you pass originalEmailId (rebuilds and keeps it) or noQuote:true (drops it). Supplying htmlBody to a text-only reply draft converts it to HTML.',
             },
             originalEmailId: {
               type: 'string',
-              description: "When editing the body of a REPLY draft (its htmlBody, or a text-only reply draft's textBody), the id of the message this draft is a reply to (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original. Without it, a quote-dropping body edit is rejected.",
+              description: "When editing the body of a REPLY or FORWARD draft, the id of the message this draft replies to OR forwards (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original / forwarded-message block. Without it, a body edit that would drop them is rejected.",
             },
             noQuote: {
-              type: 'boolean',
-              description: "Set true to DISCARD the quoted original when editing a reply draft's body (instead of keeping it via originalEmailId). Deliberate-discard escape; without it a quote-dropping body edit is rejected.",
+              type: ['boolean', 'string'],
+              description: "Set true to DISCARD the quoted original (reply draft) or the forwarded-message block (forward draft) when editing the body, instead of keeping it via originalEmailId. On a forward draft this also clears the forward marking, so later edits aren't re-challenged. Deliberate-discard escape; without it a quote-dropping body edit is rejected.",
             },
             replyTo: {
               type: 'array',
@@ -1394,6 +1463,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const text = result.sent
           ? `Reply sent successfully. Submission ID: ${result.submissionId}${result.markedAnswered ? ' Original marked answered and read.' : ''}`
           : `Reply draft saved successfully (Email ID: ${result.emailId}). Subject: ${result.subject}`;
+        return { content: [{ type: 'text', text }] };
+      }
+
+      case 'forward_email': {
+        // The orchestration (fetch original, assemble the forwarded-message block,
+        // carry/.eml attachments, upload new ones, create-or-send, keyword marking)
+        // lives in composeForward so it is unit-testable with a mock client; this
+        // handler just maps the result to the response text.
+        const result = await composeForward(args, client, getAttachDir());
+        const inlineNote = result.droppedInlineImages
+          ? ` ${result.droppedInlineImages} embedded image(s) were not carried — use asAttachment for full fidelity.`
+          : '';
+        const text = result.sent
+          ? `Forward sent successfully. Submission ID: ${result.submissionId}${result.markedForwarded ? ' Original marked forwarded and read.' : ''}${inlineNote}`
+          : `Forward draft saved successfully (Email ID: ${result.emailId}). Subject: ${result.subject}${inlineNote}`;
         return { content: [{ type: 'text', text }] };
       }
 

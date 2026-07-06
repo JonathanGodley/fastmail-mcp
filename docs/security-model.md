@@ -99,10 +99,42 @@ design), but that guarantee ends at its return; the upload-then-reject ordering 
 window. Accepted because Fastmail garbage-collects unreferenced blobs (the same GC the code
 already relies on for a mid-batch upload failure) — no unbounded growth, no data exposure.
 
+### forward_email attachment postures (#30)
+
+- **Carried attachment names are relayed faithfully.** The original's attachment names are
+  attacker-chosen, and the inline forward re-sends them verbatim under the user's From.
+  Renaming a user's files in transit would be surprising, every mainstream client relays
+  verbatim, and the consumer of the name is the *receiving* client's save dialog — which is
+  the layer that sanitizes save names. Same posture as `edit_draft`'s pre-existing
+  attachment carry (which also relays stored names verbatim across the recreate).
+- **The tool-GENERATED `.eml` filename is sanitized** — the one name this server *creates*
+  (`asAttachment`, derived from the original's attacker-controlled subject) is held to a
+  higher bar than names it merely relays: control chars (`\p{Cc}`, C0+C1) and Unicode
+  format/bidi controls (`\p{Cf}`, e.g. U+202E extension spoofing) stripped, path
+  separators and the Windows drive/ADS colon replaced, leading dots stripped, length
+  capped; a blank result falls back to `forwarded-message.eml`. Windows reserved device
+  names (`CON`, `NUL`, …) deliberately survive as e.g. `CON.eml` — a save-time nuisance the
+  receiving client handles, consistent with the relay posture above.
+- **`asAttachment` raw-blob exposure (accepted, disclosed).** The attached `.eml` is the
+  stored RFC 5322 message, byte-identical. Probed live 2026-07-05: a **Sent-copy blob
+  retains the `Bcc` header** (forwarding your own sent mail as `.eml` discloses its Bcc
+  recipients), and a received-message blob exposes the full transport record — the Received
+  hop chain (8 hops on the probe, with internal host names/IPs), spam-filter verdict
+  headers, ARC and Authentication-Results sets, and delivery-routing headers. None of this
+  is visible in an inline forward, which reproduces only the body under a From/To/Cc/
+  Subject/Date block. The tool's `asAttachment` description discloses this; it is the
+  caller's deliberate trade for losslessness.
+- **Outgoing size is unbounded by this server on the carry/.eml paths (accepted).**
+  `MAX_ATTACHMENT_BYTES` caps only *local uploads* (files this server reads off disk);
+  carried originals and the `.eml` are blobId **re-references** never read client-side, so
+  no client-side cap applies — Fastmail's own message-size limit governs, and an oversized
+  send fails loudly server-side. Parity with `edit_draft`'s carry, which re-references the
+  same way.
+
 ## `originalEmailId` is an in-account read-and-embed primitive (accepted residual)
 
-`reply_email` and `edit_draft`'s reply-quote keep path both take an `originalEmailId` and, on
-the keep path, fetch that message's body and embed it (sanitized via `sanitizeForQuote`) into
+`reply_email`, `forward_email`, and `edit_draft`'s keep path all take an `originalEmailId`
+and fetch that message's body and embed it (sanitized via `sanitizeForQuote`) into
 a draft the caller may then send. Stated plainly: this lets a caller move one message's
 content into outgoing mail addressed to arbitrary recipients under the user's own `From`. A
 prompt-injected agent could use it to exfiltrate the content of any message in the account by
@@ -122,8 +154,8 @@ privacy control. Documented here as an accepted residual: the mitigation for mis
 same opt-in/authorization posture that governs sending mail at all, not a restriction on which
 in-account message may be quoted.
 
-The reply path also **writes two keyword flags** (`$answered`, `$seen`) to that same unscoped
-`originalEmailId` after a send succeeds (#52/#54). This rides the identical unscoped-id posture
+The reply and forward paths also **write two keyword flags** (`$answered`+`$seen`, or
+`$forwarded`+`$seen`) to that same unscoped `originalEmailId` after a send succeeds (#52/#54, #30). This rides the identical unscoped-id posture
 above (it may name any in-account message, not necessarily the one the user was viewing), but
 adds no capability class: two boolean keyword sets, no move/delete/body write, scoped to
 `session.accountId`, and dominated by `mark_email_read`, which already grants a standalone

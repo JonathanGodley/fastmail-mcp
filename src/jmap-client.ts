@@ -2,7 +2,8 @@ import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError, InvalidInputError } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank } from './body-format.js';
-import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker } from './reply-quote.js';
+import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker } from './reply-quote.js';
+import { isSettableMessageId } from './forward-handler.js';
 import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
 import type { FileHandle } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
@@ -170,12 +171,22 @@ export const EMAIL_PROPERTIES_COMPACT = [
 // `textBody` is already in COMPACT (structure); VERBOSE adds the content (`bodyValues`)
 // and the html/attachment parts. `sentAt` is a get-path superset addition (allowed by the
 // property-consistency rule) for reply-quote attribution (when the original was written).
+// The X-Forwarded-Message-Id header (what forward_email records as the forwarded
+// original's Message-ID) is deliberately VERBOSE-tier, not COMPACT: list items already
+// show forward-ness via the isForwarded keyword flag; the header VALUE is needed only
+// when operating on a specific draft (the edit guard's recovery), a get_email context.
+// Corollary, not a gap: getThread uses EMAIL_PROPERTIES_COMPACT, so thread reads
+// (including raw:true) don't surface forwardedMessageId — consistent with this decision.
 export const EMAIL_PROPERTIES_VERBOSE = [
   ...EMAIL_PROPERTIES_COMPACT,
   'htmlBody', 'attachments', 'bodyValues', 'sentAt',
+  'header:X-Forwarded-Message-Id:asMessageIds',
 ] as const;
 
-export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name'] as const;
+// `disposition`/`cid` are load-bearing for forward_email's inline-image handling:
+// without them every attachments[] part reads as disposition-less and the
+// true-inline (cid) drop predicate can never fire (#30).
+export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name', 'disposition', 'cid'] as const;
 
 export interface MailboxInfo {
   name: string;
@@ -743,6 +754,7 @@ export class JmapClient {
     inReplyTo?: string[];
     references?: string[];
     replyTo?: string[];
+    forwardedMessageId?: string[];
     attachments?: AttachmentPart[];
   }): Promise<string> {
     const session = await this.getSession();
@@ -810,6 +822,12 @@ export class JmapClient {
       ...(email.inReplyTo && { inReplyTo: email.inReplyTo }),
       ...(email.references && { references: email.references }),
       ...(email.replyTo?.length && { replyTo: email.replyTo.map(parseAddress) }),
+      // The forwarded original's Message-ID (forward_email). A header SET, unlike every
+      // other header: use in this file (which are GETs) — Fastmail accepts it and
+      // round-trips it through store/fetch and destroy+recreate (probed live
+      // 2026-07-05). The value is pre-vetted by the forward handler; Fastmail itself
+      // rejects CRLF/non-ASCII, so no injection is possible here.
+      ...(email.forwardedMessageId?.length && { 'header:X-Forwarded-Message-Id:asMessageIds': email.forwardedMessageId }),
       ...(email.attachments?.length && { attachments: email.attachments }),
       ...this.shapeBodies(email.textBody, email.htmlBody),
     };
@@ -884,6 +902,7 @@ export class JmapClient {
     inReplyTo?: string[];
     references?: string[];
     replyTo?: string[];
+    forwardedMessageId?: string[];
     attachments?: AttachmentPart[];
   }): Promise<string> {
     const session = await this.getSession();
@@ -945,6 +964,9 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
+    // Header SET for forward drafts — see the sendEmail note (pre-vetted value;
+    // server-validated; round-trips destroy+recreate).
+    if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
     if (email.attachments?.length) emailObject.attachments = email.attachments;
     // Generate the body parts (auto text/plain fallback for html-only input where
     // derivable; ships html-only otherwise; no-body html is rejected by shapeBodies). A
@@ -1043,7 +1065,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'textBody', 'htmlBody', 'bodyValues', 'mailboxIds', 'keywords', 'inReplyTo', 'references', 'attachments'],
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'textBody', 'htmlBody', 'bodyValues', 'mailboxIds', 'keywords', 'inReplyTo', 'references', 'attachments', 'header:X-Forwarded-Message-Id:asMessageIds'],
           // Inline list (NOT the module-level EMAIL_BODY_PROPERTIES) — extended with
           // name/disposition/cid so the faithful recreate can carry attachment metadata
           // and detect inline (cid:) images.
@@ -1145,20 +1167,47 @@ export class JmapClient {
     // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
     // discarded so stored bodies keep their exact (untrimmed) value below.
 
-    // ---- Reply-quote preservation guard (#37, redesigned #42) ----
+    // ---- Quoted-original / forwarded-block preservation guard (#37, redesigned #42,
+    // extended to forward drafts #30) ----
     // A reply draft keeps the quoted original in its body (buildReplyBodies appends a cited
-    // <blockquote> to html and a "> "-quoted block to text). An edit that rewrites or clears
-    // that body would silently drop the quote. We decide on the EXISTING (stored) body — which
-    // THIS server generated, so its quote shape is reliable — never on the caller's NEW body
-    // (untrusted: it can't tell the real quote from any quote-shaped content, and prose can
-    // false-positive). When the draft has a quote and the edit touches the body in a way that
-    // isn't quote-preserving by construction, force the caller to choose: regenerate+keep from
-    // a caller-named originalEmailId, or deliberately noQuote. Supersedes the fork.8 new-body-
-    // scan (bypassable + html-only); see docs/email-bodies.md and #42.
+    // <blockquote> to html and a "> "-quoted block to text); a forward draft keeps the
+    // forwarded-message block (buildForwardBodies). An edit that rewrites or clears that
+    // body would silently drop it. We decide on the EXISTING (stored) body — which THIS
+    // server generated, so its shape is reliable — never on the caller's NEW body
+    // (untrusted: it can't tell a real quote from any quote-shaped content, and prose can
+    // false-positive). When the draft is protected and the edit touches the body in a way
+    // that isn't preserving by construction, force the caller to choose: regenerate+keep
+    // from a caller-named originalEmailId, or deliberately noQuote. Supersedes the fork.8
+    // new-body-scan (bypassable + html-only); see docs/email-bodies.md, #42, #30.
     const isReply = !!existingEmail.inReplyTo?.length;
     const oldHtmlQuoted = hasQuoteMarker(existingHtmlValue);
     const oldTextQuoted = hasTextQuoteMarker(existingTextValue);
-    const draftHasQuote = isReply && (oldHtmlQuoted || oldTextQuoted);
+
+    // Forward gating: the X-Forwarded-Message-Id header — set by this server's
+    // forward_email AND by Fastmail's own clients — is a challenge FLOOR (protects a
+    // draft whose block shape isn't recognizable: foreign header-setting clients, or a
+    // marker lost to re-serialization), while the body markers ALSO gate on their own
+    // (protects forwards of a Message-ID-less original, where no header could be set).
+    // Markers additionally decide the challenge wording (recognizable = regenerable).
+    const forwardHeader: string[] = existingEmail['header:X-Forwarded-Message-Id:asMessageIds'] || [];
+    const isForward = forwardHeader.length > 0;
+    const oldHtmlForwarded = hasForwardMarker(existingHtmlValue);
+    const oldTextForwarded = hasTextForwardMarker(existingTextValue);
+    const forwardMarkers = oldHtmlForwarded || oldTextForwarded;
+
+    // Mutually exclusive dispatch: compute both, run at most ONE variant — the keep path
+    // MUTATES updates.htmlBody/textBody and falls through, so two sequential blocks would
+    // rebuild the body twice. Both engaged → reply wins: on a pathological both-marker
+    // draft an originalEmailId keep regenerates the REPLY shape — loud, no silent loss,
+    // but a tie-break, not a claim of correctness. (A forward OF a reply carries
+    // "wrote:\n> " in its reproduced text but has no inReplyTo, so isReply stays false
+    // and it correctly dispatches to the forward variant; asAttachment forwards set no
+    // header and a deliberately non-marker filler body, so the guard is inert on them —
+    // their .eml is an ordinary carried attachment the recreate preserves.)
+    const replyGuardArmed = isReply && (oldHtmlQuoted || oldTextQuoted);
+    const forwardGuardArmed = isForward || forwardMarkers;
+    const guardVariant: 'reply' | 'forward' | null =
+      replyGuardArmed ? 'reply' : (forwardGuardArmed ? 'forward' : null);
 
     // Pre-merge signals: what the edit does to each body. existingHtmlValue/existingTextValue
     // were fetched above; these are the same inputs the coupling guards below use.
@@ -1171,12 +1220,16 @@ export class JmapClient {
     // The quote survives WITHOUT inspecting any new content in exactly two shapes:
     //  - a metadata-only edit (no body written or cleared) leaves both bodies untouched;
     //  - a plain-text conversion (clearFields:['htmlBody'] alone) keeps the old text, but only
-    //    counts as quote-preserving when that surviving text actually carries the "> " quote
-    //    (oldTextQuoted — always true for drafts this server made). If it doesn't, this is NOT
-    //    a clean carve-out and the edit correctly falls through to the guard below.
+    //    counts as quote-preserving when that surviving text actually carries the variant's
+    //    own text marker ("> " quote for replies, the dashed forwarded-message line for
+    //    forwards — always true for drafts this server made). Checking the OTHER variant's
+    //    marker here would misfire a plain-text conversion of a forward draft. If the
+    //    surviving text has no marker, this is NOT a clean carve-out and the edit correctly
+    //    falls through to the guard below.
+    const oldTextMarked = guardVariant === 'forward' ? oldTextForwarded : oldTextQuoted;
     const quoteKeptByConstruction =
          !touchesBody
-      || (clearedHtml && !wroteHtml && !wroteText && !clearedText && oldTextQuoted);
+      || (clearedHtml && !wroteHtml && !wroteText && !clearedText && oldTextMarked);
 
     // Text-side edits while a non-empty html survives are owned by the two coupling guards
     // further down (textBody-alone; clearFields:['textBody']-while-html), which emit the
@@ -1187,61 +1240,120 @@ export class JmapClient {
     const coupledTextEdit =
       !wroteHtml && !clearedHtml && !isBlank(existingHtmlValue) && (wroteText || clearedText);
 
-    if (draftHasQuote && touchesBody && !quoteKeptByConstruction && !coupledTextEdit) {
+    // Set when a noQuote drop resolves the challenge: a deliberate de-quote is also a
+    // de-forward, so the recreate below skips the X-Forwarded-Message-Id carry
+    // REGARDLESS of which variant handled it — otherwise a reply-variant noQuote on a
+    // pathological both-marker draft would strand the header and the NEXT body edit
+    // would be re-challenged by the header floor. One step must fully de-arm.
+    let dropForwardHeader = false;
+    // The recorded source the recreate carries. A forward-variant keep RE-POINTS this
+    // to the fetched original's own Message-ID (when settable): the caller may name a
+    // DIFFERENT original than the recorded one (the blessed correcting-a-wrong-original
+    // case), and carrying the stale id would leave the guard's advertised recovery
+    // pointer rebuilding the block for the wrong message on a later edit.
+    let carriedForwardHeader: string[] = forwardHeader;
+    if (guardVariant && touchesBody && !quoteKeptByConstruction && !coupledTextEdit) {
+      const keepNoun = guardVariant === 'reply' ? 'the quote' : 'the forwarded block';
       if (updates.originalEmailId && updates.noQuote === true) {
-        throw new InvalidInputError('Pass either originalEmailId (keep the quote) or noQuote (discard it), not both.');
+        throw new InvalidInputError(`Pass either originalEmailId (keep ${keepNoun}) or noQuote (discard it), not both.`);
       } else if (updates.originalEmailId) {
         // Regenerate from the caller-named original — never re-resolved from the draft's
-        // In-Reply-To (which is attacker-controllable), so there's no spoof surface. The id is
-        // trusted, not validated against the draft's In-Reply-To (that check would false-reject
-        // legitimate cases, e.g. correcting a wrong original). getEmailById throws on not-found;
-        // rethrow with a message naming the param so the caller can fix it (it surfaces via
-        // index's error wrap like this function's other guards).
+        // In-Reply-To / X-Forwarded-Message-Id (attacker-controllable), so there's no spoof
+        // surface. The id is trusted, not validated against the draft's headers (that check
+        // would false-reject legitimate cases, e.g. correcting a wrong original).
+        // getEmailById throws on not-found; rethrow with a message naming the param so the
+        // caller can fix it (it surfaces via index's error wrap like the other guards).
         let original: any;
         try {
           original = await this.getEmailById(updates.originalEmailId);
         } catch {
-          throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' could not be fetched (no such message, or not accessible). Pass the id of the message this draft replies to.`);
+          const relation = guardVariant === 'reply' ? 'replies to' : 'forwards';
+          throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' could not be fetched (no such message, or not accessible). Pass the id of the message this draft ${relation}.`);
         }
-        // Regenerate the quote into EVERY body the edit is writing — both, when the caller
-        // supplies both (a new html + a custom text alternative), so neither side silently
-        // loses the quote on the keep path. buildReplyBodies quotes exactly the formats passed.
-        // A clear-only edit writes neither body, so there's nowhere to regenerate into — reject
-        // loudly rather than silently no-op the keep intent. This pre-empts the downstream
-        // no-body reject for a clear-the-last-body edit (the caller sees the regenerate message,
-        // not the no-body one); both are loud and lose no data, and the throw means no double-fire.
+        // Regenerate the quote/block into EVERY body the edit is writing — both, when the
+        // caller supplies both (a new html + a custom text alternative), so neither side
+        // silently loses it on the keep path. The builders emit into exactly the formats
+        // passed. A clear-only edit writes neither body, so there's nowhere to regenerate
+        // into — reject loudly rather than silently no-op the keep intent. This pre-empts
+        // the downstream no-body reject for a clear-the-last-body edit (the caller sees the
+        // regenerate message, not the no-body one); both are loud and lose no data.
         if (wroteHtml || wroteText) {
-          const rebuilt = buildReplyBodies({
-            original,
-            ...(wroteHtml && { htmlBody: updates.htmlBody }),
-            ...(wroteText && { textBody: updates.textBody }),
-            quoteOriginal: true,
-          });
+          const rebuilt = guardVariant === 'reply'
+            ? buildReplyBodies({
+                original,
+                ...(wroteHtml && { htmlBody: updates.htmlBody }),
+                ...(wroteText && { textBody: updates.textBody }),
+                quoteOriginal: true,
+              })
+            : buildForwardBodies({
+                original,
+                ...(wroteHtml && { htmlBody: updates.htmlBody }),
+                ...(wroteText && { textBody: updates.textBody }),
+              });
           if (wroteHtml) updates.htmlBody = rebuilt.htmlBody;
           if (wroteText) updates.textBody = rebuilt.textBody;
-          // Loud-fail a self-inconsistent keep request: the caller asked to KEEP via
-          // originalEmailId, but the named message has no quotable content (attachment-only /
-          // calendar-only / cid-image-only), so buildReplyBodies passed the body through
-          // unquoted. This is reachable only by naming the WRONG/empty original — a draft naming
-          // its own original can't hit it (a quote exists only if that original was quotable, and
-          // JMAP message content is immutable). It loses no caller input (the new body is kept);
-          // it just turns a confusing quote-less result into an actionable error instead of a
-          // silent one. The `||` accepts the edit if ANY written format kept a marker, so a
-          // partially-quotable original still keeps.
-          const restored = (wroteHtml && hasQuoteMarker(updates.htmlBody))
-            || (wroteText && hasTextQuoteMarker(updates.textBody));
-          if (!restored) {
-            throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' has no quotable content (e.g. an attachment-only or calendar-only message), so the quote can't be restored. Check the id, or use noQuote to drop the quote deliberately.`);
+          if (guardVariant === 'reply') {
+            // Loud-fail a self-inconsistent keep request: the caller asked to KEEP via
+            // originalEmailId, but the named message has no quotable content (attachment-only /
+            // calendar-only / cid-image-only), so buildReplyBodies passed the body through
+            // unquoted. This is reachable only by naming the WRONG/empty original — a draft naming
+            // its own original can't hit it (a quote exists only if that original was quotable, and
+            // JMAP message content is immutable). It loses no caller input (the new body is kept);
+            // it just turns a confusing quote-less result into an actionable error instead of a
+            // silent one. The `||` accepts the edit if ANY written format kept a marker, so a
+            // partially-quotable original still keeps.
+            const restored = (wroteHtml && hasQuoteMarker(updates.htmlBody))
+              || (wroteText && hasTextQuoteMarker(updates.textBody));
+            if (!restored) {
+              throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' has no quotable content (e.g. an attachment-only or calendar-only message), so the quote can't be restored. Check the id, or use noQuote to drop the quote deliberately.`);
+            }
+          }
+          // Forward variant: no restored-check — buildForwardBodies always emits at least
+          // the header block into every written body, so the check would be tautological.
+          // Flip side (intentional asymmetry, inherent to forwarding): a WRONG
+          // originalEmailId here produces a valid-looking block for the wrong message with
+          // no loud fail — any original yields a block — unlike the reply path's restored
+          // catch. No caller data is lost either way.
+          if (guardVariant === 'forward') {
+            // Re-point the recorded source at the original the block was just rebuilt
+            // from (the same pre-vet forward_email applies; a malformed/absent id keeps
+            // the existing carry — stale beats stripped, since the header is also the
+            // guard's challenge floor). This also records the source on a marker-only
+            // draft that had no header, upgrading its later challenges to the runnable
+            // standard recipe.
+            const repointedId = original?.messageId?.[0];
+            if (isSettableMessageId(repointedId)) carriedForwardHeader = [repointedId];
           }
         } else {
-          throw new InvalidInputError("originalEmailId can't regenerate a quote on a body you're not writing — edit the body (htmlBody or textBody) to keep the quote, or use noQuote to drop it.");
+          const regenNoun = guardVariant === 'reply' ? 'a quote' : 'the forwarded block';
+          throw new InvalidInputError(`originalEmailId can't regenerate ${regenNoun} on a body you're not writing — edit the body (htmlBody or textBody) to keep ${keepNoun}, or use noQuote to drop it.`);
         }
       } else if (updates.noQuote === true) {
-        // Proceed: the quote is dropped on explicit request.
-      } else {
+        // Proceed: the quote/block is dropped on explicit request.
+        dropForwardHeader = true;
+      } else if (guardVariant === 'reply') {
         // Error names ONLY the data-preserving keep path; noQuote is deliberately omitted so
         // the model is never nudged toward discarding the quote (it stays in the schema).
         throw new InvalidInputError("Editing this reply draft's body would drop the quoted original. Pass originalEmailId (the message it replies to) to keep the quote. If you only have the draft, resolve the original from its In-Reply-To Message-ID via search_emails first.");
+      } else if (isForward && forwardMarkers) {
+        // The normal forward case: recorded source + recognizable block. Recipe mirrors the
+        // reply guard's (resolve the id, then keep). The recovery deliberately says plain
+        // get_email — forwardedMessageId is always returned by it, not gated behind a
+        // verbose knob. Search the BARE id: Fastmail's full-text lookup matches the
+        // Message-ID without its angle brackets (verified live 2026-07-05).
+        throw new InvalidInputError("Editing this forward draft's body would drop the forwarded-message block. Pass originalEmailId (the message it forwards) to keep the block. If you only have the draft, read its forwardedMessageId via get_email, then find that message with search_emails (search the bare id, without angle brackets).");
+      } else if (forwardMarkers) {
+        // Marker only, no recorded source (a forward of a Message-ID-less original, or
+        // pasted forwarded-looking content — an accepted false-positive cost; see
+        // docs/email-bodies.md). Leads with what happened, readable by a caller that never
+        // forwarded anything, and offers noQuote first: there may be nothing to rebuild.
+        throw new InvalidInputError("This draft's body matches a forwarded-message marker. Pass noQuote:true to drop that block and proceed with your edit, or originalEmailId (the message it forwards) to rebuild the block.");
+      } else {
+        // Header floor: the source IS recorded but the block isn't in a shape this server
+        // can regenerate in place (a foreign client's forward, or our marker lost to
+        // re-serialization). The standard recipe IS runnable; noQuote also clears the
+        // forward marking so later edits aren't re-challenged.
+        throw new InvalidInputError("This draft is marked as a forward (it records the forwarded message's id), but its forwarded block isn't in a shape this server can regenerate in place. Pass originalEmailId to rebuild the block from that message (read the draft's forwardedMessageId via get_email, then find it with search_emails using the bare id, without angle brackets), or noQuote:true to drop the block and the forward marking (later edits won't be re-challenged).");
       }
     }
 
@@ -1377,6 +1489,13 @@ export class JmapClient {
       // drafts this client creates via reply_email send=false).
       ...(existingEmail.inReplyTo && { inReplyTo: existingEmail.inReplyTo }),
       ...(existingEmail.references && { references: existingEmail.references }),
+      // Carry the forward marking (the recorded source AND the guard's challenge floor)
+      // unless a noQuote drop deliberately cleared it; a forward-variant keep may have
+      // re-pointed or newly recorded it above. A foreign stored value that fails
+      // Fastmail's header-SET validation fails the CREATE loudly with the old draft
+      // intact (create-first order below) — recoverable in one step via noQuote, never
+      // a silent drop.
+      ...(carriedForwardHeader.length > 0 && !dropForwardHeader && { 'header:X-Forwarded-Message-Id:asMessageIds': carriedForwardHeader }),
       ...(finalAttachments.length && { attachments: finalAttachments }),
     };
 
@@ -1934,7 +2053,11 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['attachments']
+          properties: ['attachments'],
+          // Pinned explicitly (was previously the RFC 8621 §4.4 server default, which
+          // already includes disposition/cid) so this tool's ability to distinguish
+          // inline parts never rides on an implicit default.
+          bodyProperties: [...EMAIL_BODY_PROPERTIES],
         }, 'getAttachments']
       ]
     };

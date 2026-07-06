@@ -12,6 +12,11 @@ export interface SimplifiedEmail {
   replyTo?: string[];
   inReplyTo?: string[];
   isReply?: boolean;
+  // The forwarded original's Message-ID (from X-Forwarded-Message-Id, which
+  // forward_email records on non-asAttachment forward drafts). VERBOSE-tier:
+  // present on get_email/verbose reads; list items show forward-ness via
+  // isForwarded instead.
+  forwardedMessageId?: string[];
   isRead?: boolean;
   isFlagged?: boolean;
   isDraft?: boolean;
@@ -227,6 +232,7 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   addIf(result, 'replyTo', (raw.replyTo ?? []).map(formatAddress));
   addIf(result, 'inReplyTo', raw.inReplyTo);
   addFlag(result, 'isReply', !!(raw.inReplyTo?.length));
+  addIf(result, 'forwardedMessageId', raw['header:X-Forwarded-Message-Id:asMessageIds']);
   // Promote the canonical message-state keywords to `is*` flags from the single
   // KEYWORD_FLAGS map (subsumes the old hand-written isRead/isFlagged/isDraft lines
   // and adds isAnswered/isForwarded for free). DROP_WHEN_FALSE then decides which

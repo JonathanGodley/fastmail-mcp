@@ -1,6 +1,6 @@
 import sanitizeHtml from 'sanitize-html';
 import { htmlToText, isBlank } from './body-format.js';
-import { formatReplyDate } from './email-formatter.js';
+import { formatAddress, formatReplyDate } from './email-formatter.js';
 
 // Build the reply bodies (caller's new text + an attributed, top-posted quote of the
 // original), matching the Fastmail web client with a portable quote-bar. createDraft/
@@ -18,9 +18,11 @@ function escapeHtml(s: string): string {
 }
 
 // Collapse internal whitespace runs (incl. newlines) to single spaces, so a display name
-// containing a newline can't split the attribution line.
+// containing a newline can't split the attribution line. The class is \s plus U+0085
+// (NEL): ECMAScript \s covers \r, U+2028, and U+2029 but NOT U+0085, which IS a mandatory
+// line break per UAX #14 — verified empirically 2026-07-05, so don't "simplify" back to \s.
 function normalizeName(s: string): string {
-  return s.replace(/\s+/g, ' ').trim();
+  return s.replace(/[\s\u0085]+/g, ' ').trim();
 }
 
 // Strip our own truncation/encoding sentinels defensively before quoting (the raw reader
@@ -183,4 +185,139 @@ export function buildReplyBodies(input: {
   }
 
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Forward support (forward_email + edit_draft's forward guard)
+// ---------------------------------------------------------------------------
+
+// The forwarded-message block matches the canonical Fastmail shape (probed live
+// 2026-07-05 against the official Fastmail client's forward): a dashed marker
+// line, then From/To/Cc/Subject/Date header lines (Cc only when present), then
+// the original below a blank line. The HTML wrapper is the platform's own
+// <div type="cite">. Reply markers are <blockquote>-anchored (hasQuoteMarker),
+// so the two marker families are disjoint by tag name, and sanitizeForQuote
+// strips type= from embedded divs, so a forward quoted inside a reply (or
+// pasted sanitized forward HTML) can't false-trip hasForwardMarker.
+const FORWARD_MARKER_LINE = '----- Original message -----';
+const FORWARD_OPEN = '<div type="cite">';
+
+// Header lines for the forwarded-message block, unescaped (text form; the HTML
+// form escapes each line). Every field is attacker-controlled content re-sent
+// under the user's identity: normalizeName collapses line-splitting whitespace
+// across the WHOLE composed address (defensively covering the email portion,
+// not just the display name). Line-omission rule: a field with no usable value
+// drops its whole line — no bare "To:" for a Bcc-only-received original, no
+// "Date:" when sentAt/receivedAt are both absent.
+function forwardHeaderLines(original: any): string[] {
+  const joinAddrs = (list: any[] | undefined | null): string =>
+    (list ?? [])
+      .filter((a: any) => a && (a.email || a.name))
+      .map((a: any) => normalizeName(formatAddress(a)))
+      .filter(Boolean)
+      .join(', ');
+  const lines: string[] = [FORWARD_MARKER_LINE];
+  const from = joinAddrs(original?.from);
+  if (from) lines.push(`From: ${from}`);
+  const to = joinAddrs(original?.to);
+  if (to) lines.push(`To: ${to}`);
+  const cc = joinAddrs(original?.cc);
+  if (cc) lines.push(`Cc: ${cc}`);
+  const subject = normalizeName(original?.subject ?? '');
+  if (subject) lines.push(`Subject: ${subject}`);
+  // The Date line is the JMAP sentAt/receivedAt string verbatim (ISO 8601 with
+  // offset) — the platform's own forward block uses this form, deliberately not
+  // the humanized formatReplyDate shape.
+  const date = normalizeName(original?.sentAt ?? original?.receivedAt ?? '');
+  if (date) lines.push(`Date: ${date}`);
+  return lines;
+}
+
+// Build the forward bodies: the caller's note (optional) above a forwarded-
+// message header block, with the original reproduced verbatim below it (no "> "
+// prefixing — that is reply quoting). Unlike buildReplyBodies there is no
+// passthrough: the block IS the forward's content, so this always emits it.
+export function buildForwardBodies(input: {
+  original: any;      // raw JMAP email from getEmailById (body lists + bodyValues + addresses)
+  textBody?: string;  // caller's note, placed above the block
+  htmlBody?: string;
+}): { textBody?: string; htmlBody?: string } {
+  const { original, textBody, htmlBody } = input;
+
+  const bodyValues = original?.bodyValues || {};
+  const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
+  const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
+  const sanitizedHtml = origHtml ? sanitizeForQuote(origHtml) : '';
+  const htmlQuotable = sanitizedHtml ? isQuotable(sanitizedHtml) : false;
+  const textQuotable = !isBlank(origText);
+
+  const lines = forwardHeaderLines(original);
+  const textBlock = lines.join('\n');
+  const htmlBlock = `<div><br>${lines.map(escapeHtml).join('<br>')}<br></div>`;
+
+  // Content below the block. Text form: the original's own text, else a
+  // readable conversion of its html; may be blank (attachment-only original),
+  // in which case the block stands alone. HTML form: the sanitized original
+  // html, else the original text escaped — never fabricated from nothing.
+  const textSource = pick(origText, htmlToText(origHtml));
+  const htmlSource = htmlQuotable ? sanitizedHtml : (textQuotable ? textToHtmlBlock(origText) : '');
+
+  const composeText = (note: string | undefined): string => {
+    const prefix = note && !isBlank(note) ? `${note}\n\n\n` : '';
+    const below = !isBlank(textSource) ? `\n\n${textSource}` : '';
+    return `${prefix}${textBlock}${below}`;
+  };
+  const composeHtml = (note: string | undefined): string => {
+    const cite = htmlSource ? `${FORWARD_OPEN}${htmlSource}</div>` : '';
+    return `${note ?? ''}${htmlBlock}${cite}`;
+  };
+
+  // Which formats are emitted:
+  //   - caller supplied a format → that format, with the note on top (both
+  //     supplied → both, each carrying the caller's own text — a custom text
+  //     alternative is never silently replaced by a derived fallback);
+  //   - caller supplied neither → html only when the original has quotable
+  //     html; a text-only original yields a TEXT forward (the body model's
+  //     "never fabricate HTML from plain text" holds for the tool's own
+  //     default choice — see docs/email-bodies.md).
+  const out: { textBody?: string; htmlBody?: string } = {};
+  if (htmlBody !== undefined) out.htmlBody = composeHtml(htmlBody);
+  if (textBody !== undefined) out.textBody = composeText(textBody);
+  if (htmlBody === undefined && textBody === undefined) {
+    if (htmlQuotable) out.htmlBody = composeHtml(undefined);
+    else out.textBody = composeText(undefined);
+  }
+  return out;
+}
+
+// True if html carries a forwarded-message wrapper: a <div type="cite"> — the
+// canonical Fastmail forward wrapper, which buildForwardBodies also emits.
+// Attribute-keyed ONLY, never text-keyed: sanitizeForQuote strips type= from
+// embedded content, so a reply quoting a forward (or pasted sanitized forward
+// HTML) loses the attribute and cannot false-trip this. Disjoint from
+// hasQuoteMarker by tag name (div vs blockquote) — the official Fastmail client
+// uses <blockquote type="cite"> for replies and <div type="cite"> only for
+// forwards (probed live 2026-07-05). Like hasQuoteMarker, a PRESENCE check that
+// only governs whether edit_draft's guard fires; originalEmailId is the
+// authoritative keep path.
+export function hasForwardMarker(html: string | null | undefined): boolean {
+  if (!html) return false;
+  return /<div\b[^>]*\btype\s*=\s*["']?cite\b/i.test(html);
+}
+
+// True if plain text carries a forwarded-message attribution line: a dashed
+// marker in the canonical Fastmail shape ("----- Original message -----") or
+// Gmail's ("---------- Forwarded message ----------"), anchored at line start
+// (mirroring hasQuoteMarker's recognition of both our own and Gmail's shape).
+// The anchor is load-bearing: a reply draft QUOTING a forwarded message carries
+// "> ----- Original message -----", and the "[ \t]*" prefix cannot consume the
+// ">", so that draft dispatches to the reply variant. This must also match
+// htmlToText(<the html block>) — an html-only forward stores a derived
+// text/plain alternative (pinned by test). Matching pasted forwarded content of
+// the same conventional shape is an accepted, documented cost: the guard
+// over-asks loudly and noQuote resolves it in one step. Linear-time: every
+// quantifier consumes from classes disjoint from its neighbors.
+export function hasTextForwardMarker(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /(^|\n)[ \t]*-{3,}[ \t]*(Original|Forwarded) message[ \t]*-{2,}/i.test(text);
 }

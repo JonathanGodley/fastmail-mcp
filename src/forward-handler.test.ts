@@ -1,0 +1,316 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { buildForwardParams, composeForward, sanitizeEmlFilename } from './forward-handler.js';
+import type { ForwardClient } from './forward-handler.js';
+import { hasTextForwardMarker, hasForwardMarker } from './reply-quote.js';
+import { EMAIL_BODY_PROPERTIES } from './jmap-client.js';
+import { InvalidInputError } from './coerce.js';
+
+// A raw-JMAP-shaped original (as getEmailById returns it AFTER the
+// EMAIL_BODY_PROPERTIES disposition/cid addition — the attachment part shape here
+// deliberately mirrors a live Fastmail response, so an under-shaped mock can't
+// mask a missing property).
+function makeOriginal(over: any = {}) {
+  return {
+    id: 'orig-1',
+    blobId: 'blob-orig-raw',
+    messageId: ['orig-msg@example.com'],
+    subject: 'Project update',
+    from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
+    to: [{ name: 'Bob', email: 'bob@example.com' }],
+    sentAt: '2026-07-01T09:14:00-04:00',
+    textBody: [{ partId: 't', type: 'text/plain' }],
+    htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: 'original text' }, h: { value: '<p>original html</p>' } },
+    attachments: [
+      { partId: '3', blobId: 'blob-doc', type: 'application/pdf', size: 1234, name: 'doc.pdf', disposition: 'attachment', cid: null },
+    ],
+    ...over,
+  };
+}
+
+// The drop predicate needs disposition+cid on every fetched part — pin the property
+// list so a later "cleanup" of EMAIL_BODY_PROPERTIES can't silently disarm it.
+describe('EMAIL_BODY_PROPERTIES — forward prerequisites', () => {
+  it('fetches disposition and cid (the inline-drop predicate inputs)', () => {
+    assert.ok((EMAIL_BODY_PROPERTIES as readonly string[]).includes('disposition'));
+    assert.ok((EMAIL_BODY_PROPERTIES as readonly string[]).includes('cid'));
+  });
+});
+
+describe('buildForwardParams — subject', () => {
+  it("defaults to 'Fwd: <original subject>'", () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    assert.equal(forwardParams.subject, 'Fwd: Project update');
+  });
+  it('does not double-prefix an existing Fwd:/fw:/FWD:', () => {
+    for (const s of ['Fwd: Hello', 'fw: Hello', 'FWD: Hello', 'FW: Hello']) {
+      const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ subject: s }));
+      assert.equal(forwardParams.subject, s);
+    }
+  });
+  it('uses a caller-supplied subject verbatim', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: 'Custom line' }, makeOriginal());
+    assert.equal(forwardParams.subject, 'Custom line');
+  });
+  it('treats a supplied-but-blank subject as omitted (falls to the default rule)', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: '   ' }, makeOriginal());
+    assert.equal(forwardParams.subject, 'Fwd: Project update');
+  });
+  it('handles an original with no subject', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ subject: undefined }));
+    assert.equal(forwardParams.subject, 'Fwd: ');
+  });
+});
+
+describe('buildForwardParams — recipients + send flag', () => {
+  it('requires to (no default recipient, unlike reply)', () => {
+    assert.throws(() => buildForwardParams({}, makeOriginal()), /to is required for a forward; there is no default recipient/);
+    assert.throws(() => buildForwardParams({ to: [] }, makeOriginal()), /to is required for a forward/);
+  });
+  it('accepts a comma-separated to string (lenient coercion)', () => {
+    const { forwardParams } = buildForwardParams({ to: 'a@x.com, b@y.com' }, makeOriginal());
+    assert.deepEqual(forwardParams.to, ['a@x.com', 'b@y.com']);
+  });
+  it('defaults shouldSend to false and coerces string booleans', () => {
+    assert.equal(buildForwardParams({ to: ['x@y.com'] }, makeOriginal()).shouldSend, false);
+    assert.equal(buildForwardParams({ to: ['x@y.com'], send: true }, makeOriginal()).shouldSend, true);
+    assert.equal(buildForwardParams({ to: ['x@y.com'], send: 'true' }, makeOriginal()).shouldSend, true);
+  });
+});
+
+describe('buildForwardParams — forwardedMessageId (recorded source)', () => {
+  it("records the original's Message-ID", () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    assert.deepEqual(forwardParams.forwardedMessageId, ['orig-msg@example.com']);
+  });
+  it('omits it when the original has no Message-ID', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ messageId: undefined }));
+    assert.equal(forwardParams.forwardedMessageId, undefined);
+  });
+  it('omits a malformed Message-ID rather than fail the create (Fastmail rejects/mangles these on SET)', () => {
+    for (const bad of [
+      'has space@example.com',
+      'angle<bracket@example.com',
+      'angle>bracket@example.com',
+      'non-ascii-käse@example.com',
+      'ctrlbell@example.com',
+      'x'.repeat(999) + '@example.com',
+      '',
+    ]) {
+      const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ messageId: [bad] }));
+      assert.equal(forwardParams.forwardedMessageId, undefined, `should omit: ${JSON.stringify(bad.slice(0, 40))}`);
+    }
+  });
+  it('omits it on asAttachment forwards (the .eml is the recorded source; keeps the guard inert)', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    assert.equal(forwardParams.forwardedMessageId, undefined);
+  });
+});
+
+describe('buildForwardParams — bodies', () => {
+  it('caller-neither with an html original emits an html forward (no fabricated text side)', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    assert.equal(forwardParams.textBody, undefined);
+    assert.match(forwardParams.htmlBody!, /----- Original message -----/);
+    assert.match(forwardParams.htmlBody!, /original html/);
+  });
+  it('caller-neither with a TEXT-ONLY original emits a text forward (never fabricates html)', () => {
+    const orig = makeOriginal({ htmlBody: undefined, bodyValues: { t: { value: 'plain only' } } });
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, orig);
+    assert.equal(forwardParams.htmlBody, undefined);
+    assert.match(forwardParams.textBody!, /----- Original message -----/);
+    assert.match(forwardParams.textBody!, /plain only/);
+  });
+  it('places the caller note above the block', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], textBody: 'FYI folks' }, makeOriginal());
+    assert.match(forwardParams.textBody!, /^FYI folks\n\n\n----- Original message -----/);
+  });
+});
+
+describe('buildForwardParams — asAttachment (.eml)', () => {
+  it("attaches the original's own blobId as message/rfc822 with a subject-derived name", () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    assert.deepEqual(forwardParams.attachments, [{
+      blobId: 'blob-orig-raw',
+      type: 'message/rfc822',
+      name: 'Project update.eml',
+      disposition: 'attachment',
+    }]);
+  });
+  it('note-less: emits the non-marker filler (passes the blank-body send reject, arms no guard)', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    assert.equal(forwardParams.textBody, 'Forwarded message attached.');
+    assert.equal(forwardParams.htmlBody, undefined);
+    assert.equal(hasTextForwardMarker(forwardParams.textBody), false);
+  });
+  it('with a note: passes the caller bodies through with NO forwarded-message block', () => {
+    const { forwardParams } = buildForwardParams(
+      { to: ['x@y.com'], asAttachment: true, textBody: 'see attached', htmlBody: '<p>see attached</p>' },
+      makeOriginal(),
+    );
+    assert.equal(forwardParams.textBody, 'see attached');
+    assert.equal(forwardParams.htmlBody, '<p>see attached</p>');
+    assert.equal(hasForwardMarker(forwardParams.htmlBody), false);
+    assert.equal(hasTextForwardMarker(forwardParams.textBody), false);
+  });
+  it('throws when the original has no blobId', () => {
+    assert.throws(
+      () => buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal({ blobId: undefined })),
+      /no blobId/,
+    );
+  });
+});
+
+describe('sanitizeEmlFilename', () => {
+  it('keeps an ordinary subject', () => {
+    assert.equal(sanitizeEmlFilename('Quarterly report'), 'Quarterly report.eml');
+  });
+  it('falls back on a blank/absent subject', () => {
+    assert.equal(sanitizeEmlFilename(''), 'forwarded-message.eml');
+    assert.equal(sanitizeEmlFilename('   '), 'forwarded-message.eml');
+    assert.equal(sanitizeEmlFilename(undefined), 'forwarded-message.eml');
+  });
+  it('neutralizes traversal-shaped subjects (path separators, leading dots, colon)', () => {
+    assert.equal(sanitizeEmlFilename('..\\..\\Startup\\x'), '_.._Startup_x.eml');
+    assert.equal(sanitizeEmlFilename('../x'), '_x.eml');
+    assert.equal(sanitizeEmlFilename('C:autorun'), 'C_autorun.eml');
+  });
+  it('strips control and format/bidi characters', () => {
+    // U+202E (RLO) and U+0085 (NEL) are built from char codes so no raw invisible
+    // character lives in this source file.
+    const rlo = String.fromCharCode(0x202e);
+    const nel = String.fromCharCode(0x85);
+    assert.equal(sanitizeEmlFilename(`abc${rlo}lme.gpj`), 'abclme.gpj.eml');
+    assert.equal(sanitizeEmlFilename(`ab${nel}cd`), 'abcd.eml');
+  });
+  it('caps the length before appending .eml', () => {
+    const name = sanitizeEmlFilename('x'.repeat(500));
+    assert.ok(name.length <= 84);
+    assert.ok(name.endsWith('.eml'));
+  });
+  it('caps by code points — never splits a surrogate pair at the boundary', () => {
+    // 79 ASCII chars then an astral char: a UTF-16-unit slice(0,80) would cut the
+    // pair in half and leave a lone surrogate (invalid on the wire).
+    const name = sanitizeEmlFilename('x'.repeat(79) + '\u{1F600}' + 'tail');
+    assert.equal(name, 'x'.repeat(79) + '\u{1F600}.eml');
+    assert.ok(!/[\uD800-\uDFFF]$/.test(name.slice(0, -4)) || /[\uDC00-\uDFFF]/.test(name)); // no lone surrogate
+    assert.ok([...name].every((c) => !(c.length === 1 && c.charCodeAt(0) >= 0xd800 && c.charCodeAt(0) <= 0xdfff)));
+  });
+});
+
+describe('buildForwardParams — attachment carry', () => {
+  const inlinePng = { partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'pic.png', disposition: 'inline', cid: 'img-1' };
+  const inlineNoCid = { partId: '5', blobId: 'blob-odd', type: 'application/zip', size: 10, name: 'odd.zip', disposition: 'inline', cid: null };
+
+  it('carries non-inline originals through the whitelist (never server-set partId/size)', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    assert.deepEqual(forwardParams.attachments, [
+      { blobId: 'blob-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' },
+    ]);
+  });
+  it('drops true-inline (cid) parts and counts them in droppedInlineImages', () => {
+    const orig = makeOriginal({ attachments: [makeOriginal().attachments[0], inlinePng] });
+    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.com'] }, orig);
+    assert.equal(droppedInlineImages, 1);
+    assert.deepEqual(forwardParams.attachments!.map((a) => a.blobId), ['blob-doc']);
+  });
+  it("normalizes inline-WITHOUT-cid to disposition 'attachment' (kept, not counted; keeps the draft editable)", () => {
+    const orig = makeOriginal({ attachments: [inlineNoCid] });
+    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.com'] }, orig);
+    assert.equal(droppedInlineImages, 0);
+    assert.deepEqual(forwardParams.attachments, [
+      { blobId: 'blob-odd', type: 'application/zip', name: 'odd.zip', disposition: 'attachment' },
+    ]);
+  });
+  it('includeOriginalAttachments:false drops the carry but still counts inline drops (the body strips their <img> either way)', () => {
+    const orig = makeOriginal({ attachments: [makeOriginal().attachments[0], inlinePng] });
+    const { forwardParams, droppedInlineImages } = buildForwardParams(
+      { to: ['x@y.com'], includeOriginalAttachments: false }, orig,
+    );
+    assert.equal(forwardParams.attachments, undefined);
+    assert.equal(droppedInlineImages, 1);
+  });
+  it('asAttachment: droppedInlineImages is ABSENT even for an inline-bearing original (the .eml embeds them losslessly)', () => {
+    const orig = makeOriginal({ attachments: [inlinePng] });
+    const { droppedInlineImages } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, orig);
+    assert.equal(droppedInlineImages, undefined);
+  });
+});
+
+describe('composeForward — orchestration', () => {
+  const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'new.pdf', disposition: 'attachment' }];
+
+  function spyClient(over: Partial<ForwardClient> = {}) {
+    const calls: any = {};
+    const client: ForwardClient = {
+      getEmailById: async (id) => { calls.getId = id; return makeOriginal(); },
+      uploadAttachments: async (specs, dir) => { calls.upload = { specs, dir }; return UPLOADED; },
+      createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
+      sendEmail: async (p) => { calls.send = p; return 'sub-7'; },
+      addKeywords: async (id, kw) => { calls.keywords = { id, kw }; },
+      ...over,
+    };
+    return { client, calls };
+  }
+
+  it('requires originalEmailId', async () => {
+    const { client } = spyClient();
+    await assert.rejects(() => composeForward({ to: ['x@y.com'] }, client, undefined), /originalEmailId is required/);
+  });
+  it('defaults to the DRAFT branch and does NOT mark keywords', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
+    assert.equal(r.sent, false);
+    assert.equal(r.emailId, 'draft-7');
+    assert.equal(calls.send, undefined);
+    assert.equal(calls.keywords, undefined);
+    assert.equal(r.markedForwarded, undefined);
+  });
+  it('send=true transmits and marks the original $forwarded+$seen (best-effort, reported)', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'], send: true }, client, undefined);
+    assert.equal(r.sent, true);
+    assert.equal(r.submissionId, 'sub-7');
+    assert.deepEqual(calls.keywords, { id: 'o1', kw: ['$forwarded', '$seen'] });
+    assert.equal(r.markedForwarded, true);
+  });
+  it('swallows a keyword-set failure (forward already sent) — markedForwarded false', async () => {
+    const { client } = spyClient({ addKeywords: async () => { throw new InvalidInputError('nope'); } });
+    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'], send: true }, client, undefined);
+    assert.equal(r.sent, true);
+    assert.equal(r.markedForwarded, false);
+  });
+  it('appends caller uploads BEHIND the carried originals (draft branch)', async () => {
+    const { client, calls } = spyClient();
+    await composeForward(
+      { originalEmailId: 'o1', to: ['x@y.com'], attachments: [{ path: 'new.pdf' }] },
+      client, '/attach/root',
+    );
+    assert.deepEqual(calls.upload, { specs: [{ path: 'new.pdf' }], dir: '/attach/root' });
+    assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-doc', 'up-1']);
+  });
+  it('appends caller uploads behind the .eml on asAttachment', async () => {
+    const { client, calls } = spyClient();
+    await composeForward(
+      { originalEmailId: 'o1', to: ['x@y.com'], asAttachment: true, attachments: [{ path: 'new.pdf' }] },
+      client, '/attach/root',
+    );
+    assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-orig-raw', 'up-1']);
+    assert.equal(calls.draft.attachments[0].type, 'message/rfc822');
+  });
+  it('surfaces droppedInlineImages in the result (draft and send branches)', async () => {
+    const inline = { partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'p.png', disposition: 'inline', cid: 'img-1' };
+    const { client } = spyClient({ getEmailById: async () => makeOriginal({ attachments: [inline] }) });
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
+    assert.equal(d.droppedInlineImages, 1);
+    const s = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'], send: true }, client, undefined);
+    assert.equal(s.droppedInlineImages, 1);
+  });
+  it('does not call uploadAttachments when no new attachments are given', async () => {
+    let uploadCalled = false;
+    const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
+    await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
+    assert.equal(uploadCalled, false);
+  });
+});
