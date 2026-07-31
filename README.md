@@ -87,7 +87,9 @@ This fork adds a **response simplification system** that reduces token usage whe
    ```bash
    export FASTMAIL_API_TOKEN="your_api_token_here"
    # Optional: customize base URL (defaults to https://api.fastmail.com)
-   # Only api.fastmail.com and www.fastmailusercontent.com are accepted by default.
+   # Only api.fastmail.com and www.fastmailusercontent.com are accepted by default,
+   # each with an optional regional prefix (phl.api.fastmail.com,
+   # phl-www.fastmailusercontent.com) as returned by JMAP session discovery.
    # For self-hosted JMAP servers, also set FASTMAIL_ALLOW_UNSAFE_BASE_URL=true.
    export FASTMAIL_BASE_URL="https://api.fastmail.com"
    # Optional: customize attachment download directory (defaults to ~/Downloads/fastmail-mcp/).

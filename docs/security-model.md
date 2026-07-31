@@ -227,3 +227,30 @@ than overclaimed:
   `makeRequest` (one atomic snapshot — no race) where possible; the derivation tolerates a missing/
   garbled count by failing closed to the degraded note. A message moving between *any* two reads is
   an inherent, accepted residual, not a temporal guarantee.
+
+## Endpoint allowlist (where the bearer token may be sent)
+
+The other half of the model: every URL that will carry the API token is checked by
+`validateFastmailUrl` (`src/url-validation.ts`) — the configured `FASTMAIL_BASE_URL`, and the
+`apiUrl`/`downloadUrl`/`uploadUrl` that JMAP session discovery hands back. HTTPS is mandatory
+in all modes, including the `FASTMAIL_ALLOW_UNSAFE_BASE_URL` opt-in, because the token would
+otherwise go over the wire in cleartext.
+
+**The allowlist matches host shapes, not a fixed list of names**, because Fastmail pins some
+accounts to a regional endpoint. Observed live: `apiUrl`/`uploadUrl` on
+`phl.api.fastmail.com` (region as a leading label) and `downloadUrl` on
+`phl-www.fastmailusercontent.com` (region hyphenated onto the `www` label). The two hosts
+spell the region differently, so there are two anchored patterns rather than one. Session
+discovery returning a regional host is normal Fastmail behaviour, not a redirect to be
+distrusted — an exact-name allowlist rejected those accounts outright and made every tool
+fail.
+
+Region prefixes are limited to a single label (the pattern excludes `.`) and both patterns are
+anchored at each end, so nothing can nest in front of a legitimate suffix
+(`evil.phl-www.fastmailusercontent.com`) or append a foreign registrable domain behind one
+(`phl.api.fastmail.com.attacker.com`). The prefix is allowed only in front of the two endpoint
+hosts — `phl.www.fastmail.com` is still rejected.
+
+`FASTMAIL_ALLOW_UNSAFE_BASE_URL` stays what it is: an opt-in for self-hosted JMAP servers that
+drops host checking wholesale. It is not the answer to a regional Fastmail host, and using it
+for that would disable the check for every URL in the session response.

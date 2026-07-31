@@ -13,6 +13,65 @@ describe('validateFastmailUrl (default policy)', () => {
     assert.equal(url.hostname, 'www.fastmailusercontent.com');
   });
 
+  it('accepts a regional API host', () => {
+    // Fastmail session discovery returns region-pinned endpoints for some
+    // accounts, e.g. apiUrl/uploadUrl on phl.api.fastmail.com.
+    const url = validateFastmailUrl('https://phl.api.fastmail.com/jmap/api/', 'session.apiUrl');
+    assert.equal(url.hostname, 'phl.api.fastmail.com');
+  });
+
+  it('accepts a regional user-content host', () => {
+    // The user-content host spells the region with a hyphen, not a dot.
+    const url = validateFastmailUrl(
+      'https://phl-www.fastmailusercontent.com/jmap/download/x/y/z',
+      'session.downloadUrl',
+    );
+    assert.equal(url.hostname, 'phl-www.fastmailusercontent.com');
+  });
+
+  it('accepts a multi-part regional prefix', () => {
+    assert.equal(
+      validateFastmailUrl('https://us-west1.api.fastmail.com/jmap/api/', 'apiUrl').hostname,
+      'us-west1.api.fastmail.com',
+    );
+    assert.equal(
+      validateFastmailUrl('https://us-west1-www.fastmailusercontent.com/x', 'downloadUrl').hostname,
+      'us-west1-www.fastmailusercontent.com',
+    );
+  });
+
+  it('rejects a regional prefix carrying extra labels', () => {
+    // Only one label may precede the fixed suffix, so an attacker-controlled
+    // host cannot hide in front of a legitimate-looking regional prefix.
+    assert.throws(
+      () => validateFastmailUrl('https://evil.phl.api.fastmail.com/jmap/api/', 'baseUrl'),
+      /not in the Fastmail allowlist/,
+    );
+    assert.throws(
+      () => validateFastmailUrl('https://evil.phl-www.fastmailusercontent.com/x', 'baseUrl'),
+      /not in the Fastmail allowlist/,
+    );
+  });
+
+  it('rejects a regional-looking prefix on the wrong domain', () => {
+    assert.throws(
+      () => validateFastmailUrl('https://phl.api.fastmail.com.attacker.com/', 'baseUrl'),
+      /not in the Fastmail allowlist/,
+    );
+    assert.throws(
+      () => validateFastmailUrl('https://phl-www.fastmailusercontent.com.attacker.com/', 'baseUrl'),
+      /not in the Fastmail allowlist/,
+    );
+  });
+
+  it('rejects a regional prefix on a non-API fastmail host', () => {
+    // The prefix is only allowed in front of the two endpoint hosts.
+    assert.throws(
+      () => validateFastmailUrl('https://phl.www.fastmail.com/jmap/api/', 'baseUrl'),
+      /not in the Fastmail allowlist/,
+    );
+  });
+
   it('rejects HTTP even on allowed host', () => {
     assert.throws(
       () => validateFastmailUrl('http://api.fastmail.com/jmap/api/', 'baseUrl'),

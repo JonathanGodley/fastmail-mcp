@@ -75,7 +75,8 @@ function getAuthConfig(): FastmailConfig {
   ]);
 
   // Opt-in for self-hosted JMAP servers. Required to use any base URL outside
-  // the api.fastmail.com / www.fastmailusercontent.com allowlist.
+  // the api.fastmail.com / www.fastmailusercontent.com allowlist (which already
+  // covers Fastmail's regional hosts, e.g. phl.api.fastmail.com).
   const unsafeInfo = findEnvValue([
     'FASTMAIL_ALLOW_UNSAFE_BASE_URL',
     'USER_CONFIG_FASTMAIL_ALLOW_UNSAFE_BASE_URL',
