@@ -20,7 +20,7 @@ import { composeForward } from './forward-handler.js';
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.4-fork.10',
+    version: '1.9.4-fork.11',
   },
   {
     capabilities: {
