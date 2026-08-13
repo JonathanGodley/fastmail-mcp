@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult } from './response-formatters.js';
+import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -561,7 +561,7 @@ const TOOLS = [
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Editing the body of a reply draft that still carries the quoted original — or of a forward draft that carries the forwarded-message block — requires you to say what happens to it: pass originalEmailId (the id of the message this draft replies to or forwards) to rebuild the body and keep it, or noQuote:true to drop it. Metadata-only edits (subject/recipients/attachments) and plain-text conversion (clearFields:[\'htmlBody\']) keep the quote automatically; each successive body edit that should keep the quote must pass originalEmailId again. Supplying htmlBody to a text-only reply draft converts it to HTML. Since JMAP emails are immutable, this creates a replacement draft and then deletes the old one (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. On the rare failure where the replacement is created but the old copy can\'t be removed, you may be left with a duplicate draft rather than none. A draft containing inline (cid:) images, or a body part that isn\'t plain text or HTML, can\'t be preserved by editing and is rejected — recreate it instead.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Editing the body of a reply draft that still carries the quoted original — or of a forward draft that carries the forwarded-message block — requires you to say what happens to it: pass originalEmailId (the id of the message this draft replies to or forwards) to rebuild the body and keep it, or noQuote:true to drop it. Metadata-only edits (subject/recipients/attachments) and plain-text conversion (clearFields:[\'htmlBody\']) keep the quote automatically; each successive body edit that should keep the quote must pass originalEmailId again. Supplying htmlBody to a text-only reply draft converts it to HTML. Since JMAP emails are immutable, this creates a replacement draft and moves the old one to Trash (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. The replaced draft is never destroyed: it stays recoverable in Trash until Trash expiry, so an edit made from an out-of-date copy of the draft can be undone. The result also reports what the replaced draft contained (subject, recipients, body sizes) — compare it against what you expected to replace, since a draft changed elsewhere (the web UI, another client) in the meantime will have been overwritten. On the rare failure where the replacement is created but the old copy can\'t be moved to Trash, you are left with a duplicate draft rather than none, and the result says so. A draft containing inline (cid:) images, or a body part that isn\'t plain text or HTML, can\'t be preserved by editing and is rejected — recreate it instead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1503,7 +1503,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? await client.uploadAttachments(editAttachmentSpecs, getAttachDir())
           : undefined;
 
-        const { id: newEmailId, orphanedOldDraftId } = await client.updateDraft(emailId, {
+        const updateResult = await client.updateDraft(emailId, {
           to,
           cc,
           bcc,
@@ -1519,19 +1519,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           noQuote,
         });
 
-        // JMAP content is immutable, so an edit creates a replacement draft and removes
-        // the old one (create-then-delete). On the rare path where the new draft was
-        // created but the old copy couldn't be removed, say so plainly rather than claim
-        // it "was replaced" — the old draft lingers as a duplicate holding pre-edit content.
-        const text = orphanedOldDraftId
-          ? `Draft saved as new Email ID: ${newEmailId}. The previous draft copy could not be removed and remains as a duplicate (id ${orphanedOldDraftId}); you may want to delete it.`
-          : `Draft updated successfully. New Email ID: ${newEmailId} (old draft ${emailId} was replaced)`;
-
+        // JMAP content is immutable, so an edit creates a replacement draft and moves the
+        // old one to Trash. The summary reports where that old copy went and what it held,
+        // so an unintended overwrite is visible and undoable (#65).
         return {
           content: [
             {
               type: 'text',
-              text,
+              text: formatEditDraftResult(updateResult),
             },
           ],
         };

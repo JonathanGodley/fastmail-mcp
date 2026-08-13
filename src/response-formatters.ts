@@ -1,5 +1,5 @@
 import { simplifyEmail } from './email-formatter.js';
-import type { QueryResult } from './jmap-client.js';
+import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 
 export function formatQueryResult(result: QueryResult): string {
   const { items, total } = result;
@@ -20,6 +20,44 @@ export function formatEmailQueryResult(result: QueryResult): string {
       ? `${total} results.`
       : `${items.length} results.`;
   return `${summary}\n${JSON.stringify(simplified, null, 2)}`;
+}
+
+// Recipient lists are capped so a big draft can't turn the result into a wall of
+// addresses; the trashed copy holds the full picture.
+const MAX_ECHOED_RECIPIENTS = 5;
+function formatReplacedRecipients(label: string, addresses?: string[]): string | null {
+  if (!addresses?.length) return null;
+  const shown = addresses.slice(0, MAX_ECHOED_RECIPIENTS).join(', ');
+  const extra = addresses.length - MAX_ECHOED_RECIPIENTS;
+  return `${label} ${shown}${extra > 0 ? ` (+${extra} more)` : ''}`;
+}
+
+// Render the fingerprint of the draft an edit replaced (#65). Returns '' when that draft
+// carried nothing worth echoing.
+function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
+  const parts = [
+    replaced.subject ? `subject "${replaced.subject}"` : null,
+    formatReplacedRecipients('to', replaced.to),
+    formatReplacedRecipients('cc', replaced.cc),
+    replaced.htmlBodySize != null ? `htmlBody ${replaced.htmlBodySize} chars` : null,
+    replaced.textBodySize != null ? `textBody ${replaced.textBodySize} chars` : null,
+  ].filter(Boolean);
+  return parts.join(', ');
+}
+
+// The edit_draft result text. An edit recreates the message (JMAP content is immutable),
+// so this has to say three things: the new id, where the old copy went, and what that old
+// copy contained — the last one so a caller that edited from a stale copy can see at once
+// that it overwrote something it didn't know about, and restore it from Trash (#65).
+export function formatEditDraftResult(result: UpdateDraftResult): string {
+  const disposal = result.trashedOldDraftId
+    ? `The previous draft (id ${result.trashedOldDraftId}) was moved to Trash, where it stays recoverable until Trash expiry.`
+    : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be moved to Trash (${result.orphanedOldDraftReason ?? 'reason unknown'}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
+  const fingerprint = formatReplacedDraft(result.replacedDraft);
+  const replaced = fingerprint
+    ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
+    : '';
+  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}`;
 }
 
 // Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the

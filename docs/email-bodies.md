@@ -353,7 +353,7 @@ carries the original unrendered.
 **Live-probed forward facts (2026-07-05, recorded here so they aren't re-derived):**
 
 - `header:X-Forwarded-Message-Id:asMessageIds` is settable on `Email/set` create and
-  round-trips store/fetch AND destroy+recreate exactly. Fastmail validates the value:
+  round-trips store/fetch AND the edit recreate exactly. Fastmail validates the value:
   embedded CRLF → rejected (`invalidProperties`); non-ASCII → rejected; embedded `<`/`>` →
   accepted but split into two mangled ids; a 1500-char id → accepted and folded. Hence the
   pre-vet in `forward-handler.ts` (printable ASCII, no whitespace/angles, ≤998 chars;
@@ -366,7 +366,7 @@ carries the original unrendered.
   HTML into the text part of an html-only original — this server's attachment carry and
   `htmlToText` conversion are deliberate improvements, not parity.
 
-## Why destroy + recreate is mandatory
+## Why trash + recreate is mandatory
 
 JMAP email body properties are immutable and server-set (RFC 8621 §4.1.4); only
 `keywords` and `mailboxIds` are mutable. So editing a draft's subject or body is done
@@ -380,11 +380,39 @@ success while leaving the draft unchanged.
 
 The recreate is faithful (`8afbf68`): it carries `In-Reply-To` / `References`,
 re-references attachments by `blobId`, and preserves keywords. Ordering is
-create-then-delete (create the new draft, confirm, then destroy the old one) so there
-is no data-loss window; the response returns the new id plus `orphanedOldDraftId` if the
-cleanup delete fails. A draft carrying an inline `cid:` image (a `multipart/related`
+create-then-dispose (create the new draft, confirm, then dispose of the old one) so there
+is no data-loss window. A draft carrying an inline `cid:` image (a `multipart/related`
 tree that can't round-trip through the flat draft fields) is rejected rather than
 silently flattened. That reconstruction is tracked as a follow-on in issue #13.
+
+### Disposing of the replaced draft: Trash, never destroy (#65)
+
+The old copy is disposed of by moving it to the mailbox with the `trash` role (an
+`Email/set update` of `mailboxIds` only — `keywords` are left alone, so the copy is still
+a `$draft` and restoring it is a move back to Drafts; Trash expiry is by mailbox, not by
+keyword). It used to be an `Email/set destroy`, which cost real data: an assistant edited
+a draft from a body it had cached earlier, the user had meanwhile rewritten that draft in
+the web UI, and the recreate silently replaced the user's version with the stale one. The
+destroy made that unrecoverable — the previous draft was gone from the account, leaving
+only a support-side backup restore.
+
+The server can never detect this on its own (it cannot know the caller's copy is stale),
+so the mitigation is on the disposal side plus disclosure:
+
+- **Trash, not destroy** turns the overwrite into a one-step undo, and Trash's normal
+  expiry bounds the clutter.
+- **There is no destroy fallback.** If the Trash move can't happen (no `trash` role on the
+  account, a `notUpdated` entry, or a thrown transport error), the old draft is left
+  exactly where it was and reported as `orphanedOldDraftId` + `orphanedOldDraftReason`.
+  The edit itself already succeeded, so this never throws. A visible duplicate the caller
+  can delete is strictly cheaper than the unrecoverable act this path exists to avoid.
+- **The result echoes back what was replaced** (`replacedDraft`: id, subject, to/cc, and
+  body character counts), so a caller comparing against its own copy sees an unintended
+  overwrite immediately. Sizes rather than the previous bodies: the old draft is intact in
+  Trash, so its full content is one `get_email` away.
+
+Exactly one of `trashedOldDraftId` / `orphanedOldDraftId` is always set — the fate of the
+replaced draft is never left unstated.
 
 ## Body extraction: matching by MIME type, not list membership
 
@@ -451,7 +479,7 @@ reference.
   draft's `subject` / `bodyStructure` / `bodyValues` returns `updated: {id: null}`
   (success) but the server ignores it; a re-fetch shows subject, `blobId`, and body
   unchanged. Fastmail does NOT return `notUpdated` / `invalidProperties` for immutable-
-  property edits. Only `keywords` and `mailboxIds` are mutable. Hence destroy+recreate;
+  property edits. Only `keywords` and `mailboxIds` are mutable. Hence recreate-on-edit;
   the code comment rationale is "server silently no-ops," not "server rejects."
 - **`cid:` inline images surface in `attachments` with `disposition: 'inline'`** (plus
   `cid`, `partId`, `blobId`; `hasAttachment: false`). So the strict

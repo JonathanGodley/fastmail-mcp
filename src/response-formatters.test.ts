@@ -1,6 +1,65 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatEmailQueryResult, formatContactQueryResult } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
+
+// ---------- formatEditDraftResult ----------
+
+describe('formatEditDraftResult', () => {
+  const REPLACED = {
+    id: 'draft-1',
+    subject: 'Lunch plans',
+    to: ['bob@example.com'],
+    cc: ['carol@example.com'],
+    textBodySize: 120,
+    htmlBodySize: 240,
+  };
+
+  it('reports the new id, the Trash move, and what was replaced', () => {
+    const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: REPLACED, trashedOldDraftId: 'draft-1' });
+    assert.match(text, /New Email ID: draft-2/);
+    assert.match(text, /draft-1\) was moved to Trash/);
+    assert.match(text, /recoverable until Trash expiry/);
+    assert.match(text, /subject "Lunch plans"/);
+    assert.match(text, /to bob@example\.com/);
+    assert.match(text, /cc carol@example\.com/);
+    assert.match(text, /htmlBody 240 chars/);
+    assert.match(text, /textBody 120 chars/);
+    assert.doesNotMatch(text, /WARNING/);
+  });
+
+  it('warns plainly when the old draft could not be trashed, and gives the reason', () => {
+    const text = formatEditDraftResult({
+      id: 'draft-2',
+      replacedDraft: REPLACED,
+      orphanedOldDraftId: 'draft-1',
+      orphanedOldDraftReason: 'this account has no mailbox with the trash role',
+    });
+    assert.match(text, /New Email ID: draft-2/);
+    assert.match(text, /WARNING/);
+    assert.match(text, /could NOT be moved to Trash \(this account has no mailbox with the trash role\)/);
+    assert.match(text, /remains in place as a duplicate/);
+    // The edit still succeeded, and the echo-back is still reported.
+    assert.match(text, /Draft updated successfully/);
+    assert.match(text, /subject "Lunch plans"/);
+  });
+
+  it('caps a long recipient list rather than dumping every address', () => {
+    const many = Array.from({ length: 9 }, (_, i) => `p${i}@example.com`);
+    const text = formatEditDraftResult({
+      id: 'draft-2',
+      replacedDraft: { id: 'draft-1', to: many },
+      trashedOldDraftId: 'draft-1',
+    });
+    assert.match(text, /to p0@example\.com, p1@example\.com, p2@example\.com, p3@example\.com, p4@example\.com \(\+4 more\)/);
+    assert.doesNotMatch(text, /p5@example\.com/);
+  });
+
+  it('omits the echo-back sentence when the replaced draft had nothing to report', () => {
+    const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1' });
+    assert.match(text, /moved to Trash/);
+    assert.doesNotMatch(text, /It contained/);
+  });
+});
 
 // ---------- simplifyMailbox ----------
 

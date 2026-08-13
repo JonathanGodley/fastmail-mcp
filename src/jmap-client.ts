@@ -188,6 +188,32 @@ export const EMAIL_PROPERTIES_VERBOSE = [
 // true-inline (cid) drop predicate can never fire (#30).
 export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name', 'disposition', 'cid'] as const;
 
+// A compact fingerprint of the draft an edit replaced, echoed back so a caller that
+// edited from a stale copy sees immediately what it overwrote (#65). Body sizes are the
+// character lengths of the stored values, not the bodies themselves: the old draft
+// survives in Trash, so its full content is one get_email away and echoing it back
+// would be bulk with no extra signal. Bcc is left out for the same reason.
+export interface ReplacedDraftInfo {
+  id: string;
+  subject?: string;
+  to?: string[];
+  cc?: string[];
+  textBodySize?: number;
+  htmlBodySize?: number;
+}
+
+// updateDraft's result. Exactly ONE of trashedOldDraftId / orphanedOldDraftId is always
+// set: the old copy either reached Trash or is still sitting where it was. It is never
+// destroyed, and its fate is never left unstated.
+export interface UpdateDraftResult {
+  id: string;
+  replacedDraft: ReplacedDraftInfo;
+  trashedOldDraftId?: string;
+  orphanedOldDraftId?: string;
+  // Why the Trash move didn't happen. Set whenever orphanedOldDraftId is.
+  orphanedOldDraftReason?: string;
+}
+
 export interface MailboxInfo {
   name: string;
   // The stable JMAP role (lowercased), or null for a custom folder/label. Only
@@ -824,7 +850,7 @@ export class JmapClient {
       ...(email.replyTo?.length && { replyTo: email.replyTo.map(parseAddress) }),
       // The forwarded original's Message-ID (forward_email). A header SET, unlike every
       // other header: use in this file (which are GETs) — Fastmail accepts it and
-      // round-trips it through store/fetch and destroy+recreate (probed live
+      // round-trips it through store/fetch and the edit recreate (probed live
       // 2026-07-05). The value is pre-vetted by the forward handler; Fastmail itself
       // rejects CRLF/non-ASCII, so no injection is possible here.
       ...(email.forwardedMessageId?.length && { 'header:X-Forwarded-Message-Id:asMessageIds': email.forwardedMessageId }),
@@ -965,7 +991,7 @@ export class JmapClient {
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
     // Header SET for forward drafts — see the sendEmail note (pre-vetted value;
-    // server-validated; round-trips destroy+recreate).
+    // server-validated; round-trips the edit recreate).
     if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
     if (email.attachments?.length) emailObject.attachments = email.attachments;
     // Generate the body parts (auto text/plain fallback for html-only input where
@@ -1012,7 +1038,7 @@ export class JmapClient {
   //    mere presence in a list — otherwise we'd read the text value into the html slot
   //    and synthesise a phantom text/html part on recreate.
   //  - JMAP body properties are immutable (RFC 8621 §4.1), which is why updateDraft
-  //    rebuilds and re-sends the bodies via destroy+recreate rather than patching.
+  //    rebuilds and re-sends the bodies via a recreate rather than patching.
   // Takes the first part of the given type (drafts here carry at most one per type). If a
   // value were ever elided from bodyValues, that format reads as undefined rather than a
   // partial body (callers fetch full values, so this won't occur in practice).
@@ -1055,7 +1081,7 @@ export class JmapClient {
     // message; noQuote = deliberately drop it. Absent both, the edit is rejected (no silent loss).
     originalEmailId?: string;
     noQuote?: boolean;
-  }): Promise<{ id: string; orphanedOldDraftId?: string }> {
+  }): Promise<UpdateDraftResult> {
     // The caller-supplied-body guard for edit_draft. It lives here, unlike the other four
     // compose paths (which guard in their handlers), because updateDraft is edit_draft's
     // only caller — so `updates` IS the caller's own input, before this method regenerates
@@ -1139,7 +1165,7 @@ export class JmapClient {
     }
 
     // Extract existing body values by MIME type (see bodyValueForType for the
-    // MIME-match-not-list-presence rationale; bodies are immutable so we destroy+recreate).
+    // MIME-match-not-list-presence rationale; bodies are immutable so we recreate).
     const bodyValues = existingEmail.bodyValues || {};
     const existingTextValue = this.bodyValueForType(existingEmail.textBody, 'text/plain', bodyValues);
     const existingHtmlValue = this.bodyValueForType(existingEmail.htmlBody, 'text/html', bodyValues);
@@ -1509,13 +1535,29 @@ export class JmapClient {
 
     Object.assign(emailObject, buildBodyParts({ textBody: textBodyValue, htmlBody: htmlBodyValue }));
 
-    // Create-then-delete (NOT a single combined create+destroy call). JMAP content is
+    // What this edit is about to replace, captured BEFORE the recreate so the caller can
+    // detect an overwrite it didn't intend (#65). See ReplacedDraftInfo for why this is a
+    // fingerprint rather than the previous content.
+    const addressList = (addrs: any): string[] =>
+      (addrs || []).map((a: any) => a?.email).filter((e: any): e is string => typeof e === 'string' && e !== '');
+    const replacedTo = addressList(existingEmail.to);
+    const replacedCc = addressList(existingEmail.cc);
+    const replacedDraft: ReplacedDraftInfo = {
+      id: emailId,
+      ...(existingEmail.subject && { subject: existingEmail.subject }),
+      ...(replacedTo.length && { to: replacedTo }),
+      ...(replacedCc.length && { cc: replacedCc }),
+      ...(existingTextValue !== undefined && { textBodySize: existingTextValue.length }),
+      ...(existingHtmlValue !== undefined && { htmlBodySize: existingHtmlValue.length }),
+    };
+
+    // Create-then-dispose (NOT a single combined create+destroy call). JMAP content is
     // immutable — verified live 2026-06-24 that Fastmail SILENTLY NO-OPS an in-place
     // subject/body update (returns success but changes nothing), so a recreate is
     // mandatory. RFC 8620 §6.3 guarantees blob lifetime within a call but says NOTHING
     // about create/destroy atomicity: a server MAY apply the destroy even when the create
     // lands in notCreated, which would vanish the draft. So we create FIRST, confirm it
-    // succeeded, and only THEN destroy the old draft. Worst case is a harmless duplicate
+    // succeeded, and only THEN dispose of the old draft. Worst case is a harmless duplicate
     // (recoverable), never a vanished draft (unrecoverable).
     // WARNING: do NOT "optimize" this back into one Email/set call; that reintroduces the
     // data-loss window.
@@ -1543,28 +1585,62 @@ export class JmapClient {
       throw new Error('Draft update returned no email ID');
     }
 
-    // The new draft is valid → the edit has SUCCEEDED. Now remove the old copy. Any
-    // failure here (structured notDestroyed OR a thrown transport/method error) leaves a
-    // harmless duplicate holding the OLD pre-edit content — report it as an orphan
-    // warning, but do NOT throw (throwing would tell the caller the edit failed when it
-    // didn't).
+    // The new draft is valid → the edit has SUCCEEDED. Now dispose of the old copy by
+    // moving it to TRASH — never Email/set destroy (#65). An edit made from a stale copy
+    // of the draft (it was changed in the web UI in between, say) silently overwrites
+    // whatever the caller didn't know about, and a destroy made that unrecoverable: the
+    // old draft was gone from the account with only a support-side backup restore left.
+    // A Trash move makes the same mistake a one-step undo, and Trash's normal expiry
+    // bounds the clutter. Only mailboxIds is patched; keywords (including $draft) are
+    // left alone, matching delete_email — a trashed draft is still a draft, so restoring
+    // it is a move back to Drafts, and Trash expiry is by mailbox, not by keyword.
+    //
+    // Any failure here — no Trash mailbox, a structured notUpdated, or a thrown
+    // transport/method error — leaves a duplicate holding the OLD pre-edit content.
+    // Report it as an orphan warning with its reason, but do NOT throw: the edit itself
+    // succeeded, and throwing would tell the caller it failed. There is deliberately NO
+    // destroy fallback — destroying is the exact unrecoverable act this path exists to
+    // avoid, and a visible duplicate the caller can delete is strictly cheaper.
+    let trashedOldDraftId: string | undefined;
     let orphanedOldDraftId: string | undefined;
+    let orphanedOldDraftReason: string | undefined;
     try {
-      const destroyResponse = await this.makeRequest({
-        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-        methodCalls: [
-          ['Email/set', { accountId: session.accountId, destroy: [emailId] }, 'destroyDraft']
-        ]
-      });
-      const destroyResult = this.getMethodResult(destroyResponse, 0);
-      if (destroyResult.notDestroyed?.[emailId]) {
+      // EXACT role only (case-insensitive), the same rule delete_email uses: a custom
+      // folder merely NAMED like a trash folder must never become the destination.
+      const mailboxes = await this.getMailboxes();
+      const trashMailbox = this.findByExactRole(mailboxes, 'trash');
+      if (!trashMailbox) {
         orphanedOldDraftId = emailId;
+        orphanedOldDraftReason = 'this account has no mailbox with the trash role';
+      } else {
+        const trashResponse = await this.makeRequest({
+          using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+          methodCalls: [
+            ['Email/set', {
+              accountId: session.accountId,
+              update: { [emailId]: { mailboxIds: { [trashMailbox.id]: true } } },
+            }, 'trashOldDraft']
+          ]
+        });
+        const trashResult = this.getMethodResult(trashResponse, 0);
+        if (trashResult.notUpdated?.[emailId]) {
+          orphanedOldDraftId = emailId;
+          orphanedOldDraftReason = this.describeSetError(trashResult.notUpdated[emailId]);
+        } else {
+          trashedOldDraftId = emailId;
+        }
       }
-    } catch {
+    } catch (err) {
       orphanedOldDraftId = emailId;
+      orphanedOldDraftReason = err instanceof Error ? err.message : String(err);
     }
 
-    return { id: newEmailId, ...(orphanedOldDraftId && { orphanedOldDraftId }) };
+    return {
+      id: newEmailId,
+      replacedDraft,
+      ...(trashedOldDraftId && { trashedOldDraftId }),
+      ...(orphanedOldDraftId && { orphanedOldDraftId, orphanedOldDraftReason }),
+    };
   }
 
   async sendDraft(emailId: string): Promise<string> {
