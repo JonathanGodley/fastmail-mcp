@@ -128,6 +128,14 @@ Two constraints pin that placement:
   has no way to edit the original to fix it. Validating only what the caller wrote keeps
   every reject actionable.
 
+**`send_draft` is deliberately outside the gate.** It takes no body parameter, so a draft
+authored elsewhere that already carries an escaped-HTML or CDATA body can still be sent.
+That is a consciously accepted gap, for the same caller-input principle as above: the
+stored body is content this server didn't author, and rejecting it at send time would
+block mail the caller may not be able to rewrite (the existing empty-part reject still
+catches a body that derives to nothing). Drafts created or edited through this server's
+own tools have already passed the gate on write.
+
 ## The asymmetric edit coupling
 
 Because the text part is an auto-managed fallback of the HTML, `edit_draft`'s
