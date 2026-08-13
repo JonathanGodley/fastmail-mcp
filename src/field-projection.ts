@@ -54,6 +54,9 @@ const EMAIL_FIELD_MAP: Record<keyof SimplifiedEmail, true> = {
   bodyHtml: true,
   bodyHtmlSize: true,
   bodyTextSize: true,
+  quotedBytesStripped: true,
+  quotedStripSkipped: true,
+  bodyTextUnavailable: true,
   blobId: true,
   size: true,
   keywords: true,
@@ -160,7 +163,16 @@ export function wantsHtmlBody(fields: ReadonlySet<string> | undefined): boolean 
  * complete but silently isn't, which is precisely the "never silently drop a promised
  * field" rule. A caller that projects neither location field is promised no location,
  * so nothing is owed and nothing rides along.
+ *
+ * The bodyText signals ride along the same way: `quotedBytesStripped` /
+ * `quotedStripSkipped` (#73) and `bodyTextUnavailable` describe what happened TO the
+ * bodyText being returned — a projected bodyText with its strip signal dropped would
+ * read as a verbatim body when it isn't. They are attached by key presence, not
+ * truthiness: quotedBytesStripped 0 is a meaningful answer ("no marker matched, the
+ * body is whole") and is deliberately emitted despite the omit-empties norm.
  */
+const BODY_TEXT_SIGNALS = ['quotedBytesStripped', 'quotedStripSkipped', 'bodyTextUnavailable'] as const;
+
 export function projectEmail(
   email: SimplifiedEmail,
   fields: ReadonlySet<string> | undefined,
@@ -179,6 +191,14 @@ export function projectEmail(
     email.unresolvedMailboxIds?.length
   ) {
     projected.unresolvedMailboxIds = email.unresolvedMailboxIds;
+  }
+
+  if (fields.has('bodyText')) {
+    for (const signal of BODY_TEXT_SIGNALS) {
+      if (!fields.has(signal) && Object.prototype.hasOwnProperty.call(source, signal)) {
+        projected[signal] = source[signal];
+      }
+    }
   }
 
   return projected as Partial<SimplifiedEmail>;

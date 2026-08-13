@@ -268,6 +268,43 @@ describe('projectEmail', () => {
     const projected = projectEmail(simplified, new Set(['mailboxes']));
     assert.deepEqual(projected, { mailboxes: ['Inbox'] });
   });
+
+  // The bodyText signals (#73) ride along the same way the location degradation does:
+  // a projected bodyText whose strip signal was projected away would read as a
+  // verbatim body when it is not.
+  it('emits quotedBytesStripped alongside a projected bodyText when stripping removed bytes', () => {
+    const quoted = rawEmail({
+      textBody: [{ partId: 'text1', type: 'text/plain' }],
+      bodyValues: { text1: { value: 'New words\n\nOn Jan 1, 2026, Alice wrote:\n> old words\n> more old words' } },
+    });
+    const stripped = simplifyEmail(quoted, { stripQuoted: true });
+    const projected = projectEmail(stripped, new Set(['bodyText'])) as Record<string, any>;
+    assert.equal(projected.bodyText, 'New words');
+    assert.ok(projected.quotedBytesStripped > 0);
+  });
+
+  it('emits quotedBytesStripped 0 alongside a projected bodyText — presence, not truthiness', () => {
+    // 0 is the answer "no marker matched, the body is whole"; dropping it would leave
+    // the caller unable to tell a verbatim body from an unstripped one.
+    const stripped = simplifyEmail(rawEmail(), { stripQuoted: true });
+    const projected = projectEmail(stripped, new Set(['bodyText'])) as Record<string, any>;
+    assert.equal(projected.bodyText, 'Numbers for the quarter');
+    assert.equal(projected.quotedBytesStripped, 0);
+  });
+
+  it('emits quotedStripSkipped alongside a projected bodyText when there was nothing to strip', () => {
+    const htmlOnly = rawEmail({ textBody: [], bodyValues: { html1: { value: '<p>Numbers</p>' } } });
+    const stripped = simplifyEmail(htmlOnly, { stripQuoted: true });
+    const projected = projectEmail(stripped, new Set(['bodyText'])) as Record<string, any>;
+    assert.equal(typeof projected.quotedStripSkipped, 'string');
+  });
+
+  it('does not emit the strip signals when bodyText was not projected', () => {
+    const stripped = simplifyEmail(rawEmail(), { stripQuoted: true });
+    const projected = projectEmail(stripped, new Set(['id', 'subject']));
+    assert.equal('quotedBytesStripped' in projected, false);
+    assert.equal('quotedStripSkipped' in projected, false);
+  });
 });
 
 // ---------- the get_email read path (#69) ----------
