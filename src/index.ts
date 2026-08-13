@@ -14,6 +14,7 @@ import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
 import { composeSend, composeDraft } from './compose-handler.js';
@@ -244,6 +245,29 @@ const PREVIEW_SIZE_DESC =
 const THREAD_SPLINTER_DESC =
   'THREADING HAZARD: Fastmail groups a message into an existing conversation by SUBJECT as well as by these headers. A draft that carries them under a subject that does not match the thread\'s base subject is given a NEW threadId, and from then on later drafts replying to that same original message are grouped onto that splinter thread as well — including ones created afterwards with the correct "Re:" subject and full reference chain. Deleting the offending drafts does not undo it. The effect is display-only (the headers are correct, so recipients thread normally and sending resolves it), but the drafts stay detached from the conversation in the Fastmail UI. To reply on an existing thread prefer reply_email, which builds the headers and the matching subject for you and takes a deliberate `subject` override.';
 
+// The `fields` projection, shared verbatim by every read tool that offers it
+// (get_email, list_emails, search_emails, get_recent_emails) so the four can't
+// drift. One sentence goes in the tool description (why you would reach for it),
+// the full contract in the parameter description. (#69, #79)
+const FIELDS_TOOL_DESC =
+  'Use `fields` to return ONLY the fields you need (e.g. fields:["id","subject","from","date","threadId"]) when the default shape would be too large for one response.';
+
+const FIELDS_PARAM_DESC =
+  'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId) is a valid name on list_emails/search_emails/get_recent_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden.';
+
+// The `fields` parameter, declared identically on every read tool that offers it.
+// The string alternative is advertised because lenient clients stringify arrays
+// (coerceStringArray accepts a JSON or comma-separated string). (#69, #79)
+function fieldsSchemaProperty() {
+  return {
+    oneOf: [
+      { type: 'array', items: { type: 'string' } },
+      { type: 'string' },
+    ],
+    description: FIELDS_PARAM_DESC,
+  };
+}
+
 // Single source of truth for the tool catalog. Hoisted to module scope so the
 // CallTool handler can derive each tool's declared parameter set for the
 // unknown-parameter guard (#11) — no drift from what clients see via ListTools.
@@ -267,7 +291,7 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC,
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -296,6 +320,7 @@ const TOOLS = [
               type: 'boolean',
               description: INCLUDE_SPAM_DESC,
             },
+            fields: fieldsSchemaProperty(),
             raw: {
               type: 'boolean',
               description: 'Return original JMAP response instead of simplified format',
@@ -305,7 +330,7 @@ const TOOLS = [
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC,
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -317,6 +342,7 @@ const TOOLS = [
               type: 'boolean',
               description: 'Include HTML body in response. WARNING: can produce very large responses (50K+ chars) for marketing/rich emails. Only use when HTML content is specifically needed.',
             },
+            fields: fieldsSchemaProperty(),
             raw: {
               type: 'boolean',
               description: 'Return original JMAP response instead of simplified format',
@@ -657,7 +683,7 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100.',
+        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -730,6 +756,7 @@ const TOOLS = [
               type: 'boolean',
               description: INCLUDE_SPAM_DESC,
             },
+            fields: fieldsSchemaProperty(),
             raw: {
               type: 'boolean',
               description: 'Return original JMAP response instead of simplified format',
@@ -990,7 +1017,7 @@ const TOOLS = [
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC,
+        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1008,6 +1035,7 @@ const TOOLS = [
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
             },
+            fields: fieldsSchemaProperty(),
             raw: {
               type: 'boolean',
               description: 'Return original JMAP response instead of simplified format',
@@ -1390,6 +1418,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_emails': {
         const { mailbox, limit, ascending, raw } = args as any;
+        // Validated before the query so a typo'd field name costs no round trip.
+        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
         const result = await client.getEmails({
           mailbox,
@@ -1401,7 +1431,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         // Append the exclusion note (if any) to the formatter's string — same out-of-band
         // discipline on both raw + simplified; the JSON block stays parseable.
-        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result);
+        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
             {
@@ -1417,12 +1447,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
+        // Validated before the fetch so a typo'd field name costs no round trip.
+        // Selecting bodyHtml implies verbose's includeHtml: without that, projecting a
+        // field the simplifier never emitted would return {} — the trap the parameter
+        // exists to avoid (#69).
+        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
         const email = await client.getEmailById(emailId);
+        const simplified = simplifyEmail(email, { includeHtml: !!verbose || wantsHtmlBody(fields) });
         return {
           content: [
             {
               type: 'text',
-              text: raw ? JSON.stringify(email, null, 2) : JSON.stringify(simplifyEmail(email, { includeHtml: !!verbose }), null, 2),
+              text: raw ? JSON.stringify(email, null, 2) : JSON.stringify(projectEmail(simplified, fields), null, 2),
             },
           ],
         };
@@ -1714,13 +1750,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_recent_emails': {
         const { limit = 10, mailbox = 'inbox', ascending, raw } = args as any;
+        // Validated before the query so a typo'd field name costs no round trip.
+        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
         const client = initializeClient();
         const result = await client.getRecentEmails(limit, mailbox, !!ascending);
         return {
           content: [
             {
               type: 'text',
-              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result),
+              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result, { fields }),
             },
           ],
         };
@@ -1903,6 +1941,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_emails': {
         const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit, ascending, raw } = args as any;
+        // Validated before the query so a typo'd field name costs no round trip.
+        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
         const client = initializeClient();
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
         const result = await client.searchEmails({
@@ -1915,7 +1955,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           includeTrash: coerceBool((args as any).includeTrash) ?? false,
           includeSpam: coerceBool((args as any).includeSpam) ?? false,
         });
-        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result);
+        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
             {

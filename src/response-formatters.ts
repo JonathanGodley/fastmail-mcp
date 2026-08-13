@@ -1,4 +1,5 @@
 import { simplifyEmail } from './email-formatter.js';
+import { projectEmail } from './field-projection.js';
 import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 
 export function formatQueryResult(result: QueryResult): string {
@@ -11,9 +12,15 @@ export function formatQueryResult(result: QueryResult): string {
   return `${summary}\n${JSON.stringify(items, null, 2)}`;
 }
 
-export function formatEmailQueryResult(result: QueryResult): string {
+// The one seam every list/search read tool renders through (list_emails,
+// search_emails, get_recent_emails), so `fields` projection lands on all three at
+// once and cannot drift between them. The summary line and the trailing exclusion
+// note are NOT fields and are never projected away — they are out-of-band signals
+// about the query, and a caller silently losing "N results were withheld" while
+// asking for a narrower shape would be a scope lie, not a smaller response.
+export function formatEmailQueryResult(result: QueryResult, options?: { fields?: ReadonlySet<string> }): string {
   const { items, total } = result;
-  const simplified = items.map(e => simplifyEmail(e));
+  const simplified = items.map(e => projectEmail(simplifyEmail(e), options?.fields));
   const summary = total != null && total > items.length
     ? `Showing ${items.length} of ${total} results.`
     : total != null

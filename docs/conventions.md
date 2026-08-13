@@ -139,6 +139,62 @@ leading-underscore name, and read it in the simplifier via `addIf` (so it is omi
 absent). Do not thread it through function signatures, and do not make it enumerable — it
 would leak into raw output.
 
+## Output width is the caller's to narrow (`fields`)
+
+`verbose` and `raw` both ask for *more*. `fields` is the third axis and the only one that
+asks for **less**: an explicit allowlist of simplified field names, honoured exactly.
+A named preset (`compact: true`, dropping the threading plumbing and preview) was
+considered and **declined**: it would be a second mechanism to document and a second thing
+to re-decide every time the shape gains a field, and it guesses at what the caller wanted,
+where an allowlist is told. Callers here are overwhelmingly models that know exactly which
+fields they are about to read, so being told costs a few tokens and removes the guess.
+It exists because response size was otherwise a property of the mailbox rather than of the
+call — a 66-message sweep measured 84KB (~47% RFC threading plumbing, ~23% preview,
+18% the fields the caller wanted) and an editor-inflated draft body pushed `get_email`
+past the same wall (#79, #69). `limit` is not a substitute: per-message size varies by
+more than an order of magnitude, so no limit value is both safe and useful.
+
+Four properties define the convention, and a fifth tool adding `fields` should keep all of
+them:
+
+- **One seam, post-simplification.** `parseEmailFields` / `projectEmail`
+  (`src/field-projection.ts`) run on the *simplified* object, so `raw: true` stays pure
+  JMAP and untouched. The list/search tools inherit it through the single
+  `formatEmailQueryResult` seam, which is why `list_emails`, `search_emails` and
+  `get_recent_emails` cannot drift apart.
+- **One vocabulary, checked by the compiler.** The valid names are the keys of
+  `SimplifiedEmail`, held in a `Record<keyof SimplifiedEmail, true>` map — a field added to
+  the shape without a line there is a compile error, so a new field can never become
+  permanently unselectable. It is deliberately NOT per-tool, since a per-tool allowlist
+  would be a second thing to keep in sync. The consequence is that a name can be valid on a
+  tool that can never populate it: the list/search tools fetch `EMAIL_PROPERTIES_COMPACT`,
+  so every simplified field derived from the `EMAIL_PROPERTIES_VERBOSE` additions (today
+  `bodyText`, `bodyHtml`, `bodyHtmlSize`, `attachments`, `forwardedMessageId`) comes back
+  absent there. That is documented in the README rather than rejected — it is not a typo,
+  and rejecting it would make the vocabulary tool-dependent. State the rule (a field needing
+  the full-message fetch is never populated on a list result) rather than only the list, so
+  a field added to the verbose tier later inherits the same status without a doc rewrite.
+- **Every ambiguity rejects, because every quiet fallback returns the FULL response** —
+  the exact refusal the parameter exists to avoid. Unknown name, empty array, and
+  `fields` together with `raw: true` are all `InvalidInputError`s naming the fix. Silently
+  letting `raw` win would hand the largest response this server produces to the caller who
+  asked for the smallest, and a silently-ignored typo would read as "that field is always
+  empty" (the same reasoning as the strict-parameter-keys rule above).
+- **Subtractive only, with one companion rule.** Projection cannot invent a field or change
+  a value's meaning, so caller-directed omission is not the "silently dropped promised
+  field" failure — the caller asked. The exception is `unresolvedMailboxIds`, which is not
+  an independent field but the degradation half of `mailboxes`/`roles`: projecting either
+  location field emits it when resolution degraded, even unnamed. Without that, a short
+  `mailboxes` array would look complete when it isn't — the #53 bug through a new door.
+
+Out-of-band signals are not fields and are never projected away: the result-count summary
+and the Trash/Spam exclusion note describe the *query*, not a message.
+
+Projection is an **output** transform. It deliberately does not narrow what is fetched from
+the server — the JMAP property sets are held identical across the read methods on purpose
+(see the JMAP-property-consistency rule in `CLAUDE.md`), and making the fetch shape depend
+on a caller's projection would trade that invariant for a saving the caller never sees.
+
 ## `hasAttachment` is a server heuristic — passed through by design
 
 `hasAttachment` in simplified output is the server's value, untouched. This is a

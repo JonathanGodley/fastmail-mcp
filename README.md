@@ -218,23 +218,25 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 ## Response Simplification
 
-All data-returning tools simplify responses by default to reduce token usage. Two optional parameters control how much data is returned:
+All data-returning tools simplify responses by default to reduce token usage. Three optional parameters control how much data is returned:
 
 - **Default** — a curated, cleaned response. Addresses are strings instead of objects, boolean flags replace keyword maps, null/empty fields are stripped, and only the most useful fields are included.
 - **`verbose: true`** — all fields, still in the simplified shape. Use this when you need data the default omits (e.g. HTML body, mailbox permissions, contact addresses) without dealing with raw JMAP structures.
 - **`raw: true`** — the original JMAP response with no transformation. Use this for debugging or when you need exact JMAP field names and structures.
+- **`fields: [...]`** — the opposite direction: return *only* the named fields. See [Field projection](#field-projection-fields).
 
 ### What each tool returns
 
-| Tool | `verbose` | `raw` |
-|------|-----------|-------|
-| `get_email` | ✅ | ✅ |
-| `list_emails`, `search_emails`, `get_recent_emails`, `get_thread` | — | ✅ |
-| `list_mailboxes` | ✅ | ✅ |
-| `list_identities` | ✅ | ✅ |
-| `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ |
+| Tool | `verbose` | `raw` | `fields` |
+|------|-----------|-------|----------|
+| `get_email` | ✅ | ✅ | ✅ |
+| `list_emails`, `search_emails`, `get_recent_emails` | — | ✅ | ✅ |
+| `get_thread` | — | ✅ | — |
+| `list_mailboxes` | ✅ | ✅ | — |
+| `list_identities` | ✅ | ✅ | — |
+| `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ | — |
 
-Email list/search tools don't support `verbose` — they always return metadata and preview. Use `get_email` for full email content. `preview` is a truncated snippet (~256 chars max), not the full body; these tools also return `bodyTextSize` (the full text-body size in bytes) so you can tell a short snippet apart from a long message — when `bodyTextSize` is much larger than the preview, fetch `get_email` before concluding content is absent. `size` is the whole-message size (including attachments and inline images), so it is not a body-length proxy.
+Email list/search tools don't support `verbose` — they always return metadata and preview. Use `get_email` for full email content. `preview` is a truncated snippet (~256 chars max), not the full body; these tools also return `bodyTextSize` (the full text-body size in bytes) so you can tell a short snippet apart from a long message — when `bodyTextSize` is much larger than the preview, fetch `get_email` before concluding content is absent. `size` is the whole-message size (including attachments and inline images), so it is not a body-length proxy. They do support `fields`, which is how you make a wide listing fit in one response.
 
 ### Parameter validation
 
@@ -268,6 +270,34 @@ Error codes follow the same recoverability logic: a failure you can fix by chang
 - `listUnsubscribe` mapped from JMAP's `header:List-Unsubscribe:asURLs`
 - `date` rendered in local time as ISO-8601 with a numeric UTC offset (e.g. `2026-03-02T08:00:00+10:00`), not UTC `Z`. The zone is the server host's by default, or `FASTMAIL_TIMEZONE` if set. Each email carries the offset for its own instant, so DST is handled per-message. Use `raw: true` to get the canonical JMAP UTC `receivedAt` instead.
 - Empty and null fields omitted
+
+### Field projection (`fields`)
+
+`verbose`/`raw` ask for *more*. `fields` asks for **less**: pass an array of simplified field names and the response carries only those.
+
+```jsonc
+// A headers-only sweep of a two-week window, in one response instead of four
+search_emails { "after": "2026-07-01", "limit": 100,
+                "fields": ["id", "subject", "from", "date", "threadId"] }
+
+// A large HTML draft's body alone - no metadata, no plain-text copy
+get_email { "emailId": "M123", "fields": ["bodyHtml"] }
+```
+
+Available on `get_email`, `list_emails`, `search_emails` and `get_recent_emails`. Why it exists: response size is otherwise decided by what happens to be in the mailbox rather than by anything you control — a 66-message sweep measured 84KB, of which thread `references`/`messageId`/`inReplyTo` were ~47% and `preview` another ~23%, while the five fields the caller actually wanted were 18% ([#79](https://github.com/JonathanGodley/fastmail-mcp/issues/79)); separately, an editor-inflated draft's HTML body pushed `get_email` past the same wall ([#69](https://github.com/JonathanGodley/fastmail-mcp/issues/69)). `limit` is not a substitute — per-message size varies by more than an order of magnitude, so no limit is both safe and useful.
+
+The rules:
+
+- **Names are the simplified field names, exactly** (see [Email fields](#email-fields) above), camelCase and case-sensitive. An unknown name is **rejected** with the full valid list rather than silently returning nothing — a typo must not read as "that field is always empty". One bad name rejects the whole call, so every typo is fixable in a single retry.
+- **Omit the parameter** for the default shape. An **empty array is rejected**: "give me nothing" is never the intent, and treating it as "no projection" would hand back the full response the parameter exists to shrink.
+- **`fields` cannot be combined with `raw: true`.** `raw` returns untransformed JMAP, whose field names differ (`receivedAt` not `date`, `mailboxIds` not `mailboxes`). Letting `raw` quietly win would return the largest response this server produces to a caller who asked for the smallest.
+- **A field a message doesn't have is simply absent**, so a narrow projection can legitimately come back as `{}` (e.g. `fields: ["bodyText"]` on an HTML-only message — ask for `bodyHtml` too if either will do). Nothing is invented and no value's meaning changes; projection only subtracts.
+- **`fields: ["bodyHtml"]` on `get_email` implies `verbose`** — you don't need to pass both. (With the HTML body included, the `bodyHtmlSize` hint is not emitted; it only appears when the body itself is omitted.)
+- **Some names are valid everywhere but only ever populated by `get_email`.** The list/search tools fetch a narrower set of message properties, and the general rule is that **any field needing the full-message fetch is accepted as a name but comes back absent on a list result** — it is not rejected, because it isn't a typo. Today that is `bodyText`, `bodyHtml`, `bodyHtmlSize`, `attachments` and `forwardedMessageId`. The list tools carry populated substitutes for the common needs: `hasAttachment` for attachment presence, `isForwarded` for forward-ness, and `bodyTextSize` for how much body there is. For the content itself, fetch `get_email`.
+- **`unresolvedMailboxIds` rides along with `mailboxes`/`roles`.** If you project either location field and a mailbox id couldn't be resolved, `unresolvedMailboxIds` is included even if you didn't name it — otherwise a short `mailboxes` array would look complete when it isn't. Project neither and nothing rides along.
+- **The summary line and the Trash/Spam exclusion note are not fields** and are never projected away. They describe the query, not the message.
+
+Projection is applied to output only; it does not change what is fetched from the server.
 
 ### Mailbox fields
 
@@ -316,9 +346,9 @@ The signature fields are the identity's configured sign-off, the same text the F
 - **list_mailboxes**: Get all mailboxes in your account
   - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **list_emails**: List recent emails across all mailboxes (or one, via `mailbox`). **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam` to include them); drafts are included (set `excludeDrafts` to omit them). When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing in Trash/Spam matched, and you need not re-search to check.
-  - Parameters: `mailbox` (optional — id, role, or name; scoping to a mailbox ignores the default exclusion), `limit` (default: 20), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `raw` (optional, return original JMAP response)
-- **get_email**: Get a specific email by ID. Returns plain text body with HTML omitted (bodyHtmlSize hint provided). Only use `verbose` if you specifically need the HTML body — it can be very large for marketing emails.
-  - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `raw` (optional, return original JMAP response)
+  - Parameters: `mailbox` (optional — id, role, or name; scoping to a mailbox ignores the default exclusion), `limit` (default: 20), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
+- **get_email**: Get a specific email by ID. Returns plain text body with HTML omitted (bodyHtmlSize hint provided). Only use `verbose` if you specifically need the HTML body — it can be very large for marketing emails. To read a large HTML body without the rest of the message alongside it, use `fields: ["bodyHtml"]`.
+  - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
 - **send_email**: Send an email (supports threading via optional `inReplyTo` and `references` headers)
   - Parameters: `to` (required array), `cc` (optional array), `bcc` (optional array), `from` (optional), `mailbox` (optional — id/role/name to save into, defaults to Drafts), `subject` (required), `textBody` (optional), `htmlBody` (optional), `inReplyTo` (optional array), `references` (optional array), `replyTo` (optional array), `attachments` (optional array — see [Sending attachments](#sending-attachments))
 - **reply_email**: Reply to an existing email with proper threading headers (automatically builds In-Reply-To and References). Saves a draft by default; set `send=true` to transmit immediately. The original is **quoted by default** (attributed, top-posted, matching the web client with a portable quote-bar style); set `quoteOriginal=false` to omit it. Quoted HTML is reproduced **sanitised** (script/style/event handlers stripped; formatting and real `http(s)` images kept; inline `cid:` images omitted — see [#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)) and is re-sent under your From address. On `send=true` the original message is marked answered and read (best-effort; the success message reports it when the mark succeeds). The subject defaults to `Re: <original subject>` (no double-prefixing); pass `subject` to override it (see [Replying with a different subject](#replying-with-a-different-subject)). (This tool returns a status string, not email data, so `raw`/simplification do not apply.)
@@ -340,10 +370,10 @@ The signature fields are the identity's configured sign-off, the same text the F
 - **send_draft**: Send an existing draft email. The draft must have recipients and a from address. Moves the email to the Sent folder. An **HTML-only draft with real content** (e.g. an image-only message) sends as-is — image-only/HTML-only mail is valid. Only a **genuinely empty body part** (e.g. a blank `htmlBody` alongside real text, which can happen for drafts created in other clients) is **rejected**: an empty `text/html` part renders blank and shadows a real `text/plain`, so the recipient would see nothing. Edit the draft to supply or clear that body first. (Drafts created by this server never carry an empty part; every send/draft path drops empty bodies on write.)
   - Parameters: `emailId` (required)
 - **search_emails**: Email search. Free-text `query` matches subject/body/participants (plain words, **not** operator syntax — `from:alice@example.com` is matched literally; use the dedicated `from`/`to`/`cc`/`bcc`/`subject` params instead). All filters combine with AND. **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam`); drafts are included. `query` is optional — with no query it returns recent mail matching only the structural filters. When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing in Trash/Spam matched, and you need not re-search to check.
-  - Parameters: `query` (optional), `from` (optional), `to` (optional), `cc` (optional), `bcc` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailbox` (optional — id/role/name; scoping ignores the default exclusion), `after` (optional date or datetime), `before` (optional date or datetime), `limit` (default: 20, max: 100), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `raw` (optional, return original JMAP response)
+  - Parameters: `query` (optional), `from` (optional), `to` (optional), `cc` (optional), `bcc` (optional), `subject` (optional), `hasAttachment` (optional), `isUnread` (optional), `isPinned` (optional), `mailbox` (optional — id/role/name; scoping ignores the default exclusion), `after` (optional date or datetime), `before` (optional date or datetime), `limit` (default: 20, max: 100), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `fields` (optional array — return only these fields; the way to keep a many-message sweep inside one response, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
   - **Date bounds (`after` / `before`).** Both accept a plain date (`2026-07-20`) or a full datetime (`2026-07-20T14:30:00Z`, or with an offset such as `2026-07-20T14:30:00+01:00`); a datetime with no zone is read as the server host's local time. A date-only value means **00:00:00 UTC on that date**, so `after:"2026-07-20"` includes all of July 20 while `before:"2026-07-20"` (the bound is exclusive) excludes it — pass `before:"2026-07-21"` to search up to and including July 20. Only those two shapes are accepted: an unpadded or slash-separated date (`2026-7-20`, `2026/07/20`), free text (`20 July 2026`), a partial date (`2026-07`), a day that doesn't exist in its month, and an empty string are all **rejected** with a message naming the parameter — omit the parameter to search without that bound. The strictness is deliberate: the loose forms are read as host-local midnight rather than UTC, which would silently move the search window. Before this, any of these reached the mail server as a bare `invalidArguments` that named no argument ([#70](https://github.com/JonathanGodley/fastmail-mcp/issues/70)).
 - **get_recent_emails**: Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion) use `list_emails`.
-  - Parameters: `limit` (default: 10, max: 50), `mailbox` (default: 'inbox' — id/role/name; e.g. `mailbox:"trash"` to read Trash directly), `ascending` (optional, oldest first), `raw` (optional, return original JMAP response)
+  - Parameters: `limit` (default: 10, max: 50), `mailbox` (default: 'inbox' — id/role/name; e.g. `mailbox:"trash"` to read Trash directly), `ascending` (optional, oldest first), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
 - **mark_email_read**: Mark an email as read or unread
   - Parameters: `emailId` (required), `read` (default: true)
 - **pin_email**: Pin or unpin an email
@@ -513,6 +543,7 @@ src/
 ├── jmap-client.ts          # JMAP client wrapper
 ├── email-formatter.ts      # Simplified email format for AI consumption
 ├── response-formatters.ts  # Mailbox/identity/contact simplifiers and query formatters
+├── field-projection.ts     # `fields` output projection for the email read tools
 ├── contacts-calendar.ts    # Contacts and calendar extensions
 └── caldav-client.ts        # CalDAV calendar client (fallback)
 ```

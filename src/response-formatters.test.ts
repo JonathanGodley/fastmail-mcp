@@ -284,6 +284,57 @@ describe('formatEmailQueryResult', () => {
     const result = formatEmailQueryResult({ items: [makeEmail('e1'), makeEmail('e2')], total: 50 });
     assert.ok(result.startsWith('Showing 2 of 50 results.'));
   });
+
+  // The `fields` projection reaches list_emails, search_emails and get_recent_emails
+  // through this one formatter, so these cover all three tools' list shape (#79).
+  describe('fields projection', () => {
+    const threaded = () => ({
+      ...makeEmail('e1'),
+      threadId: 't1',
+      messageId: ['<m1@example.com>'],
+      references: ['<r1@example.com>', '<r2@example.com>'],
+      blobId: 'blob-1',
+      to: [{ email: 'bob@example.com' }],
+    });
+
+    it('projects every item down to the selected fields', () => {
+      const result = formatEmailQueryResult(
+        { items: [threaded(), { ...threaded(), id: 'e2' }], total: 2 },
+        { fields: new Set(['id', 'subject', 'date', 'threadId', 'to']) },
+      );
+      const items = JSON.parse(result.slice(result.indexOf('\n') + 1));
+      assert.equal(items.length, 2);
+      for (const item of items) {
+        assert.deepEqual(Object.keys(item).sort(), ['date', 'id', 'subject', 'threadId', 'to']);
+      }
+    });
+
+    it('drops the threading plumbing and preview that dominate a wide listing', () => {
+      const result = formatEmailQueryResult(
+        { items: [threaded()], total: 1 },
+        { fields: new Set(['id', 'subject']) },
+      );
+      assert.ok(!result.includes('references'));
+      assert.ok(!result.includes('messageId'));
+      assert.ok(!result.includes('blobId'));
+      assert.ok(!result.includes('preview'));
+      assert.ok(!result.includes('bodyHtmlSize'));
+    });
+
+    it('keeps the summary line, which is a query signal rather than a field', () => {
+      const result = formatEmailQueryResult(
+        { items: [threaded()], total: 66 },
+        { fields: new Set(['id']) },
+      );
+      assert.ok(result.startsWith('Showing 1 of 66 results.'));
+    });
+
+    it('returns the default shape when no projection is passed', () => {
+      const result = formatEmailQueryResult({ items: [threaded()], total: 1 }, {});
+      assert.ok(result.includes('references'));
+      assert.ok(result.includes('preview'));
+    });
+  });
 });
 
 // ---------- formatContactQueryResult ----------
