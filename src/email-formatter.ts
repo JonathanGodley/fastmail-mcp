@@ -1,3 +1,8 @@
+import { stripQuotedText } from './quote-strip.js';
+
+// Reason string for `quotedStripSkipped`. Fixed wording so a client can match on it.
+export const NO_PLAIN_TEXT_BODY = 'no plain-text body to strip';
+
 export interface SimplifiedEmail {
   id: string;
   subject: string;
@@ -32,6 +37,19 @@ export interface SimplifiedEmail {
   bodyHtml?: string;
   bodyHtmlSize?: number;
   bodyTextSize?: number;
+  // Quote-stripping signals (#73), emitted ONLY when the caller asked for stripQuoted.
+  // Exactly one of the two appears, and neither is ever omitted for being "empty" — the
+  // caller has to be able to tell "quote removed" from "nothing recognised" from "there
+  // was no text body to strip":
+  //   quotedBytesStripped: 0 -> the body is verbatim, no marker matched.
+  //   quotedBytesStripped: N -> N UTF-8 bytes of quoted history were removed.
+  //   quotedStripSkipped     -> stripping did not run; the string says why.
+  quotedBytesStripped?: number;
+  quotedStripSkipped?: string;
+  // Set by get_thread's includeBodies path for a message that has no plain-text body to
+  // return (an HTML-only message; thread reads deliberately never carry HTML). Never
+  // present without includeBodies.
+  bodyTextUnavailable?: true;
   blobId?: string;
   size?: number;
   keywords?: Record<string, boolean>;
@@ -46,6 +64,10 @@ export interface SimplifiedEmail {
 
 export interface SimplifyOptions {
   includeHtml?: boolean;
+  // Remove recognised quoted correspondence from `bodyText` and report how much went
+  // (#73). Opt-in per call; the default output is always verbatim. Applies to the plain
+  // text body ONLY — a `bodyHtml` returned alongside it (verbose) is untouched.
+  stripQuoted?: boolean;
   // IANA timezone name (e.g. 'America/New_York') to render `date` in. Takes
   // precedence over the module default set by setDefaultTimezone(); falls back
   // to the host zone when neither is set.
@@ -306,6 +328,22 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
       0
     );
     if (textBytes > 0) addIf(result, 'bodyTextSize', textBytes);
+  }
+
+  // Quote stripping (#73), opt-in. Runs on the extracted plain-text body only: HTML
+  // quoting has no reliable text-level boundary, so a `bodyHtml` emitted above (verbose,
+  // or the html-only fallback) is left verbatim and is NOT counted here. The signal is
+  // emitted unconditionally — including the 0 that says "no marker matched, this body is
+  // whole" — because a caller who asked to strip must be able to tell that apart from a
+  // successful strip, and from an html-only message where there was nothing to strip.
+  if (options?.stripQuoted) {
+    if (typeof bodyText === 'string') {
+      const { text, quotedBytesStripped } = stripQuotedText(bodyText);
+      result.bodyText = text;
+      result.quotedBytesStripped = quotedBytesStripped;
+    } else {
+      result.quotedStripSkipped = NO_PLAIN_TEXT_BODY;
+    }
   }
 
   const attachments = (raw.attachments ?? []).map((a: any) => {

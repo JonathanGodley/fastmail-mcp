@@ -19,6 +19,8 @@ import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
 import { composeSend, composeDraft } from './compose-handler.js';
 import { assertBodyInputs } from './body-format.js';
+import { assertStripQuotedNotRaw } from './quote-strip.js';
+import { readThread } from './thread-handler.js';
 
 const server = new Server(
   {
@@ -268,6 +270,15 @@ function fieldsSchemaProperty() {
   };
 }
 
+// Shared by get_email and get_thread so the two can't drift on what stripping does,
+// what it does NOT touch, and how to read the signal it returns (#73).
+const STRIP_QUOTED_DESC =
+  'Remove quoted reply history from the plain-text body, so a long thread is not re-read at every quote depth. Opt-in; the default output is verbatim. ' +
+  'Detection is deliberately conservative and covers the conventional markers only: leading ">" quote runs (including nested ">>"), an "On <date>, <someone> wrote:" attribution directly above such a run, an Outlook From:/Sent:/To:/Subject: header block, and "-----Original Message-----". An unrecognised shape is returned UNCHANGED rather than guessed at. ' +
+  'Read the result from the signals: `quotedBytesStripped` is how many bytes went, and 0 means no marker matched and the body is whole (do not re-fetch to check); `quotedStripSkipped` instead means there was no plain-text body to strip. ' +
+  'Applies to `bodyText` only — a `bodyHtml` returned alongside it is NOT stripped. Cannot be combined with raw (raw is unmodified JMAP). ' +
+  'On a FORWARDED message the forwarded content sits below the same "-----Original Message-----" marker and is therefore stripped too, leaving the covering note; re-read without the flag if `quotedBytesStripped` looks wrong for what you expected.';
+
 // Single source of truth for the tool catalog. Hoisted to module scope so the
 // CallTool handler can derive each tool's declared parameter set for the
 // unknown-parameter guard (#11) — no drift from what clients see via ListTools.
@@ -330,7 +341,7 @@ const TOOLS = [
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -343,6 +354,10 @@ const TOOLS = [
               description: 'Include HTML body in response. WARNING: can produce very large responses (50K+ chars) for marketing/rich emails. Only use when HTML content is specifically needed.',
             },
             fields: fieldsSchemaProperty(),
+            stripQuoted: {
+              type: 'boolean',
+              description: STRIP_QUOTED_DESC,
+            },
             raw: {
               type: 'boolean',
               description: 'Return original JMAP response instead of simplified format',
@@ -1189,7 +1204,7 @@ const TOOLS = [
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them.',
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1200,6 +1215,14 @@ const TOOLS = [
             includeDrafts: {
               type: 'boolean',
               description: 'Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.',
+            },
+            includeBodies: {
+              type: 'boolean',
+              description: 'Return each message\'s plain-text body (bodyText) alongside its metadata, turning an N-message conversation read into one call. HTML bodies are never returned here (that is where the size risk lives) — a message with no plain-text part is flagged bodyTextUnavailable:true, fetch that one with get_email verbose=true. Hidden drafts are excluded before bodies are read, so an in-progress reply never lands in a transcription. The combined bodies are capped at 100000 bytes: over that the call fails with a message naming the largest messages and telling you to add stripQuoted=true or fetch them individually, rather than silently truncating a body.',
+            },
+            stripQuoted: {
+              type: 'boolean',
+              description: 'Requires includeBodies. Strips quoted history from every returned body, so the response is each message\'s new text only — the shape most read-a-conversation tasks want. ' + STRIP_QUOTED_DESC,
             },
             raw: {
               type: 'boolean',
@@ -1443,7 +1466,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_email': {
-        const { emailId, verbose, raw } = args as any;
+        const { emailId, verbose, raw, stripQuoted } = args as any;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -1452,8 +1475,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // field the simplifier never emitted would return {} — the trap the parameter
         // exists to avoid (#69).
         const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        // Rejected before the fetch: raw is unmodified JMAP, so honouring stripQuoted
+        // there would be impossible and ignoring it would be silent (#73).
+        const strip = coerceBool(stripQuoted) ?? false;
+        assertStripQuotedNotRaw(strip, !!raw);
         const email = await client.getEmailById(emailId);
-        const simplified = simplifyEmail(email, { includeHtml: !!verbose || wantsHtmlBody(fields) });
+        const simplified = simplifyEmail(email, { includeHtml: !!verbose || wantsHtmlBody(fields), stripQuoted: strip });
         return {
           content: [
             {
@@ -1967,32 +1994,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_thread': {
-        const { threadId, raw, includeDrafts } = args as any;
+        const { threadId } = args as any;
         if (!threadId) {
           throw new McpError(ErrorCode.InvalidParams, 'threadId is required');
         }
         const client = initializeClient();
         try {
-          const { emails, hiddenDraftCount } = await client.getThread(threadId, coerceBool(includeDrafts) ?? false);
-          if (raw) {
-            // raw is a pure-JSON escape valve that external clients may JSON.parse
-            // wholesale; the draft note (below) is appended only on the simplified
-            // path so raw output stays faithfully parseable. hiddenDraftCount never
-            // leaks into the raw JSON — a raw consumer can pass includeDrafts itself.
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text: JSON.stringify(emails, null, 2),
-                },
-              ],
-            };
-          }
-          const simplified = emails.map(e => simplifyEmail(e));
-          let text = JSON.stringify(simplified, null, 2);
-          if (hiddenDraftCount > 0) {
-            text += `\n\nNote: ${hiddenDraftCount} draft(s) in this thread are hidden; set includeDrafts:true to include them.`;
-          }
+          // The flag guards, the body-size cap and the per-message signals live in
+          // readThread so they are unit-testable with a mock client; this stays a
+          // result-to-text wrapper.
+          const text = await readThread(args, client);
           return {
             content: [
               {

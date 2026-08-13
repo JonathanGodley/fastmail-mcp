@@ -139,6 +139,16 @@ leading-underscore name, and read it in the simplifier via `addIf` (so it is omi
 absent). Do not thread it through function signatures, and do not make it enumerable — it
 would leak into raw output.
 
+**A flag that only a simplified response can honour is REJECTED with `raw`, not ignored.**
+`stripQuoted` (#73) rewrites the simplified `bodyText`; there is no honest way to apply it
+to a pure-JMAP payload, and silently dropping it would leave a caller believing a response
+was stripped when it was not. So `assertStripQuotedNotRaw` (`src/quote-strip.ts`) rejects
+the pair from both `get_email` and `get_thread`, naming the two ways out. Same reasoning as
+the unknown-parameter guard: a parameter that quietly does nothing produces confident wrong
+answers. Contrast `includeBodies` (#74), which is a *fetch*-level knob — it changes the
+`Email/get` property set, so `raw` faithfully returns the richer JMAP object and the two
+compose fine.
+
 ## Output width is the caller's to narrow (`fields`)
 
 `verbose` and `raw` both ask for *more*. `fields` is the third axis and the only one that

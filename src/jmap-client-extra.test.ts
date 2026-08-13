@@ -821,7 +821,7 @@ describe('getThread', () => {
     assert.equal(emailGetArgs.bodyProperties, undefined);
   });
 
-  it('always requests compact properties (no bodies)', async () => {
+  it('fetches text body values (and only those) when includeBodies is set', async () => {
     let callCount = 0;
     const makeReq = mock.method(client, 'makeRequest', async () => {
       callCount++;
@@ -840,13 +840,16 @@ describe('getThread', () => {
       };
     });
 
-    await client.getThread('e1');
+    await client.getThread('e1', false, true);
 
     const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
-    // No body *content* in compact mode: bodyValues / fetchTextBodyValues stay absent.
-    // (textBody structure is requested for the bodyTextSize hint — asserted above.)
-    assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
-    assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
+    // The defined VERBOSE superset, not a third ad-hoc property list.
+    assert.ok(emailGetArgs.properties.includes('bodyValues'), 'should request bodyValues');
+    assert.ok(emailGetArgs.properties.includes('textBody'), 'should request textBody structure');
+    assert.equal(emailGetArgs.fetchTextBodyValues, true);
+    // The html alternative is the expensive half of a thread read and is never fetched.
+    assert.equal(emailGetArgs.fetchHTMLBodyValues, undefined);
+    assert.ok(Array.isArray(emailGetArgs.bodyProperties), 'should request body properties');
   });
 
   it('throws InvalidInputError when the thread is not found (a bad id is caller-fixable input, #41)', async () => {
@@ -979,6 +982,42 @@ describe('getThread', () => {
     ]);
     const { hiddenDraftCount } = await client.getThread('e1');
     assert.equal(hiddenDraftCount, 2);
+  });
+
+  it('drops a hidden draft together with its body when bodies are fetched', async () => {
+    let callCount = 0;
+    mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail']] };
+      }
+      return {
+        methodResponses: [
+          ['Thread/get', { list: [{ id: 'thread-1', emailIds: ['e1', 'e2'] }] }, 'getThread'],
+          ['Email/get', { list: [
+            {
+              id: 'e1', subject: 'Sent message', keywords: { $seen: true },
+              textBody: [{ partId: 't1', type: 'text/plain' }],
+              bodyValues: { t1: { value: 'the sent text' } },
+            },
+            {
+              id: 'e2', subject: 'Draft reply', keywords: { $draft: true },
+              textBody: [{ partId: 't2', type: 'text/plain' }],
+              bodyValues: { t2: { value: 'unsent words nobody should read yet' } },
+            },
+          ] }, 'emails'],
+        ],
+      };
+    });
+
+    const { emails, hiddenDraftCount } = await client.getThread('e1', false, true);
+
+    assert.equal(hiddenDraftCount, 1);
+    assert.deepEqual(emails.map((e: any) => e.id), ['e1']);
+    assert.ok(
+      !JSON.stringify(emails).includes('unsent words nobody should read yet'),
+      "a hidden draft's body must not reach the caller",
+    );
   });
 
   it('reports hiddenDraftCount 0 for a thread with no drafts', async () => {

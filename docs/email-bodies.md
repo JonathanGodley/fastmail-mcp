@@ -1,10 +1,11 @@
 # Email body handling
 
-How this server composes, edits, and reasons about the `text/plain` and `text/html`
+How this server composes, edits, reads, and reasons about the `text/plain` and `text/html`
 parts of an email. This spans every authoring path (`send_email`, `create_draft`,
-`reply_email`, `forward_email`, `edit_draft`, `send_draft`), so it lives here rather than in any one
+`reply_email`, `forward_email`, `edit_draft`, `send_draft`) and the read paths that undo
+their quoting again (`get_email`, `get_thread`), so it lives here rather than in any one
 tool's issue. The per-tool behaviour rationale lives in the closed GitHub issues
-(#4, #7, #15, #16); this file is the shared model they all depend on.
+(#4, #7, #15, #16, #73, #74); this file is the shared model they all depend on.
 
 ## The body-format model
 
@@ -259,6 +260,77 @@ from "recognized in principle" to "verified." This is still the **broadest** edg
 feature — wider than the non-quotable-original corner above, which needs a wrong argument to
 reach, whereas this needs only an unrecognized draft from another client. Documented and
 accepted; surfaced to users in the README's `edit_draft` notes.
+
+## The read side: stripping quoted history (#73, #74)
+
+Everything above is the **compose** side — building a quote, and recognizing our own quote
+on a draft we are about to rewrite. `src/quote-strip.ts` is the **read** side: given a
+message's `text/plain` body, remove the correspondence quoted inside it. The two live in
+separate modules on purpose, because the same word ("marker") carries a different burden in
+each:
+
+| | compose side (`reply-quote.ts`) | read side (`quote-strip.ts`) |
+|---|---|---|
+| Input | a draft **we or a client of ours** produced | whatever a **foreign** client produced |
+| A match means | a guard fires (a confirmation prompt) | text is **deleted from the output** |
+| Miss cost | the guard doesn't challenge an edit | quoted bytes stay in the response |
+| False-positive cost | a needless challenge, resolved in one step | the reader loses real content |
+
+The asymmetry sets the posture: **recognize confidently or not at all.** Every marker is a
+conventional, machine-emitted shape anchored at line start — a leading `>` run (nesting is
+the same shape), an `On <date>, <someone> wrote:` attribution *directly above* such a run
+(including Gmail's wrapped two-line form), an Outlook `From:`/`Sent:`/`To:`/`Subject:`
+**block** (a lone `From:` line is not enough — it needs two more header lines within the
+next few, with nothing but headers and blanks between), and `-----Original Message-----` as
+a whole line. Nothing matches → the body is returned byte-identical.
+
+**Regions, not one boundary.** The naive implementation cuts everything below the first
+marker. That is right for a top-posted reply and wrong for the two other real shapes: a
+bottom-posted reply (the new text is *under* the quote) and an inline reply (interleaved
+between quoted paragraphs) would both be deleted entirely. So each quoted run is removed as
+its own region and unquoted text is never removed for being *positioned* after a quote. The
+two marker classes that have no end delimiter — the Outlook header block and
+`-----Original Message-----` — do run to the end of the message, because that is what they
+mean.
+
+**The signal is the safety net, and it is never silent.** A caller that asked to strip gets
+`quotedBytesStripped` (UTF-8 bytes removed; **`0` = nothing matched, this body is whole**)
+or `quotedStripSkipped` (there was no plain-text body). Emitting the `0` is a deliberate
+exception to the omit-empty-fields rule: without it "nothing was quoted" and "the shape
+wasn't recognized" and "the flag did nothing" are indistinguishable, and a caller cannot
+know whether re-reading verbatim is worth a round trip.
+
+**Accepted residuals** (all documented in the README, all reported through the signal):
+
+- **HTML-only quoting is out of reach.** Outlook's `<div>` nesting, or any quote flattened
+  from HTML without `>` prefixes, has no text-level boundary. This is the same
+  foreign-client recognition residual as the compose-side guard above, seen from the other
+  end. Deriving text from HTML in order to strip it was rejected: `get_email` returns what
+  the message *is*, and swapping a verbatim `bodyHtml` for a lossy derived-then-cut plain
+  text would be a bigger change to the read contract than the token saving is worth.
+  Rejecting the combination outright was also rejected — a caller cannot know a message is
+  HTML-only before reading it, and on a thread read one such message would fail the whole
+  call. It reports `quotedStripSkipped` and returns unchanged.
+- **A forward is stripped like a reply.** A forwarded message's content sits below the same
+  `-----Original Message-----` marker (Fastmail's own forward block uses those words too),
+  so `stripQuoted` leaves the covering note. The marker is in the feature's stated scope and
+  Outlook uses it for replies; the alternative — casing/spacing heuristics to tell a
+  forward's dashed line from a reply's — is exactly the guessing this module refuses to do.
+  Signalled by a `quotedBytesStripped` that looks large for a short message.
+- **A wrapped quoted line whose continuation lost its `>` prefix** survives as a fragment.
+  Deleting an unquoted line on suspicion is the one thing this module will not do.
+- **Localized attributions** ("schrieb:", "a écrit :") are not recognized, so the
+  attribution line survives above a stripped `>` run.
+
+**Thread bodies (#74)** ride on the same function. `getThread`'s `includeBodies` switches
+the `Email/get` property set to the defined `EMAIL_PROPERTIES_VERBOSE` superset (not a third
+ad-hoc list) and fetches **text values only** — a thread multiplies body size by the message
+count and the HTML alternative is the expensive half, so a message with no plain-text part
+is flagged `bodyTextUnavailable` rather than served HTML. The combined bodies are capped
+(`THREAD_BODY_BYTE_CAP`, `src/thread-handler.ts`) and the cap **errors** rather than
+truncates, for the reason #59 exists: a silently shortened body is indistinguishable from a
+short message. The cap is measured on what would actually be returned, which is what makes
+"retry with `stripQuoted:true`" a real remedy rather than advice.
 
 ## Forwarding: the forwarded-message block + guard extension (#30)
 

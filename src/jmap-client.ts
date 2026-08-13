@@ -175,8 +175,11 @@ export const EMAIL_PROPERTIES_COMPACT = [
 // original's Message-ID) is deliberately VERBOSE-tier, not COMPACT: list items already
 // show forward-ness via the isForwarded keyword flag; the header VALUE is needed only
 // when operating on a specific draft (the edit guard's recovery), a get_email context.
-// Corollary, not a gap: getThread uses EMAIL_PROPERTIES_COMPACT, so thread reads
-// (including raw:true) don't surface forwardedMessageId — consistent with this decision.
+// Corollary, not a gap: getThread uses EMAIL_PROPERTIES_COMPACT by default, so an
+// ordinary thread read (including raw:true) doesn't surface forwardedMessageId —
+// consistent with this decision. getThread's includeBodies mode (#74) switches to this
+// same VERBOSE superset rather than inventing a third property list, so a thread read
+// with bodies is a get-path read and does carry it.
 export const EMAIL_PROPERTIES_VERBOSE = [
   ...EMAIL_PROPERTIES_COMPACT,
   'htmlBody', 'attachments', 'bodyValues', 'sentAt',
@@ -2699,7 +2702,11 @@ export class JmapClient {
     });
   }
 
-  async getThread(threadId: string, includeDrafts: boolean = false): Promise<{ emails: any[]; hiddenDraftCount: number }> {
+  async getThread(
+    threadId: string,
+    includeDrafts: boolean = false,
+    includeBodies: boolean = false,
+  ): Promise<{ emails: any[]; hiddenDraftCount: number }> {
     const session = await this.getSession();
 
     // First, check if threadId is actually an email ID and resolve the thread
@@ -2733,7 +2740,20 @@ export class JmapClient {
       '#ids': { resultOf: 'getThread', name: 'Thread/get', path: '/list/*/emailIds' },
     };
 
-    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
+    // Default: the compact list set — metadata + preview, body *structure* only.
+    // includeBodies (#74) fetches the text body CONTENT for every message in one call, so
+    // a conversation can be read without one get_email per message. It reuses the defined
+    // VERBOSE superset rather than a third ad-hoc property list, keeping the two-list
+    // discipline documented above (and so raw:true returns a complete JMAP email). The
+    // HTML values are deliberately NOT fetched: a thread multiplies body size by the
+    // message count and the html alternative is the expensive half.
+    if (includeBodies) {
+      emailGetParams.properties = [...EMAIL_PROPERTIES_VERBOSE];
+      emailGetParams.bodyProperties = [...EMAIL_BODY_PROPERTIES];
+      emailGetParams.fetchTextBodyValues = true;
+    } else {
+      emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
+    }
 
     // Use Thread/get with the resolved thread ID
     const request: JmapRequest = {
@@ -2770,6 +2790,8 @@ export class JmapClient {
     // them (the duplicate-draft trap: an agent reading a thread to reply must not
     // miss that a draft reply already exists). Assumes the full thread is returned
     // (Thread/get -> Email/get, no limit); threads are small so this holds.
+    // The filter runs on the whole fetched email object, so under includeBodies a
+    // hidden draft's BODY is dropped with it — the count is all that survives.
     if (includeDrafts) {
       return { emails, hiddenDraftCount: 0 };
     }

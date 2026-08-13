@@ -794,3 +794,62 @@ describe('simplifyEmail — forwardedMessageId (#30)', () => {
     assert.equal(simplifyEmail({ id: 'e1', subject: 's', from: [], 'header:X-Forwarded-Message-Id:asMessageIds': null }).forwardedMessageId, undefined);
   });
 });
+
+describe('simplifyEmail — stripQuoted (#73)', () => {
+  const withBodies = (text: string | null, html?: string) => {
+    const raw: any = { id: 'e1', subject: 's', from: [{ email: 'a@b.com' }], bodyValues: {} };
+    if (text !== null) {
+      raw.textBody = [{ partId: 't', type: 'text/plain' }];
+      raw.bodyValues.t = { value: text };
+    }
+    if (html) {
+      raw.htmlBody = [{ partId: 'h', type: 'text/html' }];
+      raw.bodyValues.h = { value: html };
+    }
+    return raw;
+  };
+
+  const quotedBody = 'My answer.\n\nOn Mon, Jun 15, 2026, Alice wrote:\n> the earlier conversation';
+
+  it('leaves the body verbatim and emits no signal when the option is off', () => {
+    const result = simplifyEmail(withBodies(quotedBody));
+    assert.equal(result.bodyText, quotedBody);
+    assert.equal(result.quotedBytesStripped, undefined);
+    assert.equal(result.quotedStripSkipped, undefined);
+  });
+
+  it('strips the quote and reports the bytes removed', () => {
+    const result = simplifyEmail(withBodies(quotedBody), { stripQuoted: true });
+    assert.equal(result.bodyText, 'My answer.');
+    assert.equal(
+      result.quotedBytesStripped,
+      Buffer.byteLength(quotedBody, 'utf8') - Buffer.byteLength('My answer.', 'utf8'),
+    );
+  });
+
+  it('emits an explicit 0 when nothing matched, so "verbatim" is distinguishable from "stripped"', () => {
+    const result = simplifyEmail(withBodies('A note with no quoted history.'), { stripQuoted: true });
+    assert.equal(result.bodyText, 'A note with no quoted history.');
+    assert.equal(result.quotedBytesStripped, 0);
+  });
+
+  it('leaves a verbose bodyHtml untouched — stripping is plain-text only', () => {
+    const html = '<p>My answer.</p><blockquote type="cite">the earlier conversation</blockquote>';
+    const result = simplifyEmail(withBodies(quotedBody, html), { stripQuoted: true, includeHtml: true });
+    assert.equal(result.bodyText, 'My answer.');
+    assert.equal(result.bodyHtml, html);
+  });
+
+  it('reports the skip (never a silent no-op) on an HTML-only message', () => {
+    const result = simplifyEmail(withBodies(null, '<p>html only</p>'), { stripQuoted: true });
+    assert.equal(result.quotedStripSkipped, 'no plain-text body to strip');
+    assert.equal(result.quotedBytesStripped, undefined);
+    // The html fallback for an html-only message is unaffected by the flag.
+    assert.equal(result.bodyHtml, '<p>html only</p>');
+  });
+
+  it('reports the skip on a message with no body at all', () => {
+    const result = simplifyEmail({ id: 'e1', subject: 's', from: [] }, { stripQuoted: true });
+    assert.equal(result.quotedStripSkipped, 'no plain-text body to strip');
+  });
+});
