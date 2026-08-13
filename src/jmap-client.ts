@@ -1590,10 +1590,13 @@ export class JmapClient {
     // of the draft (it was changed in the web UI in between, say) silently overwrites
     // whatever the caller didn't know about, and a destroy made that unrecoverable: the
     // old draft was gone from the account with only a support-side backup restore left.
-    // A Trash move makes the same mistake a one-step undo, and Trash's normal expiry
-    // bounds the clutter. Only mailboxIds is patched; keywords (including $draft) are
-    // left alone, matching delete_email — a trashed draft is still a draft, so restoring
-    // it is a move back to Drafts, and Trash expiry is by mailbox, not by keyword.
+    // A Trash move makes the same mistake a one-step undo, and whatever Trash retention
+    // the account is set to bounds the clutter. Only mailboxIds is patched; keywords
+    // (including $draft) are left alone, matching delete_email — a trashed draft is still
+    // a draft, so restoring it is a move back to Drafts, and Trash retention applies by
+    // mailbox, not by keyword. getThread compensates: a $draft whose only mailbox is Trash
+    // is not counted as an active draft, so repeated edits can't inflate its hidden-draft
+    // warning.
     //
     // Any failure here — no Trash mailbox, a structured notUpdated, or a thrown
     // transport/method error — leaves a duplicate holding the OLD pre-edit content.
@@ -1607,6 +1610,8 @@ export class JmapClient {
     try {
       // EXACT role only (case-insensitive), the same rule delete_email uses: a custom
       // folder merely NAMED like a trash folder must never become the destination.
+      // (getMailboxes is uncached, so this costs one extra round trip per edit —
+      // accepted for a write path that already makes several.)
       const mailboxes = await this.getMailboxes();
       const trashMailbox = this.findByExactRole(mailboxes, 'trash');
       if (!trashMailbox) {
@@ -1622,12 +1627,21 @@ export class JmapClient {
             }, 'trashOldDraft']
           ]
         });
+        // Confirm the move POSITIVELY: RFC 8620 §5.3 puts every requested id in exactly
+        // one of updated/notUpdated, so absence from both means the server told us
+        // nothing — and inferring success from "not in notUpdated" would report
+        // "recoverable in Trash" for a draft still sitting in Drafts. `updated` maps
+        // id -> object|null, so the null case makes a truthiness test wrong; test for
+        // the key.
         const trashResult = this.getMethodResult(trashResponse, 0);
         if (trashResult.notUpdated?.[emailId]) {
           orphanedOldDraftId = emailId;
           orphanedOldDraftReason = this.describeSetError(trashResult.notUpdated[emailId]);
-        } else {
+        } else if (Object.prototype.hasOwnProperty.call(trashResult.updated ?? {}, emailId)) {
           trashedOldDraftId = emailId;
+        } else {
+          orphanedOldDraftId = emailId;
+          orphanedOldDraftReason = 'the server did not report the move as applied';
         }
       }
     } catch (err) {
@@ -2739,7 +2753,8 @@ export class JmapClient {
     // Resolve mailbox names onto the FULL list before filtering, so the draft
     // filter below doesn't skip the attach for retained messages.
     const emails = this.getListResult(response, 1);
-    attachMailboxInfo(emails, buildMailboxInfoMap(this.readListResultIfPresent(response, 2)));
+    const threadMailboxes = this.readListResultIfPresent(response, 2);
+    attachMailboxInfo(emails, buildMailboxInfoMap(threadMailboxes));
 
     // Drafts (e.g. an in-progress reply) are noise when reading a conversation,
     // so exclude them by default. Identify by the $draft keyword (survives a
@@ -2753,7 +2768,23 @@ export class JmapClient {
       return { emails, hiddenDraftCount: 0 };
     }
     const filtered = emails.filter((e: any) => !e.keywords?.$draft);
-    return { emails: filtered, hiddenDraftCount: emails.length - filtered.length };
+    // A draft sitting ONLY in Trash is not an active draft, so it must not inflate the
+    // count: the note exists to warn that a draft reply already exists, and every
+    // edit_draft leaves its replaced copy in Trash (as does deleting a draft), so
+    // counting those would make a thread with one real draft warn about three. Trash is
+    // resolved by EXACT role, from the mailbox list this batch already fetched. If that
+    // role can't be resolved, every draft is counted as before — fail toward
+    // over-warning, never toward missing a real draft. (A trashed draft IS still
+    // returned under includeDrafts:true, which is an explicit ask for everything;
+    // trashed non-drafts show there too.)
+    const trashMailboxId = this.findByExactRole(threadMailboxes, 'trash')?.id;
+    const isTrashedDraft = (e: any): boolean => {
+      if (trashMailboxId == null) return false;
+      const ids = Object.entries(e.mailboxIds || {}).filter(([, v]) => v).map(([id]) => id);
+      return ids.length > 0 && ids.every(id => id === trashMailboxId);
+    };
+    const hiddenDraftCount = emails.filter((e: any) => e.keywords?.$draft && !isTrashedDraft(e)).length;
+    return { emails: filtered, hiddenDraftCount };
   }
 
   async getMailboxStats(mailbox?: string): Promise<any> {

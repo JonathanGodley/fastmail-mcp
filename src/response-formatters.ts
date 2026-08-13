@@ -51,7 +51,7 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
 // that it overwrote something it didn't know about, and restore it from Trash (#65).
 export function formatEditDraftResult(result: UpdateDraftResult): string {
   const disposal = result.trashedOldDraftId
-    ? `The previous draft (id ${result.trashedOldDraftId}) was moved to Trash, where it stays recoverable until Trash expiry.`
+    ? `The previous draft (id ${result.trashedOldDraftId}) was moved to Trash, where it stays recoverable until Trash is emptied or auto-purged.`
     : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be moved to Trash (${result.orphanedOldDraftReason ?? 'reason unknown'}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
   const fingerprint = formatReplacedDraft(result.replacedDraft);
   const replaced = fingerprint

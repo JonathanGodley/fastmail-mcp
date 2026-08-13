@@ -447,6 +447,46 @@ describe('updateDraft', () => {
     assert.match(result.orphanedOldDraftReason!, /serverFail|busy/);
   });
 
+  it('when the server reports the move in neither updated nor notUpdated: orphaned, not assumed trashed', async () => {
+    mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
+      }
+      if (params.create) {
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
+      // Neither map mentions draft-1: claiming "recoverable in Trash" here would be a
+      // guess about a draft that may still be sitting in Drafts.
+      return { methodResponses: [['Email/set', { updated: {}, notUpdated: {} }, 'trashOldDraft']] };
+    });
+
+    const result = await client.updateDraft('draft-1', { subject: 'X' });
+    assert.equal(result.id, 'draft-2');
+    assert.equal(result.trashedOldDraftId, undefined);
+    assert.equal(result.orphanedOldDraftId, 'draft-1');
+    assert.match(result.orphanedOldDraftReason!, /did not report the move/i);
+  });
+
+  it('treats a null entry in updated as a successful move (JMAP allows id -> null)', async () => {
+    mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
+      }
+      if (params.create) {
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
+      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+    });
+
+    const result = await client.updateDraft('draft-1', { subject: 'X' });
+    assert.equal(result.trashedOldDraftId, 'draft-1');
+    assert.equal(result.orphanedOldDraftId, undefined);
+  });
+
   it('when the mailbox lookup throws: surfaces the orphan + reason, does NOT throw', async () => {
     mock.method(client, 'getMailboxes', async () => { throw new Error('network down'); });
     mock.method(client, 'makeRequest', async (req: any) => {

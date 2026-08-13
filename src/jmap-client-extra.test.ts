@@ -912,6 +912,75 @@ describe('getThread', () => {
     assert.equal(hiddenDraftCount, 0);
   });
 
+  // A thread carrying an active draft reply plus a draft that now lives only in Trash —
+  // the shape every edit_draft leaves behind, since the replaced copy keeps its $draft
+  // keyword. `mailboxes` is what the batch's trailing Mailbox/get returns.
+  const threadWithTrashedDraftResponse = (mailboxes: any[]) => {
+    let callCount = 0;
+    return mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail']] };
+      }
+      return {
+        methodResponses: [
+          ['Thread/get', { list: [{ id: 'thread-1', emailIds: ['e1', 'e2', 'e3'] }] }, 'getThread'],
+          ['Email/get', { list: [
+            { id: 'e1', subject: 'Sent message', keywords: { $seen: true }, mailboxIds: { 'mb-inbox': true } },
+            { id: 'e2', subject: 'Active draft reply', keywords: { $draft: true }, mailboxIds: { 'mb-drafts': true } },
+            { id: 'e3', subject: 'Draft replaced by an edit', keywords: { $draft: true }, mailboxIds: { 'mb-trash': true } },
+          ] }, 'emails'],
+          ['Mailbox/get', { list: mailboxes }, 'mailboxes'],
+        ],
+      };
+    });
+  };
+
+  const THREAD_MAILBOXES = [
+    { id: 'mb-inbox', name: 'Inbox', role: 'inbox' },
+    { id: 'mb-drafts', name: 'Drafts', role: 'drafts' },
+    { id: 'mb-trash', name: 'Trash', role: 'trash' },
+  ];
+
+  it('does not count a draft that now lives only in Trash', async () => {
+    threadWithTrashedDraftResponse(THREAD_MAILBOXES);
+    const { emails, hiddenDraftCount } = await client.getThread('e1');
+    assert.deepEqual(emails.map((e: any) => e.id), ['e1']); // both drafts stay hidden
+    assert.equal(hiddenDraftCount, 1);                      // only the active one is counted
+  });
+
+  it('still counts a draft that is in Trash AND another mailbox', async () => {
+    let callCount = 0;
+    mock.method(client, 'makeRequest', async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail']] };
+      }
+      return {
+        methodResponses: [
+          ['Thread/get', { list: [{ id: 'thread-1', emailIds: ['e1'] }] }, 'getThread'],
+          ['Email/get', { list: [
+            { id: 'e1', subject: 'Draft filed in two places', keywords: { $draft: true }, mailboxIds: { 'mb-trash': true, 'mb-drafts': true } },
+          ] }, 'emails'],
+          ['Mailbox/get', { list: THREAD_MAILBOXES }, 'mailboxes'],
+        ],
+      };
+    });
+    const { hiddenDraftCount } = await client.getThread('e1');
+    assert.equal(hiddenDraftCount, 1);
+  });
+
+  it('counts every draft when the trash role cannot be resolved (fails toward over-warning)', async () => {
+    // Same thread, but no mailbox carries the trash role — a folder merely NAMED "Trash"
+    // must not be treated as one.
+    threadWithTrashedDraftResponse([
+      { id: 'mb-drafts', name: 'Drafts', role: 'drafts' },
+      { id: 'mb-trash', name: 'Trash', role: null },
+    ]);
+    const { hiddenDraftCount } = await client.getThread('e1');
+    assert.equal(hiddenDraftCount, 2);
+  });
+
   it('reports hiddenDraftCount 0 for a thread with no drafts', async () => {
     let callCount = 0;
     mock.method(client, 'makeRequest', async () => {

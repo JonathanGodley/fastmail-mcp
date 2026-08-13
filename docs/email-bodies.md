@@ -389,8 +389,8 @@ silently flattened. That reconstruction is tracked as a follow-on in issue #13.
 
 The old copy is disposed of by moving it to the mailbox with the `trash` role (an
 `Email/set update` of `mailboxIds` only — `keywords` are left alone, so the copy is still
-a `$draft` and restoring it is a move back to Drafts; Trash expiry is by mailbox, not by
-keyword). It used to be an `Email/set destroy`, which cost real data: an assistant edited
+a `$draft` and restoring it is a move back to Drafts; Trash retention applies by mailbox,
+not by keyword). It used to be an `Email/set destroy`, which cost real data: an assistant edited
 a draft from a body it had cached earlier, the user had meanwhile rewritten that draft in
 the web UI, and the recreate silently replaced the user's version with the stale one. The
 destroy made that unrecoverable — the previous draft was gone from the account, leaving
@@ -399,13 +399,28 @@ only a support-side backup restore.
 The server can never detect this on its own (it cannot know the caller's copy is stale),
 so the mitigation is on the disposal side plus disclosure:
 
-- **Trash, not destroy** turns the overwrite into a one-step undo, and Trash's normal
-  expiry bounds the clutter.
+- **Trash, not destroy** turns the overwrite into a one-step undo. How long the copy
+  survives is the account's business: Fastmail's Trash retention is a per-account setting
+  and can be set to never auto-purge, so "recoverable until Trash is emptied or
+  auto-purged" is the honest claim — not a fixed expiry window (not live-probed).
 - **There is no destroy fallback.** If the Trash move can't happen (no `trash` role on the
-  account, a `notUpdated` entry, or a thrown transport error), the old draft is left
-  exactly where it was and reported as `orphanedOldDraftId` + `orphanedOldDraftReason`.
-  The edit itself already succeeded, so this never throws. A visible duplicate the caller
-  can delete is strictly cheaper than the unrecoverable act this path exists to avoid.
+  account, a `notUpdated` entry, a thrown transport error, or a response that reports the
+  id in neither `updated` nor `notUpdated`), the old draft is left exactly where it was and
+  reported as `orphanedOldDraftId` + `orphanedOldDraftReason`. Success is confirmed
+  positively from `updated` (RFC 8620 §5.3 puts every id in exactly one map, and `updated`
+  maps id → object|**null**, so it is a key test, not a truthiness test) — inferring it
+  from the absence of a `notUpdated` entry would report "recoverable in Trash" for a draft
+  still sitting in Drafts. The edit itself already succeeded, so this never throws. A
+  visible duplicate the caller can delete is strictly cheaper than the unrecoverable act
+  this path exists to avoid.
+- **A trashed draft stops counting as an active draft.** `get_thread` hides drafts and
+  reports how many it hid, keyed on the `$draft` keyword; since the replaced copy keeps
+  that keyword, every edit would otherwise add one to that count for the life of the Trash
+  copy, and a thread with one real draft reply would warn about three. So a `$draft`
+  message whose ONLY mailbox is the `trash`-role one is neither shown nor counted (a
+  caller who wants Trash content reads Trash). If the `trash` role can't be resolved,
+  every draft is counted as before — fail toward over-warning, never toward missing a
+  real draft reply.
 - **The result echoes back what was replaced** (`replacedDraft`: id, subject, to/cc, and
   body character counts), so a caller comparing against its own copy sees an unintended
   overwrite immediately. Sizes rather than the previous bodies: the old draft is intact in

@@ -18,7 +18,7 @@ describe('formatEditDraftResult', () => {
     const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: REPLACED, trashedOldDraftId: 'draft-1' });
     assert.match(text, /New Email ID: draft-2/);
     assert.match(text, /draft-1\) was moved to Trash/);
-    assert.match(text, /recoverable until Trash expiry/);
+    assert.match(text, /recoverable until Trash is emptied or auto-purged/);
     assert.match(text, /subject "Lunch plans"/);
     assert.match(text, /to bob@example\.com/);
     assert.match(text, /cc carol@example\.com/);
