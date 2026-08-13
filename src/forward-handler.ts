@@ -2,6 +2,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { isBlank, assertBodyInputs } from './body-format.js';
+import { coerceSubjectOverride } from './subject.js';
 import { buildForwardBodies } from './reply-quote.js';
 import type { AttachmentPart } from './jmap-client.js';
 
@@ -108,12 +109,13 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
     throw new McpError(ErrorCode.InvalidParams, 'to is required for a forward; there is no default recipient');
   }
 
-  // Subject: caller override used verbatim when non-blank (a supplied-but-blank value
-  // falls to the default, matching the repo's provided-but-empty posture); default is
-  // "Fwd: <original>" without double-prefixing an existing Fwd:/Fw:/FW:.
-  const rawSubject = typeof a.subject === 'string' ? a.subject : undefined;
+  // Subject: caller override used verbatim when non-blank; a supplied-but-blank value
+  // falls to the default and a non-string is rejected (shared with reply_email's identical
+  // parameter, so the two can't drift — #68). Default is "Fwd: <original>" without
+  // double-prefixing an existing Fwd:/Fw:/FW:.
+  const rawSubject = coerceSubjectOverride(a.subject, 'Omit it to use "Fwd: <original subject>".');
   let subject: string;
-  if (rawSubject !== undefined && !isBlank(rawSubject)) {
+  if (rawSubject !== undefined) {
     subject = rawSubject;
   } else {
     const orig = originalEmail?.subject || '';

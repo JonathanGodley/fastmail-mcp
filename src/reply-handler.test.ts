@@ -76,6 +76,48 @@ describe('buildReplyParams — subject, recipients, threading', () => {
     assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal({ subject: 'Hello' })).replyParams.subject, 'Re: Hello');
     assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal({ subject: 'Re: Hello' })).replyParams.subject, 'Re: Hello');
   });
+  it('uses a caller-supplied subject verbatim, with no Re: prefixing (#68)', () => {
+    const { replyParams } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'x', subject: 'Budget sign-off' },
+      makeOriginal(),
+    );
+    assert.equal(replyParams.subject, 'Budget sign-off');
+    // The override changes only the subject: the threading chain is built the same way.
+    assert.deepEqual(replyParams.inReplyTo, ['orig-msg@example.com']);
+    assert.deepEqual(replyParams.references, ['root@example.com', 'orig-msg@example.com']);
+  });
+  it('does not add Re: to an override that lacks it, even when the original had one (#68)', () => {
+    const { replyParams } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'x', subject: 'New topic' },
+      makeOriginal({ subject: 'Re: Project update' }),
+    );
+    assert.equal(replyParams.subject, 'New topic');
+  });
+  it('treats a supplied-but-blank subject as omitted (falls to the Re: default) (#68)', () => {
+    // '​' is a zero-width space: visually empty, so it reads as blank like the rest.
+    for (const blank of ['', '   ', '​']) {
+      const { replyParams } = buildReplyParams(
+        { originalEmailId: 'e1', textBody: 'x', subject: blank },
+        makeOriginal(),
+      );
+      assert.equal(replyParams.subject, 'Re: Project update');
+    }
+  });
+  it('treats a null subject as omitted, as lenient clients spell an unset field (#68)', () => {
+    const { replyParams } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'x', subject: null },
+      makeOriginal(),
+    );
+    assert.equal(replyParams.subject, 'Re: Project update');
+  });
+  it('rejects a non-string subject rather than silently inheriting the default (#68)', () => {
+    for (const bad of [42, ['a'], { s: 1 }, true]) {
+      assert.throws(
+        () => buildReplyParams({ originalEmailId: 'e1', textBody: 'x', subject: bad }, makeOriginal()),
+        /subject must be a string/,
+      );
+    }
+  });
   it('defaults the recipient to the original sender, preserving the display name (#31)', () => {
     assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal()).replyParams.to, ['Jon Godley <jon@example.com>']);
   });
@@ -196,6 +238,35 @@ describe('composeReply — attachment threading into both branches', () => {
     // #52/#54: the send branch marks the original answered + read and reports it.
     assert.deepEqual(calls.keywords, { id: 'o1', kw: ['$answered', '$seen'] });
     assert.equal(r.markedAnswered, true);
+  });
+
+  it('carries a subject override into the SEND branch and the reported result (#68)', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeReply(
+      { originalEmailId: 'o1', send: true, textBody: 'hi', subject: 'Budget sign-off' },
+      client, undefined,
+    );
+    assert.equal(calls.send.subject, 'Budget sign-off');
+    assert.equal(r.subject, 'Budget sign-off');
+  });
+
+  it('carries a subject override into the DRAFT branch and the reported result (#68)', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeReply(
+      { originalEmailId: 'o1', send: false, textBody: 'hi', subject: 'Budget sign-off' },
+      client, undefined,
+    );
+    assert.equal(calls.draft.subject, 'Budget sign-off');
+    assert.equal(r.subject, 'Budget sign-off');
+  });
+
+  it('inherits the Re: subject in both branches when no override is given (#68)', async () => {
+    const draft = spyClient();
+    await composeReply({ originalEmailId: 'o1', send: false, textBody: 'hi' }, draft.client, undefined);
+    assert.equal(draft.calls.draft.subject, 'Re: Project update');
+    const sent = spyClient();
+    await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, sent.client, undefined);
+    assert.equal(sent.calls.send.subject, 'Re: Project update');
   });
 
   it('marks the original answered+read on a bare send (no attachments)', async () => {

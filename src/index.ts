@@ -235,6 +235,15 @@ const LOCATION_FIELDS_DESC =
 const PREVIEW_SIZE_DESC =
   '`preview` is a truncated snippet (~256 chars max), NOT the full body. `bodyTextSize` is the full text-body size in bytes (it includes quoted history, so treat it as an upper bound); when it is much larger than the preview, fetch get_email before concluding content is absent. `size` is the whole-message size including attachments and inline images, so it is NOT a body-length proxy.';
 
+// Shared, verbatim across create_draft's inReplyTo and references, so the hand-rolled
+// threading hazard is stated on whichever one the caller reaches for. Fastmail groups a
+// message into a conversation by subject as well as by the threading headers, so a draft
+// carrying the headers under a different subject lands on a new threadId; observed after
+// that: every later draft replying to the same original was assigned to that splinter
+// thread too, and deleting the offending drafts did not restore the grouping (#68).
+const THREAD_SPLINTER_DESC =
+  'THREADING HAZARD: Fastmail groups a message into an existing conversation by SUBJECT as well as by these headers. A draft that carries them under a subject that does not match the thread\'s base subject is given a NEW threadId, and from then on later drafts replying to that same original message are grouped onto that splinter thread as well — including ones created afterwards with the correct "Re:" subject and full reference chain. Deleting the offending drafts does not undo it. The effect is display-only (the headers are correct, so recipients thread normally and sending resolves it), but the drafts stay detached from the conversation in the Fastmail UI. To reply on an existing thread prefer reply_email, which builds the headers and the matching subject for you and takes a deliberate `subject` override.';
+
 // Single source of truth for the tool catalog. Hoisted to module scope so the
 // CallTool handler can derive each tool's declared parameter set for the
 // unknown-parameter guard (#11) — no drift from what clients see via ListTools.
@@ -381,7 +390,7 @@ const TOOLS = [
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address. On send=true the original is marked answered and read (best-effort; reported in the success message when it succeeds).',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address. On send=true the original is marked answered and read (best-effort; reported in the success message when it succeeds).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -407,6 +416,10 @@ const TOOLS = [
             from: {
               type: 'string',
               description: 'Sender email address (optional, defaults to account primary email)',
+            },
+            subject: {
+              type: 'string',
+              description: 'Override the subject (optional). When omitted the reply inherits "Re: <original subject>", without double-prefixing an existing Re:; a blank string is treated as omitted. The In-Reply-To/References headers are built identically either way, so recipients still thread the reply correctly. NOTE: Fastmail groups messages by subject as well as by those headers, so a changed subject detaches the DRAFT from the original conversation in the Fastmail UI (it is given its own threadId) — and once such a draft exists, later drafts replying to that same original message may be grouped onto the detached thread too. Display only, and it resolves once the reply is sent.',
             },
             textBody: {
               type: 'string',
@@ -467,7 +480,7 @@ const TOOLS = [
             },
             subject: {
               type: 'string',
-              description: "Override the subject (optional). When omitted: 'Fwd: <original subject>', without double-prefixing an existing Fwd:/Fw:/FW:.",
+              description: "Override the subject (optional). When omitted: 'Fwd: <original subject>', without double-prefixing an existing Fwd:/Fw:/FW:. A blank string is treated as omitted; a non-string is rejected. (Same posture as reply_email's subject.)",
             },
             textBody: {
               type: 'string',
@@ -501,7 +514,7 @@ const TOOLS = [
       },
       {
         name: 'create_draft',
-        description: 'Create an email draft without sending it. Supports threading headers for replies. IMPORTANT: each call creates a new draft — do not call twice for the same message.',
+        description: 'Create an email draft without sending it. Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -543,12 +556,12 @@ const TOOLS = [
             inReplyTo: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Message-IDs to reply to (optional, for threading)',
+              description: 'Message-IDs to reply to (optional, for threading). ' + THREAD_SPLINTER_DESC,
             },
             references: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Message-IDs for References header (optional, for threading)',
+              description: 'Message-IDs for References header (optional, for threading). ' + THREAD_SPLINTER_DESC,
             },
             replyTo: {
               type: 'array',
@@ -960,7 +973,7 @@ const TOOLS = [
       },
       {
         name: 'list_identities',
-        description: 'List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo). Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.',
+        description: "List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo, and the identity's configured signature as textSignature/htmlSignature when it has one; a blank signature is omitted). Nothing appends the signature for you — JMAP does not do it server-side and neither does this server, so to sign a message read it from here and include it in the body you pass to send_email/create_draft/reply_email (above the quoted history on a reply). Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.",
         inputSchema: {
           type: 'object',
           properties: {

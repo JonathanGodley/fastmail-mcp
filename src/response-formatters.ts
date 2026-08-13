@@ -130,8 +130,23 @@ export function simplifyIdentity(raw: any, options?: { verbose?: boolean }): any
   };
   if (raw.replyTo) result.replyTo = raw.replyTo;
   if (raw.mayDelete != null) result.mayDelete = raw.mayDelete;
+  // The identity's configured signature (RFC 8621 section 6). This is where the Fastmail
+  // web UI stores the signature it appends for you; JMAP does not append it server-side,
+  // so a caller composing through this server has to read it from here and include it in
+  // the body deliberately. Surfaced by default rather than behind verbose, because it is
+  // the authoritative sign-off and free-handing one from memory drifts from what the user
+  // actually configured (#33). An unset or blank signature is omitted, per the
+  // omit-empty-fields convention.
+  if (typeof raw.textSignature === 'string' && raw.textSignature.trim() !== '') {
+    result.textSignature = raw.textSignature;
+  }
+  if (typeof raw.htmlSignature === 'string' && raw.htmlSignature.trim() !== '') {
+    result.htmlSignature = raw.htmlSignature;
+  }
   if (options?.verbose) {
-    // Include all remaining identity properties
+    // Include all remaining identity properties. The signature keys are deliberately NOT
+    // in coreKeys: verbose still means "everything the server sent", so a blank signature
+    // (omitted above) is restored here rather than narrowed away by the default view.
     const coreKeys = new Set(['id', 'name', 'email', 'replyTo', 'mayDelete']);
     for (const key of Object.keys(raw)) {
       if (!coreKeys.has(key) && raw[key] !== undefined) {

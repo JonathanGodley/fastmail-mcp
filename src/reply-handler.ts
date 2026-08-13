@@ -2,6 +2,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { isBlank, assertBodyInputs } from './body-format.js';
+import { coerceSubjectOverride } from './subject.js';
 import { buildReplyBodies } from './reply-quote.js';
 import { formatAddress } from './email-formatter.js';
 import type { AttachmentPart } from './jmap-client.js';
@@ -26,8 +27,9 @@ export interface ReplyParams {
 // Assemble the reply parameters from the caller's args and the already-fetched original
 // email. Pure (no I/O), so the reply_email handler's logic is unit-testable without
 // spinning the server: coerce inputs, default quoteOriginal to true, reject a body-less
-// send (trim/zero-width-aware), build the threading headers and the "Re:" subject, default
-// the recipient to the original sender, and append the attributed quote. The caller-supplied
+// send (trim/zero-width-aware), build the threading headers and the subject (the caller's
+// override, else "Re: <original>"), default the recipient to the original sender, and
+// append the attributed quote. The caller-supplied
 // bodies are returned as-is when quoteOriginal is false. createDraft/sendEmail add the auto
 // text/plain fallback downstream for an html-only reply. Throws McpError on invalid input.
 export function buildReplyParams(
@@ -41,6 +43,7 @@ export function buildReplyParams(
   // that would otherwise trip the no-readable-body reject, so a CDATA-wrapped reply ships
   // with its new message silently dropped from the plain-text part (#78).
   assertBodyInputs(a);
+  const subjectOverride = coerceSubjectOverride(a.subject, 'Omit it to inherit "Re: <original subject>".');
   const { from, textBody, htmlBody, send } = a;
   const { to: toArray, cc, bcc, replyTo } = coerceRecipients(a);
   const shouldSend = coerceBool(send) ?? false;
@@ -59,8 +62,12 @@ export function buildReplyParams(
   const inReplyTo = [originalMessageId];
   const references = [...(originalEmail.references || []), originalMessageId];
 
-  let subject = originalEmail.subject || '';
-  if (!/^Re:/i.test(subject)) {
+  // The caller's override wins verbatim; otherwise inherit the original's subject with a
+  // "Re: " prefix, without double-prefixing one that already has it. The threading headers
+  // above are built the same way either way, so an overridden subject still carries a
+  // correct In-Reply-To/References chain to the recipient (#68).
+  let subject = subjectOverride ?? (originalEmail.subject || '');
+  if (subjectOverride === undefined && !/^Re:/i.test(subject)) {
     subject = `Re: ${subject}`;
   }
 

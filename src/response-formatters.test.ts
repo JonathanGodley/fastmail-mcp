@@ -133,11 +133,30 @@ describe('simplifyIdentity', () => {
     assert.equal(result.mayDelete, true);
   });
 
+  it('returns the configured signatures by default (#33)', () => {
+    const result = simplifyIdentity(raw);
+    assert.equal(result.textSignature, 'Regards, Jon');
+    assert.equal(result.htmlSignature, '<p>Regards, Jon</p>');
+  });
+
   it('omits verbose fields by default', () => {
     const result = simplifyIdentity(raw);
     assert.equal(result.bcc, undefined);
-    assert.equal(result.textSignature, undefined);
-    assert.equal(result.htmlSignature, undefined);
+  });
+
+  it('omits a signature that is absent, blank, or not a string (#33)', () => {
+    const absent = simplifyIdentity({ id: 'id-3', name: 'Test', email: 'test@example.com' });
+    assert.equal(absent.textSignature, undefined);
+    assert.equal(absent.htmlSignature, undefined);
+    assert.equal('textSignature' in absent, false);
+
+    const blank = simplifyIdentity({ ...raw, textSignature: '', htmlSignature: '   ' });
+    assert.equal(blank.textSignature, undefined);
+    assert.equal(blank.htmlSignature, undefined);
+
+    const wrongType = simplifyIdentity({ ...raw, textSignature: null, htmlSignature: 42 });
+    assert.equal(wrongType.textSignature, undefined);
+    assert.equal(wrongType.htmlSignature, undefined);
   });
 
   it('includes verbose fields when verbose=true', () => {
@@ -145,6 +164,11 @@ describe('simplifyIdentity', () => {
     assert.deepEqual(result.bcc, [{ email: 'bcc@example.com' }]);
     assert.equal(result.textSignature, 'Regards, Jon');
     assert.equal(result.htmlSignature, '<p>Regards, Jon</p>');
+  });
+
+  it('still reports a blank signature under verbose=true (verbose means everything sent)', () => {
+    const result = simplifyIdentity({ ...raw, textSignature: '' }, { verbose: true });
+    assert.equal(result.textSignature, '');
   });
 
   it('omits replyTo when not present', () => {

@@ -747,7 +747,13 @@ export class JmapClient {
 
   async getIdentities(): Promise<any[]> {
     const session = await this.getSession();
-    
+
+    // No `properties` filter: RFC 8620 section 5.1 defines an omitted/null `properties`
+    // as "return every property of the object", so this already fetches the full RFC 8621
+    // section 6 Identity — including textSignature/htmlSignature, which list_identities
+    // surfaces (#33). Naming properties explicitly would be the narrowing change, not the
+    // widening one: it would cap raw/verbose output at whatever list we hard-coded and
+    // drop any Fastmail-specific property those modes return today.
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:submission'],
       methodCalls: [

@@ -54,8 +54,23 @@ describe('buildForwardParams — subject', () => {
     assert.equal(forwardParams.subject, 'Custom line');
   });
   it('treats a supplied-but-blank subject as omitted (falls to the default rule)', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: '   ' }, makeOriginal());
+    // Zero-width-aware, like every other emptiness test: '​' renders as empty.
+    for (const blank of ['', '   ', '​']) {
+      const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: blank }, makeOriginal());
+      assert.equal(forwardParams.subject, 'Fwd: Project update');
+    }
+  });
+  it('treats a null subject as omitted, as lenient clients spell an unset field', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: null }, makeOriginal());
     assert.equal(forwardParams.subject, 'Fwd: Project update');
+  });
+  it('rejects a non-string subject rather than silently using the default (#68)', () => {
+    for (const bad of [42, ['a'], { s: 1 }, true]) {
+      assert.throws(
+        () => buildForwardParams({ to: ['x@y.com'], subject: bad }, makeOriginal()),
+        /subject must be a string/,
+      );
+    }
   });
   it('handles an original with no subject', () => {
     const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ subject: undefined }));
