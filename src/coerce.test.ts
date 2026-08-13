@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, coerceUtcDate, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -140,6 +140,137 @@ describe('coerceBool', () => {
     assert.equal(coerceBool('false') === true, false);
     assert.equal(coerceBool('garbage') === true, false);
     assert.equal(coerceBool(undefined) === true, false);
+  });
+});
+
+describe('coerceUtcDate (#70)', () => {
+  it('returns undefined for undefined/null (no date bound)', () => {
+    assert.equal(coerceUtcDate(undefined, 'after'), undefined);
+    assert.equal(coerceUtcDate(null, 'before'), undefined);
+  });
+
+  it('expands a date-only value to midnight UTC on that date', () => {
+    assert.equal(coerceUtcDate('2026-07-20', 'after'), '2026-07-20T00:00:00Z');
+    assert.equal(coerceUtcDate('2026-01-01', 'before'), '2026-01-01T00:00:00Z');
+  });
+
+  it('passes a full UTC datetime through unchanged', () => {
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00Z', 'after'), '2026-07-20T14:30:00Z');
+  });
+
+  it('converts an offset datetime to UTC', () => {
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00+01:00', 'after'), '2026-07-20T13:30:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00-05:00', 'before'), '2026-07-20T19:30:00Z');
+  });
+
+  it('reads a zone-less datetime as host local time and emits the same instant in UTC', () => {
+    // Asserted against the host's own conversion so the test is timezone-independent;
+    // what is pinned is that the instant survives and the emitted shape is a UTCDate.
+    const out = coerceUtcDate('2026-07-20T14:30:00', 'after');
+    assert.equal(new Date(out!).getTime(), new Date('2026-07-20T14:30:00').getTime());
+    assert.match(out!, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  it('trims milliseconds to the canonical seconds-precision UTCDate', () => {
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00.123Z', 'after'), '2026-07-20T14:30:00Z');
+  });
+
+  it('trims surrounding whitespace before parsing', () => {
+    assert.equal(coerceUtcDate('  2026-07-20  ', 'after'), '2026-07-20T00:00:00Z');
+  });
+
+  it('rejects an unparseable value, naming the parameter and the accepted formats', () => {
+    assert.throws(
+      () => coerceUtcDate('last tuesday-ish', 'before'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /^before /);
+        assert.match(err.message, /last tuesday-ish/);
+        assert.match(err.message, /2026-07-20T14:30:00Z/);
+        return true;
+      },
+    );
+  });
+
+  it('rejects shapes outside YYYY-MM-DD / YYYY-MM-DDThh:mm:ss rather than guessing', () => {
+    // Date's legacy fallback parser would accept all of these, but reads them as
+    // host-local midnight instead of the documented UTC midnight (and rolls impossible
+    // days over), so the search window would silently differ from what was asked for.
+    for (const value of ['2026-7-20', '2026/07/20', '20 July 2026', 'July 20 2026', '2026', '2026-07', '2026-2-31', '2026/02/30', '2026-07-20T']) {
+      assert.throws(
+        () => coerceUtcDate(value, 'after'),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /after is not a (valid|real calendar) date/);
+          assert.match(err.message, /2026-07-20/);
+          return true;
+        },
+        `expected ${value} to be rejected`,
+      );
+    }
+  });
+
+  it('rejects an impossible calendar date instead of rolling it over', () => {
+    for (const value of ['2026-02-31', '2026-02-31T09:00:00Z', '2026-04-31T09:00:00+02:00']) {
+      assert.throws(
+        () => coerceUtcDate(value, 'after'),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /after is not a real calendar date/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it('keeps an offset value whose UTC date differs from the written date', () => {
+    // The calendar-date guard must not misfire when an offset legitimately moves the
+    // instant onto the next UTC day.
+    assert.equal(coerceUtcDate('2026-07-20T23:00:00-05:00', 'before'), '2026-07-21T04:00:00Z');
+  });
+
+  it('rejects an empty or whitespace-only value rather than dropping the bound', () => {
+    for (const value of ['', '   ']) {
+      assert.throws(
+        () => coerceUtcDate(value, 'after'),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /after cannot be empty/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it('rejects a non-string value', () => {
+    assert.throws(
+      () => coerceUtcDate(1753000000000, 'before'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /before must be a date string, not a number/);
+        return true;
+      },
+    );
+    assert.throws(
+      () => coerceUtcDate(['2026-07-20'], 'after'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /after must be a date string, not an array/);
+        return true;
+      },
+    );
+  });
+
+  it('truncates a very long value in the rejection message', () => {
+    const long = 'x'.repeat(200);
+    assert.throws(
+      () => coerceUtcDate(long, 'after'),
+      (err: Error) => {
+        assert.match(err.message, /x{60}\.\.\./);
+        assert.ok(!err.message.includes('x'.repeat(61)));
+        return true;
+      },
+    );
   });
 });
 

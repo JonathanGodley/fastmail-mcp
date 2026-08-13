@@ -104,6 +104,91 @@ export function coerceBool(value: unknown): boolean | undefined {
   return undefined;
 }
 
+// JMAP filter conditions take a UTCDate (RFC 8620 §1.4): an RFC 3339 date-time whose
+// offset is literally `Z`, e.g. `2026-07-20T00:00:00Z`. A bare `2026-07-20` is valid
+// ISO 8601 but the server rejects it with an opaque `invalidArguments` that names no
+// argument (#70), so normalise here instead of passing the caller's string through.
+//
+// The two accepted shapes are matched explicitly and everything else is rejected — this
+// is the one place the codebase does NOT coerce leniently, because `new Date()`'s legacy
+// fallback parser guesses in ways that would silently move the search window: it reads
+// `2026/07/20` and `20 July 2026` as HOST-LOCAL midnight (not the documented UTC
+// midnight), and rolls an impossible day like `2026-2-31` over into the next month
+// instead of failing. A rejection the caller can read and fix beats a window that is
+// quietly off by the host's UTC offset.
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_TIME_PATTERN = /^(\d{4}-\d{2}-\d{2})T.+$/;
+
+// Longest caller value echoed back in a rejection message. Enough to recognise the bad
+// value, short enough that a pasted blob doesn't become the error.
+const DATE_ECHO_LIMIT = 60;
+
+// Normalise a caller-supplied date/datetime into the JMAP UTCDate shape.
+//
+//   2026-07-20                -> 2026-07-20T00:00:00Z   (midnight UTC on that date)
+//   2026-07-20T14:30:00Z      -> 2026-07-20T14:30:00Z
+//   2026-07-20T14:30:00+01:00 -> 2026-07-20T13:30:00Z   (offset applied)
+//   2026-07-20T14:30:00       -> the same instant in UTC (no zone = host local time)
+//
+// Anything else is REJECTED with an InvalidInputError naming the parameter and the
+// accepted shapes, so the caller never has to guess which argument JMAP disliked. That
+// includes an unpadded or slash-separated date, free text, a reduced-precision `2026` /
+// `2026-07`, and a day that doesn't exist in its month. An empty/whitespace-only string
+// is rejected too rather than treated as "no filter": silently dropping a date bound
+// widens the search and reads as "the filter did nothing". Milliseconds are trimmed so
+// the emitted value is the canonical seconds-precision form.
+export function coerceUtcDate(value: unknown, paramName: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    throw new InvalidInputError(
+      `${paramName} must be a date string, not ${Array.isArray(value) ? 'an array' : `a ${typeof value}`}. ${acceptedDateFormats()}`,
+    );
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new InvalidInputError(
+      `${paramName} cannot be empty; omit it to search without that date bound. ${acceptedDateFormats()}`,
+    );
+  }
+
+  const dateOnly = DATE_ONLY_PATTERN.test(trimmed);
+  const datePart = dateOnly ? trimmed : DATE_TIME_PATTERN.exec(trimmed)?.[1];
+  if (!datePart) {
+    throw new InvalidInputError(
+      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
+    );
+  }
+
+  // A day that doesn't exist in its month parses rather than failing (2026-02-31 becomes
+  // 2026-03-03), which would silently shift the search window off the dates the caller
+  // asked for. Probe the calendar date on its own — probing the whole value wouldn't
+  // work, since an offset legitimately moves the UTC date.
+  const dayProbe = new Date(`${datePart}T00:00:00Z`);
+  if (Number.isNaN(dayProbe.getTime()) || !dayProbe.toISOString().startsWith(datePart)) {
+    throw new InvalidInputError(
+      `${paramName} is not a real calendar date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
+    );
+  }
+
+  // A date-only value is expanded explicitly rather than left to Date's parse so the
+  // intent (midnight UTC, never host-local) is visible in the code, not a spec detail.
+  const parsed = new Date(dateOnly ? `${trimmed}T00:00:00Z` : trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new InvalidInputError(
+      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
+    );
+  }
+  return parsed.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function echoDate(value: string): string {
+  return value.length > DATE_ECHO_LIMIT ? `${value.slice(0, DATE_ECHO_LIMIT)}...` : value;
+}
+
+function acceptedDateFormats(): string {
+  return 'Accepted: a date such as 2026-07-20 (treated as 00:00:00 UTC on that date), or a full datetime such as 2026-07-20T14:30:00Z or 2026-07-20T14:30:00+01:00.';
+}
+
 // Loud-reject a settable string field that was provided but is empty,
 // whitespace-only, or null. Callers invoke this only for fields that were
 // actually present (i.e. !== undefined at the call site), so silently omitting

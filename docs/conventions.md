@@ -17,6 +17,15 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   no recipient field can reach `.map(parseAddress)` as a bare string (the original
   `cc:""` / `bcc:""` crash class).
 - `coerceBool` — stringified / actual boolean to `boolean` (or `undefined`).
+- `coerceUtcDate` — a date or datetime to the JMAP `UTCDate` shape (`2026-07-20T00:00:00Z`)
+  for the `search_emails` `after` / `before` filters. `YYYY-MM-DD` expands to midnight UTC
+  and `YYYY-MM-DDThh:mm:ss` (with `Z`, an offset, or no zone) is converted; **every other
+  shape is a loud reject** naming the parameter, because the mail server's own rejection
+  (`invalidArguments`) names no argument at all. This is the deliberate exception to the
+  lenient-coercion rule above: `new Date()`'s fallback parser accepts `2026/07/20` and
+  `20 July 2026` but reads them as *host-local* midnight, and rolls an impossible day
+  (`2026-2-31`) into the next month, so accepting them would silently shift the search
+  window instead of failing. A guess the caller can't see is worse than an error they can.
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
   shared by `update_calendar_event` and `edit_draft`.
 

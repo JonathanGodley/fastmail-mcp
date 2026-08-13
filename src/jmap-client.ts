@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, PathAccessError, InvalidInputError } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker } from './reply-quote.js';
 import { isSettableMessageId } from './forward-handler.js';
@@ -2555,6 +2555,12 @@ export class JmapClient {
     includeTrash?: boolean;
     includeSpam?: boolean;
   }): Promise<QueryResult> {
+    // Normalise the date bounds before any network work: JMAP wants a UTCDate and
+    // rejects a bare YYYY-MM-DD with an `invalidArguments` that names no argument, so
+    // an unusable value fails here with one that does (#70).
+    const after = coerceUtcDate(filters.after, 'after');
+    const before = coerceUtcDate(filters.before, 'before');
+
     const mailboxes = await this.getMailboxes();
     const resolvedMailboxId = await this.resolveMailboxId(filters.mailbox, mailboxes);
 
@@ -2566,8 +2572,8 @@ export class JmapClient {
     if (filters.bcc) base.bcc = filters.bcc;
     if (filters.subject) base.subject = filters.subject;
     if (filters.hasAttachment !== undefined) base.hasAttachment = filters.hasAttachment;
-    if (filters.after) base.after = filters.after;
-    if (filters.before) base.before = filters.before;
+    if (after) base.after = after;
+    if (before) base.before = before;
     if (resolvedMailboxId) base.inMailbox = resolvedMailboxId;
 
     // Each keyword is its own condition (mixed polarities can't share one FilterCondition).

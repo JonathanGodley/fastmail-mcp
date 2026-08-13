@@ -690,11 +690,11 @@ const TOOLS = [
             },
             after: {
               type: 'string',
-              description: 'Emails after this date (ISO 8601)',
+              description: 'Only emails received at or after this time. Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset such as "2026-07-20T14:30:00+01:00") - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means 00:00:00 UTC on that date, so it includes the whole of that day. An empty string is rejected; omit the parameter to search without a start bound.',
             },
             before: {
               type: 'string',
-              description: 'Emails before this date (ISO 8601)',
+              description: 'Only emails received before this time (exclusive). Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset) - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means 00:00:00 UTC on that date, so it excludes that whole day; pass the following date to include it. An empty string is rejected; omit the parameter to search without an end bound.',
             },
             limit: {
               type: ['number', 'string'],

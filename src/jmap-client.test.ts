@@ -4,6 +4,7 @@ import { homedir } from 'os';
 import { resolve, join, basename, sep } from 'path';
 import { JmapClient } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
+import { InvalidInputError } from './coerce.js';
 
 // ---------- helpers ----------
 
@@ -1604,6 +1605,34 @@ describe('searchEmails', () => {
     const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
     assert.equal(filter.text, 'quarterly');
     assert.equal(filter.notKeyword, undefined);
+  });
+
+  // The JMAP filter takes a UTCDate; a bare date reaches the server as invalidArguments
+  // unless it is expanded first (#70).
+  it('normalises date-only and offset date bounds into the JMAP UTCDate shape', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/query', { ids: [], total: 0 }, 'query'],
+        ['Email/get', { list: [] }, 'emails'],
+      ],
+    }));
+    await client.searchEmails({ after: '2026-07-20', before: '2026-07-25T09:00:00+02:00', limit: 10 });
+    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    assert.equal(filter.after, '2026-07-20T00:00:00Z');
+    assert.equal(filter.before, '2026-07-25T07:00:00Z');
+  });
+
+  it('rejects an unparseable date bound before making any request', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({ methodResponses: [] }));
+    await assert.rejects(
+      () => client.searchEmails({ before: 'yesterday' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /^before is not a valid date/);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 0);
   });
 });
 
