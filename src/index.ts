@@ -275,9 +275,9 @@ function fieldsSchemaProperty() {
 const STRIP_QUOTED_DESC =
   'Remove quoted reply history from the plain-text body, so a long thread is not re-read at every quote depth. Opt-in; the default output is verbatim. ' +
   'Detection is deliberately conservative and covers the conventional markers only: leading ">" quote runs (including nested ">>"), an "On <date>, <someone> wrote:" attribution directly above such a run, an Outlook From:/Sent:/To:/Subject: header block, and "-----Original Message-----". An unrecognised shape is returned UNCHANGED rather than guessed at. ' +
-  'Read the result from the signals: `quotedBytesStripped` is how many bytes went, and 0 means no marker matched and the body is whole (do not re-fetch to check); `quotedStripSkipped` instead means there was no plain-text body to strip. ' +
+  'Read the result from the signals: `quotedBytesStripped` is how many bytes went, and 0 means no marker matched and the body is whole (do not re-fetch to check); `quotedStripSkipped` instead means there was no non-empty plain-text body to strip (an HTML-only message). ' +
   'Applies to `bodyText` only — a `bodyHtml` returned alongside it is NOT stripped. Cannot be combined with raw (raw is unmodified JMAP). ' +
-  'On a FORWARDED message the forwarded content sits below the same "-----Original Message-----" marker and is therefore stripped too, leaving the covering note; re-read without the flag if `quotedBytesStripped` looks wrong for what you expected.';
+  'Stripping can also over-reach, because these markers are conventions rather than syntax: a leading ">" is equally a markdown blockquote or a pasted shell prompt, a pasted email header block (From: with an address, plus To:/Sent:/Subject:) is treated as a quoted section and cuts to the end of the message, and a FORWARDED message\'s content sits below the same "-----Original Message-----" marker, leaving only the covering note. So treat a `quotedBytesStripped` that looks too large for the message as the cue to re-read that message without the flag.';
 
 // Single source of truth for the tool catalog. Hoisted to module scope so the
 // CallTool handler can derive each tool's declared parameter set for the

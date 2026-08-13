@@ -300,7 +300,14 @@ exception to the omit-empty-fields rule: without it "nothing was quoted" and "th
 wasn't recognized" and "the flag did nothing" are indistinguishable, and a caller cannot
 know whether re-reading verbatim is worth a round trip.
 
-**Accepted residuals** (all documented in the README, all reported through the signal):
+**Accepted residuals** (all documented in the README, all reported through the signal).
+They run in **both directions**, and it matters that the list says so: an under-strip
+returns duplicated bytes, an over-strip returns *less than the sender wrote*. Under-strip is
+the one to prefer at every fork, and the marker rules are tuned that way — but the markers
+are conventions, not syntax, so over-strip is real and the reader has to know to watch
+`quotedBytesStripped` for a number that looks too large for a short message.
+
+*Under-strip (quoted history survives; `quotedBytesStripped` is 0):*
 
 - **HTML-only quoting is out of reach.** Outlook's `<div>` nesting, or any quote flattened
   from HTML without `>` prefixes, has no text-level boundary. This is the same
@@ -311,16 +318,45 @@ know whether re-reading verbatim is worth a round trip.
   Rejecting the combination outright was also rejected — a caller cannot know a message is
   HTML-only before reading it, and on a thread read one such message would fail the whole
   call. It reports `quotedStripSkipped` and returns unchanged.
+- **A wrapped quoted line whose continuation lost its `>` prefix** survives as a fragment.
+  Deleting an unquoted line on suspicion is the one thing this module will not do.
+- **Localized attributions** ("schrieb:", "a écrit :") are not recognized, so the
+  attribution line survives above a stripped `>` run.
+- **An Outlook header block whose `From:` carries no address** (Outlook can render a known
+  contact as a bare display name) does not fire the block rule — see the over-strip entry
+  below for why the address is required.
+
+*Over-strip (content the sender wrote is removed; `quotedBytesStripped` is the tell):*
+
+- **A leading `>` is not only a quote.** It is also a markdown blockquote and the prompt of
+  a pasted shell/REPL transcript, and both are stripped. This is the feature working to
+  spec — `>` runs are the first marker #73 names — not a bug to be heuristically narrowed
+  (distinguishing "> the value MUST be a string" from a quoted line is not decidable from
+  the text). Pinned by test so it stays a decision.
 - **A forward is stripped like a reply.** A forwarded message's content sits below the same
   `-----Original Message-----` marker (Fastmail's own forward block uses those words too),
   so `stripQuoted` leaves the covering note. The marker is in the feature's stated scope and
   Outlook uses it for replies; the alternative — casing/spacing heuristics to tell a
   forward's dashed line from a reply's — is exactly the guessing this module refuses to do.
-  Signalled by a `quotedBytesStripped` that looks large for a short message.
-- **A wrapped quoted line whose continuation lost its `>` prefix** survives as a fragment.
-  Deleting an unquoted line on suspicion is the one thing this module will not do.
-- **Localized attributions** ("schrieb:", "a écrit :") are not recognized, so the
-  attribution line survives above a stripped `>` run.
+- **Pasted email headers that carry an address** still fire the block rule, and that rule
+  cuts to the END of the message, so anything the sender wrote below the paste goes with
+  it. This is the sharpest over-strip and it is why the rule requires an address-shaped
+  token in the `From:` value: probing found a pasted job posting ("From: The Hiring Team"
+  over To:/Subject: lines) losing two thirds of a short message including the sender's own
+  question underneath. Requiring an address keeps the display-name-only pastes — the common
+  newsletter/job-posting shape — out of the rule entirely, at the cost of the under-strip
+  noted above. A paste that reproduces a real address is indistinguishable from a quote and
+  is accepted.
+- **A prose line can be pulled into a wrapped attribution.** The walk-back that catches
+  Gmail's two-line "On … / wrote:" form cannot tell it from two ordinary sentences that
+  happen to end in "wrote:" directly above a genuine `>` block, and eats both. Narrowing it
+  further would drop the wrapped-attribution case, which is common; this is the accepted
+  trade.
+
+In every over-strip case the remedy is the same and is stated in the README: the response
+carries `quotedBytesStripped`, so a number that looks too large for the message is the cue
+to re-read that message without the flag. That is the whole reason the count is emitted
+rather than the stripping being silent.
 
 **Thread bodies (#74)** ride on the same function. `getThread`'s `includeBodies` switches
 the `Email/get` property set to the defined `EMAIL_PROPERTIES_VERBOSE` superset (not a third

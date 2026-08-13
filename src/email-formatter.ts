@@ -1,7 +1,11 @@
 import { stripQuotedText } from './quote-strip.js';
 
 // Reason string for `quotedStripSkipped`. Fixed wording so a client can match on it.
-export const NO_PLAIN_TEXT_BODY = 'no plain-text body to strip';
+// "non-empty" is load-bearing: extractBody yields nothing both for a message with no
+// text/plain part at all (an HTML-only one) and for a text part whose value is empty, and
+// the two are indistinguishable from here. The wording covers both rather than claiming
+// the part is absent when it may just be empty.
+export const NO_PLAIN_TEXT_BODY = 'no non-empty plain-text body to strip';
 
 export interface SimplifiedEmail {
   id: string;

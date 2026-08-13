@@ -254,7 +254,7 @@ Error codes follow the same recoverability logic: a failure you can fix by chang
 
 **`get_email` with `verbose`**: adds `bodyHtml` (WARNING: can produce very large responses for marketing/rich emails — only use when HTML content is specifically needed)
 
-**With `stripQuoted`** (`get_email`, or `get_thread` with `includeBodies`): adds `quotedBytesStripped` (bytes of quoted history removed — `0` means nothing matched and the body is verbatim) **or** `quotedStripSkipped` (there was no plain-text body to strip). One of the two is always present, never omitted for being empty.
+**With `stripQuoted`** (`get_email`, or `get_thread` with `includeBodies`): adds `quotedBytesStripped` (bytes of quoted history removed — `0` means nothing matched and the body is verbatim) **or** `quotedStripSkipped` (there was no non-empty plain-text body to strip — an HTML-only message, or one whose text part is empty). One of the two is always present, never omitted for being empty.
 
 **`get_thread` with `includeBodies`**: adds `bodyText` per message, and `bodyTextUnavailable: true` on a message that has no plain-text part (thread reads never return HTML). Because this mode reads each message through the same property set `get_email` uses, thread messages also gain the `attachments` array (replacing the `hasAttachment` flag) and `forwardedMessageId` on a forward draft. See [Reading long threads cheaply](#reading-long-threads-cheaply).
 
@@ -436,10 +436,22 @@ Both are opt-in and neither changes any default: verbatim-by-default is the righ
 | `quotedBytesStripped: 0` | Nothing matched — this body is **verbatim**, do not re-fetch |
 | `quotedStripSkipped` | Stripping did not run; the string says why (there was no plain-text body) |
 
-**Known limits, all by design:**
+**Known limits, all by design.** They run in both directions, and `quotedBytesStripped` is the tell for both: a `0` where you expected a strip, or a number that looks too large for a short message. The remedy in every case is to re-read that message without the flag.
+
+*Too little stripped:*
 
 - An **unrecognised quote shape passes through unchanged** rather than being guessed at, and says so with a `0`. Text derived from HTML-only quoting (Outlook's `<div>` nesting, a Gmail quote flattened without `>` prefixes) has no text-level boundary to find. This is the same foreign-client recognition residual as the compose-side quote guard; see [`docs/email-bodies.md`](docs/email-bodies.md).
-- On a **forwarded** message, the forwarded content sits below `-----Original Message-----` too, so `stripQuoted` removes it and leaves your covering note. `quotedBytesStripped` will look large for a short message — re-read without the flag when that is not what you wanted.
+- **Localized attributions** ("schrieb:", "a écrit :") aren't recognised, so that one line survives above an otherwise stripped quote.
+
+*Too much stripped:*
+
+- **A leading `>` is not only a quote marker.** A markdown blockquote in the sender's own writing, or pasted shell/REPL/diff output whose prompt is `>`, is stripped as quoted text. `>` runs are the primary marker the feature is built on, so this is it working as specified — telling one from the other is not decidable from the text.
+- **Pasted email headers count as a quoted section** when the `From:` line carries an address, and that rule cuts to the end of the message. The address requirement exists precisely to keep display-name-only pastes (a job posting's "From: The Hiring Team", a newsletter) out of it — those now pass through untouched.
+- On a **forwarded** message, the forwarded content sits below `-----Original Message-----` too, so `stripQuoted` removes it and leaves your covering note.
+- A **prose line ending in "wrote:"** directly above a genuine quote can be pulled in with the attribution (the same walk-back that catches Gmail's wrapped two-line attribution).
+
+*Other:*
+
 - `stripQuoted` applies to **`bodyText` only**. A `bodyHtml` returned alongside it (`get_email` with `verbose`) is untouched.
 - `stripQuoted` **cannot be combined with `raw`** (raw is unmodified JMAP), and on `get_thread` it requires `includeBodies`. Both combinations are rejected with an error rather than quietly ignored.
 - `get_thread`'s combined bodies are capped at **100,000 bytes** (~25k tokens). Over that the call **errors**, naming the largest messages and telling you to add `stripQuoted: true` or fetch them individually — a silently truncated body is indistinguishable from a short message, which is the trap this feature exists to remove. The cap is measured on what would actually be returned, so `stripQuoted` genuinely brings an over-cap thread back under it.

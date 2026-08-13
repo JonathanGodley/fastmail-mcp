@@ -129,7 +129,7 @@ describe('readThread — stripQuoted composition', () => {
       await readThread({ threadId: 't1', includeBodies: true, stripQuoted: true }, client),
     );
     assert.equal(messages[1].bodyTextUnavailable, true);
-    assert.equal(messages[1].quotedStripSkipped, 'no plain-text body to strip');
+    assert.equal(messages[1].quotedStripSkipped, 'no non-empty plain-text body to strip');
     assert.equal(messages[0].bodyTextUnavailable, undefined);
   });
 
@@ -180,13 +180,17 @@ describe('readThread — total body size cap', () => {
     );
   });
 
-  it('applies the cap on the raw path too', async () => {
+  it('applies the cap on the raw path, with a remedy raw can actually run', async () => {
+    // "Retry with stripQuoted:true" would be rejected outright on the raw path, so the
+    // raw message has to say drop raw / fetch individually instead.
     const { client } = makeClient([makeEmail('e1', 'x'.repeat(120_000))]);
     await assert.rejects(
       () => readThread({ threadId: 't1', includeBodies: true, raw: true }, client),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
         assert.match(err.message, /over the 100000-byte limit/);
+        assert.match(err.message, /drop raw and retry with stripQuoted:true, or fetch the messages individually/);
+        assert.doesNotMatch(err.message, /^.*Retry with stripQuoted:true to drop/);
         return true;
       },
     );
@@ -201,8 +205,9 @@ describe('readThread — total body size cap', () => {
   });
 
   it('assertThreadBodiesWithinCap passes a thread exactly at the cap', () => {
-    assert.doesNotThrow(() => assertThreadBodiesWithinCap([{ id: 'e1', bytes: THREAD_BODY_BYTE_CAP }], false));
-    assert.throws(() => assertThreadBodiesWithinCap([{ id: 'e1', bytes: THREAD_BODY_BYTE_CAP + 1 }], false));
+    const mode = { stripQuoted: false, raw: false };
+    assert.doesNotThrow(() => assertThreadBodiesWithinCap([{ id: 'e1', bytes: THREAD_BODY_BYTE_CAP }], mode));
+    assert.throws(() => assertThreadBodiesWithinCap([{ id: 'e1', bytes: THREAD_BODY_BYTE_CAP + 1 }], mode));
   });
 });
 

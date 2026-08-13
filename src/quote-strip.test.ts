@@ -153,6 +153,45 @@ describe('stripQuotedText — Outlook header block', () => {
     assert.ok(quotedBytesStripped > 0);
   });
 
+  it('leaves a pasted job posting alone — header-shaped lines with no address are not a quote', () => {
+    // The over-strip case this rule is narrowed for: the block runs to the end of the
+    // message, so firing on a paste would take the sender's own question with it.
+    const body = [
+      'Does this look worth applying for?',
+      '',
+      'From: The Hiring Team',
+      'To: Candidates',
+      'Subject: Senior Engineer, Remote',
+      '',
+      'We are looking for an engineer to join the platform team.',
+      '',
+      'What do you think?',
+    ].join('\n');
+    const { text, quotedBytesStripped } = strip(body);
+    assert.equal(text, body);
+    assert.equal(quotedBytesStripped, 0);
+  });
+
+  it('leaves a pasted support mail whose From: carries no address', () => {
+    const body = [
+      'They sent me this, is it a phishing attempt?',
+      '',
+      'From: Account Support',
+      'Sent: Yesterday',
+      'Subject: Verify your account',
+      '',
+      'Click here to verify.',
+    ].join('\n');
+    const { text, quotedBytesStripped } = strip(body);
+    assert.equal(text, body);
+    assert.equal(quotedBytesStripped, 0);
+  });
+
+  it('still fires on a bare address with no display name', () => {
+    const body = ['Note.', '', 'From: alice@example.com', 'Sent: Monday', 'Subject: Re: x', '', 'quoted'].join('\n');
+    assert.equal(strip(body).text, 'Note.');
+  });
+
   it('needs the block, not one header line: a lone "From:" line is left alone', () => {
     const body = 'Quick note.\n\nFrom: the design review, we agreed on option B.';
     const { text, quotedBytesStripped } = strip(body);
@@ -161,7 +200,7 @@ describe('stripQuotedText — Outlook header block', () => {
   });
 
   it('leaves a "From:" line with only one sibling header untouched', () => {
-    const body = ['Note.', '', 'From: Alice', 'Subject: lunch', 'Nothing else here.'].join('\n');
+    const body = ['Note.', '', 'From: Alice <alice@example.com>', 'Subject: lunch', 'Nothing else here.'].join('\n');
     const { text, quotedBytesStripped } = strip(body);
     assert.equal(text, body);
     assert.equal(quotedBytesStripped, 0);
@@ -232,6 +271,38 @@ describe('stripQuotedText — no-marker passthrough and signal semantics', () =>
     // unquoted line on suspicion, the fragment is kept and the surrounding quote goes.
     const body = ['Reply.', '', '> a very long quoted line that got', 'wrapped without a marker', '> next quoted line'].join('\n');
     assert.equal(strip(body).text, 'Reply.\nwrapped without a marker');
+  });
+});
+
+// These pin the OVER-strip direction: content that is not quoted correspondence but wears
+// a quote marker. All are documented in docs/email-bodies.md and the README as accepted
+// residuals — the caller's tell is quotedBytesStripped, and the remedy is re-reading
+// without the flag. They are here so the behaviour is a pinned decision, not a surprise.
+describe('stripQuotedText — documented over-strip residuals', () => {
+  it('strips a markdown blockquote in the sender\'s own writing', () => {
+    const body = ['The spec says:', '', '> the value MUST be a string', '', 'which we do not honour.'].join('\n');
+    const { text, quotedBytesStripped } = strip(body);
+    assert.equal(text, 'The spec says:\n\nwhich we do not honour.');
+    assert.ok(quotedBytesStripped > 0, 'the signal is the caller\'s tell that this happened');
+  });
+
+  it('strips pasted shell/REPL output whose prompt is ">"', () => {
+    const body = ['Repro:', '', '> npm test', '> 3 failing', '', 'Any ideas?'].join('\n');
+    assert.equal(strip(body).text, 'Repro:\n\nAny ideas?');
+  });
+
+  it('can eat a prose line pulled into a wrapped attribution above a real quote', () => {
+    // The walk-back that catches Gmail's two-line attribution cannot tell this apart from
+    // one. Narrowing it further would drop the wrapped-attribution case, which is common;
+    // this is the accepted trade.
+    const body = [
+      'On Tuesday we agreed to postpone,',
+      'which is not what the author wrote:',
+      '> the original message',
+      '',
+      'Anyway.',
+    ].join('\n');
+    assert.equal(strip(body).text, 'Anyway.');
   });
 });
 

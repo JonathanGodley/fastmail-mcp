@@ -842,7 +842,7 @@ describe('simplifyEmail — stripQuoted (#73)', () => {
 
   it('reports the skip (never a silent no-op) on an HTML-only message', () => {
     const result = simplifyEmail(withBodies(null, '<p>html only</p>'), { stripQuoted: true });
-    assert.equal(result.quotedStripSkipped, 'no plain-text body to strip');
+    assert.equal(result.quotedStripSkipped, 'no non-empty plain-text body to strip');
     assert.equal(result.quotedBytesStripped, undefined);
     // The html fallback for an html-only message is unaffected by the flag.
     assert.equal(result.bodyHtml, '<p>html only</p>');
@@ -850,6 +850,6 @@ describe('simplifyEmail — stripQuoted (#73)', () => {
 
   it('reports the skip on a message with no body at all', () => {
     const result = simplifyEmail({ id: 'e1', subject: 's', from: [] }, { stripQuoted: true });
-    assert.equal(result.quotedStripSkipped, 'no plain-text body to strip');
+    assert.equal(result.quotedStripSkipped, 'no non-empty plain-text body to strip');
   });
 });

@@ -36,9 +36,22 @@ function bodyByteEntries(sizes: Array<{ id: string; bytes: number }>) {
   return [...sizes].sort((a, b) => b.bytes - a.bytes);
 }
 
+// The remedy has to be one the caller can actually run from where they are: on the raw
+// path "retry with stripQuoted:true" would be rejected by assertStripQuotedNotRaw, so the
+// raw case gets its own wording.
+function overCapRemedy(mode: { stripQuoted: boolean; raw: boolean }): string {
+  if (mode.raw) {
+    return 'raw returns JMAP unmodified and cannot be stripped, so drop raw and retry with stripQuoted:true, or fetch the messages individually with get_email.';
+  }
+  if (mode.stripQuoted) {
+    return 'Quoted history was already stripped, so fetch these messages individually with get_email (run get_thread without includeBodies for the id list).';
+  }
+  return 'Retry with stripQuoted:true to drop the repeated quoted history, or fetch the messages individually with get_email.';
+}
+
 export function assertThreadBodiesWithinCap(
   sizes: Array<{ id: string; bytes: number }>,
-  stripQuoted: boolean,
+  mode: { stripQuoted: boolean; raw: boolean },
 ): void {
   const total = sizes.reduce((sum, s) => sum + s.bytes, 0);
   if (total <= THREAD_BODY_BYTE_CAP) return;
@@ -47,9 +60,7 @@ export function assertThreadBodiesWithinCap(
     .slice(0, LARGEST_LISTED)
     .map((s) => `${s.id} (${s.bytes} bytes)`)
     .join(', ');
-  const remedy = stripQuoted
-    ? 'Quoted history was already stripped, so fetch these messages individually with get_email (run get_thread without includeBodies for the id list).'
-    : 'Retry with stripQuoted:true to drop the repeated quoted history, or fetch the messages individually with get_email.';
+  const remedy = overCapRemedy(mode);
 
   throw new InvalidInputError(
     `Thread bodies total ${total} bytes across ${sizes.length} message(s), over the ${THREAD_BODY_BYTE_CAP}-byte limit for a single get_thread response. ` +
@@ -97,7 +108,7 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
     // faithfully parseable. hiddenDraftCount never leaks into the raw JSON — a raw
     // consumer can pass includeDrafts itself. The size cap still applies: it guards the
     // response, not the formatting.
-    if (includeBodies) assertThreadBodiesWithinCap(rawBodyBytes(emails), false);
+    if (includeBodies) assertThreadBodiesWithinCap(rawBodyBytes(emails), { stripQuoted: false, raw: true });
     return JSON.stringify(emails, null, 2);
   }
 
@@ -112,7 +123,7 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
     }
     assertThreadBodiesWithinCap(
       simplified.map((m) => ({ id: m.id, bytes: byteLength(m.bodyText ?? '') })),
-      stripQuoted,
+      { stripQuoted, raw: false },
     );
   }
 

@@ -17,6 +17,13 @@ import { InvalidInputError } from './coerce.js';
 // returned byte-identical and `quotedBytesStripped` is 0 — an unrecognised shape passes
 // through unchanged BY DESIGN rather than being guessed at. Callers can therefore treat a
 // 0 as "this body is verbatim" and re-read nothing.
+//
+// The failure modes run BOTH ways, and the docs name both (docs/email-bodies.md). Under-
+// strip is the safe one and the one to prefer at every fork. Over-strip is real, because
+// the markers are conventions rather than syntax: a leading ">" is also a markdown
+// blockquote and the prompt of a shell/REPL transcript, and those are stripped as quotes
+// per the feature's own marker list. The remedy is the signal — a quotedBytesStripped that
+// looks large for a short message means re-read without the flag.
 
 export interface QuoteStripResult {
   // The body with every recognised quoted region removed. Byte-identical to the input
@@ -46,10 +53,20 @@ const ATTRIBUTION_MAX_WRAPPED_LINES = 3;
 const ORIGINAL_MESSAGE = /^[ \t]*-{2,}[ \t]*Original Message[ \t]*-{2,}\s*$/i;
 
 // Outlook's header block, which opens a quoted section with no ">" prefixing at all.
-// Confidence comes from the BLOCK, not the single line: a "From:" line with a value, then
-// at least two more header lines within the next few lines, with nothing but headers and
-// blanks in between. One stray "From:" in prose therefore cannot trigger it.
-const HEADER_FROM = /^[ \t]*From:[ \t]*\S/;
+// Confidence comes from the BLOCK, not the single line: a "From:" line whose value looks
+// like an ADDRESS, then at least two more header lines within the next few lines, with
+// nothing but headers and blanks in between.
+//
+// The address requirement is what keeps this rule on the right side of the strip/keep
+// trade, because this marker class cuts to the END of the message. Pasted content that
+// merely looks header-ish — a job posting or a newsletter carrying "From: The Hiring
+// Team" over To:/Subject: lines — would otherwise take the reader's own question below
+// the paste with it. A genuine quoted or forwarded header carries an addr-spec, so
+// requiring one costs almost nothing; where it does cost (Outlook can render a known
+// contact as a bare display name) the failure is an UNDER-strip, reported as a
+// quotedBytesStripped of 0, which is the direction this module errs in by design.
+const HEADER_FROM = /^[ \t]*From:[ \t]*(\S.*)$/;
+const ADDRESS_TOKEN = /@|<[^<>]*>/;
 const HEADER_SIBLING = /^[ \t]*(Sent|Date|To|Cc|Bcc|Subject|Reply-To):/i;
 const HEADER_BLOCK_LOOKAHEAD = 6;
 const HEADER_BLOCK_MIN_SIBLINGS = 2;
@@ -108,7 +125,8 @@ function markerRegionStart(lines: string[], i: number): number {
 }
 
 function isHeaderBlock(lines: string[], i: number): boolean {
-  if (!HEADER_FROM.test(lines[i])) return false;
+  const from = HEADER_FROM.exec(lines[i]);
+  if (!from || !ADDRESS_TOKEN.test(from[1])) return false;
   let siblings = 0;
   for (let j = i + 1; j < lines.length && j <= i + HEADER_BLOCK_LOOKAHEAD; j++) {
     if (BLANK_LINE.test(lines[j])) continue;
