@@ -198,6 +198,38 @@ sanitiser (roughly the bar Gmail / Apple Mail emit) and does not fully eliminate
 mutation-XSS. Stripping script / `on*` / `style` / unscoped wrappers plus pinned schemes
 is the deliberate safety floor, not an oversight.
 
+## Process lifecycle: the exit on stdin EOF is implicit
+
+The server has no shutdown handler, and that is deliberate. The SDK's
+`StdioServerTransport` attaches only `data` / `error` listeners to `process.stdin` and
+never registers an EOF handler, so nothing calls `transport.close()` and the server's
+`onclose` never runs. The process ends anyway: stdin reaching EOF releases the last
+handle holding the event loop open, and node exits with code 0. Measured on Windows,
+that takes tens of milliseconds.
+
+The post-request case was **measured once and is an accepted residual, not
+regression-covered**: after a tool call had opened an HTTPS connection to Fastmail,
+EOF still exited in ~35ms, so an idle keep-alive socket from `fetch` did not hold the
+loop open. The lifecycle tests deliberately do not cover this - reaching a tool call
+means credentials and a live network round trip, which `npm test` must not require -
+so a future undici or node change here would not be caught automatically.
+
+Two consequences worth knowing before changing startup code:
+
+- **Anything that keeps the event loop alive turns a clean exit into a hang.** A bare
+  `setInterval`, a retained socket, a file watcher, an unresolved handle - any of these
+  and an embedding caller that closes stdin waits forever, most damagingly on Windows
+  where the orphan outlives its parent silently. Keep long-lived handles out of the
+  startup path, or `unref()` them.
+- **An explicit `process.exit()` on EOF was considered and rejected.** It would trade
+  the graceful drain (an in-flight tool call still gets to write its response) for a
+  truncated one, and it would mask a leaked handle rather than expose it.
+
+`src/server-lifecycle.test.ts` is the guard: it spawns the built `dist/index.js`, closes
+stdin, and fails if the process does not exit on its own. The consumer-facing side of
+this (spawn directly with node, never via `cmd /c` on Windows, expected handshake
+latency) is in the README's embedding section.
+
 ## Dependency / build gotchas
 
 - **`html-to-text` v10 ships no type declarations.** Types come from a separate
