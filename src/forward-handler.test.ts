@@ -79,6 +79,51 @@ describe('buildForwardParams — recipients + send flag', () => {
   });
 });
 
+describe('buildForwardParams — malformed caller notes (#62, #71/#77, #78)', () => {
+  it('rejects a non-string note instead of crashing on it', () => {
+    assert.throws(
+      () => buildForwardParams({ to: ['x@y.com'], htmlBody: 42 }, makeOriginal()),
+      (e: any) => e instanceof InvalidInputError && /htmlBody must be a string/.test(e.message),
+    );
+  });
+
+  it('rejects an entirely HTML-escaped note', () => {
+    assert.throws(
+      () => buildForwardParams({ to: ['x@y.com'], htmlBody: '&lt;p&gt;FYI&lt;/p&gt;' }, makeOriginal()),
+      /htmlBody appears to be HTML-escaped/,
+    );
+  });
+
+  // Same shadowing as the reply quote: the forwarded-message block supplies the visible
+  // content the no-readable-body reject looks for, so a CDATA-wrapped note would ship
+  // with the note itself missing from the plain-text part.
+  it('rejects a CDATA-wrapped note even though the forwarded block would supply content', () => {
+    assert.throws(
+      () => buildForwardParams({ to: ['x@y.com'], htmlBody: '<![CDATA[<p>FYI</p>]]>' }, makeOriginal()),
+      /htmlBody contains a CDATA section/,
+    );
+    assert.throws(
+      () => buildForwardParams({ to: ['x@y.com'], textBody: '<![CDATA[FYI]]>' }, makeOriginal()),
+      /textBody is wrapped in a CDATA section/,
+    );
+  });
+
+  it('rejects on the asAttachment path too (the note is the whole body there)', () => {
+    assert.throws(
+      () => buildForwardParams({ to: ['x@y.com'], asAttachment: true, htmlBody: '<![CDATA[<p>FYI</p>]]>' }, makeOriginal()),
+      /CDATA/,
+    );
+  });
+
+  it('leaves a legitimate note alone: escaped markup inside real tags', () => {
+    const { forwardParams } = buildForwardParams(
+      { to: ['x@y.com'], htmlBody: '<p>See the <code>&lt;config&gt;</code> block below</p>' },
+      makeOriginal(),
+    );
+    assert.match(forwardParams.htmlBody!, /&lt;config&gt;/);
+  });
+});
+
 describe('buildForwardParams — forwardedMessageId (recorded source)', () => {
   it("records the original's Message-ID", () => {
     const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
@@ -312,5 +357,18 @@ describe('composeForward — orchestration', () => {
     const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
     await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
     assert.equal(uploadCalled, false);
+  });
+  it('rejects a malformed note before sending, uploading, or saving a draft', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => composeForward(
+        { originalEmailId: 'o1', to: ['x@y.com'], send: true, htmlBody: '<![CDATA[<p>FYI</p>]]>', attachments: [{ path: 'new.pdf' }] },
+        client, '/attach/root',
+      ),
+      /htmlBody contains a CDATA section/,
+    );
+    assert.equal(calls.send, undefined);
+    assert.equal(calls.draft, undefined);
+    assert.equal(calls.upload, undefined);
   });
 });

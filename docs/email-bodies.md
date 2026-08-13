@@ -2,7 +2,7 @@
 
 How this server composes, edits, and reasons about the `text/plain` and `text/html`
 parts of an email. This spans every authoring path (`send_email`, `create_draft`,
-`reply_email`, `edit_draft`, `send_draft`), so it lives here rather than in any one
+`reply_email`, `forward_email`, `edit_draft`, `send_draft`), so it lives here rather than in any one
 tool's issue. The per-tool behaviour rationale lives in the closed GitHub issues
 (#4, #7, #15, #16); this file is the shared model they all depend on.
 
@@ -44,6 +44,89 @@ The model is implemented in `src/body-format.ts`:
 A consequence worth stating for future changes: a "tighten this up to require a text
 part" change would wrongly refuse legitimate image-only sends. The no-body reject is
 deliberately the only reject.
+
+## Caller-supplied body validation (#62, #71/#77, #78)
+
+Everything above assumes the caller handed us a body we can reason about. `assertBodyInputs`
+(`src/body-format.ts`) is the gate that makes that true. It rejects three shapes with an
+`InvalidInputError` (→ `InvalidParams` at the tool boundary), and they share a failure
+signature: the call reports success, the tool result looks fine, and the defect is only
+visible to a human who opens the draft or to the recipient.
+
+- **Non-string body.** A present, non-string `textBody`/`htmlBody` used to reach `isBlank`
+  and throw a raw `TypeError` (surfacing as `InternalError`, i.e. "retry" rather than "fix
+  your input"). Now rejected by name. `undefined` **and `null`** both mean "omitted": null
+  is how several lenient clients spell an unset optional field, and every downstream check
+  already read it as absent, so accepting it preserves working calls rather than turning
+  them into errors. Consistent with `coerceStringArray` / `coerceAttachments`, which also
+  fold null into undefined.
+- **Fully HTML-escaped `htmlBody`** — at least one escaped element tag (`&lt;p&gt;`) and
+  zero real elements. Reject rather than unescape: unescaping guesses at intent, whereas
+  the error teaches the right shape once. `htmlBody` only. Literal `<p>` characters in a
+  plain-text body are ordinary content, and escaped markup inside real tags
+  (`<pre>&lt;p&gt;</pre>`) is legitimate HTML.
+
+  Both halves of the test are load-bearing, and the escaped half needs to be narrow. Because
+  the guard only fires when there is **no** real markup, it is by definition judging prose —
+  and in prose, escaped angle brackets are ordinary content. A loose "`&lt;` anything `&gt;`"
+  test rejected real messages: `Hi &lt;name&gt;, see attached.`, `mail me at &lt;a@b.com&gt;`,
+  `Please reply with &lt;approve&gt; or &lt;reject&gt;.` So the escaped tag NAME must be a
+  known HTML element, followed by a genuine tag delimiter (whitespace, `/`, or the closing
+  `&gt;`) — which is what tells `&lt;a href=…&gt;` from `&lt;a@b.com&gt;`.
+
+  **Residual false-positive surface (accepted):** a body with no real markup whose escaped
+  brackets happen to wrap a known element name *and* a tag-like delimiter — e.g. prose whose
+  only markup-ish content is `&lt;code&gt;` or `&lt;table&gt;` used as a placeholder word.
+  Much smaller than the original test's surface, but not nil. The remedy is in the error
+  message either way (use `textBody`, or include real markup), and both keep the caller's
+  words intact.
+- **CDATA section**, with a deliberate asymmetry between the formats:
+  - `htmlBody` — rejected **anywhere** in the body. The two parsers that read it disagree,
+    and both outcomes are bad. Our `htmlToText` derivation (htmlparser2) recognizes the
+    section and consumes it whole; measured: `<![CDATA[<p>Hi</p>]]>` derives to `''`,
+    `<p>Before</p><![CDATA[<p>gone</p>]]><p>After</p>` derives to `Before\n\nAfter`, and an
+    unclosed section swallows to the end of the string. So a mid-body section is as
+    destructive as a wrapper, hence "anywhere" rather than "starts with". A browser takes a
+    different route to the same mess: outside foreign content, HTML5 has no CDATA, so
+    `<![CDATA[` starts a *bogus comment* that ends at the first `>` — the opening token and
+    whatever precedes that `>` disappear, and the trailing `]]>` renders as visible text. The
+    HTML half therefore fails visibly and the text half fails silently. The correct way to
+    show a literal CDATA token in HTML is to escape it (`&lt;![CDATA[`), which passes.
+
+    **Known false positive (consciously declined):** inline SVG that CDATA-wraps a `<style>`
+    or `<script>` block — valid in the SVG/XML integration point, where a browser *does*
+    honour CDATA. The reject stands: such a body is vanishingly rare in email, HTML5 mangles
+    it anyway once the fragment is parsed as HTML rather than XML, and our text derivation
+    would still swallow it. Recorded so the trade is visible rather than assumed absent.
+  - `textBody` — rejected only when the trimmed body **starts with** `<![CDATA[`, i.e. the
+    caller wrapped the whole body. A `text/plain` part is never markup-parsed, so an
+    embedded CDATA token is inert, and a message quoting an XML snippet is real content that
+    must keep working.
+  - A bare `]]>` is **not** rejected in either format (consciously declined). The
+    catastrophic swallow requires the opening token; on its own `]]>` renders as literal
+    text and passes through the text derivation intact, so rejecting it would block ordinary
+    prose and code snippets to prevent nothing.
+
+**Where the gate sits, and why.** It runs on the CALLER's own body, at the seam of each of
+the five compose paths, *before* a reply quote or forwarded-message block is merged in:
+`buildReplyParams` (`src/reply-handler.ts`), `buildForwardParams`
+(`src/forward-handler.ts`), `composeSend` / `composeDraft` (`src/compose-handler.ts`), and
+the top of `updateDraft` (`src/jmap-client.ts`, edit_draft's only caller — which is why the
+guard sits in the client method there, alongside the rest of the edit-body rules).
+
+Two constraints pin that placement:
+
+- **The merge masks the defect.** `jmap-client.ts`'s existing no-readable-body reject
+  (`normalized.htmlOnly && !htmlHasVisibleContent`) would catch a bare CDATA-wrapped send,
+  but a reply escapes it: the quoted original supplies the visible content the gate looks
+  for, so `htmlOnly` is never set and the malformed new message rides through with its text
+  part reduced to the quote alone. Same for a forward. The escaped-HTML test is masked the
+  same way (the quote contributes the real tags the test looks for).
+- **A merged body is not caller input.** `sendEmail` / `createDraft` cannot host this guard,
+  because the reply and forward paths reach them with the quoted original folded in. A
+  message that legitimately quotes an XML snippet would be rejected on reply, and the user
+  has no way to edit the original to fix it. Validating only what the caller wrote keeps
+  every reject actionable.
 
 ## The asymmetric edit coupling
 

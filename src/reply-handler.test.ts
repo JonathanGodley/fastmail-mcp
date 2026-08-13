@@ -109,6 +109,61 @@ describe('buildReplyParams — validation', () => {
   });
 });
 
+describe('buildReplyParams — malformed caller bodies (#62, #71/#77, #78)', () => {
+  it('rejects a non-string body instead of crashing on it', () => {
+    assert.throws(
+      () => buildReplyParams({ originalEmailId: 'e1', textBody: 42 }, makeOriginal()),
+      (e: any) => e instanceof InvalidInputError && /textBody must be a string/.test(e.message),
+    );
+  });
+
+  it('rejects an entirely HTML-escaped htmlBody', () => {
+    assert.throws(
+      () => buildReplyParams({ originalEmailId: 'e1', htmlBody: '&lt;p&gt;Hi there&lt;/p&gt;' }, makeOriginal()),
+      /htmlBody appears to be HTML-escaped/,
+    );
+  });
+
+  // The quote is what makes this class of malformed body dangerous on a reply: it hides
+  // the damage from every downstream check. A CDATA-wrapped htmlBody derives to an empty
+  // text part on its own (which the no-readable-body reject would catch), but once the
+  // quoted original is appended the merged HTML has plenty of visible content, so the
+  // reply ships with the new message dropped from the plain-text alternative and only the
+  // original's words quoted back at the recipient. The guard therefore runs on the
+  // caller's body, before the quote is merged in.
+  it('rejects a CDATA-wrapped body even though the quote would supply visible content', () => {
+    assert.throws(
+      () => buildReplyParams(
+        { originalEmailId: 'e1', htmlBody: '<![CDATA[<p>Just checking in</p>]]>', quoteOriginal: true },
+        makeOriginal(),
+      ),
+      /htmlBody contains a CDATA section/,
+    );
+    assert.throws(
+      () => buildReplyParams(
+        { originalEmailId: 'e1', textBody: '<![CDATA[Just checking in]]>', quoteOriginal: true },
+        makeOriginal(),
+      ),
+      /textBody is wrapped in a CDATA section/,
+    );
+  });
+
+  it('rejects on the draft path too (send defaults to false, so nothing is transmitted either way)', () => {
+    assert.throws(
+      () => buildReplyParams({ originalEmailId: 'e1', send: false, htmlBody: '<![CDATA[<p>x</p>]]>' }, makeOriginal()),
+      /CDATA/,
+    );
+  });
+
+  it('leaves a legitimate body alone: escaped markup inside real tags, and a bare ]]>', () => {
+    const { replyParams } = buildReplyParams(
+      { originalEmailId: 'e1', htmlBody: '<p>Write it as <code>&lt;p&gt;</code>, and end with ]]&gt;</p>' },
+      makeOriginal(),
+    );
+    assert.match(replyParams.htmlBody!, /&lt;p&gt;/);
+  });
+});
+
 describe('composeReply — attachment threading into both branches', () => {
   const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
 
@@ -206,5 +261,19 @@ describe('composeReply — attachment threading into both branches', () => {
   it('requires originalEmailId', async () => {
     const { client } = spyClient();
     await assert.rejects(() => composeReply({ textBody: 'hi' }, client, undefined), /originalEmailId is required/);
+  });
+
+  it('rejects a malformed body before sending, uploading, or saving a draft', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => composeReply(
+        { originalEmailId: 'o1', send: true, htmlBody: '<![CDATA[<p>hi</p>]]>', attachments: [{ path: 'a.pdf' }] },
+        client, '/attach/root',
+      ),
+      /htmlBody contains a CDATA section/,
+    );
+    assert.equal(calls.send, undefined);
+    assert.equal(calls.draft, undefined);
+    assert.equal(calls.upload, undefined);
   });
 });

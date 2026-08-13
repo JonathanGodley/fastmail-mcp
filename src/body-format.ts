@@ -1,4 +1,5 @@
 import { convert } from 'html-to-text';
+import { InvalidInputError } from './coerce.js';
 
 // Body-format rule applied across every compose path: never ship an HTML body without a
 // readable text/plain alternative. The text part is a DERIVED fallback, auto-generated
@@ -19,6 +20,96 @@ const ZERO_WIDTH = /[\u200B\u200C\u200D\uFEFF\u00AD]/g;
 // whitespace / zero-width-only all read as "absent" consistently everywhere.
 export function isBlank(s: string | undefined | null): boolean {
   return !s || s.replace(ZERO_WIDTH, '').trim() === '';
+}
+
+// ---------------------------------------------------------------------------
+// Caller-supplied body validation (#62, #71/#77, #78)
+// ---------------------------------------------------------------------------
+// Three malformed-body shapes that the compose paths used to accept silently, each
+// reaching a recipient before anyone noticed. Applied to the CALLER's own textBody /
+// htmlBody at every compose seam, BEFORE a reply quote or forwarded-message block is
+// merged in — a merged body is partly server-generated and partly the quoted original's
+// content, and validating that would reject legitimate mail (e.g. replying to a message
+// that quotes an XML snippet).
+
+// An escaped tag run (`&lt;p&gt;`), and any real element.
+//
+// The escaped test is deliberately narrow, because it only ever fires on a body with NO
+// real markup — i.e. on prose, where escaped angle brackets are ordinary content. A loose
+// "&lt; anything &gt;" test rejected real messages: "Hi &lt;name&gt;, see attached.",
+// "mail me at &lt;a@b.com&gt;", "reply with &lt;approve&gt; or &lt;reject&gt;". So the
+// escaped tag NAME must be a known HTML element, and the lookahead requires a genuine tag
+// delimiter after it (whitespace, `/`, or the closing `&gt;`) — which is what separates
+// `&lt;a href=…&gt;` (an anchor) from `&lt;a@b.com&gt;` (an email address).
+const ESCAPED_TAG = /&lt;\/?(p|br|div|span|a|b|i|u|em|strong|ul|ol|li|h[1-6]|table|thead|tbody|tr|td|th|img|pre|code|blockquote|hr|body|html|head|style|font|sub|sup|small|big|center)(?=\s|\/|&gt;)/i;
+const REAL_TAG = /<[a-z][^>]*>/i;
+// Case-insensitive: an HTML parser treats `<!` as the start of a markup declaration
+// regardless of the case that follows, so a lowercase spelling is no safer.
+const CDATA_OPEN = /<!\[CDATA\[/i;
+const CDATA_START = /^<!\[CDATA\[/i;
+
+// Reject a present-but-non-string body (#62). `undefined` AND `null` both mean "omitted":
+// null is how several lenient clients spell an unset optional field, and every downstream
+// body check (isBlank, the falsy guards) already reads it as absent — so accepting it here
+// keeps the existing behaviour rather than turning a working call into an error.
+function requireBodyString(name: string, value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    const got = Array.isArray(value) ? 'array' : typeof value;
+    throw new InvalidInputError(`${name} must be a string; received ${got}. Pass the message body as a plain string.`);
+  }
+  return value;
+}
+
+// Validate the caller's body parameters. Reads only textBody / htmlBody, so the whole
+// tool-args object can be passed straight in. Throws InvalidInputError (mapped to
+// InvalidParams at the tool boundary) on:
+//
+//  - a present, non-string body (#62);
+//  - an htmlBody that is entirely HTML-ESCAPED markup — escaped element tags and zero
+//    real elements (#71/#77). Rejecting beats unescaping, which would guess at intent.
+//    htmlBody only: literal `<p>` characters in a plain-text body are ordinary content,
+//    and escaped markup inside real tags (`<pre>&lt;p&gt;</pre>`) is legitimate HTML;
+//  - a CDATA section (#78). Asymmetric by format, because the damage is:
+//      htmlBody — rejected wherever `<![CDATA[` appears. The two parsers that read the body
+//        disagree, and both outcomes are bad. This server's html-to-text derivation
+//        (htmlparser2) recognizes the section and consumes everything from the opening token
+//        to the next `]]>`, or to the end of the body when unclosed — measured: a CDATA-
+//        wrapped body derives to '', and a CDATA-wrapped REPLY derives to the quoted
+//        original alone, the new message silently gone. A browser instead handles
+//        `<![CDATA[` as a bogus comment that ends at the first `>`, so it drops the opening
+//        token and renders the trailing `]]>` as visible text. Mid-body sections do the same
+//        damage, hence "anywhere" rather than "at the start". To show a literal CDATA token
+//        in HTML it must be escaped anyway (`&lt;![CDATA[`), which passes.
+//      textBody — rejected only when the body STARTS with `<![CDATA[`, i.e. the caller
+//        wrapped the whole body. A plain-text part is never markup-parsed, so an embedded
+//        CDATA token is inert, and mail that quotes an XML snippet is perfectly legitimate
+//        content that must keep working. A bare `]]>` is left alone in BOTH formats for
+//        the same reason: without an opening token it renders as literal text and survives
+//        the text derivation intact, so rejecting it would only block real prose.
+export function assertBodyInputs(bodies: { textBody?: unknown; htmlBody?: unknown }): void {
+  const text = requireBodyString('textBody', bodies?.textBody);
+  const html = requireBodyString('htmlBody', bodies?.htmlBody);
+
+  if (text !== undefined && CDATA_START.test(text.trimStart())) {
+    throw new InvalidInputError(
+      'textBody is wrapped in a CDATA section. Pass the message body as a plain string with no <![CDATA[ ... ]]> wrapper.',
+    );
+  }
+
+  if (html === undefined) return;
+
+  if (CDATA_OPEN.test(html)) {
+    throw new InvalidInputError(
+      'htmlBody contains a CDATA section (<![CDATA[), which is not valid in an HTML email body: the plain-text alternative is derived with an HTML parser that drops the section and everything inside it, so the message would be lost from it, while the rendered HTML shows a stray ]]>. Pass the body as plain markup, or escape the token as &lt;![CDATA[ to show it literally.',
+    );
+  }
+
+  if (ESCAPED_TAG.test(html) && !REAL_TAG.test(html)) {
+    throw new InvalidInputError(
+      'htmlBody appears to be HTML-escaped: it contains escaped tag sequences (&lt;p&gt;) and no actual HTML elements, so recipients would see the tags as text. Pass real markup (<p>...</p>), or use textBody for a plain-text message.',
+    );
+  }
 }
 
 // Custom <img> formatter: emit the alt text only (nothing when there is no alt). The

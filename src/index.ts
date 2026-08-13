@@ -16,6 +16,8 @@ import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplify
 import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
+import { composeSend, composeDraft } from './compose-handler.js';
+import { assertBodyInputs } from './body-format.js';
 
 const server = new Server(
   {
@@ -351,11 +353,11 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one.',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML.',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
             },
             inReplyTo: {
               type: 'array',
@@ -408,11 +410,11 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one.',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML.',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
             },
             send: {
               type: ['boolean', 'string'],
@@ -469,11 +471,11 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Optional note placed ABOVE the forwarded-message block, in plain text — the original is reproduced below it automatically; omit for a bare FYI forward. NOTE: a text-only note produces a PLAIN-TEXT forward (the original\'s HTML formatting is reduced to text) — use htmlBody, or both, to preserve its formatting. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.)',
+              description: 'Optional note placed ABOVE the forwarded-message block, in plain text — the original is reproduced below it automatically; omit for a bare FYI forward. NOTE: a text-only note produces a PLAIN-TEXT forward (the original\'s HTML formatting is reduced to text) — use htmlBody, or both, to preserve its formatting. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.) Must be a plain string: a note wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'Optional note placed ABOVE the forwarded-message block, in HTML (the preferred format; a plain-text alternative is derived automatically) — the original is reproduced below it. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.)',
+              description: 'Optional note placed ABOVE the forwarded-message block, in HTML (the preferred format; a plain-text alternative is derived automatically) — the original is reproduced below it. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.) Pass REAL markup — an entirely HTML-escaped note (escaped element tags like &lt;p&gt; with no actual elements) is rejected, as is one containing a CDATA section.',
             },
             send: {
               type: ['boolean', 'string'],
@@ -532,11 +534,11 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one.',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML.',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
             },
             inReplyTo: {
               type: 'array',
@@ -592,11 +594,11 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed). For a TEXT-ONLY reply or forward draft, editing textBody is a quote-bearing edit: pass originalEmailId to rebuild and keep the quoted/forwarded original, or noQuote:true to drop it.',
+              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed). For a TEXT-ONLY reply or forward draft, editing textBody is a quote-bearing edit: pass originalEmailId to rebuild and keep the quoted/forwarded original, or noQuote:true to drop it. Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically. For a REPLY or FORWARD draft that carries the quoted/forwarded original, editing the body is rejected unless you pass originalEmailId (rebuilds and keeps it) or noQuote:true (drops it). Supplying htmlBody to a text-only reply draft converts it to HTML.',
+              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically. For a REPLY or FORWARD draft that carries the quoted/forwarded original, editing the body is rejected unless you pass originalEmailId (rebuilds and keeps it) or noQuote:true (drops it). Supplying htmlBody to a text-only reply draft converts it to HTML. Pass REAL markup — an entirely HTML-escaped body (escaped element tags like &lt;p&gt; with no actual elements) is rejected, as is any body containing a CDATA section.',
             },
             originalEmailId: {
               type: 'string',
@@ -1414,37 +1416,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'send_email': {
-        const { from, mailbox, subject, textBody, htmlBody, inReplyTo, references } = args as any;
-        const { to: toArray, cc, bcc, replyTo } = coerceRecipients(args as any);
-        if (!toArray || toArray.length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, 'to field is required and must be a non-empty array');
-        }
-        if (!subject) {
-          throw new McpError(ErrorCode.InvalidParams, 'subject is required');
-        }
-        if (!textBody && !htmlBody) {
-          throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
-        }
-
-        const sendAttachmentSpecs = coerceAttachments((args as any).attachments);
-        const sendAttachments = sendAttachmentSpecs?.length
-          ? await client.uploadAttachments(sendAttachmentSpecs, getAttachDir())
-          : undefined;
-
-        const submissionId = await client.sendEmail({
-          to: toArray,
-          cc,
-          bcc,
-          from,
-          mailbox,
-          subject,
-          textBody,
-          htmlBody,
-          inReplyTo,
-          references,
-          replyTo,
-          attachments: sendAttachments,
-        });
+        // The orchestration (body validation, recipient coercion, attachment upload,
+        // transmit) lives in composeSend so it is unit-testable with a mock client;
+        // this handler just maps the result to the response text.
+        const submissionId = await composeSend(args, client, getAttachDir());
 
         return {
           content: [
@@ -1483,36 +1458,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'create_draft': {
-        const { from, mailbox, subject, textBody, htmlBody, inReplyTo, references } = args as any;
-        const { to, cc, bcc, replyTo } = coerceRecipients(args as any);
-        // Coerce attachments BEFORE the contentless guard so an attachment-only draft
-        // (a legitimate "stash this file" artifact, consistent with edit_draft accepting
-        // a body-less attachment edit) counts as content. A lenient client may send a
-        // JSON-string array, so test the coerced specs, not the raw arg.
-        const draftAttachmentSpecs = coerceAttachments((args as any).attachments);
-
-        if (!to?.length && !subject && !textBody && !htmlBody && !draftAttachmentSpecs?.length) {
-          throw new McpError(ErrorCode.InvalidParams, 'At least one of to, subject, textBody, htmlBody, or attachments must be provided');
-        }
-
-        const draftAttachments = draftAttachmentSpecs?.length
-          ? await client.uploadAttachments(draftAttachmentSpecs, getAttachDir())
-          : undefined;
-
-        const emailId = await client.createDraft({
-          to,
-          cc,
-          bcc,
-          from,
-          mailbox,
-          subject,
-          textBody,
-          htmlBody,
-          inReplyTo,
-          references,
-          replyTo,
-          attachments: draftAttachments,
-        });
+        // The orchestration (body validation, recipient coercion, the contentless-draft
+        // guard, attachment upload, create) lives in composeDraft so it is unit-testable
+        // with a mock client; this handler just maps the result to the response text.
+        const { emailId, subject, to, cc } = await composeDraft(args, client, getAttachDir());
 
         const summary = [
           `Draft created successfully (Email ID: ${emailId}).`,
@@ -1542,6 +1491,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
+
+        // Ordering belt only: updateDraft runs the same check and remains the authoritative
+        // seam for this tool. Running it here too means a malformed body is refused before
+        // any attachment is read off disk and pushed to the blob store, matching the other
+        // four compose paths (the guard is a pure, idempotent input check).
+        assertBodyInputs(args as any);
 
         const editAttachmentSpecs = coerceAttachments((args as any).attachments);
         const editAttachments = editAttachmentSpecs?.length

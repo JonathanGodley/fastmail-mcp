@@ -1,7 +1,7 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
-import { isBlank } from './body-format.js';
+import { isBlank, assertBodyInputs } from './body-format.js';
 import { buildForwardBodies } from './reply-quote.js';
 import type { AttachmentPart } from './jmap-client.js';
 
@@ -94,6 +94,10 @@ export interface BuiltForward {
 // composeForward (the I/O boundary). Throws McpError on invalid input.
 export function buildForwardParams(args: any, originalEmail: any): BuiltForward {
   const a = args ?? {};
+  // Validate the caller's note FIRST — before the forwarded-message block is assembled
+  // below, which would otherwise mask a malformed note the same way a reply quote does
+  // (see the equivalent guard in buildReplyParams).
+  assertBodyInputs(a);
   const { from, textBody, htmlBody, send } = a;
   const { to, cc, bcc, replyTo } = coerceRecipients(a);
   const shouldSend = coerceBool(send) ?? false;

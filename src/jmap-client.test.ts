@@ -483,6 +483,47 @@ describe('updateDraft', () => {
     });
   });
 
+  // ---- malformed caller bodies (#62, #71/#77, #78) ----
+
+  it('rejects a non-string body without touching the server', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: 42 as any }),
+      (err: Error) => {
+        assert.match(err.message, /htmlBody must be a string; received number/);
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 0); // fails before the Email/get fetch
+  });
+
+  it('rejects an entirely HTML-escaped htmlBody', async () => {
+    mockUpdate(client, RICH_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '&lt;p&gt;Rewritten&lt;/p&gt;' }),
+      /htmlBody appears to be HTML-escaped/,
+    );
+  });
+
+  it('rejects a CDATA-wrapped body in either format', async () => {
+    mockUpdate(client, RICH_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<![CDATA[<p>Rewritten</p>]]>' }),
+      /htmlBody contains a CDATA section/,
+    );
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: '<![CDATA[Rewritten]]>' }),
+      /textBody is wrapped in a CDATA section/,
+    );
+  });
+
+  it('still accepts a body that merely contains escaped markup inside real tags', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+    await client.updateDraft('draft-1', { htmlBody: '<p>Write <code>&lt;p&gt;</code> like this</p>' });
+    assert.equal(draftFromCall(makeReq).bodyValues.html.value, '<p>Write <code>&lt;p&gt;</code> like this</p>');
+  });
+
   // ---- one-sided guard + text-fallback regeneration on html edit ----
 
   it('throws when editing textBody alone on a dual-body draft (html is what recipients see)', async () => {

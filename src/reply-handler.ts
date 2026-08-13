@@ -1,7 +1,7 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
-import { isBlank } from './body-format.js';
+import { isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies } from './reply-quote.js';
 import { formatAddress } from './email-formatter.js';
 import type { AttachmentPart } from './jmap-client.js';
@@ -35,6 +35,12 @@ export function buildReplyParams(
   originalEmail: any,
 ): { shouldSend: boolean; quoteOriginal: boolean; replyParams: ReplyParams } {
   const a = args ?? {};
+  // Validate the caller's own bodies FIRST — before the quote is appended below. Once the
+  // quoted original is merged in, a malformed new message is masked by it: the quote
+  // supplies the real tags an escaped-HTML body lacks, and it supplies the visible content
+  // that would otherwise trip the no-readable-body reject, so a CDATA-wrapped reply ships
+  // with its new message silently dropped from the plain-text part (#78).
+  assertBodyInputs(a);
   const { from, textBody, htmlBody, send } = a;
   const { to: toArray, cc, bcc, replyTo } = coerceRecipients(a);
   const shouldSend = coerceBool(send) ?? false;

@@ -1,7 +1,7 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, PathAccessError, InvalidInputError } from './coerce.js';
-import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank } from './body-format.js';
+import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker } from './reply-quote.js';
 import { isSettableMessageId } from './forward-handler.js';
 import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
@@ -1056,6 +1056,14 @@ export class JmapClient {
     originalEmailId?: string;
     noQuote?: boolean;
   }): Promise<{ id: string; orphanedOldDraftId?: string }> {
+    // The caller-supplied-body guard for edit_draft. It lives here, unlike the other four
+    // compose paths (which guard in their handlers), because updateDraft is edit_draft's
+    // only caller — so `updates` IS the caller's own input, before this method regenerates
+    // a reply quote or forwarded block from it, and this is where the rest of the body
+    // rules already live. sendEmail/createDraft can't host it: they are shared with the
+    // reply and forward paths, which reach them with an already-merged body.
+    assertBodyInputs(updates);
+
     const session = await this.getSession();
 
     // Fetch the existing email

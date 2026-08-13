@@ -20,6 +20,12 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
   shared by `update_calendar_event` and `edit_draft`.
 
+Leniency has a limit: a value is coerced when the intent is unambiguous, and rejected when
+guessing would change the message. `textBody` / `htmlBody` are the reject side — a
+non-string body, an entirely HTML-escaped `htmlBody`, and a CDATA-wrapped body are refused
+by `assertBodyInputs` (`src/body-format.ts`) rather than repaired, because unescaping or
+unwrapping would guess at what the caller meant to send. See `docs/email-bodies.md`.
+
 ### Verifying coercion
 
 The normal MCP tool harness validates the declared `inputSchema` before the call
