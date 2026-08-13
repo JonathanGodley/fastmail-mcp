@@ -231,7 +231,7 @@ All data-returning tools simplify responses by default to reduce token usage. Th
 |------|-----------|-------|----------|
 | `get_email` | ✅ | ✅ | ✅ |
 | `list_emails`, `search_emails`, `get_recent_emails` | — | ✅ | ✅ |
-| `get_thread` | — | ✅ | — |
+| `get_thread` | — | ✅ | ✅ |
 | `list_mailboxes` | ✅ | ✅ | — |
 | `list_identities` | ✅ | ✅ | — |
 | `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ | — |
@@ -288,7 +288,7 @@ search_emails { "after": "2026-07-01", "limit": 100,
 get_email { "emailId": "M123", "fields": ["bodyHtml"] }
 ```
 
-Available on `get_email`, `list_emails`, `search_emails` and `get_recent_emails`. Why it exists: response size is otherwise decided by what happens to be in the mailbox rather than by anything you control — a 66-message sweep measured 84KB, of which thread `references`/`messageId`/`inReplyTo` were ~47% and `preview` another ~23%, while the five fields the caller actually wanted were 18% ([#79](https://github.com/JonathanGodley/fastmail-mcp/issues/79)); separately, an editor-inflated draft's HTML body pushed `get_email` past the same wall ([#69](https://github.com/JonathanGodley/fastmail-mcp/issues/69)). `limit` is not a substitute — per-message size varies by more than an order of magnitude, so no limit is both safe and useful.
+Available on `get_email`, `list_emails`, `search_emails`, `get_recent_emails` and `get_thread`. Why it exists: response size is otherwise decided by what happens to be in the mailbox rather than by anything you control — a 66-message sweep measured 84KB, of which thread `references`/`messageId`/`inReplyTo` were ~47% and `preview` another ~23%, while the five fields the caller actually wanted were 18% ([#79](https://github.com/JonathanGodley/fastmail-mcp/issues/79)); separately, an editor-inflated draft's HTML body pushed `get_email` past the same wall ([#69](https://github.com/JonathanGodley/fastmail-mcp/issues/69)). `limit` is not a substitute — per-message size varies by more than an order of magnitude, so no limit is both safe and useful.
 
 The rules:
 
@@ -297,8 +297,9 @@ The rules:
 - **`fields` cannot be combined with `raw: true`.** `raw` returns untransformed JMAP, whose field names differ (`receivedAt` not `date`, `mailboxIds` not `mailboxes`). Letting `raw` quietly win would return the largest response this server produces to a caller who asked for the smallest.
 - **A field a message doesn't have is simply absent**, so a narrow projection can legitimately come back as `{}` (e.g. `fields: ["bodyText"]` on an HTML-only message — ask for `bodyHtml` too if either will do). Nothing is invented and no value's meaning changes; projection only subtracts.
 - **`fields: ["bodyHtml"]` on `get_email` implies `verbose`** — you don't need to pass both. (With the HTML body included, the `bodyHtmlSize` hint is not emitted; it only appears when the body itself is omitted.)
-- **Some names are valid everywhere but only ever populated by `get_email`.** The list/search tools fetch a narrower set of message properties, and the general rule is that **any field needing the full-message fetch is accepted as a name but comes back absent on a list result** — it is not rejected, because it isn't a typo. Today that is `bodyText`, `bodyHtml`, `bodyHtmlSize`, `attachments` and `forwardedMessageId`. The list tools carry populated substitutes for the common needs: `hasAttachment` for attachment presence, `isForwarded` for forward-ness, and `bodyTextSize` for how much body there is. For the content itself, fetch `get_email`.
+- **Some names are valid everywhere but only populated where the tool fetches them.** The list/search tools fetch a narrower set of message properties, and the general rule is that **any field needing the full-message fetch is accepted as a name but comes back absent on a list result** — it is not rejected, because it isn't a typo. Today that is `bodyText`, `bodyHtml`, `bodyHtmlSize`, `attachments` and `forwardedMessageId`. The list tools carry populated substitutes for the common needs: `hasAttachment` for attachment presence, `isForwarded` for forward-ness, and `bodyTextSize` for how much body there is. For the content itself, fetch `get_email` — or, for a whole conversation, `get_thread` with `includeBodies`, where `bodyText` (never `bodyHtml`) is populated per message.
 - **`unresolvedMailboxIds` rides along with `mailboxes`/`roles`.** If you project either location field and a mailbox id couldn't be resolved, `unresolvedMailboxIds` is included even if you didn't name it — otherwise a short `mailboxes` array would look complete when it isn't. Project neither and nothing rides along.
+- **The `bodyText` signals ride along with `bodyText`** the same way: `quotedBytesStripped`/`quotedStripSkipped` (when `stripQuoted` ran) and `bodyTextUnavailable` (on thread reads) describe what happened to the body being returned, so they survive projection even unnamed — a stripped body must not read as verbatim. On `get_thread`, the 100,000-byte body cap is measured on the projected output, so projecting `bodyText` away also lifts the cap.
 - **The summary line and the Trash/Spam exclusion note are not fields** and are never projected away. They describe the query, not the message.
 
 Projection is applied to output only; it does not change what is fetched from the server.
@@ -400,7 +401,7 @@ The signature fields are the identity's configured sign-off, the same text the F
   - Parameters: `emailId` (required), `attachmentId` (required), `path` (optional)
   - `path` may be absolute or relative. Relative paths (including a bare filename) resolve against the download directory, so an attachment lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected. To save directly into your own location, set `FASTMAIL_DOWNLOAD_DIR` to that root (see [Setup](#setup)) — confinement stays on, scoped to the directory you choose.
 - **get_thread**: Get all emails in a conversation thread. Returns metadata + preview for each email, or the full plain-text bodies with `includeBodies`.
-  - Parameters: `threadId` (required), `includeDrafts` (optional, include in-progress drafts), `includeBodies` (optional, return each message's `bodyText`), `stripQuoted` (optional, requires `includeBodies` — return each message's new text only), `raw` (optional, return original JMAP response)
+  - Parameters: `threadId` (required), `includeDrafts` (optional, include in-progress drafts), `includeBodies` (optional, return each message's `bodyText`), `stripQuoted` (optional, requires `includeBodies` — return each message's new text only), `fields` (optional array — return only these fields per message, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
   - `includeBodies` turns an N-message conversation read into one call — see [Reading long threads cheaply](#reading-long-threads-cheaply).
   - Draft messages are **excluded by default** (an in-progress reply is noise when reading a conversation). When any are present, a trailing note reports **how many drafts are hidden** (so a draft reply you already started isn't missed) — the drafts themselves are not surfaced. Set `includeDrafts: true` to include them. (The note is on the simplified path only; `raw` output stays pure JSON.)
 

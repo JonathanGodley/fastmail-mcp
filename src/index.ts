@@ -248,14 +248,14 @@ const THREAD_SPLINTER_DESC =
   'THREADING HAZARD: Fastmail groups a message into an existing conversation by SUBJECT as well as by these headers. A draft that carries them under a subject that does not match the thread\'s base subject is given a NEW threadId, and from then on later drafts replying to that same original message are grouped onto that splinter thread as well — including ones created afterwards with the correct "Re:" subject and full reference chain. Deleting the offending drafts does not undo it. The effect is display-only (the headers are correct, so recipients thread normally and sending resolves it), but the drafts stay detached from the conversation in the Fastmail UI. To reply on an existing thread prefer reply_email, which builds the headers and the matching subject for you and takes a deliberate `subject` override.';
 
 // The `fields` projection, shared verbatim by every read tool that offers it
-// (get_email, list_emails, search_emails, get_recent_emails) so the four can't
-// drift. One sentence goes in the tool description (why you would reach for it),
-// the full contract in the parameter description. (#69, #79)
+// (get_email, list_emails, search_emails, get_recent_emails, get_thread) so they
+// can't drift. One sentence goes in the tool description (why you would reach for
+// it), the full contract in the parameter description. (#69, #79)
 const FIELDS_TOOL_DESC =
   'Use `fields` to return ONLY the fields you need (e.g. fields:["id","subject","from","date","threadId"]) when the default shape would be too large for one response.';
 
 const FIELDS_PARAM_DESC =
-  'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId) is a valid name on list_emails/search_emails/get_recent_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden.';
+  'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId) is a valid name on list_emails/search_emails/get_recent_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden. On get_thread, `bodyText` IS populated when includeBodies:true (`bodyHtml` never is), and a projected bodyText keeps its signals (quotedBytesStripped/quotedStripSkipped/bodyTextUnavailable) uninvited — without them a stripped body would read as verbatim.';
 
 // The `fields` parameter, declared identically on every read tool that offers it.
 // The string alternative is advertised because lenient clients stringify arrays
@@ -1204,7 +1204,7 @@ const TOOLS = [
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them.',
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them. ' + FIELDS_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1224,6 +1224,7 @@ const TOOLS = [
               type: 'boolean',
               description: 'Requires includeBodies. Strips quoted history from every returned body, so the response is each message\'s new text only — the shape most read-a-conversation tasks want. ' + STRIP_QUOTED_DESC,
             },
+            fields: fieldsSchemaProperty(),
             raw: {
               type: 'boolean',
               description: 'Return original JMAP response instead of simplified format',

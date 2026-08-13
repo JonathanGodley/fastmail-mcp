@@ -1,6 +1,7 @@
 import { coerceBool, InvalidInputError } from './coerce.js';
 import { simplifyEmail } from './email-formatter.js';
 import type { SimplifiedEmail } from './email-formatter.js';
+import { parseEmailFields, projectEmail } from './field-projection.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 
 // get_thread's orchestration, extracted from the CallTool switch so it is unit-testable
@@ -90,6 +91,9 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
   const stripQuoted = coerceBool(args?.stripQuoted) ?? false;
 
   assertStripQuotedNotRaw(stripQuoted, raw);
+  // Validated before the fetch, and rejected with raw for the same reason as the other
+  // read tools: raw is untransformed JMAP, whose field names differ (#69).
+  const fields = parseEmailFields(args?.fields, { raw });
   // stripQuoted rewrites bodies, and without includeBodies there are none. Rejecting is
   // the same reasoning as the unknown-parameter guard: a flag that silently does nothing
   // lets a caller believe it read stripped bodies when it read previews.
@@ -117,17 +121,28 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
   if (includeBodies) {
     // Never-silent: a message with no plain-text body (an HTML-only one) yields no
     // bodyText, and thread reads deliberately never carry HTML. Say so per message
-    // instead of letting the field quietly go missing.
+    // instead of letting the field quietly go missing. Set before projection so the
+    // flag rides along with a projected bodyText.
     for (const msg of simplified) {
       if (typeof msg.bodyText !== 'string') msg.bodyTextUnavailable = true;
     }
+  }
+
+  // Projection runs BEFORE the cap so the cap measures what is actually returned:
+  // a caller who projected bodyText away gets the small response they asked for, not
+  // an error about bytes that never reach the output.
+  const projected = simplified.map((m) => projectEmail(m, fields));
+
+  if (includeBodies) {
     assertThreadBodiesWithinCap(
-      simplified.map((m) => ({ id: m.id, bytes: byteLength(m.bodyText ?? '') })),
+      // Ids come from the pre-projection objects so the over-cap error can still name
+      // the largest messages when the caller didn't project id.
+      projected.map((m, i) => ({ id: simplified[i].id, bytes: byteLength((m as Partial<SimplifiedEmail>).bodyText ?? '') })),
       { stripQuoted, raw: false },
     );
   }
 
-  let text = JSON.stringify(simplified, null, 2);
+  let text = JSON.stringify(projected, null, 2);
   if (hiddenDraftCount > 0) {
     text += `\n\nNote: ${hiddenDraftCount} draft(s) in this thread are hidden; set includeDrafts:true to include them.`;
   }

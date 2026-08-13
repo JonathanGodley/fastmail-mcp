@@ -171,7 +171,9 @@ them:
   (`src/field-projection.ts`) run on the *simplified* object, so `raw: true` stays pure
   JMAP and untouched. The list/search tools inherit it through the single
   `formatEmailQueryResult` seam, which is why `list_emails`, `search_emails` and
-  `get_recent_emails` cannot drift apart.
+  `get_recent_emails` cannot drift apart. `get_thread` applies the same pair in
+  `readThread`, projecting each message *before* the thread-body byte cap is measured —
+  the cap guards what is actually returned, so projecting `bodyText` away also lifts it.
 - **One vocabulary, checked by the compiler.** The valid names are the keys of
   `SimplifiedEmail`, held in a `Record<keyof SimplifiedEmail, true>` map — a field added to
   the shape without a line there is a compile error, so a new field can never become
@@ -192,10 +194,14 @@ them:
   empty" (the same reasoning as the strict-parameter-keys rule above).
 - **Subtractive only, with one companion rule.** Projection cannot invent a field or change
   a value's meaning, so caller-directed omission is not the "silently dropped promised
-  field" failure — the caller asked. The exception is `unresolvedMailboxIds`, which is not
-  an independent field but the degradation half of `mailboxes`/`roles`: projecting either
-  location field emits it when resolution degraded, even unnamed. Without that, a short
-  `mailboxes` array would look complete when it isn't — the #53 bug through a new door.
+  field" failure — the caller asked. The exception is a field that is not independent but
+  the *description of another field's value*: `unresolvedMailboxIds` is the degradation
+  half of `mailboxes`/`roles`, and the bodyText signals (`quotedBytesStripped`,
+  `quotedStripSkipped`, `bodyTextUnavailable`) say what happened to the `bodyText` being
+  returned. Projecting the carrier field emits its companions even unnamed (attached by
+  key presence, not truthiness — `quotedBytesStripped: 0` is an answer). Without that, a
+  short `mailboxes` array would look complete when it isn't (the #53 bug through a new
+  door), and a stripped body would read as verbatim.
 
 Out-of-band signals are not fields and are never projected away: the result-count summary
 and the Trash/Spam exclusion note describe the *query*, not a message.

@@ -211,6 +211,69 @@ describe('readThread — total body size cap', () => {
   });
 });
 
+describe('readThread — field projection', () => {
+  it('keeps only the projected fields per message', async () => {
+    const { client } = makeClient([makeEmail('e1', 'hello'), makeEmail('e2', 'there')]);
+    const messages = parseMessages(
+      await readThread({ threadId: 't1', fields: ['id', 'subject'] }, client),
+    );
+    assert.deepEqual(messages, [
+      { id: 'e1', subject: 'Message e1' },
+      { id: 'e2', subject: 'Message e2' },
+    ]);
+  });
+
+  it('a projected bodyText keeps its strip signal', async () => {
+    const { client } = makeClient([
+      makeEmail('e1', 'New words\n\nOn Mon, Jun 15, 2026, Alice wrote:\n> old words'),
+    ]);
+    const messages = parseMessages(
+      await readThread({ threadId: 't1', includeBodies: true, stripQuoted: true, fields: ['bodyText'] }, client),
+    );
+    assert.equal(messages[0].bodyText, 'New words');
+    assert.ok(messages[0].quotedBytesStripped > 0);
+  });
+
+  it('a projected bodyText keeps bodyTextUnavailable on an HTML-only message', async () => {
+    const { client } = makeClient([makeHtmlOnlyEmail('e1')]);
+    const messages = parseMessages(
+      await readThread({ threadId: 't1', includeBodies: true, fields: ['id', 'bodyText'] }, client),
+    );
+    assert.deepEqual(messages[0], { id: 'e1', bodyTextUnavailable: true });
+  });
+
+  it('rejects fields together with raw', async () => {
+    const { client } = makeClient([makeEmail('e1', 'hello')]);
+    await assert.rejects(
+      () => readThread({ threadId: 't1', raw: true, fields: ['id'] }, client),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /fields cannot be combined with raw:true/);
+        return true;
+      },
+    );
+  });
+
+  it('the body cap measures the projected output, so projecting bodyText away lifts it', async () => {
+    const { client } = makeClient([makeEmail('e1', 'x'.repeat(120_000))]);
+    const messages = parseMessages(
+      await readThread({ threadId: 't1', includeBodies: true, fields: ['id', 'subject'] }, client),
+    );
+    assert.deepEqual(messages, [{ id: 'e1', subject: 'Message e1' }]);
+  });
+
+  it('an over-cap error still names the largest message when id was not projected', async () => {
+    const { client } = makeClient([makeEmail('e1', 'x'.repeat(120_000))]);
+    await assert.rejects(
+      () => readThread({ threadId: 't1', includeBodies: true, fields: ['bodyText'] }, client),
+      (err: Error) => {
+        assert.match(err.message, /Largest: e1 \(\d+ bytes\)/);
+        return true;
+      },
+    );
+  });
+});
+
 describe('readThread — hidden drafts', () => {
   it('keeps the hidden-draft note and returns no draft body', async () => {
     // The client filters drafts out of the fetched set, so a hidden draft's body is
