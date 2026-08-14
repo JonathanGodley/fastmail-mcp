@@ -823,154 +823,6 @@ export class JmapClient {
     return identities.find((id: any) => id.mayDelete === false) || identities[0];
   }
 
-  async sendEmail(email: {
-    to: string[];
-    cc?: string[];
-    bcc?: string[];
-    subject: string;
-    textBody?: string;
-    htmlBody?: string;
-    from?: string;
-    mailbox?: string;
-    inReplyTo?: string[];
-    references?: string[];
-    replyTo?: string[];
-    forwardedMessageId?: string[];
-    attachments?: AttachmentPart[];
-  }): Promise<string> {
-    const session = await this.getSession();
-
-    // Get all identities to validate from address
-    const identities = await this.getIdentities();
-    if (!identities || identities.length === 0) {
-      throw new Error('No sending identities found');
-    }
-
-    // Determine which identity to use
-    let selectedIdentity;
-    if (email.from) {
-      // Validate that the from address matches an available identity
-      selectedIdentity = identities.find(id => matchesIdentity(id.email, email.from!));
-      if (!selectedIdentity) {
-        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
-      }
-    } else {
-      // Use default identity
-      selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
-    }
-
-    // Use the requested from address (not the identity email, which may be a wildcard like *@domain)
-    const fromEmail = email.from || selectedIdentity.email;
-
-    // Get the mailbox IDs we need
-    const mailboxes = await this.getMailboxes();
-    const draftsMailbox = this.findMailboxByRoleOrName(mailboxes, 'drafts', 'draft');
-    const sentMailbox = this.findMailboxByRoleOrName(mailboxes, 'sent', 'sent');
-
-    if (!draftsMailbox) {
-      throw new Error('Could not find Drafts mailbox to save email');
-    }
-    if (!sentMailbox) {
-      throw new Error('Could not find Sent mailbox to move email after sending');
-    }
-
-    // Use provided mailbox (resolved id/role/name) or default to drafts for initial
-    // creation. Resolving shares the already-fetched list (no double-fetch); an unknown
-    // mailbox throws InvalidInputError, and an id is validated against the list too.
-    const initialMailboxId = email.mailbox ? resolveMailbox(mailboxes, email.mailbox).id : draftsMailbox.id;
-
-    // Ensure we have at least one body type (zero-width/whitespace-only counts as absent).
-    if (isBlank(email.textBody) && isBlank(email.htmlBody)) {
-      throw new InvalidInputError('Either textBody or htmlBody must be provided');
-    }
-
-    const initialMailboxIds: Record<string, boolean> = {};
-    initialMailboxIds[initialMailboxId] = true;
-
-    const sentMailboxIds: Record<string, boolean> = {};
-    sentMailboxIds[sentMailbox.id] = true;
-
-    // Generate the body parts: html-only input gets an auto text/plain fallback where one
-    // is derivable (ships html-only otherwise; a no-body message is rejected by shapeBodies).
-    const emailObject = {
-      mailboxIds: initialMailboxIds,
-      keywords: { $draft: true },
-      from: [{ name: selectedIdentity.name, email: fromEmail }],
-      to: email.to.map(parseAddress),
-      cc: email.cc?.map(parseAddress) || [],
-      bcc: email.bcc?.map(parseAddress) || [],
-      subject: email.subject,
-      ...(email.inReplyTo && { inReplyTo: email.inReplyTo }),
-      ...(email.references && { references: email.references }),
-      ...(email.replyTo?.length && { replyTo: email.replyTo.map(parseAddress) }),
-      // The forwarded original's Message-ID (forward_email). A header SET, unlike every
-      // other header: use in this file (which are GETs) — Fastmail accepts it and
-      // round-trips it through store/fetch and the edit recreate (probed live
-      // 2026-07-05). The value is pre-vetted by the forward handler; Fastmail itself
-      // rejects CRLF/non-ASCII, so no injection is possible here.
-      ...(email.forwardedMessageId?.length && { 'header:X-Forwarded-Message-Id:asMessageIds': email.forwardedMessageId }),
-      ...(email.attachments?.length && { attachments: email.attachments }),
-      ...this.shapeBodies(email.textBody, email.htmlBody),
-    };
-
-    const request: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail', 'urn:ietf:params:jmap:submission'],
-      methodCalls: [
-        ['Email/set', {
-          accountId: session.accountId,
-          create: { draft: emailObject }
-        }, 'createEmail'],
-        ['EmailSubmission/set', {
-          accountId: session.accountId,
-          create: {
-            submission: {
-              emailId: '#draft',
-              identityId: selectedIdentity.id,
-              envelope: {
-                mailFrom: { email: fromEmail },
-                rcptTo: [
-                  ...email.to.map(addr => ({ email: parseAddress(addr).email })),
-                  ...(email.cc || []).map(addr => ({ email: parseAddress(addr).email })),
-                  ...(email.bcc || []).map(addr => ({ email: parseAddress(addr).email })),
-                ]
-              }
-            }
-          },
-          onSuccessUpdateEmail: {
-            '#submission': {
-              mailboxIds: sentMailboxIds,
-              keywords: { $seen: true }
-            }
-          }
-        }, 'submitEmail']
-      ]
-    };
-
-    const response = await this.makeRequest(request);
-
-    const emailResult = this.getMethodResult(response, 0);
-    if (emailResult.notCreated?.draft) {
-      throw new Error(`Failed to create email: ${this.describeSetError(emailResult.notCreated.draft)}`);
-    }
-
-    const emailId = emailResult.created?.draft?.id;
-    if (!emailId) {
-      throw new Error('Email creation returned no email ID');
-    }
-
-    const submissionResult = this.getMethodResult(response, 1);
-    if (submissionResult.notCreated?.submission) {
-      throw new Error(`Failed to submit email: ${this.describeSetError(submissionResult.notCreated.submission)}`);
-    }
-
-    const submissionId = submissionResult.created?.submission?.id;
-    if (!submissionId) {
-      throw new Error('Email submission returned no submission ID');
-    }
-
-    return submissionId;
-  }
-
   async createDraft(email: {
     to?: string[];
     cc?: string[];
@@ -1045,8 +897,11 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
-    // Header SET for forward drafts — see the sendEmail note (pre-vetted value;
-    // server-validated; round-trips the edit recreate).
+    // The forwarded original's Message-ID (forward_email). A header SET, unlike every
+    // other header use in this file (which are GETs) — Fastmail accepts it and
+    // round-trips it through store/fetch and the edit recreate (probed live
+    // 2026-07-05). The value is pre-vetted by the forward handler; Fastmail itself
+    // rejects CRLF/non-ASCII, so no injection is possible here.
     if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
     if (email.attachments?.length) emailObject.attachments = email.attachments;
     // Generate the body parts (auto text/plain fallback for html-only input where
@@ -1102,8 +957,8 @@ export class JmapClient {
     return part ? bodyValues[part.partId].value : undefined;
   }
 
-  // Generate the JMAP body-part shaping for an authoring path (sendEmail/createDraft) to
-  // splat into the email object. normalizeBodies derives the text/plain fallback from html
+  // Generate the JMAP body-part shaping for the authoring path (createDraft) to splat
+  // into the email object. normalizeBodies derives the text/plain fallback from html
   // when none was supplied; we degrade gracefully — ship html-only when the html has
   // visible media but no derivable text — and reject ONLY a genuinely no-body message
   // (html present that renders to nothing AND has no image). A message with neither body
@@ -1141,8 +996,8 @@ export class JmapClient {
     // compose paths (which guard in their handlers), because updateDraft is edit_draft's
     // only caller — so `updates` IS the caller's own input, before this method regenerates
     // a reply quote or forwarded block from it, and this is where the rest of the body
-    // rules already live. sendEmail/createDraft can't host it: they are shared with the
-    // reply and forward paths, which reach them with an already-merged body.
+    // rules already live. createDraft can't host it: it is shared with the reply and
+    // forward paths, which reach it with an already-merged body.
     assertBodyInputs(updates);
 
     const session = await this.getSession();

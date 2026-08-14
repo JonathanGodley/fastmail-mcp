@@ -11,8 +11,7 @@ export interface SendDraftClient {
 }
 
 // Why the original wasn't marked, when the draft DID name one. A keyword-write failure is
-// not in this list: it is reported the same way the direct send=true paths report theirs
-// (silently, see below), so it never reaches the result text.
+// not in this list: it stays silent (see below), so it never reaches the result text.
 export type KeywordSkipReason = 'not-found' | 'ambiguous' | 'lookup-failed';
 
 // Present only when the sent draft recorded a source message.
@@ -58,20 +57,18 @@ export function selectSource(refs: SourceReferences): { kind: 'reply' | 'forward
 
 // Send a saved draft, then maintain the thread state of whatever message it was composed
 // from: a reply marks the original answered + read, a forward marks it forwarded + read
-// (#60, #54). Without this, the recommended review-the-draft-then-send workflow would be
-// the one flow that leaves the original untouched, while the direct reply/forward
-// send=true paths mark it. (A forward saved with asAttachment records no provenance — the
-// attached .eml is its recorded source — so there is nothing here to resolve and its draft
-// marks nothing; the direct send=true path still marks the original.)
+// (#60, #54). The compose surface is draft-first (#32/#66) — every reply and forward is
+// transmitted here — so this is the only place that maintenance can happen. (A forward
+// saved with asAttachment records no provenance — the attached .eml is its recorded
+// source — so there is nothing here to resolve and its draft marks nothing.)
 //
 // Everything after the submission is best-effort: the mail is already gone, so no failure
-// here may fail the call or roll anything back. Where the direct paths just mark an id the
-// caller handed them, this path has to work out WHICH message the draft came from, so it
-// has one failure mode they don't — the source Message-ID resolving to no message or to
-// several. That one is reported in the result text (the caller never named an original, so
-// silence would leave them no way to know maintenance was skipped, nor which message to
-// mark by hand). A keyword-write failure stays silent, matching reply_email/forward_email
-// on the identical failure.
+// here may fail the call or roll anything back. The draft names its source by Message-ID,
+// so this path has to work out WHICH message it came from, and that lookup can fail — the
+// source Message-ID resolving to no message or to several. That one is reported in the
+// result text (the caller never named an original, so silence would leave them no way to
+// know maintenance was skipped, nor which message to mark by hand). A keyword-write
+// failure stays silent: the send succeeded, and the flags are cosmetic thread state.
 export async function sendDraftAndMaintainKeywords(
   args: any,
   client: SendDraftClient,

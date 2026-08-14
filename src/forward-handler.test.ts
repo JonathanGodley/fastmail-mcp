@@ -78,7 +78,7 @@ describe('buildForwardParams — subject', () => {
   });
 });
 
-describe('buildForwardParams — recipients + send flag', () => {
+describe('buildForwardParams — recipients', () => {
   it('requires to (no default recipient, unlike reply)', () => {
     assert.throws(() => buildForwardParams({}, makeOriginal()), /to is required for a forward; there is no default recipient/);
     assert.throws(() => buildForwardParams({ to: [] }, makeOriginal()), /to is required for a forward/);
@@ -86,11 +86,6 @@ describe('buildForwardParams — recipients + send flag', () => {
   it('accepts a comma-separated to string (lenient coercion)', () => {
     const { forwardParams } = buildForwardParams({ to: 'a@x.com, b@y.com' }, makeOriginal());
     assert.deepEqual(forwardParams.to, ['a@x.com', 'b@y.com']);
-  });
-  it('defaults shouldSend to false and coerces string booleans', () => {
-    assert.equal(buildForwardParams({ to: ['x@y.com'] }, makeOriginal()).shouldSend, false);
-    assert.equal(buildForwardParams({ to: ['x@y.com'], send: true }, makeOriginal()).shouldSend, true);
-    assert.equal(buildForwardParams({ to: ['x@y.com'], send: 'true' }, makeOriginal()).shouldSend, true);
   });
 });
 
@@ -198,7 +193,7 @@ describe('buildForwardParams — asAttachment (.eml)', () => {
       disposition: 'attachment',
     }]);
   });
-  it('note-less: emits the non-marker filler (passes the blank-body send reject, arms no guard)', () => {
+  it('note-less: emits the non-marker filler (gives the draft a readable body, arms no guard)', () => {
     const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
     assert.equal(forwardParams.textBody, 'Forwarded message attached.');
     assert.equal(forwardParams.htmlBody, undefined);
@@ -298,17 +293,16 @@ describe('buildForwardParams — attachment carry', () => {
   });
 });
 
-describe('composeForward — orchestration', () => {
+describe('composeForward — draft-only orchestration', () => {
   const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'new.pdf', disposition: 'attachment' }];
 
+  // The interface has no transmit method at all — send_draft is the only sender.
   function spyClient(over: Partial<ForwardClient> = {}) {
     const calls: any = {};
     const client: ForwardClient = {
       getEmailById: async (id) => { calls.getId = id; return makeOriginal(); },
       uploadAttachments: async (specs, dir) => { calls.upload = { specs, dir }; return UPLOADED; },
       createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
-      sendEmail: async (p) => { calls.send = p; return 'sub-7'; },
-      addKeywords: async (id, kw) => { calls.keywords = { id, kw }; },
       ...over,
     };
     return { client, calls };
@@ -318,30 +312,24 @@ describe('composeForward — orchestration', () => {
     const { client } = spyClient();
     await assert.rejects(() => composeForward({ to: ['x@y.com'] }, client, undefined), /originalEmailId is required/);
   });
-  it('defaults to the DRAFT branch and does NOT mark keywords', async () => {
+  it('saves a draft and returns its id and subject', async () => {
     const { client, calls } = spyClient();
     const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
-    assert.equal(r.sent, false);
     assert.equal(r.emailId, 'draft-7');
-    assert.equal(calls.send, undefined);
-    assert.equal(calls.keywords, undefined);
-    assert.equal(r.markedForwarded, undefined);
+    assert.equal(r.subject, 'Fwd: Project update');
+    assert.ok(calls.draft);
   });
-  it('send=true transmits and marks the original $forwarded+$seen (best-effort, reported)', async () => {
+  // The send parameter was removed when the compose surface went draft-first (#32/#66):
+  // the schema now rejects it as an unknown parameter before this orchestration runs.
+  // Belt-and-braces: even if a stray send flag reached this layer, it is ignored and the
+  // forward is still saved as a draft — this function has no way to transmit anything.
+  it('ignores a stray send flag: the forward is drafted, never transmitted', async () => {
     const { client, calls } = spyClient();
     const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'], send: true }, client, undefined);
-    assert.equal(r.sent, true);
-    assert.equal(r.submissionId, 'sub-7');
-    assert.deepEqual(calls.keywords, { id: 'o1', kw: ['$forwarded', '$seen'] });
-    assert.equal(r.markedForwarded, true);
+    assert.equal(r.emailId, 'draft-7');
+    assert.ok(calls.draft); // the only write is the draft create
   });
-  it('swallows a keyword-set failure (forward already sent) — markedForwarded false', async () => {
-    const { client } = spyClient({ addKeywords: async () => { throw new InvalidInputError('nope'); } });
-    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'], send: true }, client, undefined);
-    assert.equal(r.sent, true);
-    assert.equal(r.markedForwarded, false);
-  });
-  it('appends caller uploads BEHIND the carried originals (draft branch)', async () => {
+  it('appends caller uploads BEHIND the carried originals', async () => {
     const { client, calls } = spyClient();
     await composeForward(
       { originalEmailId: 'o1', to: ['x@y.com'], attachments: [{ path: 'new.pdf' }] },
@@ -359,13 +347,11 @@ describe('composeForward — orchestration', () => {
     assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-orig-raw', 'up-1']);
     assert.equal(calls.draft.attachments[0].type, 'message/rfc822');
   });
-  it('surfaces droppedInlineImages in the result (draft and send branches)', async () => {
+  it('surfaces droppedInlineImages in the result', async () => {
     const inline = { partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'p.png', disposition: 'inline', cid: 'img-1' };
     const { client } = spyClient({ getEmailById: async () => makeOriginal({ attachments: [inline] }) });
     const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
     assert.equal(d.droppedInlineImages, 1);
-    const s = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'], send: true }, client, undefined);
-    assert.equal(s.droppedInlineImages, 1);
   });
   it('does not call uploadAttachments when no new attachments are given', async () => {
     let uploadCalled = false;
@@ -373,16 +359,15 @@ describe('composeForward — orchestration', () => {
     await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
     assert.equal(uploadCalled, false);
   });
-  it('rejects a malformed note before sending, uploading, or saving a draft', async () => {
+  it('rejects a malformed note before uploading or saving a draft', async () => {
     const { client, calls } = spyClient();
     await assert.rejects(
       () => composeForward(
-        { originalEmailId: 'o1', to: ['x@y.com'], send: true, htmlBody: '<![CDATA[<p>FYI</p>]]>', attachments: [{ path: 'new.pdf' }] },
+        { originalEmailId: 'o1', to: ['x@y.com'], htmlBody: '<![CDATA[<p>FYI</p>]]>', attachments: [{ path: 'new.pdf' }] },
         client, '/attach/root',
       ),
       /htmlBody contains a CDATA section/,
     );
-    assert.equal(calls.send, undefined);
     assert.equal(calls.draft, undefined);
     assert.equal(calls.upload, undefined);
   });

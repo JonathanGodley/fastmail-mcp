@@ -22,19 +22,12 @@ export interface DraftParams {
   attachments?: AttachmentPart[];
 }
 
-// Sending additionally requires a recipient and a subject.
-export interface SendParams extends DraftParams {
-  to: string[];
-  subject: string;
-}
-
-// The minimal client surface these orchestrations need; JmapClient satisfies it
-// structurally. Declared here (rather than importing JmapClient) so the handlers stay
+// The minimal client surface this orchestration needs; JmapClient satisfies it
+// structurally. Declared here (rather than importing JmapClient) so the handler stays
 // unit-testable with a mock, matching ReplyClient / ForwardClient.
 export interface ComposeClient {
   uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
   createDraft(params: DraftParams): Promise<string>;
-  sendEmail(params: SendParams): Promise<string>;
 }
 
 export interface ComposeDraftResult {
@@ -44,58 +37,17 @@ export interface ComposeDraftResult {
   cc?: string[];
 }
 
-// Orchestrate send_email: validate the caller's bodies and required fields, coerce the
-// recipient lists, upload any attachments, then transmit. Extracted from the index tool
-// handler so the validation and the attachment seam are unit-testable with a mock client
-// (the handler is now a thin submissionId-to-text wrapper). attachDir is passed in so
-// this function reads no environment itself.
+// Orchestrate create_draft: validate the caller's bodies, coerce the recipient lists,
+// upload any attachments, then create the draft. Extracted from the index tool handler so
+// the validation and the attachment seam are unit-testable with a mock client (the
+// handler is a thin result-to-text wrapper). attachDir is passed in so this function
+// reads no environment itself. Transmission is a separate step: send_draft is the only
+// tool that submits mail.
 //
-// The body guard belongs HERE rather than in JmapClient.sendEmail: that method is shared
-// with reply_email / forward_email, where it receives the MERGED body (the caller's text
-// plus the quoted or forwarded original). Validating there would reject legitimate mail
-// whose quoted original happens to contain, say, a CDATA token.
-export async function composeSend(
-  args: any,
-  client: ComposeClient,
-  attachDir: string | undefined,
-): Promise<string> {
-  const a = args ?? {};
-  assertBodyInputs(a);
-
-  const { from, mailbox, subject, textBody, htmlBody, inReplyTo, references } = a;
-  const { to, cc, bcc, replyTo } = coerceRecipients(a);
-
-  if (!to || to.length === 0) {
-    throw new McpError(ErrorCode.InvalidParams, 'to field is required and must be a non-empty array');
-  }
-  if (!subject) {
-    throw new McpError(ErrorCode.InvalidParams, 'subject is required');
-  }
-  if (!textBody && !htmlBody) {
-    throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
-  }
-
-  const specs = coerceAttachments(a.attachments);
-  const attachments = specs?.length ? await client.uploadAttachments(specs, attachDir) : undefined;
-
-  return client.sendEmail({
-    to,
-    cc,
-    bcc,
-    from,
-    mailbox,
-    subject,
-    textBody,
-    htmlBody,
-    inReplyTo,
-    references,
-    replyTo,
-    attachments,
-  });
-}
-
-// Orchestrate create_draft. Same shape as composeSend; returns the fields the handler
-// needs for its summary line so the handler stays a thin wrapper.
+// The body guard belongs HERE rather than in JmapClient.createDraft: that method is
+// shared with reply_email / forward_email, where it receives the MERGED body (the
+// caller's text plus the quoted or forwarded original). Validating there would reject
+// legitimate mail whose quoted original happens to contain, say, a CDATA token.
 export async function composeDraft(
   args: any,
   client: ComposeClient,

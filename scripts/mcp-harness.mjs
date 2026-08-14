@@ -149,7 +149,7 @@ export function createClient({ env } = {}) {
       notify('notifications/initialized', {});
       return result;
     },
-    // NOTE: call() is generic and CAN mutate the account (send_email, delete_email,
+    // NOTE: call() is generic and CAN mutate the account (send_draft, delete_email,
     // bulk_* …). The copy-paste default below is the read-only one on purpose —
     // pick the tool name deliberately.
     call(name, args = {}) {

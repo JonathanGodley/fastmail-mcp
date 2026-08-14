@@ -54,20 +54,8 @@ describe('buildReplyParams — quoteOriginal wiring', () => {
       { originalEmailId: 'e1', htmlBody: '<p>html reply</p>' },
       makeOriginal(),
     );
-    assert.equal(replyParams.textBody, undefined); // caller gave no text; createDraft/sendEmail add the fallback later
+    assert.equal(replyParams.textBody, undefined); // caller gave no text; createDraft adds the fallback later
     assert.match(replyParams.htmlBody!, /html reply.*<blockquote/s);
-  });
-});
-
-describe('buildReplyParams — send flag', () => {
-  it('defaults shouldSend to false (draft is the safe default)', () => {
-    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal()).shouldSend, false);
-  });
-  it('send=true → shouldSend true (transmit path)', () => {
-    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', send: true }, makeOriginal()).shouldSend, true);
-  });
-  it('coerces a stringified send ("true")', () => {
-    assert.equal(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', send: 'true' }, makeOriginal()).shouldSend, true);
   });
 });
 
@@ -136,11 +124,7 @@ describe('buildReplyParams — subject, recipients, threading', () => {
 });
 
 describe('buildReplyParams — validation', () => {
-  it('rejects a body-less send (trim/zero-width-aware)', () => {
-    assert.throws(() => buildReplyParams({ originalEmailId: 'e1', htmlBody: '   ', send: true }, makeOriginal()), /Either textBody or htmlBody is required/);
-    assert.throws(() => buildReplyParams({ originalEmailId: 'e1', send: true }, makeOriginal()), /Either textBody or htmlBody is required/);
-  });
-  it('allows a body-less DRAFT (default send=false) — does not throw', () => {
+  it('allows a body-less reply draft — does not throw (fill it in via edit_draft before send_draft)', () => {
     assert.doesNotThrow(() => buildReplyParams({ originalEmailId: 'e1' }, makeOriginal()));
   });
   it('throws when the original has no Message-ID', () => {
@@ -190,9 +174,9 @@ describe('buildReplyParams — malformed caller bodies (#62, #71/#77, #78)', () 
     );
   });
 
-  it('rejects on the draft path too (send defaults to false, so nothing is transmitted either way)', () => {
+  it('rejects a malformed body even though nothing is ever transmitted from this tool', () => {
     assert.throws(
-      () => buildReplyParams({ originalEmailId: 'e1', send: false, htmlBody: '<![CDATA[<p>x</p>]]>' }, makeOriginal()),
+      () => buildReplyParams({ originalEmailId: 'e1', htmlBody: '<![CDATA[<p>x</p>]]>' }, makeOriginal()),
       /CDATA/,
     );
   });
@@ -206,125 +190,67 @@ describe('buildReplyParams — malformed caller bodies (#62, #71/#77, #78)', () 
   });
 });
 
-describe('composeReply — attachment threading into both branches', () => {
+describe('composeReply — draft-only orchestration', () => {
   const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
 
   // A spy ReplyClient: records what each method was called with; uploadAttachments
-  // returns the canned UPLOADED parts so we can assert they thread through.
+  // returns the canned UPLOADED parts so we can assert they thread through. The
+  // interface has no transmit method at all — send_draft is the only sender.
   function spyClient(over: Partial<ReplyClient> = {}) {
     const calls: any = {};
     const client: ReplyClient = {
       getEmailById: async (id) => { calls.getId = id; return makeOriginal(); },
       uploadAttachments: async (specs, dir) => { calls.upload = { specs, dir }; return UPLOADED; },
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
-      sendEmail: async (p) => { calls.send = p; return 'sub-9'; },
-      addKeywords: async (id, kw) => { calls.keywords = { id, kw }; },
       ...over,
     };
     return { client, calls };
   }
 
-  it('uploads with the given attachDir and threads parts into the SEND branch', async () => {
+  it('saves a draft and returns its id and subject', async () => {
     const { client, calls } = spyClient();
-    const r = await composeReply(
-      { originalEmailId: 'o1', send: true, textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
-      client, '/attach/root',
-    );
-    assert.equal(r.sent, true);
-    assert.equal(r.submissionId, 'sub-9');
-    assert.deepEqual(calls.upload, { specs: [{ path: 'a.pdf' }], dir: '/attach/root' });
-    assert.deepEqual(calls.send.attachments, UPLOADED); // threaded into sendEmail
-    assert.equal(calls.draft, undefined);               // draft branch not taken
-    // #52/#54: the send branch marks the original answered + read and reports it.
-    assert.deepEqual(calls.keywords, { id: 'o1', kw: ['$answered', '$seen'] });
-    assert.equal(r.markedAnswered, true);
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined);
+    assert.deepEqual(r, { subject: 'Re: Project update', emailId: 'draft-9' });
+    assert.equal(calls.getId, 'o1');
+    assert.ok(calls.draft);
   });
 
-  it('carries a subject override into the SEND branch and the reported result (#68)', async () => {
+  it('carries a subject override into the draft and the reported result (#68)', async () => {
     const { client, calls } = spyClient();
     const r = await composeReply(
-      { originalEmailId: 'o1', send: true, textBody: 'hi', subject: 'Budget sign-off' },
-      client, undefined,
-    );
-    assert.equal(calls.send.subject, 'Budget sign-off');
-    assert.equal(r.subject, 'Budget sign-off');
-  });
-
-  it('carries a subject override into the DRAFT branch and the reported result (#68)', async () => {
-    const { client, calls } = spyClient();
-    const r = await composeReply(
-      { originalEmailId: 'o1', send: false, textBody: 'hi', subject: 'Budget sign-off' },
+      { originalEmailId: 'o1', textBody: 'hi', subject: 'Budget sign-off' },
       client, undefined,
     );
     assert.equal(calls.draft.subject, 'Budget sign-off');
     assert.equal(r.subject, 'Budget sign-off');
   });
 
-  it('inherits the Re: subject in both branches when no override is given (#68)', async () => {
-    const draft = spyClient();
-    await composeReply({ originalEmailId: 'o1', send: false, textBody: 'hi' }, draft.client, undefined);
-    assert.equal(draft.calls.draft.subject, 'Re: Project update');
-    const sent = spyClient();
-    await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, sent.client, undefined);
-    assert.equal(sent.calls.send.subject, 'Re: Project update');
-  });
-
-  it('marks the original answered+read on a bare send (no attachments)', async () => {
-    const { client, calls } = spyClient();
-    const r = await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, client, undefined);
-    assert.equal(r.sent, true);
-    assert.deepEqual(calls.keywords, { id: 'o1', kw: ['$answered', '$seen'] });
-    assert.equal(r.markedAnswered, true);
-  });
-
-  it('does NOT mark keywords on the DRAFT branch (a draft answered nothing)', async () => {
-    const { client, calls } = spyClient();
-    const r = await composeReply({ originalEmailId: 'o1', send: false, textBody: 'hi' }, client, undefined);
-    assert.equal(r.sent, false);
-    assert.equal(calls.keywords, undefined);
-    assert.equal(r.markedAnswered, undefined);
-  });
-
-  it('swallows a keyword-set failure best-effort (reply already sent) — notFound class', async () => {
-    const { client } = spyClient({ addKeywords: async () => { throw new InvalidInputError('nope'); } });
-    const r = await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, client, undefined);
-    assert.equal(r.sent, true);          // send success is NOT masked by the keyword failure
-    assert.equal(r.submissionId, 'sub-9');
-    assert.equal(r.markedAnswered, false);
-  });
-
-  it('swallows a keyword-set failure best-effort — plain Error class', async () => {
-    const { client } = spyClient({ addKeywords: async () => { throw new Error('boom'); } });
-    const r = await composeReply({ originalEmailId: 'o1', send: true, textBody: 'hi' }, client, undefined);
-    assert.equal(r.sent, true);
-    assert.equal(r.markedAnswered, false);
-  });
-
-  it('threads parts into the DRAFT branch (send=false)', async () => {
+  it('uploads with the given attachDir and threads the parts into the draft', async () => {
     const { client, calls } = spyClient();
     const r = await composeReply(
-      { originalEmailId: 'o1', send: false, textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
+      { originalEmailId: 'o1', textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
       client, '/attach/root',
     );
-    assert.equal(r.sent, false);
     assert.equal(r.emailId, 'draft-9');
+    assert.deepEqual(calls.upload, { specs: [{ path: 'a.pdf' }], dir: '/attach/root' });
     assert.deepEqual(calls.draft.attachments, UPLOADED); // threaded into createDraft
-    assert.equal(calls.send, undefined);                 // send branch not taken
   });
 
-  it('defaults to the DRAFT branch when send is omitted (orchestrator level)', async () => {
+  // The send parameter was removed when the compose surface went draft-first (#32/#66):
+  // the schema now rejects it as an unknown parameter before this orchestration runs.
+  // Belt-and-braces: even if a stray send flag reached this layer, it is ignored and the
+  // reply is still saved as a draft — this function has no way to transmit anything.
+  it('ignores a stray send flag: the reply is drafted, never transmitted', async () => {
     const { client, calls } = spyClient();
-    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, '/attach/root');
-    assert.equal(r.sent, false);
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi', send: true }, client, undefined);
     assert.equal(r.emailId, 'draft-9');
-    assert.ok(calls.draft);               // draft branch taken without an explicit send:false
-    assert.equal(calls.send, undefined);  // nothing transmitted
+    assert.ok(calls.draft); // the only write is the draft create
   });
 
   it('does not call uploadAttachments when no attachments are given', async () => {
     let uploadCalled = false;
     const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
-    const r = await composeReply({ originalEmailId: 'o1', send: false, textBody: 'hi' }, client, '/attach/root');
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, '/attach/root');
     assert.equal(r.emailId, 'draft-9');
     assert.equal(uploadCalled, false);
   });
@@ -334,16 +260,15 @@ describe('composeReply — attachment threading into both branches', () => {
     await assert.rejects(() => composeReply({ textBody: 'hi' }, client, undefined), /originalEmailId is required/);
   });
 
-  it('rejects a malformed body before sending, uploading, or saving a draft', async () => {
+  it('rejects a malformed body before uploading or saving a draft', async () => {
     const { client, calls } = spyClient();
     await assert.rejects(
       () => composeReply(
-        { originalEmailId: 'o1', send: true, htmlBody: '<![CDATA[<p>hi</p>]]>', attachments: [{ path: 'a.pdf' }] },
+        { originalEmailId: 'o1', htmlBody: '<![CDATA[<p>hi</p>]]>', attachments: [{ path: 'a.pdf' }] },
         client, '/attach/root',
       ),
       /htmlBody contains a CDATA section/,
     );
-    assert.equal(calls.send, undefined);
     assert.equal(calls.draft, undefined);
     assert.equal(calls.upload, undefined);
   });

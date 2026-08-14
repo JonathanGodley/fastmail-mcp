@@ -1,8 +1,8 @@
 # Email body handling
 
 How this server composes, edits, reads, and reasons about the `text/plain` and `text/html`
-parts of an email. This spans every authoring path (`send_email`, `create_draft`,
-`reply_email`, `forward_email`, `edit_draft`, `send_draft`) and the read paths that undo
+parts of an email. This spans every authoring path (`create_draft`, `reply_email`,
+`forward_email`, `edit_draft`, `send_draft`) and the read paths that undo
 their quoting again (`get_email`, `get_thread`), so it lives here rather than in any one
 tool's issue. The per-tool behaviour rationale lives in the closed GitHub issues
 (#4, #7, #15, #16, #73, #74); this file is the shared model they all depend on.
@@ -17,7 +17,7 @@ HTML is the source of truth; `text/plain` is a derived fallback.
 - We never fabricate HTML from plain text. The reverse direction (text to html) is not
   done anywhere; a `text/plain`-only message is legitimate and ships untouched.
 - Degrade gracefully. If the HTML yields no derivable text (an image-only newsletter),
-  the message ships HTML-only rather than being rejected. Only a genuine no-body send
+  the message ships HTML-only rather than being rejected. Only a genuine no-body message
   (no readable text and no visible HTML content) is refused.
 
 The model is implemented in `src/body-format.ts`:
@@ -109,25 +109,25 @@ visible to a human who opens the draft or to the recipient.
     prose and code snippets to prevent nothing.
 
 **Where the gate sits, and why.** It runs on the CALLER's own body, at the seam of each of
-the five compose paths, *before* a reply quote or forwarded-message block is merged in:
+the four compose paths, *before* a reply quote or forwarded-message block is merged in:
 `buildReplyParams` (`src/reply-handler.ts`), `buildForwardParams`
-(`src/forward-handler.ts`), `composeSend` / `composeDraft` (`src/compose-handler.ts`), and
+(`src/forward-handler.ts`), `composeDraft` (`src/compose-handler.ts`), and
 the top of `updateDraft` (`src/jmap-client.ts`, edit_draft's only caller — which is why the
 guard sits in the client method there, alongside the rest of the edit-body rules).
 
 Two constraints pin that placement:
 
 - **The merge masks the defect.** `jmap-client.ts`'s existing no-readable-body reject
-  (`normalized.htmlOnly && !htmlHasVisibleContent`) would catch a bare CDATA-wrapped send,
+  (`normalized.htmlOnly && !htmlHasVisibleContent`) would catch a bare CDATA-wrapped body,
   but a reply escapes it: the quoted original supplies the visible content the gate looks
   for, so `htmlOnly` is never set and the malformed new message rides through with its text
   part reduced to the quote alone. Same for a forward. The escaped-HTML test is masked the
   same way (the quote contributes the real tags the test looks for).
-- **A merged body is not caller input.** `sendEmail` / `createDraft` cannot host this guard,
-  because the reply and forward paths reach them with the quoted original folded in. A
-  message that legitimately quotes an XML snippet would be rejected on reply, and the user
-  has no way to edit the original to fix it. Validating only what the caller wrote keeps
-  every reject actionable.
+- **A merged body is not caller input.** `createDraft` cannot host this guard, because the
+  reply and forward paths reach it with the quoted original folded in. A message that
+  legitimately quotes an XML snippet would be rejected on reply, and the user has no way
+  to edit the original to fix it. Validating only what the caller wrote keeps every
+  reject actionable.
 
 **`send_draft` is deliberately outside the gate.** It takes no body parameter, so a draft
 authored elsewhere that already carries an escaped-HTML or CDATA body can still be sent.

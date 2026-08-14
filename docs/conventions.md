@@ -322,8 +322,10 @@ rather than in any one of them.
 - **Absent provenance is a real state, not a failure.** An ordinary compose records
   neither header. So does an `asAttachment` forward, deliberately: the attached `.eml` is
   its recorded source. Anything keyed on provenance is therefore inert on those drafts —
-  `send_draft` marks nothing (`forward_email send=true` still marks the original directly,
-  because it holds the id already).
+  `send_draft` marks nothing. Since the compose surface is draft-first (#32/#66, every
+  forward is a draft transmitted by `send_draft`), an `asAttachment` forward's original is
+  never marked forwarded at all: the accepted trade-off of recording the source as the
+  `.eml` instead of a header.
 - **Message-ID to JMAP id is a lookup, and it is two steps.** Every write path needs a
   JMAP id, so the header value has to be resolved: a full-text `Email/query` on the
   **bare** id is the recall step (the bracketed form matches nothing — the platform fact

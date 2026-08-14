@@ -1,13 +1,13 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
-import { isBlank, assertBodyInputs } from './body-format.js';
+import { assertBodyInputs } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
 import { buildReplyBodies } from './reply-quote.js';
 import { formatAddress } from './email-formatter.js';
 import type { AttachmentPart } from './jmap-client.js';
 
-// Parameters passed to createDraft/sendEmail for a reply (matches their input shapes).
+// Parameters passed to createDraft for a reply (matches its input shape).
 export interface ReplyParams {
   to: string[];
   cc?: string[];
@@ -19,23 +19,23 @@ export interface ReplyParams {
   inReplyTo: string[];
   references: string[];
   replyTo?: string[];
-  // Set by the reply_email handler AFTER buildReplyParams (which stays pure / no I/O);
-  // threaded into both the send and save-as-draft branches.
+  // Set by the reply_email handler AFTER buildReplyParams (which stays pure / no I/O).
   attachments?: AttachmentPart[];
 }
 
 // Assemble the reply parameters from the caller's args and the already-fetched original
 // email. Pure (no I/O), so the reply_email handler's logic is unit-testable without
-// spinning the server: coerce inputs, default quoteOriginal to true, reject a body-less
-// send (trim/zero-width-aware), build the threading headers and the subject (the caller's
-// override, else "Re: <original>"), default the recipient to the original sender, and
-// append the attributed quote. The caller-supplied
-// bodies are returned as-is when quoteOriginal is false. createDraft/sendEmail add the auto
-// text/plain fallback downstream for an html-only reply. Throws McpError on invalid input.
+// spinning the server: coerce inputs, default quoteOriginal to true, build the threading
+// headers and the subject (the caller's override, else "Re: <original>"), default the
+// recipient to the original sender, and append the attributed quote. The caller-supplied
+// bodies are returned as-is when quoteOriginal is false; a body-less reply draft is
+// allowed (it can be filled in via edit_draft before send_draft transmits it).
+// createDraft adds the auto text/plain fallback downstream for an html-only reply.
+// Throws McpError on invalid input.
 export function buildReplyParams(
   args: any,
   originalEmail: any,
-): { shouldSend: boolean; quoteOriginal: boolean; replyParams: ReplyParams } {
+): { quoteOriginal: boolean; replyParams: ReplyParams } {
   const a = args ?? {};
   // Validate the caller's own bodies FIRST — before the quote is appended below. Once the
   // quoted original is merged in, a malformed new message is masked by it: the quote
@@ -44,16 +44,9 @@ export function buildReplyParams(
   // with its new message silently dropped from the plain-text part (#78).
   assertBodyInputs(a);
   const subjectOverride = coerceSubjectOverride(a.subject, 'Omit it to inherit "Re: <original subject>".');
-  const { from, textBody, htmlBody, send } = a;
+  const { from, textBody, htmlBody } = a;
   const { to: toArray, cc, bcc, replyTo } = coerceRecipients(a);
-  const shouldSend = coerceBool(send) ?? false;
   const quoteOriginal = coerceBool(a.quoteOriginal) ?? true;
-
-  // Trim/zero-width-aware so a whitespace-only htmlBody can't slip through and produce a
-  // "   " + quote reply; a body-less reply flows to the same no-body handling elsewhere.
-  if (shouldSend && isBlank(textBody) && isBlank(htmlBody)) {
-    throw new McpError(ErrorCode.InvalidParams, 'Either textBody or htmlBody is required');
-  }
 
   const originalMessageId = originalEmail?.messageId?.[0];
   if (!originalMessageId) {
@@ -85,7 +78,6 @@ export function buildReplyParams(
   const quoted = buildReplyBodies({ original: originalEmail, textBody, htmlBody, quoteOriginal });
 
   return {
-    shouldSend,
     quoteOriginal,
     replyParams: {
       to,
@@ -109,24 +101,22 @@ export interface ReplyClient {
   getEmailById(id: string): Promise<any>;
   uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
   createDraft(params: ReplyParams): Promise<string>;
-  sendEmail(params: ReplyParams): Promise<string>;
-  addKeywords(emailId: string, keywords: string[]): Promise<void>;
 }
 
 export interface ComposeReplyResult {
-  sent: boolean;
   subject: string;
-  emailId?: string;        // set on the draft (send=false) branch
-  submissionId?: string;   // set on the send branch
-  markedAnswered?: boolean; // true when the original was marked answered+read after a send
+  emailId: string;
 }
 
 // Orchestrate a reply end to end: fetch the original, assemble the (pure) reply params,
-// upload any attachments and thread them into whichever branch runs, then create the
-// draft or send. Extracted from the index tool handler so the attachment-threading seam
-// (the one piece that touches I/O via the injected client) is unit-testable without the
-// MCP server or a live account — the handler is now a thin wrapper over this. attachDir
-// is passed in (resolved by the caller) so this function reads no environment itself.
+// upload any attachments, then save the reply as a draft. This tool only ever drafts —
+// send_draft is the single tool that transmits mail, and it also does the thread-state
+// maintenance (marking the original answered + read), resolved from the draft's
+// In-Reply-To header (#60; see docs/conventions.md "Draft provenance"). Extracted from
+// the index tool handler so the attachment-threading seam (the one piece that touches
+// I/O via the injected client) is unit-testable without the MCP server or a live
+// account — the handler is a thin wrapper over this. attachDir is passed in (resolved
+// by the caller) so this function reads no environment itself.
 export async function composeReply(
   args: any,
   client: ReplyClient,
@@ -140,33 +130,15 @@ export async function composeReply(
   // Fetch the original, then assemble the reply (threading headers, Re: subject, recipient
   // defaulting, the attributed quote, body validation) via the pure, unit-tested builder.
   const originalEmail = await client.getEmailById(originalEmailId);
-  const { shouldSend, replyParams } = buildReplyParams(args, originalEmail);
+  const { replyParams } = buildReplyParams(args, originalEmail);
 
   // Upload attachments (if any) after the pure builder, then thread the parts into
-  // whichever branch runs (send or save-as-draft).
+  // the draft.
   const specs = coerceAttachments(args?.attachments);
   if (specs?.length) {
     replyParams.attachments = await client.uploadAttachments(specs, attachDir);
   }
 
-  if (!shouldSend) {
-    const emailId = await client.createDraft(replyParams);
-    return { sent: false, subject: replyParams.subject, emailId };
-  }
-  const submissionId = await client.sendEmail(replyParams);
-  // Best-effort thread-state maintenance (#52/#54): mark the original answered + read.
-  // The reply already sent; a keyword-set FAILURE must NOT mask that success, so swallow it.
-  // The draft branch marks nothing — a saved draft has answered nothing yet; send_draft
-  // does the same maintenance when it transmits, resolving the original from the draft's
-  // In-Reply-To (#60).
-  // ($seen here clears the original's unread state — benign: it only happens as a side effect
-  //  of actually sending a reply, and mark_email_read already grants standalone $seen writes.)
-  let markedAnswered = false;
-  try {
-    await client.addKeywords(originalEmailId, ['$answered', '$seen']);
-    markedAnswered = true;
-  } catch {
-    /* best-effort: reply already sent */
-  }
-  return { sent: true, subject: replyParams.subject, submissionId, markedAnswered };
+  const emailId = await client.createDraft(replyParams);
+  return { subject: replyParams.subject, emailId };
 }

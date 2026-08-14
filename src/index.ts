@@ -18,7 +18,7 @@ import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projectio
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
-import { composeSend, composeDraft } from './compose-handler.js';
+import { composeDraft } from './compose-handler.js';
 import { assertBodyInputs } from './body-format.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { readThread } from './thread-handler.js';
@@ -388,71 +388,8 @@ const TOOLS = [
         },
       },
       {
-        name: 'send_email',
-        description: 'Send an email',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            to: {
-              oneOf: [
-                { type: 'array', items: { type: 'string' } },
-                { type: 'string' },
-              ],
-              description: 'Recipient email addresses (array of strings, or a comma-separated string). Each entry may be "Name <email>" or a bare address.',
-            },
-            cc: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
-            },
-            bcc: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
-            },
-            from: {
-              type: 'string',
-              description: 'Sender email address (optional, defaults to account primary email)',
-            },
-            mailbox: {
-              type: 'string',
-              description: 'Mailbox to SAVE the draft into — id, role, or name (optional, defaults to Drafts). Does not set From or recipients. Unknown mailbox is rejected with the valid list.',
-            },
-            subject: {
-              type: 'string',
-              description: 'Email subject',
-            },
-            textBody: {
-              type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Must be a plain string: a body wrapped in a CDATA section is rejected.',
-            },
-            htmlBody: {
-              type: 'string',
-              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
-            },
-            inReplyTo: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Message-ID(s) of the email being replied to (optional, for threading)',
-            },
-            references: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Full reference chain of Message-IDs (optional, for threading)',
-            },
-            replyTo: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
-            },
-            attachments: attachmentsSchemaProperty(false),
-          },
-          required: ['to', 'subject'],
-        },
-      },
-      {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address. On send=true the original is marked answered and read (best-effort; reported in the success message when it succeeds); sending the saved draft later via send_draft marks it the same way, resolved from the draft\'s In-Reply-To.',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the reply, it marks the original answered and read, resolved from the draft\'s In-Reply-To. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -491,10 +428,6 @@ const TOOLS = [
               type: 'string',
               description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
             },
-            send: {
-              type: ['boolean', 'string'],
-              description: 'Whether to send the reply immediately (default: false). By default the reply is saved as a draft; set send=true to transmit it.',
-            },
             quoteOriginal: {
               type: ['boolean', 'string'],
               description: 'Append the original message as an attributed quote (default true). Set false to omit it.',
@@ -511,7 +444,7 @@ const TOOLS = [
       },
       {
         name: 'forward_email',
-        description: 'Forward an existing email to new recipients. By default saves the forward as a draft; set send=true to transmit it immediately. `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional even when sending: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'. On send=true the original is marked forwarded and read (best-effort; reported in the success message when it succeeds); sending the saved draft later via send_draft marks it the same way, resolved from the recorded X-Forwarded-Message-Id — except for an asAttachment forward, which records no such header (the attached .eml is its recorded source), so its saved draft marks nothing when sent.',
+        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the forward, it marks the original forwarded and read, resolved from the recorded X-Forwarded-Message-Id — except for an asAttachment forward, which records no such header (the attached .eml is its recorded source), so its draft marks nothing when sent. `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -552,10 +485,6 @@ const TOOLS = [
               type: 'string',
               description: 'Optional note placed ABOVE the forwarded-message block, in HTML (the preferred format; a plain-text alternative is derived automatically) — the original is reproduced below it. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.) Pass REAL markup — an entirely HTML-escaped note (escaped element tags like &lt;p&gt; with no actual elements) is rejected, as is one containing a CDATA section.',
             },
-            send: {
-              type: ['boolean', 'string'],
-              description: 'Whether to send the forward immediately (default: false). By default the forward is saved as a draft; set send=true to transmit it.',
-            },
             includeOriginalAttachments: {
               type: ['boolean', 'string'],
               description: "Carry the original message's attachments on the forward (default true; all-or-none — to drop individual ones, save the default draft and use edit_draft's removeAttachments). Embedded inline (cid:) images are never carried by an inline forward; use asAttachment for those. Ignored when asAttachment is set — the .eml already embeds every original attachment.",
@@ -576,7 +505,7 @@ const TOOLS = [
       },
       {
         name: 'create_draft',
-        description: 'Create an email draft without sending it. Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message.',
+        description: 'Create an email draft without sending it (transmit it later with send_draft, the only tool that sends mail). Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -705,7 +634,7 @@ const TOOLS = [
       },
       {
         name: 'send_draft',
-        description: 'Send an existing draft email. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content (e.g. an image-only message) sends as-is; only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by forward_email) marks it forwarded and read. Best-effort — the original is found from the Message-ID recorded on the draft; when it succeeds the result says so, and when that message cannot be identified the result says it was not marked and why. A draft that records neither header marks nothing: an ordinary compose, and also a forward saved with asAttachment (it records no forwarded Message-ID, so only its direct send=true marks the original).',
+        description: 'Send an existing draft email. This is the ONLY tool that transmits mail: every compose tool (create_draft, reply_email, forward_email) saves a draft as stored, inspectable bytes, and this tool submits it. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content (e.g. an image-only message) sends as-is; only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by forward_email) marks it forwarded and read. Best-effort — the original is found from the Message-ID recorded on the draft; when it succeeds the result says so, and when that message cannot be identified the result says it was not marked and why. A draft that records neither header marks nothing: an ordinary compose, and also a forward saved with asAttachment (it deliberately records no forwarded Message-ID — the attached .eml is its recorded source).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1037,7 +966,7 @@ const TOOLS = [
       },
       {
         name: 'list_identities',
-        description: "List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo, and the identity's configured signature as textSignature/htmlSignature when it has one; a blank signature is omitted). Nothing appends the signature for you — JMAP does not do it server-side and neither does this server, so to sign a message read it from here and include it in the body you pass to send_email/create_draft/reply_email (above the quoted history on a reply). Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.",
+        description: "List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo, and the identity's configured signature as textSignature/htmlSignature when it has one; a blank signature is omitted). Nothing appends the signature for you — JMAP does not do it server-side and neither does this server, so to sign a message read it from here and include it in the body you pass to create_draft/reply_email/forward_email (above the quoted history on a reply). Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -1518,45 +1447,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case 'send_email': {
-        // The orchestration (body validation, recipient coercion, attachment upload,
-        // transmit) lives in composeSend so it is unit-testable with a mock client;
-        // this handler just maps the result to the response text.
-        const submissionId = await composeSend(args, client, getAttachDir());
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Email sent successfully. Submission ID: ${submissionId}`,
-            },
-          ],
-        };
-      }
-
       case 'reply_email': {
-        // The orchestration (fetch original, assemble reply, upload + thread attachments
-        // into both branches, create-or-send) lives in composeReply so it is unit-testable
-        // with a mock client; this handler just maps the result to the response text.
+        // The orchestration (fetch original, assemble reply, upload + thread attachments,
+        // save the draft) lives in composeReply so it is unit-testable with a mock client;
+        // this handler just maps the result to the response text.
         const result = await composeReply(args, client, getAttachDir());
-        const text = result.sent
-          ? `Reply sent successfully. Submission ID: ${result.submissionId}${result.markedAnswered ? ' Original marked answered and read.' : ''}`
-          : `Reply draft saved successfully (Email ID: ${result.emailId}). Subject: ${result.subject}`;
+        const text = `Reply draft saved successfully (Email ID: ${result.emailId}). Use send_draft to transmit it. Subject: ${result.subject}`;
         return { content: [{ type: 'text', text }] };
       }
 
       case 'forward_email': {
         // The orchestration (fetch original, assemble the forwarded-message block,
-        // carry/.eml attachments, upload new ones, create-or-send, keyword marking)
-        // lives in composeForward so it is unit-testable with a mock client; this
-        // handler just maps the result to the response text.
+        // carry/.eml attachments, upload new ones, save the draft) lives in
+        // composeForward so it is unit-testable with a mock client; this handler just
+        // maps the result to the response text.
         const result = await composeForward(args, client, getAttachDir());
         const inlineNote = result.droppedInlineImages
           ? ` ${result.droppedInlineImages} embedded image(s) were not carried — use asAttachment for full fidelity.`
           : '';
-        const text = result.sent
-          ? `Forward sent successfully. Submission ID: ${result.submissionId}${result.markedForwarded ? ' Original marked forwarded and read.' : ''}${inlineNote}`
-          : `Forward draft saved successfully (Email ID: ${result.emailId}). Subject: ${result.subject}${inlineNote}`;
+        const text = `Forward draft saved successfully (Email ID: ${result.emailId}).${inlineNote} Use send_draft to transmit it. Subject: ${result.subject}`;
         return { content: [{ type: 'text', text }] };
       }
 
@@ -2221,7 +2130,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           email: {
             available: true,
             functions: [
-              'list_mailboxes', 'list_emails', 'get_email', 'send_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
+              'list_mailboxes', 'list_emails', 'get_email', 'reply_email', 'forward_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
               'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
@@ -2384,7 +2293,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (error instanceof McpError) {
       throw error;
     }
-    // The four compose handlers (send_email/reply_email/create_draft/edit_draft) have no
+    // The four compose handlers (reply_email/forward_email/create_draft/edit_draft) have no
     // local try/catch, so an attachment opt-in/path/contentType rejection thrown as a
     // PathAccessError surfaces here. Map it to InvalidParams (actionable) rather than the
     // generic InternalError wrap below. (download_attachment maps its own PathAccessError

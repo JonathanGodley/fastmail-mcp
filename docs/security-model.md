@@ -154,13 +154,17 @@ privacy control. Documented here as an accepted residual: the mitigation for mis
 same opt-in/authorization posture that governs sending mail at all, not a restriction on which
 in-account message may be quoted.
 
-The reply and forward paths also **write two keyword flags** (`$answered`+`$seen`, or
-`$forwarded`+`$seen`) to that same unscoped `originalEmailId` after a send succeeds (#52/#54, #30). This rides the identical unscoped-id posture
-above (it may name any in-account message, not necessarily the one the user was viewing), but
-adds no capability class: two boolean keyword sets, no move/delete/body write, scoped to
-`session.accountId`, and dominated by `mark_email_read`, which already grants a standalone
-`$seen` write to any id. The write is best-effort (a failure is swallowed so it can't mask the
-already-sent reply). Accepted on the same footing as the read-and-embed primitive.
+Transmission also **writes two keyword flags** (`$answered`+`$seen`, or
+`$forwarded`+`$seen`) after a send succeeds (#52/#54, #30, #60). The compose surface is
+draft-first, so this write lives in `send_draft`: the target is resolved from the draft's
+recorded provenance header (`In-Reply-To` / `X-Forwarded-Message-Id` — see
+`docs/conventions.md` "Draft provenance"), an attacker-influenceable value on a foreign
+draft, but the resolution only ever marks the unique message that *owns* that Message-ID
+(no match, or more than one, marks nothing). Either way it adds no capability class: two
+boolean keyword sets, no move/delete/body write, scoped to `session.accountId`, and
+dominated by `mark_email_read`, which already grants a standalone `$seen` write to any id.
+The write is best-effort (a failure is swallowed so it can't mask the already-sent mail).
+Accepted on the same footing as the read-and-embed primitive.
 
 ## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
 

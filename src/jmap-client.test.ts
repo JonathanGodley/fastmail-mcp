@@ -1476,6 +1476,27 @@ describe('sendDraft', () => {
     assert.deepEqual(rcptTo[1], { email: 'cc@example.com' });
   });
 
+  // sendDraft is the only transmit path, so the envelope must cover every recipient
+  // field — including bcc, which appears in the SMTP envelope but not the headers.
+  it('includes bcc recipients in the envelope rcptTo', async () => {
+    const withBcc = { ...SENDABLE_DRAFT, bcc: [{ email: 'hidden@example.com' }] };
+    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [withBcc] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    await client.sendDraft('draft-1');
+
+    const rcptTo = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.submission.envelope.rcptTo;
+    assert.deepEqual(rcptTo, [
+      { email: 'bob@example.com' },
+      { email: 'cc@example.com' },
+      { email: 'hidden@example.com' },
+    ]);
+  });
+
   it('rejects non-draft email', async () => {
     const nonDraft = { ...SENDABLE_DRAFT, keywords: { $seen: true } };
     mock.method(client, 'makeRequest', async () => ({
@@ -1504,6 +1525,27 @@ describe('sendDraft', () => {
         return true;
       },
     );
+  });
+
+  // sendDraft is the transmit gate for every compose tool, so its identity check is the
+  // last line of defence against submitting mail from an unverified address (e.g. a draft
+  // created externally, or one whose from was edited after the sending identity was removed).
+  it('rejects a draft whose from address matches no sending identity', async () => {
+    const foreignFrom = { ...SENDABLE_DRAFT, from: [{ email: 'stranger@other.com' }] };
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/get', { list: [foreignFrom] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /does not match any sending identity/i);
+        return true;
+      },
+    );
+
+    // The reject fires before submission: only the Email/get call was made.
+    assert.equal(makeReq.mock.calls.length, 1);
   });
 
   it('throws when email not found', async () => {
@@ -2011,115 +2053,6 @@ describe('safeWritePath (symlink escapes)', () => {
   });
 });
 
-// ---------- sendEmail replyTo ----------
-
-describe('sendEmail replyTo', () => {
-  let client: JmapClient;
-
-  beforeEach(() => {
-    client = makeClient();
-    mock.method(client, 'getMailboxes', async () => [
-      DRAFTS_MAILBOX,
-      { id: 'mb-sent', name: 'Sent', role: 'sent' },
-    ]);
-  });
-
-  it('includes replyTo in JMAP emailObject when provided', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'email-new' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-
-    await client.sendEmail({
-      to: ['bob@example.com'],
-      subject: 'Test',
-      textBody: 'Hello',
-      replyTo: ['other@example.com'],
-    });
-
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.replyTo, [{ email: 'other@example.com' }]);
-  });
-
-  it('does NOT include replyTo when not provided', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'email-new' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-
-    await client.sendEmail({
-      to: ['bob@example.com'],
-      subject: 'Test',
-      textBody: 'Hello',
-    });
-
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
-    assert.equal(emailObj.replyTo, undefined);
-  });
-});
-
-// ---------- sendEmail envelope recipients ----------
-
-describe('sendEmail envelope recipients', () => {
-  let client: JmapClient;
-
-  beforeEach(() => {
-    client = makeClient();
-    mock.method(client, 'getMailboxes', async () => [
-      DRAFTS_MAILBOX,
-      { id: 'mb-sent', name: 'Sent', role: 'sent' },
-    ]);
-  });
-
-  it('includes to, cc, and bcc in envelope rcptTo', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'email-new' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-
-    await client.sendEmail({
-      to: ['alice@example.com'],
-      cc: ['bob@example.com'],
-      bcc: ['charlie@example.com'],
-      subject: 'Test',
-      textBody: 'Hello',
-    });
-
-    const req = makeReq.mock.calls[0].arguments[0];
-    const rcptTo = req.methodCalls[1][1].create.submission.envelope.rcptTo;
-    assert.equal(rcptTo.length, 3);
-    assert.deepEqual(rcptTo[0], { email: 'alice@example.com' });
-    assert.deepEqual(rcptTo[1], { email: 'bob@example.com' });
-    assert.deepEqual(rcptTo[2], { email: 'charlie@example.com' });
-  });
-
-  it('works with only to recipients (no cc/bcc)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'email-new' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-
-    await client.sendEmail({
-      to: ['alice@example.com'],
-      subject: 'Test',
-      textBody: 'Hello',
-    });
-
-    const req = makeReq.mock.calls[0].arguments[0];
-    const rcptTo = req.methodCalls[1][1].create.submission.envelope.rcptTo;
-    assert.equal(rcptTo.length, 1);
-    assert.deepEqual(rcptTo[0], { email: 'alice@example.com' });
-  });
-});
-
 // ---------- recipient name parsing ----------
 
 describe('recipient name parsing', () => {
@@ -2158,33 +2091,6 @@ describe('recipient name parsing', () => {
     assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.com' }]);
   });
 
-  it('sendEmail parses "Name <email>" recipients in the email object', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'e-1' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-
-    await client.sendEmail({ to: ['Alice <a@x.com>'], subject: 'Hi', textBody: 'Hello' });
-
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.com' }]);
-  });
-
-  it('sendEmail keeps the SMTP envelope rcptTo as a bare address (strips display name)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'e-1' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-
-    await client.sendEmail({ to: ['Alice <a@x.com>'], subject: 'Hi', textBody: 'Hello' });
-
-    const rcptTo = makeReq.mock.calls[0].arguments[0].methodCalls[1][1].create.submission.envelope.rcptTo;
-    assert.deepEqual(rcptTo, [{ email: 'a@x.com' }]);
-  });
 });
 
 // ---------- createDraft replyTo ----------
@@ -2264,41 +2170,6 @@ describe('updateDraft replyTo', () => {
 // ---------- wildcard identity ----------
 
 const WILDCARD_IDENTITY = { id: 'id-wild', name: 'Jonathan Godley', email: '*@example.com', mayDelete: true };
-
-describe('sendEmail wildcard identity', () => {
-  let client: JmapClient;
-
-  beforeEach(() => {
-    client = makeClient();
-    mock.method(client, 'getIdentities', async () => [WILDCARD_IDENTITY]);
-    mock.method(client, 'getMailboxes', async () => [
-      DRAFTS_MAILBOX,
-      { id: 'mb-sent', name: 'Sent', role: 'sent' },
-    ]);
-  });
-
-  it('uses concrete from address in email and envelope, not wildcard literal', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'email-new' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-
-    await client.sendEmail({
-      to: ['bob@example.com'],
-      subject: 'Test',
-      textBody: 'Hello',
-      from: 'work@example.com',
-    });
-
-    const req = makeReq.mock.calls[0].arguments[0];
-    const emailObj = req.methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
-    const envelope = req.methodCalls[1][1].create.submission.envelope;
-    assert.deepEqual(envelope.mailFrom, { email: 'work@example.com' });
-  });
-});
 
 describe('sendDraft wildcard identity', () => {
   let client: JmapClient;
@@ -2641,24 +2512,9 @@ describe('uploadAttachments', () => {
   });
 });
 
-// ---------- outgoing attachments wired into sendEmail / createDraft ----------
+// ---------- outgoing attachments wired into createDraft ----------
 
-describe('attachments on send/create', () => {
-  it('sendEmail places attachment parts in the email object (reply send branch)', async () => {
-    const client = makeClient();
-    mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, { id: 'mb-sent', name: 'Sent', role: 'sent' }]);
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [
-        ['Email/set', { created: { draft: { id: 'email-new' } } }, 'createEmail'],
-        ['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitEmail'],
-      ],
-    }));
-    const part = { blobId: 'b1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' };
-    await client.sendEmail({ to: ['bob@example.com'], subject: 'T', textBody: 'Hi', attachments: [part] });
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.attachments, [part]);
-  });
-
+describe('attachments on create', () => {
   it('createDraft places attachment parts in the email object (reply draft branch)', async () => {
     const client = makeClient();
     const makeReq = mock.method(client, 'makeRequest', async () => ({

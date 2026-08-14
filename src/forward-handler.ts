@@ -6,7 +6,7 @@ import { coerceSubjectOverride } from './subject.js';
 import { buildForwardBodies } from './reply-quote.js';
 import type { AttachmentPart } from './jmap-client.js';
 
-// Parameters passed to createDraft/sendEmail for a forward (matches their input shapes).
+// Parameters passed to createDraft for a forward (matches its input shape).
 export interface ForwardParams {
   to: string[];
   cc?: string[];
@@ -75,7 +75,6 @@ function carryPart(a: any): AttachmentPart {
 }
 
 export interface BuiltForward {
-  shouldSend: boolean;
   asAttachment: boolean;
   forwardParams: ForwardParams;
   // Count of the original's true-inline (cid-referenced) image parts NOT carried by
@@ -99,9 +98,8 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
   // below, which would otherwise mask a malformed note the same way a reply quote does
   // (see the equivalent guard in buildReplyParams).
   assertBodyInputs(a);
-  const { from, textBody, htmlBody, send } = a;
+  const { from, textBody, htmlBody } = a;
   const { to, cc, bcc, replyTo } = coerceRecipients(a);
-  const shouldSend = coerceBool(send) ?? false;
   const includeOriginalAttachments = coerceBool(a.includeOriginalAttachments) ?? true;
   const asAttachment = coerceBool(a.asAttachment) ?? false;
 
@@ -146,7 +144,7 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
     // whole (verified live 2026-07-05: byte-identical round-trip). The body is just
     // the caller's note — no forwarded-message block — and when no note is given, a
     // short filler that matches NO forward marker, so the edit guard stays inert and
-    // sendEmail's blank-body reject passes.
+    // the draft ships with a readable body.
     if (isBlank(textBody) && isBlank(htmlBody)) {
       params.textBody = 'Forwarded message attached.';
     } else {
@@ -162,7 +160,7 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
       name: sanitizeEmlFilename(originalEmail?.subject),
       disposition: 'attachment',
     }];
-    return { shouldSend, asAttachment, forwardParams: params };
+    return { asAttachment, forwardParams: params };
   }
 
   // Inline forward: reproduce the original under the forwarded-message block.
@@ -188,7 +186,7 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
       });
   }
 
-  return { shouldSend, asAttachment, forwardParams: params, droppedInlineImages };
+  return { asAttachment, forwardParams: params, droppedInlineImages };
 }
 
 // The minimal client surface composeForward needs; JmapClient satisfies it
@@ -198,24 +196,23 @@ export interface ForwardClient {
   getEmailById(id: string): Promise<any>;
   uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
   createDraft(params: ForwardParams): Promise<string>;
-  sendEmail(params: ForwardParams): Promise<string>;
-  addKeywords(emailId: string, keywords: string[]): Promise<void>;
 }
 
 export interface ComposeForwardResult {
-  sent: boolean;
   subject: string;
-  emailId?: string;         // set on the draft (send=false) branch
-  submissionId?: string;    // set on the send branch
-  markedForwarded?: boolean; // true when the original was marked forwarded+read after a send
+  emailId: string;
   droppedInlineImages?: number; // see BuiltForward
 }
 
 // Orchestrate a forward end to end: fetch the original, assemble the (pure) forward
-// params, upload any NEW attachments and append them to whichever branch runs, then
-// create the draft or send. Mirrors composeReply so the index handler stays a thin
-// wrapper. attachDir is passed in (resolved by the caller) so this reads no
-// environment itself.
+// params, upload any NEW attachments and append them behind the carried/.eml parts,
+// then save the forward as a draft. This tool only ever drafts — send_draft is the
+// single tool that transmits mail, and it also does the thread-state maintenance
+// (marking the original forwarded + read), resolved from the draft's recorded
+// X-Forwarded-Message-Id header (#60; see docs/conventions.md "Draft provenance").
+// An asAttachment forward records no such header, so sending its draft marks nothing.
+// Mirrors composeReply so the index handler stays a thin wrapper. attachDir is passed
+// in (resolved by the caller) so this reads no environment itself.
 export async function composeForward(
   args: any,
   client: ForwardClient,
@@ -227,7 +224,7 @@ export async function composeForward(
   }
 
   const originalEmail = await client.getEmailById(originalEmailId);
-  const { shouldSend, forwardParams, droppedInlineImages } = buildForwardParams(args, originalEmail);
+  const { forwardParams, droppedInlineImages } = buildForwardParams(args, originalEmail);
 
   // Upload NEW attachments (if any) after the pure builder and append them behind
   // the carried/.eml parts.
@@ -237,22 +234,6 @@ export async function composeForward(
     forwardParams.attachments = [...(forwardParams.attachments ?? []), ...uploaded];
   }
 
-  if (!shouldSend) {
-    const emailId = await client.createDraft(forwardParams);
-    return { sent: false, subject: forwardParams.subject, emailId, droppedInlineImages };
-  }
-  const submissionId = await client.sendEmail(forwardParams);
-  // Best-effort thread-state maintenance: mark the original forwarded + read. The
-  // forward already sent; a keyword-set failure must not mask that success, so it is
-  // swallowed (same posture as composeReply). The draft branch marks nothing here — a
-  // saved draft has forwarded nothing yet; send_draft does the same maintenance when it
-  // transmits, resolving the original from the recorded X-Forwarded-Message-Id (#60).
-  let markedForwarded = false;
-  try {
-    await client.addKeywords(originalEmailId, ['$forwarded', '$seen']);
-    markedForwarded = true;
-  } catch {
-    /* best-effort: forward already sent */
-  }
-  return { sent: true, subject: forwardParams.subject, submissionId, markedForwarded, droppedInlineImages };
+  const emailId = await client.createDraft(forwardParams);
+  return { subject: forwardParams.subject, emailId, droppedInlineImages };
 }
