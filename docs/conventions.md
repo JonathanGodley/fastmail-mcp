@@ -211,6 +211,52 @@ the server — the JMAP property sets are held identical across the read methods
 (see the JMAP-property-consistency rule in `CLAUDE.md`), and making the fetch shape depend
 on a caller's projection would trade that invariant for a saving the caller never sees.
 
+## Query-level signals: the result count and `position` paging
+
+`total` and `nextPosition` are properties of the *query*, not of a message, and that
+placement decides everything else about them. They live in the summary line built by
+`formatQuerySummary` (`src/response-formatters.ts`), which both the simplified and the
+raw path render, so the two cannot drift — and, like the Trash/Spam exclusion note,
+they are never projected away by `fields` (see the out-of-band rule above). The raw
+path is not a pure JMAP passthrough here: it already carried a summary line, so the
+signals belong on it too; a `raw` caller additionally has the JMAP response's own
+`total`/`position` if it re-queries.
+
+- **`total` is always stated.** The old summary printed `20 results.` when a page
+  happened to fill, which reads identically whether 20 is the whole match set or just
+  the first page. A caller reading a capped page as the whole answer concludes "nothing
+  else matched" when plenty did (#51) — the worst failure shape for a sweep, since it
+  is a false negative with no signal. When the server declines to compute a total
+  (`calculateTotal` is discretionary, RFC 8620 §5.5), the summary says the count was not
+  returned rather than substituting the page size.
+- **`nextPosition` appears only while more results remain.** Its absence is the
+  published "the listing is complete" signal, so there is no `hasMore: false` to
+  interpret — the same discipline as the exclusion note, where silence means nothing was
+  withheld. The arithmetic is `position actually served + items actually returned`,
+  never the requested `limit`, so a short final page ends the listing instead of
+  advertising a page that does not exist.
+- **One seam.** `position` is threaded through `runFilteredQuery` into `Email/query`, so
+  `list_emails` and `search_emails` inherit it together; `getRecentEmails` builds its own
+  batch and takes the same parameter. The filters (including the default Trash/Spam
+  exclusion, which lives inside the JMAP `filter` as `inMailboxOtherThan`) are applied
+  server-side per page, so paging cannot change what matches, and the hidden-count query
+  stays a count — it carries no `position`.
+- **`position: 0` and an omitted `position` are the same request.** 0 is the JMAP
+  default, so the parameter is only put on the wire when it is non-zero.
+- **A position past the end is not an error.** JMAP clamps it and returns an empty page
+  with the real total, which is self-describing ("0 of 137 results from position 500")
+  and idempotent, so the caller sees it overshot and re-asks. Rejecting it would add a
+  failure mode for a case that already explains itself.
+- **The coercion is the loud-reject side of the lenient-value rule** (`coercePosition`
+  in `src/coerce.ts`): a stringified `"40"` is accepted, but a negative value, a
+  fraction, or garbage is refused. Negative is the load-bearing one — JMAP reads a
+  negative position as an offset from the *end* of the results, so accepting `-1` would
+  quietly serve the last page. Reading from the other end is what `ascending` is for.
+
+Contacts and calendar listings do not take `position` and keep their own older summary
+wording; paginating those protocol paths is tracked on
+[#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51).
+
 ## `hasAttachment` is a server heuristic — passed through by design
 
 `hasAttachment` in simplified output is the server's value, untouched. This is a

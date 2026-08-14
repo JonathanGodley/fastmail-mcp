@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, coerceUtcDate, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, coerceUtcDate, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -140,6 +140,77 @@ describe('coerceBool', () => {
     assert.equal(coerceBool('false') === true, false);
     assert.equal(coerceBool('garbage') === true, false);
     assert.equal(coerceBool(undefined) === true, false);
+  });
+});
+
+describe('coercePosition (#51)', () => {
+  it('returns undefined for the blank shapes, which all mean "first page"', () => {
+    assert.equal(coercePosition(undefined), undefined);
+    assert.equal(coercePosition(null), undefined);
+    assert.equal(coercePosition(''), undefined);
+    assert.equal(coercePosition('   '), undefined);
+  });
+
+  it('accepts a number', () => {
+    assert.equal(coercePosition(0), 0);
+    assert.equal(coercePosition(40), 40);
+  });
+
+  // Lenient values: a client that stringifies numbers must not be forced to page by hand.
+  it('accepts a stringified number', () => {
+    assert.equal(coercePosition('40'), 40);
+    assert.equal(coercePosition(' 40 '), 40);
+    assert.equal(coercePosition('0'), 0);
+  });
+
+  // JMAP reads a negative position as an offset from the END of the results, so
+  // accepting -1 would quietly serve the last page instead of failing.
+  it('rejects a negative position and names the alternative', () => {
+    assert.throws(
+      () => coercePosition(-1),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /cannot be negative/);
+        assert.match(err.message, /ascending:true/);
+        return true;
+      },
+    );
+    assert.throws(() => coercePosition('-20'), InvalidInputError);
+  });
+
+  it('rejects a fraction rather than rounding to a guessed offset', () => {
+    assert.throws(
+      () => coercePosition(1.5),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /whole number/);
+        return true;
+      },
+    );
+    assert.throws(() => coercePosition('1.5'), InvalidInputError);
+  });
+
+  it('rejects non-numeric text, Infinity and an integer too large to be exact', () => {
+    assert.throws(() => coercePosition('abc'), InvalidInputError);
+    assert.throws(() => coercePosition(NaN), InvalidInputError);
+    assert.throws(() => coercePosition(Infinity), InvalidInputError);
+    assert.throws(() => coercePosition(Number.MAX_SAFE_INTEGER + 2), InvalidInputError);
+  });
+
+  it('rejects non-number, non-string shapes', () => {
+    assert.throws(() => coercePosition([20]), InvalidInputError);
+    assert.throws(() => coercePosition({ position: 20 }), InvalidInputError);
+    assert.throws(() => coercePosition(true), InvalidInputError);
+  });
+
+  it('names the parameter in the rejection so the caller knows what to fix', () => {
+    assert.throws(
+      () => coercePosition('abc'),
+      (err: Error) => {
+        assert.match(err.message, /^position /);
+        return true;
+      },
+    );
   });
 });
 

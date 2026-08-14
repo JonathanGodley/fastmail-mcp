@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceBool, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -270,6 +270,25 @@ function fieldsSchemaProperty() {
   };
 }
 
+// Paging, shared verbatim by the three list/search tools (list_emails, search_emails,
+// get_recent_emails) so their offset contract can't drift. One sentence goes in each
+// tool description (that a result is one page and how to tell there are more), the full
+// contract in the parameter description. (#51)
+const POSITION_TOOL_DESC =
+  'Results are ONE PAGE: the summary line always states the total number of matches, and when more remain it carries a `nextPosition` to pass back as `position`. No `nextPosition` means you have seen every match — do not re-run to check.';
+
+const POSITION_PARAM_DESC =
+  'Skip this many results before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. All filters (including the default Trash/Spam exclusion) are applied per page server-side, so paging never changes what matches, and the withheld-count note is per page. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected (JMAP would read it as counting back from the end; to read from the oldest end use ascending:true) and so is a fraction.';
+
+// The `position` parameter, declared identically on every list/search tool. Numbers are
+// also accepted as strings, matching `limit`, because lenient clients stringify them.
+function positionSchemaProperty() {
+  return {
+    type: ['number', 'string'],
+    description: POSITION_PARAM_DESC,
+  };
+}
+
 // Shared by get_email and get_thread so the two can't drift on what stripping does,
 // what it does NOT touch, and how to read the signal it returns (#73).
 const STRIP_QUOTED_DESC =
@@ -302,7 +321,7 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC,
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -312,9 +331,10 @@ const TOOLS = [
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of emails to return (default: 20)',
+              description: 'Maximum number of emails to return (default: 20, max: 100)',
               default: 20,
             },
+            position: positionSchemaProperty(),
             ascending: {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
@@ -698,7 +718,7 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC,
+        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -755,6 +775,7 @@ const TOOLS = [
               description: 'Maximum number of results (default: 20, max: 100)',
               default: 20,
             },
+            position: positionSchemaProperty(),
             ascending: {
               type: 'boolean',
               description: 'Sort oldest first instead of newest first (default: false)',
@@ -1032,7 +1053,7 @@ const TOOLS = [
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC,
+        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1041,6 +1062,7 @@ const TOOLS = [
               description: 'Number of recent emails to retrieve (default: 10, max: 50)',
               default: 10,
             },
+            position: positionSchemaProperty(),
             mailbox: {
               type: 'string',
               description: 'Mailbox to read — id, role, or name (default: inbox). Unknown mailbox is rejected with the valid list.',
@@ -1444,10 +1466,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { mailbox, limit, ascending, raw } = args as any;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        // Same reason: an unusable paging offset is rejected before the query runs.
+        const position = coercePosition((args as any).position);
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
         const result = await client.getEmails({
           mailbox,
           limit: validLimit,
+          position,
           ascending: !!ascending,
           includeTrash: coerceBool((args as any).includeTrash) ?? false,
           includeSpam: coerceBool((args as any).includeSpam) ?? false,
@@ -1780,8 +1805,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { limit = 10, mailbox = 'inbox', ascending, raw } = args as any;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        // Same reason: an unusable paging offset is rejected before the query runs.
+        const position = coercePosition((args as any).position) ?? 0;
         const client = initializeClient();
-        const result = await client.getRecentEmails(limit, mailbox, !!ascending);
+        const result = await client.getRecentEmails(limit, mailbox, !!ascending, position);
         return {
           content: [
             {
@@ -1971,6 +1998,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit, ascending, raw } = args as any;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        // Same reason: an unusable paging offset is rejected before the query runs.
+        const position = coercePosition((args as any).position);
         const client = initializeClient();
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
         const result = await client.searchEmails({
@@ -1978,7 +2007,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           hasAttachment: coerceBool(hasAttachment),
           isUnread: coerceBool(isUnread),
           isPinned: coerceBool(isPinned),
-          mailbox, after, before, limit: validLimit, ascending: !!ascending,
+          mailbox, after, before, limit: validLimit, position,
+          ascending: !!ascending,
           excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
           includeTrash: coerceBool((args as any).includeTrash) ?? false,
           includeSpam: coerceBool((args as any).includeSpam) ?? false,

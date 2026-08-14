@@ -134,6 +134,13 @@ export interface JmapResponse {
 export interface QueryResult<T = any> {
   items: T[];
   total?: number;
+  // The 0-based index the returned items start at within the full result set (RFC 8620
+  // section 5.5). The server reports the position it actually served — a request past
+  // the end is clamped — and we fall back to the position we asked for if a response
+  // omits it. Read by the formatters to state where a page starts and to compute
+  // `nextPosition`; like `exclusion`, it describes the QUERY, not a message, so it is
+  // never serialized into the JSON body on either the simplified or the raw path.
+  position?: number;
   // Out-of-band metadata for the default Trash/Spam exclusion. Populated by
   // searchEmails/getEmails when an exclusion was active; read by the handlers to
   // emit a trailing note. NEVER serialized into the JSON body or the raw path
@@ -558,7 +565,12 @@ export class JmapClient {
     const queryResult = this.getMethodResult(response, queryIndex);
     const items = this.getListResult(response, listIndex);
     const total = queryResult?.total;
-    return total != null ? { items, total } : { items };
+    const result: QueryResult = total != null ? { items, total } : { items };
+    // The position the server actually served these items from. Kept only when it is a
+    // number: paging arithmetic on a garbled value would be worse than falling back to
+    // the position we requested (which the paging callers supply).
+    if (typeof queryResult?.position === 'number') result.position = queryResult.position;
+    return result;
   }
 
   async getSession(): Promise<JmapSession> {
@@ -676,6 +688,7 @@ export class JmapClient {
   async getEmails(opts: {
     mailbox?: string;
     limit?: number;
+    position?: number;
     ascending?: boolean;
     includeTrash?: boolean;
     includeSpam?: boolean;
@@ -706,6 +719,7 @@ export class JmapClient {
       limit: opts.limit ?? 20,
       ascending: opts.ascending ?? false,
       mailboxes,
+      position: opts.position,
     });
   }
 
@@ -1785,7 +1799,7 @@ export class JmapClient {
     return submissionId;
   }
 
-  async getRecentEmails(limit: number = 10, mailbox: string = 'inbox', ascending: boolean = false): Promise<QueryResult> {
+  async getRecentEmails(limit: number = 10, mailbox: string = 'inbox', ascending: boolean = false, position: number = 0): Promise<QueryResult> {
     const session = await this.getSession();
 
     // Resolve the target mailbox EXACTLY (id/role/name) — replaces the old substring
@@ -1804,22 +1818,29 @@ export class JmapClient {
 
     emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
 
+    const query: any = {
+      accountId: session.accountId,
+      filter: { inMailbox: targetMailbox.id },
+      sort: [{ property: 'receivedAt', isAscending: ascending }],
+      limit: Math.min(limit, 50),
+      calculateTotal: true
+    };
+    // Paging offset (#51), sent only when non-zero — 0 is the JMAP default, so
+    // position:0 and an omitted position are the same request. This tool caps `limit`
+    // at 50, so `position` is how a caller reads past the cap.
+    if (position > 0) query.position = position;
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
-        ['Email/query', {
-          accountId: session.accountId,
-          filter: { inMailbox: targetMailbox.id },
-          sort: [{ property: 'receivedAt', isAscending: ascending }],
-          limit: Math.min(limit, 50),
-          calculateTotal: true
-        }, 'query'],
+        ['Email/query', query, 'query'],
         ['Email/get', emailGetParams, 'emails']
       ]
     };
 
     const response = await this.makeRequest(request);
     const result = this.getQueryResult(response, 0, 1);
+    if (typeof result.position !== 'number') result.position = position;
     // Reuse the mailbox list already fetched above to resolve names + roles — no extra methodCall.
     attachMailboxInfo(result.items, buildMailboxInfoMap(mailboxes));
     return result;
@@ -2537,9 +2558,11 @@ export class JmapClient {
     limit: number;
     ascending: boolean;
     mailboxes: any[];
+    position?: number;
   }): Promise<QueryResult> {
     const session = await this.getSession();
     const { base, conds, exclusion, exclusionIntended, limit, ascending, mailboxes } = opts;
+    const position = opts.position ?? 0;
 
     const doExclude = exclusion.excludeIds.length > 0;
     // Inject the exclusion into `base` BEFORE computing baseEmpty — otherwise an
@@ -2564,14 +2587,21 @@ export class JmapClient {
       properties: [...EMAIL_PROPERTIES_COMPACT],
     };
 
+    const visibleQuery: any = {
+      accountId: session.accountId,
+      filter: visibleFilter,
+      sort: [{ property: 'receivedAt', isAscending: ascending }],
+      limit,
+      calculateTotal: true,
+    };
+    // Paging offset (#51). Sent only when non-zero: 0 is the JMAP default, so an
+    // omitted `position` and position:0 are the same request on the wire. The
+    // exclusion lives inside `filter`, so every page is filtered server-side and the
+    // hidden-count query below (which is a count, not a page) stays unaffected.
+    if (position > 0) visibleQuery.position = position;
+
     const methodCalls: [string, any, string][] = [
-      ['Email/query', {
-        accountId: session.accountId,
-        filter: visibleFilter,
-        sort: [{ property: 'receivedAt', isAscending: ascending }],
-        limit,
-        calculateTotal: true,
-      }, 'query'],
+      ['Email/query', visibleQuery, 'query'],
       ['Email/get', emailGetParams, 'emails'],
     ];
 
@@ -2602,6 +2632,7 @@ export class JmapClient {
       methodCalls,
     });
     const result = this.getQueryResult(response, 0, 1);
+    if (typeof result.position !== 'number') result.position = position;
     attachMailboxInfo(result.items, buildMailboxInfoMap(mailboxes));
 
     // Populate exclusion metadata whenever an exclusion was INTENDED — even if
@@ -2649,6 +2680,7 @@ export class JmapClient {
     after?: string;
     before?: string;
     limit?: number;
+    position?: number;
     ascending?: boolean;
     excludeDrafts?: boolean;
     includeTrash?: boolean;
@@ -2699,6 +2731,7 @@ export class JmapClient {
       limit: Math.min(filters.limit || 20, 100),
       ascending: filters.ascending ?? false,
       mailboxes,
+      position: filters.position,
     });
   }
 

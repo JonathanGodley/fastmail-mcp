@@ -185,6 +185,61 @@ function echoDate(value: string): string {
   return value.length > DATE_ECHO_LIMIT ? `${value.slice(0, DATE_ECHO_LIMIT)}...` : value;
 }
 
+// The pagination offset shared by the list/search tools: a 0-based index into the
+// full result set (the JMAP `position` argument, RFC 8620 section 5.5). Values are
+// coerced leniently like `limit` — a stringified "40" from a client that stringifies
+// numbers is accepted — but the three shapes that would page somewhere the caller did
+// not mean are REJECTED rather than repaired, because a wrong offset silently skips or
+// repeats messages instead of erroring:
+//
+//   - A NEGATIVE value. JMAP reads a negative position as an offset from the END of
+//     the results, so `-1` would quietly return the last page. That is a footgun with
+//     no upside here: reading from the other end is what `ascending` is for.
+//   - A FRACTION. Rounding 1.5 is a guess about which message the caller meant to
+//     start at.
+//   - Anything non-numeric, or an integer too large to be exact.
+//
+// An omitted value, `null`, an empty string, and 0 all mean the same thing: start at
+// the first result. There is nothing to guess there, so the blank shapes coerce rather
+// than reject.
+const POSITION_HINT =
+  'Pass a whole number of results to skip (0 or greater), e.g. position:20 for the second page of a limit:20 listing.';
+const POSITION_ECHO_LIMIT = 40;
+
+export function coercePosition(value: unknown, paramName = 'position'): number | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  let n: number;
+  if (typeof value === 'number') {
+    n = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    n = Number(trimmed);
+  } else {
+    throw new InvalidInputError(
+      `${paramName} must be a number, not ${Array.isArray(value) ? 'an array' : `a ${typeof value}`}. ${POSITION_HINT}`,
+    );
+  }
+
+  if (!Number.isSafeInteger(n)) {
+    throw new InvalidInputError(
+      `${paramName} is not a whole number: "${echoPosition(value)}". ${POSITION_HINT}`,
+    );
+  }
+  if (n < 0) {
+    throw new InvalidInputError(
+      `${paramName} cannot be negative: "${echoPosition(value)}". It is an offset from the START of the results; to read from the oldest end pass ascending:true. ${POSITION_HINT}`,
+    );
+  }
+  return n;
+}
+
+function echoPosition(value: unknown): string {
+  const text = String(value);
+  return text.length > POSITION_ECHO_LIMIT ? `${text.slice(0, POSITION_ECHO_LIMIT)}...` : text;
+}
+
 function acceptedDateFormats(): string {
   return 'Accepted: a date such as 2026-07-20 (treated as 00:00:00 UTC on that date), or a full datetime such as 2026-07-20T14:30:00Z or 2026-07-20T14:30:00+01:00.';
 }

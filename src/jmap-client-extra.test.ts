@@ -44,9 +44,9 @@ function stubMailboxes(client: JmapClient, mailboxes: any[] = DEFAULT_MAILBOXES)
 // get reads from `emails`, and (when present) the count query reads from `count`. Because
 // getMailboxes is stubbed separately in these tests, makeRequest only ever sees the
 // Email/query batch, so this returns the same fixed shape regardless of the methodCalls.
-function queryResponse(opts: { ids?: string[]; list?: any[]; total?: number; broaderTotal?: number }) {
+function queryResponse(opts: { ids?: string[]; list?: any[]; total?: number; broaderTotal?: number; position?: number }) {
   const responses: any[] = [
-    ['Email/query', { ids: opts.ids ?? [], total: opts.total }, 'query'],
+    ['Email/query', { ids: opts.ids ?? [], total: opts.total, position: opts.position }, 'query'],
     ['Email/get', { list: opts.list ?? [] }, 'emails'],
   ];
   if (opts.broaderTotal !== undefined) {
@@ -235,6 +235,119 @@ describe('getEmails', () => {
     const countFilter = batch[2][1].filter;
     assert.equal(countFilter.notKeyword, '$draft');
     assert.equal(countFilter.inMailboxOtherThan, undefined);
+  });
+});
+
+// ---------- paging (#51) ----------
+
+describe('paging with position', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client);
+  });
+
+  const emailQuery = (makeReq: any) => makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+
+  it('getEmails sends the requested position to Email/query', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 137, broaderTotal: 137, position: 40 }),
+    );
+
+    const result = await client.getEmails({ limit: 20, position: 40 });
+    assert.equal(emailQuery(makeReq).position, 40);
+    assert.equal(result.position, 40);
+    assert.equal(result.total, 137);
+  });
+
+  // 0 is the JMAP default, so the paging parameter must not change the request the
+  // non-paging callers have always sent.
+  it('getEmails sends no position for position 0', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
+    );
+
+    await client.getEmails({ limit: 20, position: 0 });
+    assert.equal('position' in emailQuery(makeReq), false);
+  });
+
+  it('getEmails sends no position when none is asked for', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
+    );
+
+    await client.getEmails({ limit: 20 });
+    assert.equal('position' in emailQuery(makeReq), false);
+  });
+
+  // The Trash/Spam exclusion lives inside the JMAP filter, so it applies to whichever
+  // page is served — and the hidden count still describes the whole match set.
+  it('getEmails keeps the Trash/Spam exclusion and its hidden count on a later page', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 8, broaderTotal: 11, position: 40 }),
+    );
+
+    const result = await client.getEmails({ limit: 20, position: 40 });
+    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    assert.deepEqual([...batch[0][1].filter.inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
+    // The hidden-count query is a count, not a page: it carries no position.
+    assert.equal('position' in batch[2][1], false);
+    assert.equal(result.exclusion?.hidden, 3);
+  });
+
+  // RFC 8620 section 5.5 has the server report the position it actually served, and
+  // a request past the end is clamped there rather than erroring.
+  it('getEmails reports the server position over the requested one', async () => {
+    mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: [], list: [], total: 137, broaderTotal: 137, position: 137 }),
+    );
+
+    const result = await client.getEmails({ limit: 20, position: 500 });
+    assert.deepEqual(result.items, []);
+    assert.equal(result.position, 137);
+    assert.equal(result.total, 137);
+  });
+
+  it('getEmails falls back to the requested position when the response omits it', async () => {
+    mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 137, broaderTotal: 137 }),
+    );
+
+    const result = await client.getEmails({ limit: 20, position: 40 });
+    assert.equal(result.position, 40);
+  });
+
+  it('searchEmails sends the requested position to Email/query', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 137, broaderTotal: 137, position: 100 }),
+    );
+
+    const result = await client.searchEmails({ query: 'invoice', limit: 100, position: 100 });
+    assert.equal(emailQuery(makeReq).position, 100);
+    assert.equal(result.position, 100);
+    assert.equal(result.total, 137);
+  });
+
+  // get_recent_emails caps limit at 50, so position is the only way past that cap.
+  it('getRecentEmails sends the requested position and reports it back', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 90, position: 50 }),
+    );
+
+    const result = await client.getRecentEmails(50, 'inbox', false, 50);
+    assert.equal(emailQuery(makeReq).position, 50);
+    assert.equal(result.position, 50);
+    assert.equal(result.total, 90);
+  });
+
+  it('getRecentEmails sends no position by default', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () =>
+      queryResponse({ ids: [], list: [], total: 0 }),
+    );
+
+    await client.getRecentEmails(10, 'inbox');
+    assert.equal('position' in emailQuery(makeReq), false);
   });
 });
 

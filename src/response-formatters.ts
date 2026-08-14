@@ -2,31 +2,54 @@ import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
 import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 
+// The query-level summary that heads every email list/search response, shared by the
+// raw and simplified paths below so the two can't drift (#51). Three rules:
+//
+//   - `total` is ALWAYS stated. A bare "20 results." reads identically whether 20 is
+//     the whole match set or just the page, and a caller that reads a capped page as
+//     the whole answer concludes "nothing else matched" when plenty did.
+//   - `nextPosition` appears ONLY when more results exist. Its absence is the
+//     published "this listing is complete" signal, so there is no `hasMore: false` to
+//     interpret — the same discipline as the Trash/Spam note, where silence means
+//     nothing was withheld.
+//   - The arithmetic uses the position the page actually started at and the number of
+//     items actually returned, never the requested `limit`. A short final page (the
+//     server had fewer left than asked for) must not advertise another page.
+//
+// A position past the end is not an error: JMAP clamps it and returns an empty page
+// with the real total, which is self-describing ("0 of 137") and idempotent, so the
+// caller can see it overshot and re-ask from a valid offset.
+export function formatQuerySummary(result: QueryResult): string {
+  const { items, total, position } = result;
+  const start = typeof position === 'number' && position > 0 ? position : 0;
+  const from = start > 0 ? ` from position ${start}` : '';
+
+  // `calculateTotal` is server-discretionary (RFC 8620 section 5.5), so a total can be
+  // absent. Say so rather than printing the page size as if it were the total — that
+  // substitution is the exact miscount this summary exists to prevent.
+  if (typeof total !== 'number') {
+    return `Showing ${items.length} results${from}; the total match count was not returned, so whether more results exist is unknown.`;
+  }
+
+  const next = start + items.length;
+  const more = next < total ? ` nextPosition: ${next} (pass position:${next} for the next page).` : '';
+  return `Showing ${items.length} of ${total} results${from}.${more}`;
+}
+
 export function formatQueryResult(result: QueryResult): string {
-  const { items, total } = result;
-  const summary = total != null && total > items.length
-    ? `Showing ${items.length} of ${total} results.`
-    : total != null
-      ? `${total} results.`
-      : `${items.length} results.`;
-  return `${summary}\n${JSON.stringify(items, null, 2)}`;
+  return `${formatQuerySummary(result)}\n${JSON.stringify(result.items, null, 2)}`;
 }
 
 // The one seam every list/search read tool renders through (list_emails,
 // search_emails, get_recent_emails), so `fields` projection lands on all three at
-// once and cannot drift between them. The summary line and the trailing exclusion
-// note are NOT fields and are never projected away — they are out-of-band signals
-// about the query, and a caller silently losing "N results were withheld" while
-// asking for a narrower shape would be a scope lie, not a smaller response.
+// once and cannot drift between them. The summary line (its result count and
+// `nextPosition`) and the trailing exclusion note are NOT fields and are never
+// projected away — they are out-of-band signals about the query, and a caller
+// silently losing "N results were withheld" or "there is another page" while asking
+// for a narrower shape would be a scope lie, not a smaller response.
 export function formatEmailQueryResult(result: QueryResult, options?: { fields?: ReadonlySet<string> }): string {
-  const { items, total } = result;
-  const simplified = items.map(e => projectEmail(simplifyEmail(e), options?.fields));
-  const summary = total != null && total > items.length
-    ? `Showing ${items.length} of ${total} results.`
-    : total != null
-      ? `${total} results.`
-      : `${items.length} results.`;
-  return `${summary}\n${JSON.stringify(simplified, null, 2)}`;
+  const simplified = result.items.map(e => projectEmail(simplifyEmail(e), options?.fields));
+  return `${formatQuerySummary(result)}\n${JSON.stringify(simplified, null, 2)}`;
 }
 
 // Recipient lists are capped so a big draft can't turn the result into a wall of

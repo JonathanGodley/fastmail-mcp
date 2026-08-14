@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
 
 // ---------- formatEditDraftResult ----------
 
@@ -333,6 +333,84 @@ describe('formatEmailQueryResult', () => {
       const result = formatEmailQueryResult({ items: [threaded()], total: 1 }, {});
       assert.ok(result.includes('references'));
       assert.ok(result.includes('preview'));
+    });
+  });
+
+  // The query summary carries the two paging signals (#51). They describe the query,
+  // not a message, so they are computed the same way for the simplified and the raw
+  // path and cannot be projected away by `fields`.
+  describe('result count and paging signals', () => {
+    const page = (count: number, start: number) =>
+      Array.from({ length: count }, (_, i) => makeEmail(`e${start + i}`));
+
+    it('states the total even when the whole match set fits in one page', () => {
+      const result = formatEmailQueryResult({ items: page(2, 0), total: 2 });
+      assert.ok(result.startsWith('Showing 2 of 2 results.'), result.slice(0, 60));
+      assert.ok(!result.includes('nextPosition'));
+    });
+
+    it('emits nextPosition on a first page that has more behind it', () => {
+      const result = formatEmailQueryResult({ items: page(20, 0), total: 137, position: 0 });
+      assert.ok(result.startsWith('Showing 20 of 137 results. nextPosition: 20'), result.slice(0, 80));
+    });
+
+    it('reports where a mid-listing page starts and where the next one does', () => {
+      const result = formatEmailQueryResult({ items: page(20, 40), total: 137, position: 40 });
+      assert.ok(result.startsWith('Showing 20 of 137 results from position 40. nextPosition: 60'), result.slice(0, 90));
+    });
+
+    // The arithmetic must use what was RETURNED, not `limit`: a final page short of
+    // the limit would otherwise advertise a page that does not exist.
+    it('omits nextPosition on a short final page', () => {
+      const result = formatEmailQueryResult({ items: page(17, 120), total: 137, position: 120 });
+      assert.ok(result.startsWith('Showing 17 of 137 results from position 120.'), result.slice(0, 70));
+      assert.ok(!result.includes('nextPosition'));
+    });
+
+    it('omits nextPosition when the page ends exactly on the total', () => {
+      const result = formatEmailQueryResult({ items: page(20, 117), total: 137, position: 117 });
+      assert.ok(!result.includes('nextPosition'));
+    });
+
+    // A position past the end is server-clamped, not an error: the empty page plus the
+    // real total is self-describing, so the caller can see it overshot.
+    it('reports an empty page past the end alongside the real total', () => {
+      const result = formatEmailQueryResult({ items: [], total: 137, position: 137 });
+      assert.ok(result.startsWith('Showing 0 of 137 results from position 137.'), result.slice(0, 70));
+      assert.ok(!result.includes('nextPosition'));
+      assert.ok(result.trimEnd().endsWith('[]'));
+    });
+
+    it('position 0 renders identically to an omitted position', () => {
+      const items = page(2, 0);
+      assert.equal(
+        formatEmailQueryResult({ items, total: 50, position: 0 }),
+        formatEmailQueryResult({ items, total: 50 }),
+      );
+    });
+
+    // calculateTotal is server-discretionary, so a missing total must read as
+    // "unknown", never as the page size standing in for the whole match set.
+    it('says the total is unknown rather than printing the page size as the total', () => {
+      const result = formatEmailQueryResult({ items: page(20, 0) });
+      assert.ok(result.startsWith('Showing 20 results; the total match count was not returned'), result.slice(0, 90));
+      assert.ok(!result.includes('nextPosition'));
+    });
+
+    it('keeps the paging signals under a fields projection', () => {
+      const result = formatEmailQueryResult(
+        { items: page(20, 40), total: 137, position: 40 },
+        { fields: new Set(['id']) },
+      );
+      assert.ok(result.startsWith('Showing 20 of 137 results from position 40. nextPosition: 60'), result.slice(0, 90));
+    });
+
+    it('gives the raw path the same summary as the simplified path', () => {
+      const result = { items: page(20, 40), total: 137, position: 40 };
+      const rawSummary = formatQueryResult(result).split('\n')[0];
+      const simplifiedSummary = formatEmailQueryResult(result).split('\n')[0];
+      assert.equal(rawSummary, simplifiedSummary);
+      assert.ok(rawSummary.includes('nextPosition: 60'));
     });
   });
 });
