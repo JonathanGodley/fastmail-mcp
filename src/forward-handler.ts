@@ -17,9 +17,9 @@ export interface ForwardParams {
   htmlBody?: string;
   replyTo?: string[];
   // The forwarded original's Message-ID, recorded as X-Forwarded-Message-Id on the
-  // draft (no In-Reply-To/References — a forward starts a new conversation). Omitted
-  // when the original has no settable Message-ID, and on asAttachment forwards (the
-  // attached .eml is the recorded source there).
+  // draft (no In-Reply-To/References — a forward starts a new conversation). Recorded
+  // on BOTH forward shapes, including asAttachment; omitted only when the original
+  // has no settable Message-ID.
   forwardedMessageId?: string[];
   attachments?: AttachmentPart[];
 }
@@ -122,11 +122,15 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
 
   const params: ForwardParams = { to, cc, bcc, from, subject, replyTo };
 
-  // Record the source on the draft — except on asAttachment forwards, where the
-  // attached .eml IS the recorded source and a header would only arm the edit
-  // guard against a draft with nothing to protect.
+  // Record the source on the draft — on BOTH forward shapes. The header is what
+  // send_draft resolves to mark the original forwarded+read on transmit (#60), so an
+  // asAttachment forward needs it as much as an inline one; the attached .eml carries
+  // the content but is not machine-resolvable as provenance. The edit guard does not
+  // arm on the bare header when the draft carries a message/rfc822 attachment (the
+  // forwarded content lives there, untouched by body edits), so recording it here
+  // leaves note edits on an asAttachment draft unchallenged.
   const originalMessageId = originalEmail?.messageId?.[0];
-  if (!asAttachment && isSettableMessageId(originalMessageId)) {
+  if (isSettableMessageId(originalMessageId)) {
     params.forwardedMessageId = [originalMessageId];
   }
 
@@ -143,8 +147,9 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
     // Lossless form: the Email's own blobId is the raw RFC 5322 message; attach it
     // whole (verified live 2026-07-05: byte-identical round-trip). The body is just
     // the caller's note — no forwarded-message block — and when no note is given, a
-    // short filler that matches NO forward marker, so the edit guard stays inert and
-    // the draft ships with a readable body.
+    // short filler that matches NO forward marker (the guard's marker path stays
+    // inert; the header it does carry is neutralized by the .eml carve-out) and the
+    // draft ships with a readable body.
     if (isBlank(textBody) && isBlank(htmlBody)) {
       params.textBody = 'Forwarded message attached.';
     } else {
@@ -209,8 +214,8 @@ export interface ComposeForwardResult {
 // then save the forward as a draft. This tool only ever drafts — send_draft is the
 // single tool that transmits mail, and it also does the thread-state maintenance
 // (marking the original forwarded + read), resolved from the draft's recorded
-// X-Forwarded-Message-Id header (#60; see docs/conventions.md "Draft provenance").
-// An asAttachment forward records no such header, so sending its draft marks nothing.
+// X-Forwarded-Message-Id header (#60; see docs/conventions.md "Draft provenance"),
+// recorded on both inline and asAttachment forwards.
 // Mirrors composeReply so the index handler stays a thin wrapper. attachDir is passed
 // in (resolved by the caller) so this reads no environment itself.
 export async function composeForward(

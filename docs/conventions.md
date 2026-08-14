@@ -320,12 +320,15 @@ rather than in any one of them.
   reply-first, in `edit_draft`'s guard variant and in `send_draft`'s keyword maintenance
   alike. This server never writes both; a foreign draft that does is treated as a reply.
 - **Absent provenance is a real state, not a failure.** An ordinary compose records
-  neither header. So does an `asAttachment` forward, deliberately: the attached `.eml` is
-  its recorded source. Anything keyed on provenance is therefore inert on those drafts —
-  `send_draft` marks nothing. Since the compose surface is draft-first (#32/#66, every
-  forward is a draft transmitted by `send_draft`), an `asAttachment` forward's original is
-  never marked forwarded at all: the accepted trade-off of recording the source as the
-  `.eml` instead of a header.
+  neither header; anything keyed on provenance is inert on such a draft — `send_draft`
+  marks nothing. Both forward shapes DO record the header, including `asAttachment`
+  (originally it did not, on the theory that the attached `.eml` was its recorded
+  source — reversed under draft-first, #32/#66, because the `.eml` is not
+  machine-resolvable as provenance and `send_draft` is the only transmit path left, so
+  a header-less asAttachment forward's original could never be marked forwarded).
+  `edit_draft`'s guard does not arm on the bare header when the draft carries a
+  `message/rfc822` attachment: the forwarded content lives in the `.eml`, which body
+  edits can't drop and the recreate preserves alongside the header.
 - **Message-ID to JMAP id is a lookup, and it is two steps.** Every write path needs a
   JMAP id, so the header value has to be resolved: a full-text `Email/query` on the
   **bare** id is the recall step (the bracketed form matches nothing — the platform fact

@@ -22,7 +22,7 @@ export interface SimplifiedEmail {
   inReplyTo?: string[];
   isReply?: boolean;
   // The forwarded original's Message-ID (from X-Forwarded-Message-Id, which
-  // forward_email records on non-asAttachment forward drafts). VERBOSE-tier:
+  // forward_email records on both inline and asAttachment forward drafts). VERBOSE-tier:
   // present on get_email/verbose reads; list items show forward-ness via
   // isForwarded instead.
   forwardedMessageId?: string[];

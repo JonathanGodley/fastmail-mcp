@@ -157,9 +157,9 @@ describe('buildForwardParams — forwardedMessageId (recorded source)', () => {
       assert.equal(forwardParams.forwardedMessageId, undefined, `should omit: ${JSON.stringify(bad.slice(0, 40))}`);
     }
   });
-  it('omits it on asAttachment forwards (the .eml is the recorded source; keeps the guard inert)', () => {
+  it('records it on asAttachment forwards too (send_draft resolves it to mark the original)', () => {
     const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
-    assert.equal(forwardParams.forwardedMessageId, undefined);
+    assert.deepEqual(forwardParams.forwardedMessageId, ['orig-msg@example.com']);
   });
 });
 

@@ -121,7 +121,7 @@ describe('sendDraftAndMaintainKeywords', () => {
     assert.equal(r.keywordMaintenance?.kind, 'reply');
   });
 
-  it('writes no keywords when the draft references nothing (an ordinary compose, or a forward saved with asAttachment)', async () => {
+  it('writes no keywords when the draft references nothing (an ordinary compose)', async () => {
     const { client, calls } = spyClient({
       sendDraft: async () => ({
         submissionId: 'sub-1',

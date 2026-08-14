@@ -2707,8 +2707,15 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
       t: { value: 'top\n\nOn Sun, Jun 28, 2026, at 12:46 AM, X wrote:\n> quoted\n\n' + FWD_TEXT },
       h: { value: '<p>top</p><blockquote type="cite">quoted</blockquote>' + FWD_HTML },
     } };
-  // asAttachment-style forward draft: NO header, non-marker filler body, .eml attachment.
-  const ASATTACH_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
+  // asAttachment forward draft as forward_email now saves it: header recorded (for
+  // send_draft's keyword maintenance), non-marker filler body, .eml attachment.
+  const ASATTACH_FORWARD = { ...FORWARD_BASE, id: 'fdraft-1',
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
+    bodyValues: { t: { value: 'Forwarded message attached.' } },
+    attachments: [{ partId: '2', blobId: 'blob-eml', type: 'message/rfc822', size: 999, name: 'Hello.eml', disposition: 'attachment', cid: null }] };
+  // The same draft saved BEFORE the header was recorded on asAttachment forwards
+  // (or by a client that doesn't set it): still edits freely via no-header + no-marker.
+  const LEGACY_ASATTACH_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
     textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
     bodyValues: { t: { value: 'Forwarded message attached.' } },
     attachments: [{ partId: '2', blobId: 'blob-eml', type: 'message/rfc822', size: 999, name: 'Hello.eml', disposition: 'attachment', cid: null }] };
@@ -2902,14 +2909,40 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     assert.equal(draft[FWD_HEADER_PROP], undefined);
   });
 
-  it('asAttachment-style draft (no header, filler body): note edits pass with NO challenge', async () => {
+  it('asAttachment draft (header + .eml, filler body): note edits pass with NO challenge, header and .eml both carried', async () => {
     const makeReq = mockForwardUpdate(client, ASATTACH_FORWARD);
     const r = await client.updateDraft('fdraft-1', { textBody: 'updated note about the attached message' });
     assert.equal(r.id, 'fdraft-2');
-    // The .eml is an ordinary carried attachment on the recreate.
     const draft = createdDraftObj(makeReq);
+    // The .eml is an ordinary carried attachment on the recreate, and the recorded
+    // source survives the edit (send_draft resolves it to mark the original).
     assert.equal(draft.attachments[0].type, 'message/rfc822');
     assert.equal(draft.attachments[0].blobId, 'blob-eml');
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
+  });
+
+  it('legacy asAttachment draft (no header): note edits still pass with NO challenge', async () => {
+    const makeReq = mockForwardUpdate(client, LEGACY_ASATTACH_FORWARD);
+    const r = await client.updateDraft('fdraft-1', { textBody: 'updated note about the attached message' });
+    assert.equal(r.id, 'fdraft-2');
+    const draft = createdDraftObj(makeReq);
+    assert.equal(draft.attachments[0].blobId, 'blob-eml');
+    assert.equal(draft[FWD_HEADER_PROP], undefined);
+  });
+
+  it('noQuote on an asAttachment draft clears the recorded source (deliberate de-forward)', async () => {
+    const makeReq = mockForwardUpdate(client, ASATTACH_FORWARD);
+    await client.updateDraft('fdraft-1', { textBody: 'bare note', noQuote: true });
+    const draft = createdDraftObj(makeReq);
+    assert.equal(draft[FWD_HEADER_PROP], undefined);
+  });
+
+  it('originalEmailId + noQuote together are rejected even on an unengaged (asAttachment) draft', async () => {
+    mockForwardUpdate(client, ASATTACH_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { textBody: 'note', originalEmailId: 'orig-1', noQuote: true }),
+      /not both/,
+    );
   });
 
   it('a reply draft QUOTING a forward dispatches to the REPLY variant (quote-prefixed dashed line is not a forward marker)', async () => {

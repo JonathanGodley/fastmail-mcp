@@ -58,9 +58,9 @@ export function selectSource(refs: SourceReferences): { kind: 'reply' | 'forward
 // Send a saved draft, then maintain the thread state of whatever message it was composed
 // from: a reply marks the original answered + read, a forward marks it forwarded + read
 // (#60, #54). The compose surface is draft-first (#32/#66) — every reply and forward is
-// transmitted here — so this is the only place that maintenance can happen. (A forward
-// saved with asAttachment records no provenance — the attached .eml is its recorded
-// source — so there is nothing here to resolve and its draft marks nothing.)
+// transmitted here — so this is the only place that maintenance can happen. Both forward
+// shapes record the header, including asAttachment (whose .eml carries the content but
+// is not machine-resolvable as provenance), so both mark their original on send.
 //
 // Everything after the submission is best-effort: the mail is already gone, so no failure
 // here may fail the call or roll anything back. The draft names its source by Message-ID,

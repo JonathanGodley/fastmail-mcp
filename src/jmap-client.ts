@@ -1133,8 +1133,17 @@ export class JmapClient {
     // marker lost to re-serialization), while the body markers ALSO gate on their own
     // (protects forwards of a Message-ID-less original, where no header could be set).
     // Markers additionally decide the challenge wording (recognizable = regenerable).
+    // The bare header does NOT arm when the draft carries a message/rfc822 attachment:
+    // that is an asAttachment forward (which records the header for send_draft's
+    // keyword maintenance), whose forwarded content lives in the attached .eml — a
+    // body edit can't drop it, and the recreate carries both the attachment and the
+    // header. Residual: a foreign draft with BOTH an unrecognizable inline block and
+    // an .eml attachment loses the block's challenge, but the .eml still preserves
+    // the forwarded content in full, so nothing is unrecoverable.
     const forwardHeader: string[] = existingEmail['header:X-Forwarded-Message-Id:asMessageIds'] || [];
-    const isForward = forwardHeader.length > 0;
+    const emlAttached = Array.isArray(existingEmail.attachments)
+      && existingEmail.attachments.some((p: any) => p?.type === 'message/rfc822');
+    const isForward = forwardHeader.length > 0 && !emlAttached;
     const oldHtmlForwarded = hasForwardMarker(existingHtmlValue);
     const oldTextForwarded = hasTextForwardMarker(existingTextValue);
     const forwardMarkers = oldHtmlForwarded || oldTextForwarded;
@@ -1145,9 +1154,11 @@ export class JmapClient {
     // draft an originalEmailId keep regenerates the REPLY shape — loud, no silent loss,
     // but a tie-break, not a claim of correctness. (A forward OF a reply carries
     // "wrote:\n> " in its reproduced text but has no inReplyTo, so isReply stays false
-    // and it correctly dispatches to the forward variant; asAttachment forwards set no
-    // header and a deliberately non-marker filler body, so the guard is inert on them —
-    // their .eml is an ordinary carried attachment the recreate preserves.)
+    // and it correctly dispatches to the forward variant; asAttachment forwards record
+    // the header for send_draft's keyword maintenance but keep a deliberately
+    // non-marker filler body, and the .eml carve-out above keeps the guard inert on
+    // them — their .eml is an ordinary carried attachment the recreate preserves,
+    // and the recreate carries the header too.)
     const replyGuardArmed = isReply && (oldHtmlQuoted || oldTextQuoted);
     const forwardGuardArmed = isForward || forwardMarkers;
     const guardVariant: 'reply' | 'forward' | null =
@@ -1300,6 +1311,19 @@ export class JmapClient {
         throw new InvalidInputError("This draft is marked as a forward (it records the forwarded message's id), but its forwarded block isn't in a shape this server can regenerate in place. Pass originalEmailId to rebuild the block from that message (read the draft's forwardedMessageId via get_email, then find it with search_emails using the bare id, without angle brackets), or noQuote:true to drop the block and the forward marking (later edits won't be re-challenged).");
       }
     }
+    // Honor an explicit noQuote even when the guard never armed — an asAttachment
+    // forward (guard inert via the .eml carve-out) still carries a recorded source,
+    // and noQuote's documented meaning includes clearing the forward marking; leaving
+    // the header would have send_draft mark the original against the caller's stated
+    // intent. This also covers metadata-only edits (documented on the noQuote param).
+    // Redundant (same assignment) when the armed guard already handled it. The
+    // keep-vs-drop exclusivity is enforced here too: the armed guard's identical
+    // check is unreachable on an unengaged draft, and silently obeying half of a
+    // contradictory request would be worse than either behavior.
+    if (updates.noQuote === true && updates.originalEmailId) {
+      throw new InvalidInputError('Pass either originalEmailId (keep the quoted or forwarded content) or noQuote (discard it), not both.');
+    }
+    if (updates.noQuote === true) dropForwardHeader = true;
 
     // Merge non-body fields: updates override existing; clearFields force the empty value.
     const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));

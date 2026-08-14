@@ -438,12 +438,26 @@ dashed line, anchored so a `> `-quoted line never matches). Two postures produce
   it would be tautological). Flip side, intentional: a WRONG `originalEmailId` produces a
   valid-looking block for the wrong message with no loud fail — inherent to forwarding
   (any original yields a block); no caller data is lost.
-- `asAttachment` forwards set no header and a deliberately non-marker filler body, so the
-  guard is genuinely inert on them; the `.eml` is an ordinary carried attachment.
+- `asAttachment` forwards record the header (for `send_draft`'s keyword maintenance) but
+  keep a deliberately non-marker filler body, and the guard does not arm on the bare
+  header when the draft carries a `message/rfc822` attachment — the forwarded content
+  lives in the `.eml`, which body edits can't drop — so the guard is genuinely inert on
+  them; the `.eml` is an ordinary carried attachment and the recreate carries the header.
+  Residual: any draft with an `.eml` attachment loses the header-floor challenge — a
+  foreign draft with an unrecognizable inline block, and also this server's own inline
+  forward OF an original that itself carried an `.eml` attachment (there the carve-out's
+  premise is false: that `.eml` is unrelated content, not the forwarded message). The
+  floor's loss only bites when the body markers are ALSO absent/mangled (markers still
+  arm on their own), and in the foreign case the `.eml` still preserves the forwarded
+  content; accepted rather than fetching/matching the attachment's blob to the original.
+  Related accepted quirk: `removeAttachments`-ing the `.eml` keeps the recorded source
+  (silently dropping provenance would be worse), so sending that draft unedited still
+  marks the original forwarded; `noQuote` on any edit is the deliberate de-forward.
 
 **Recognition residual (forward form, accepted).** Narrower than the reply residual: any
 client that sets `X-Forwarded-Message-Id` is challenged via the header floor regardless of
-its block shape. The remaining gap is a foreign forward draft with **neither** the header
+its block shape (unless the draft carries a `message/rfc822` attachment — the carve-out
+above). The remaining gap is a foreign forward draft with **neither** the header
 nor a recognized dashed/div-cite shape — the guard is inert there, same accepted posture
 (and same README surfacing) as the reply guard's foreign-quote residual. One structural
 sub-case: Gmail's forward *html* cannot be marker-recognized at all — its wrapper is
