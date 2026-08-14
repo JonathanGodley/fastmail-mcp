@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
@@ -278,7 +278,7 @@ const POSITION_TOOL_DESC =
   'Results are ONE PAGE: the summary line always states the total number of matches, and when more remain it carries a `nextPosition` to pass back as `position`. No `nextPosition` means you have seen every match — do not re-run to check.';
 
 const POSITION_PARAM_DESC =
-  'Skip this many results before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. All filters (including the default Trash/Spam exclusion) are applied per page server-side, so paging never changes what matches, and the withheld-count note is per page. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected (JMAP would read it as counting back from the end; to read from the oldest end use ascending:true) and so is a fraction.';
+  'Skip this many results before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. All filters (including the default Trash/Spam exclusion) are applied server-side to every page, so paging never changes what matches. The Trash/Spam withheld-count note describes the WHOLE match set, not the page: the same count repeats on every page, so never add up the notes across pages. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected (JMAP would read it as counting back from the end; to read from the oldest end use ascending:true) and so is a fraction.';
 
 // The `position` parameter, declared identically on every list/search tool. Numbers are
 // also accepted as strings, matching `limit`, because lenient clients stringify them.
@@ -1480,7 +1480,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         // Append the exclusion note (if any) to the formatter's string — same out-of-band
         // discipline on both raw + simplified; the JSON block stays parseable.
-        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result, { fields });
+        const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
             {
@@ -1813,7 +1813,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: raw ? formatQueryResult(result) : formatEmailQueryResult(result, { fields }),
+              text: raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields }),
             },
           ],
         };
@@ -2013,7 +2013,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           includeTrash: coerceBool((args as any).includeTrash) ?? false,
           includeSpam: coerceBool((args as any).includeSpam) ?? false,
         });
-        const body = raw ? formatQueryResult(result) : formatEmailQueryResult(result, { fields });
+        const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
             {

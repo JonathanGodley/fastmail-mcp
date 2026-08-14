@@ -2,16 +2,25 @@ import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
 import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 
-// The query-level summary that heads every email list/search response, shared by the
-// raw and simplified paths below so the two can't drift (#51). Three rules:
+// The query-level summary that heads every list/search response, so the count wording
+// is written once and can't drift between the raw and simplified paths (#51).
 //
-//   - `total` is ALWAYS stated. A bare "20 results." reads identically whether 20 is
-//     the whole match set or just the page, and a caller that reads a capped page as
-//     the whole answer concludes "nothing else matched" when plenty did.
-//   - `nextPosition` appears ONLY when more results exist. Its absence is the
-//     published "this listing is complete" signal, so there is no `hasMore: false` to
-//     interpret — the same discipline as the Trash/Spam note, where silence means
-//     nothing was withheld.
+// `total` is ALWAYS stated, on every listing tool. A bare "20 results." reads
+// identically whether 20 is the whole match set or just the page, and a caller that
+// reads a capped page as the whole answer concludes "nothing else matched" when plenty
+// did.
+//
+// `paged` says whether the CALLING TOOL accepts a `position` parameter, and only a
+// paged tool is told how to continue:
+//
+//   - `nextPosition` appears only when more results exist, and only for a paged tool.
+//     Its absence on a paged tool is the published "this listing is complete" signal,
+//     so there is no `hasMore: false` to interpret — the same discipline as the
+//     Trash/Spam note, where silence means nothing was withheld.
+//   - Emitting it for an unpaged tool (the contacts listings, which render through
+//     formatQueryResult on their raw path) would be an instruction the caller cannot
+//     follow: `position` is not in those tools' schemas, so passing it back is
+//     rejected outright by the unknown-parameter guard. They still get the total.
 //   - The arithmetic uses the position the page actually started at and the number of
 //     items actually returned, never the requested `limit`. A short final page (the
 //     server had fewer left than asked for) must not advertise another page.
@@ -19,7 +28,7 @@ import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-c
 // A position past the end is not an error: JMAP clamps it and returns an empty page
 // with the real total, which is self-describing ("0 of 137") and idempotent, so the
 // caller can see it overshot and re-ask from a valid offset.
-export function formatQuerySummary(result: QueryResult): string {
+export function formatQuerySummary(result: QueryResult, options?: { paged?: boolean }): string {
   const { items, total, position } = result;
   const start = typeof position === 'number' && position > 0 ? position : 0;
   const from = start > 0 ? ` from position ${start}` : '';
@@ -28,16 +37,31 @@ export function formatQuerySummary(result: QueryResult): string {
   // absent. Say so rather than printing the page size as if it were the total — that
   // substitution is the exact miscount this summary exists to prevent.
   if (typeof total !== 'number') {
-    return `Showing ${items.length} results${from}; the total match count was not returned, so whether more results exist is unknown.`;
+    const consequence = options?.paged ? ', so whether more results exist is unknown' : '';
+    return `Showing ${items.length} results${from}; the total match count was not returned${consequence}.`;
   }
 
   const next = start + items.length;
-  const more = next < total ? ` nextPosition: ${next} (pass position:${next} for the next page).` : '';
+  const more = options?.paged && next < total
+    ? ` nextPosition: ${next} (pass position:${next} for the next page).`
+    : '';
   return `Showing ${items.length} of ${total} results${from}.${more}`;
 }
 
+// Raw (untransformed JMAP) rendering for a listing tool that does NOT take a
+// `position` — the contacts listings. Paging is a property of the tool, so it is
+// carried by which renderer the handler picks rather than by a flag each call site has
+// to remember to pass: forgetting a flag would silently drop a promised signal, while
+// reaching for the wrong function is visible in the handler.
 export function formatQueryResult(result: QueryResult): string {
   return `${formatQuerySummary(result)}\n${JSON.stringify(result.items, null, 2)}`;
+}
+
+// Raw rendering for the three paging email tools (list_emails, search_emails,
+// get_recent_emails), the counterpart to formatEmailQueryResult below: same summary,
+// untransformed items.
+export function formatRawEmailQueryResult(result: QueryResult): string {
+  return `${formatQuerySummary(result, { paged: true })}\n${JSON.stringify(result.items, null, 2)}`;
 }
 
 // The one seam every list/search read tool renders through (list_emails,
@@ -49,7 +73,7 @@ export function formatQueryResult(result: QueryResult): string {
 // for a narrower shape would be a scope lie, not a smaller response.
 export function formatEmailQueryResult(result: QueryResult, options?: { fields?: ReadonlySet<string> }): string {
   const simplified = result.items.map(e => projectEmail(simplifyEmail(e), options?.fields));
-  return `${formatQuerySummary(result)}\n${JSON.stringify(simplified, null, 2)}`;
+  return `${formatQuerySummary(result, { paged: true })}\n${JSON.stringify(simplified, null, 2)}`;
 }
 
 // Recipient lists are capped so a big draft can't turn the result into a wall of
@@ -261,13 +285,10 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
   return result;
 }
 
+// The contacts listings are not paged (they take no `position`), so they share the
+// summary for its always-stated total and never carry a nextPosition instruction their
+// callers could not act on.
 export function formatContactQueryResult(result: QueryResult, options?: { verbose?: boolean }): string {
-  const { items, total } = result;
-  const simplified = items.map(c => simplifyContact(c, options));
-  const summary = total != null && total > items.length
-    ? `Showing ${items.length} of ${total} results.`
-    : total != null
-      ? `${total} results.`
-      : `${items.length} results.`;
-  return `${summary}\n${JSON.stringify(simplified, null, 2)}`;
+  const simplified = result.items.map(c => simplifyContact(c, options));
+  return `${formatQuerySummary(result)}\n${JSON.stringify(simplified, null, 2)}`;
 }

@@ -324,12 +324,12 @@ The rules:
 - **The total is always stated.** A page that happens to fill the `limit` is otherwise indistinguishable from the complete answer, so a sweep asking "anything new this week?" could read a truncated page as "nothing else matched" — a false negative with no signal ([#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51)). In the rare case the server declines to compute a total, the summary says the count was not returned rather than passing the page size off as the total.
 - **`nextPosition` appears only while more results remain.** Its absence means the listing is complete — there is no `hasMore: false` to interpret, and no reason to re-run with a larger `position` to check. It is computed from the position actually served plus the items actually returned, so a final page shorter than `limit` ends the listing rather than advertising one more.
 - **Take `nextPosition` from the response** instead of adding up `limit`s yourself. Both usually agree; the response value is the one that accounts for what the server actually did.
-- **Filters apply per page, server-side** — including the default Trash/Spam exclusion, so paging never changes what matches and the withheld-count note is per page.
+- **Filters apply to every page, server-side** — including the default Trash/Spam exclusion, so paging never changes what matches. The withheld-count note describes the **whole match set**, not the page: the same count repeats on every page, so don't sum the notes as you page.
 - **`position: 0` is the same as omitting it.** A negative value is **rejected** (JMAP would read it as counting back from the end; to read from the oldest end pass `ascending: true`), as is a fraction or non-numeric text. A stringified `"40"` is accepted, like every other numeric parameter.
 - **A position past the end is not an error.** It returns an empty page next to the real total (`Showing 0 of 137 results from position 500.`), so you can see you overshot.
 - **The summary is identical on the `raw` path**, which already carried one; `raw` callers can also read JMAP's own `total`/`position` by querying directly.
 
-`position` is how you read past the `limit` caps (`search_emails`/`list_emails` cap at 100, `get_recent_emails` at 50). Contacts and calendar listings do not take it yet.
+`position` is how you read past the `limit` caps (`search_emails`/`list_emails` cap at 100, `get_recent_emails` at 50). Contacts and calendar listings do not take it yet: they state their total the same way, but never carry a `nextPosition`, since passing one back would be rejected as an unknown parameter.
 
 ### Mailbox fields
 

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
 
 // ---------- formatEditDraftResult ----------
 
@@ -407,11 +407,43 @@ describe('formatEmailQueryResult', () => {
 
     it('gives the raw path the same summary as the simplified path', () => {
       const result = { items: page(20, 40), total: 137, position: 40 };
-      const rawSummary = formatQueryResult(result).split('\n')[0];
+      const rawSummary = formatRawEmailQueryResult(result).split('\n')[0];
       const simplifiedSummary = formatEmailQueryResult(result).split('\n')[0];
       assert.equal(rawSummary, simplifiedSummary);
       assert.ok(rawSummary.includes('nextPosition: 60'));
     });
+  });
+});
+
+// ---------- summaries for tools that do not take a position ----------
+
+// formatQueryResult renders the raw path of the contacts listings, which declare no
+// `position`. They must still state the total, but a nextPosition would be an
+// instruction their callers cannot follow — passing `position` back to list_contacts
+// or search_contacts is rejected by the unknown-parameter guard.
+describe('formatQuerySummary on an unpaged tool', () => {
+  const contacts = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ct-${i}` }));
+
+  it('states the total but offers no nextPosition when results remain', () => {
+    const summary = formatQueryResult({ items: contacts(50), total: 312 }).split('\n')[0];
+    assert.equal(summary, 'Showing 50 of 312 results.');
+  });
+
+  it('offers no nextPosition even if the response carries a position', () => {
+    const summary = formatQueryResult({ items: contacts(50), total: 312, position: 50 }).split('\n')[0];
+    assert.ok(!summary.includes('nextPosition'), summary);
+  });
+
+  it('states the total on the simplified contacts path too', () => {
+    const summary = formatContactQueryResult({ items: contacts(50), total: 312 }).split('\n')[0];
+    assert.equal(summary, 'Showing 50 of 312 results.');
+    const complete = formatContactQueryResult({ items: contacts(3), total: 3 }).split('\n')[0];
+    assert.equal(complete, 'Showing 3 of 3 results.');
+  });
+
+  it('says a missing total is missing, without the paging consequence', () => {
+    const summary = formatQueryResult({ items: contacts(50) }).split('\n')[0];
+    assert.equal(summary, 'Showing 50 results; the total match count was not returned.');
   });
 });
 

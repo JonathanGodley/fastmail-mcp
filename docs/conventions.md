@@ -239,8 +239,10 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   `list_emails` and `search_emails` inherit it together; `getRecentEmails` builds its own
   batch and takes the same parameter. The filters (including the default Trash/Spam
   exclusion, which lives inside the JMAP `filter` as `inMailboxOtherThan`) are applied
-  server-side per page, so paging cannot change what matches, and the hidden-count query
-  stays a count — it carries no `position`.
+  server-side to every page, so paging cannot change what matches, and the hidden-count
+  query stays a count — it carries no `position`. That count is over the whole filtered
+  set, not the page, so the withheld-count note repeats identically on every page and
+  must never be summed across pages (the tool descriptions and README say so).
 - **`position: 0` and an omitted `position` are the same request.** 0 is the JMAP
   default, so the parameter is only put on the wire when it is non-zero.
 - **A position past the end is not an error.** JMAP clamps it and returns an empty page
@@ -253,8 +255,16 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   negative position as an offset from the *end* of the results, so accepting `-1` would
   quietly serve the last page. Reading from the other end is what `ascending` is for.
 
-Contacts and calendar listings do not take `position` and keep their own older summary
-wording; paginating those protocol paths is tracked on
+**`nextPosition` is gated on the calling tool accepting `position`.** `formatQuerySummary`
+takes a `paged` flag, and only the three email tools set it. The contacts listings render
+through the same summary (they get the always-stated total, which is an improvement
+everywhere) but never the `nextPosition` clause: they declare no `position` parameter, so
+a caller following that instruction would have the call rejected outright by the
+unknown-parameter guard — an instruction the caller cannot act on is worse than none.
+This is carried by *which renderer the handler picks*, not by a flag at every call site:
+`formatRawEmailQueryResult` (paged) versus `formatQueryResult` (not), because a forgotten
+flag would silently drop a promised signal while a wrong function name is visible in the
+handler. Paginating the contacts and calendar protocol paths is tracked on
 [#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51).
 
 ## `hasAttachment` is a server heuristic — passed through by design
