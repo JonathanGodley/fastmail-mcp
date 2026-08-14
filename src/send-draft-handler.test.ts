@@ -12,11 +12,10 @@ function spyClient(over: Partial<SendDraftClient> = {}) {
   const client: SendDraftClient = {
     sendDraft: async (id: string) => {
       calls.sent = id;
-      return 'sub-1';
-    },
-    getSourceReferences: async (id: string) => {
-      calls.refsFor = id;
-      return { inReplyTo: ['orig-msg@example.com'], forwardedMessageId: [] };
+      return {
+        submissionId: 'sub-1',
+        sourceReferences: { inReplyTo: ['orig-msg@example.com'], forwardedMessageId: [] },
+      };
     },
     findEmailIdsByMessageId: async (messageId: string) => {
       calls.lookup = messageId;
@@ -94,7 +93,10 @@ describe('sendDraftAndMaintainKeywords', () => {
 
   it('marks the original forwarded+read for a forward draft', async () => {
     const { client, calls } = spyClient({
-      getSourceReferences: async () => ({ inReplyTo: [], forwardedMessageId: ['fwd-msg@example.com'] }),
+      sendDraft: async () => ({
+        submissionId: 'sub-1',
+        sourceReferences: { inReplyTo: [], forwardedMessageId: ['fwd-msg@example.com'] },
+      }),
       findEmailIdsByMessageId: async () => ['orig-2'],
     });
     const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
@@ -105,9 +107,12 @@ describe('sendDraftAndMaintainKeywords', () => {
 
   it('treats a draft carrying both headers as a reply (never crosses the two keywords)', async () => {
     const { client, calls } = spyClient({
-      getSourceReferences: async () => ({
-        inReplyTo: ['reply-msg@example.com'],
-        forwardedMessageId: ['fwd-msg@example.com'],
+      sendDraft: async () => ({
+        submissionId: 'sub-1',
+        sourceReferences: {
+          inReplyTo: ['reply-msg@example.com'],
+          forwardedMessageId: ['fwd-msg@example.com'],
+        },
       }),
     });
     const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
@@ -116,9 +121,12 @@ describe('sendDraftAndMaintainKeywords', () => {
     assert.equal(r.keywordMaintenance?.kind, 'reply');
   });
 
-  it('writes no keywords when the draft references nothing (an ordinary compose)', async () => {
+  it('writes no keywords when the draft references nothing (an ordinary compose, or a forward saved with asAttachment)', async () => {
     const { client, calls } = spyClient({
-      getSourceReferences: async () => ({ inReplyTo: [], forwardedMessageId: [] }),
+      sendDraft: async () => ({
+        submissionId: 'sub-1',
+        sourceReferences: { inReplyTo: [], forwardedMessageId: [] },
+      }),
     });
     const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
     assert.equal(r.submissionId, 'sub-1');
@@ -172,18 +180,7 @@ describe('sendDraftAndMaintainKeywords', () => {
     assert.equal(r.keywordMaintenance?.marked, false);
   });
 
-  it('reports a failed provenance read without failing the send', async () => {
-    const { client, calls } = spyClient({
-      getSourceReferences: async () => { throw new Error('gone'); },
-    });
-    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
-    assert.equal(r.submissionId, 'sub-1');
-    assert.equal(r.sourceReadFailed, true);
-    assert.equal(r.keywordMaintenance, undefined);
-    assert.equal(calls.keywords, undefined);
-  });
-
-  it('does not touch keywords when the send itself fails', async () => {
+  it('does no keyword work when the send itself fails (an unreadable draft never sends)', async () => {
     const { client, calls } = spyClient({
       sendDraft: async () => { throw new InvalidInputError('Cannot send a non-draft email'); },
     });
@@ -191,7 +188,7 @@ describe('sendDraftAndMaintainKeywords', () => {
       () => sendDraftAndMaintainKeywords({ emailId: 'd1' }, client),
       /Cannot send a non-draft email/,
     );
-    assert.equal(calls.refsFor, undefined);
+    assert.equal(calls.lookup, undefined);
     assert.equal(calls.keywords, undefined);
   });
 });

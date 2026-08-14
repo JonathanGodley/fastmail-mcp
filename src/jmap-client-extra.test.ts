@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion, readSourceReferences } from './jmap-client.js';
 import { InvalidInputError } from './coerce.js';
 import { buildExclusionNote } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
@@ -1996,41 +1996,23 @@ describe('buildExclusionNote', () => {
   });
 });
 
-// ---------- source-reference read + Message-ID lookup (#60) ----------
+// ---------- draft provenance + Message-ID lookup (#60) ----------
 
-describe('getSourceReferences', () => {
-  it('returns the reply and forward provenance headers', async () => {
-    const client = makeClient();
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
-      methodResponses: [['Email/get', {
-        list: [{
-          id: 'd1',
-          inReplyTo: ['orig@example.com'],
-          'header:X-Forwarded-Message-Id:asMessageIds': ['fwd@example.com'],
-        }],
-      }, 'sourceRefs']],
-    }));
-
-    const refs = await client.getSourceReferences('d1');
-    assert.deepEqual(refs, { inReplyTo: ['orig@example.com'], forwardedMessageId: ['fwd@example.com'] });
-
-    // Reads only the two header arrays — no body values pulled just to read provenance.
-    const params = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
-    assert.deepEqual(params.properties, ['id', 'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds']);
-    assert.equal(params.fetchTextBodyValues, undefined);
-    assert.equal(params.fetchHTMLBodyValues, undefined);
+describe('readSourceReferences', () => {
+  it('reads the reply and forward provenance headers off a raw Email', () => {
+    assert.deepEqual(
+      readSourceReferences({
+        id: 'd1',
+        inReplyTo: ['orig@example.com'],
+        'header:X-Forwarded-Message-Id:asMessageIds': ['fwd@example.com'],
+      }),
+      { inReplyTo: ['orig@example.com'], forwardedMessageId: ['fwd@example.com'] },
+    );
   });
 
-  it('normalises missing headers to empty arrays', async () => {
-    const client = makeClient();
-    stubMakeRequest(client, { methodResponses: [['Email/get', { list: [{ id: 'd1' }] }, 'sourceRefs']] });
-    assert.deepEqual(await client.getSourceReferences('d1'), { inReplyTo: [], forwardedMessageId: [] });
-  });
-
-  it('throws when the email cannot be read, so "no provenance" stays distinguishable', async () => {
-    const client = makeClient();
-    stubMakeRequest(client, { methodResponses: [['Email/get', { list: [] }, 'sourceRefs']] });
-    await assert.rejects(() => client.getSourceReferences('gone'), InvalidInputError);
+  it('normalises missing headers to empty arrays', () => {
+    assert.deepEqual(readSourceReferences({ id: 'd1' }), { inReplyTo: [], forwardedMessageId: [] });
+    assert.deepEqual(readSourceReferences(undefined), { inReplyTo: [], forwardedMessageId: [] });
   });
 });
 
@@ -2055,6 +2037,17 @@ describe('findEmailIdsByMessageId', () => {
     const query = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
     assert.deepEqual(query.filter, { text: 'orig@example.com' });
     assert.equal(query.filter.inMailboxOtherThan, undefined); // Trash/Spam are NOT excluded
+  });
+
+  it('sorts oldest-first so the message that owns the id can never fall off the capped page', async () => {
+    const client = makeClient();
+    const makeReq = stubLookup(client, [{ id: 'orig-1', messageId: ['orig@example.com'] }]);
+    await client.findEmailIdsByMessageId('orig@example.com');
+    const query = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
+    // Every message that references or quotes an id postdates the message that owns it,
+    // so oldest-first puts the owner on the first page regardless of the limit.
+    assert.deepEqual(query.sort, [{ property: 'receivedAt', isAscending: true }]);
+    assert.equal(typeof query.limit, 'number');
   });
 
   it('strips angle brackets before querying (the bracketed form matches nothing)', async () => {

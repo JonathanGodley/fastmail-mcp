@@ -304,6 +304,43 @@ sub-256px image that IS content (a small but meaningful figure) reads as false. 
 inherent to any heuristic; the mitigations are `bodyTextSize` (an agent can see there is
 body to read regardless) and `get_email`/`get_email_attachments` for ground truth.
 
+## Draft provenance: how a draft names the message it came from
+
+A draft composed from an existing message records which message that was — in a header,
+by **Message-ID**, never by JMAP id. Four surfaces read that record (`reply_email`,
+`forward_email`, `send_draft`, and `edit_draft`'s quote guard), so the model belongs here
+rather than in any one of them.
+
+- **The two headers.** `In-Reply-To` marks a reply (set by `reply_email` and by every
+  other client's reply); `X-Forwarded-Message-Id` marks a forward (set by `forward_email`,
+  and by Fastmail's own clients — see `docs/email-bodies.md` for the forward-threading
+  rationale and the value-validation rules). Both are JMAP `MessageIds`, i.e. **bare** ids
+  with no angle brackets.
+- **Reply wins when a draft carries both.** Dispatch is mutually exclusive and
+  reply-first, in `edit_draft`'s guard variant and in `send_draft`'s keyword maintenance
+  alike. This server never writes both; a foreign draft that does is treated as a reply.
+- **Absent provenance is a real state, not a failure.** An ordinary compose records
+  neither header. So does an `asAttachment` forward, deliberately: the attached `.eml` is
+  its recorded source. Anything keyed on provenance is therefore inert on those drafts —
+  `send_draft` marks nothing (`forward_email send=true` still marks the original directly,
+  because it holds the id already).
+- **Message-ID to JMAP id is a lookup, and it is two steps.** Every write path needs a
+  JMAP id, so the header value has to be resolved: a full-text `Email/query` on the
+  **bare** id is the recall step (the bracketed form matches nothing — the platform fact
+  and its probe are recorded in `docs/email-bodies.md`), and keeping only the messages
+  whose own `messageId` equals the target is the precision step. The recall step is a text
+  search, so it also returns every message that merely *mentions* the id: thread siblings
+  whose `References` carry it, quoted bodies, the sent copy itself. The query sorts
+  **oldest-first**, which is load-bearing rather than cosmetic — a message can only
+  reference an id that already exists, so the message that owns it predates every mention
+  and lands on the first page whatever the result cap is.
+- **The lookup can legitimately fail to identify one message**, and callers must not
+  guess: no match, or more than one (a duplicate delivery, or a self-addressed message
+  held in both Sent and Inbox), means the resolution is unknown. `send_draft` reports the
+  skip rather than marking an arbitrary candidate; `edit_draft`'s guard never resolves at
+  all and instead requires the caller to pass `originalEmailId`, so a quote is never
+  rebuilt from a message the caller didn't name.
+
 ## Local-time formatting and the U+202F trap
 
 Date rendering for humans (`toLocalIso` and `formatReplyDate` in

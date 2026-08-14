@@ -1,12 +1,11 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import type { SourceReferences } from './jmap-client.js';
+import type { SendDraftOutcome, SourceReferences } from './jmap-client.js';
 
 // The minimal client surface sendDraftAndMaintainKeywords needs; JmapClient satisfies it
 // structurally. Declared here (like ReplyClient/ForwardClient) so the orchestration stays
 // unit-testable with a mock and free of a hard dependency on the concrete client.
 export interface SendDraftClient {
-  sendDraft(emailId: string): Promise<string>;
-  getSourceReferences(emailId: string): Promise<SourceReferences>;
+  sendDraft(emailId: string): Promise<SendDraftOutcome>;
   findEmailIdsByMessageId(messageId: string): Promise<string[]>;
   addKeywords(emailId: string, keywords: string[]): Promise<void>;
 }
@@ -33,10 +32,6 @@ export interface KeywordMaintenance {
 export interface SendDraftResult {
   submissionId: string;
   keywordMaintenance?: KeywordMaintenance;
-  // The provenance read itself failed after the send, so we can't say whether this draft
-  // replied to or forwarded anything. Distinct from "no provenance": the mail is sent
-  // either way, but here the caller has no way to know maintenance was even applicable.
-  sourceReadFailed?: boolean;
 }
 
 const KEYWORDS: Record<'reply' | 'forward', string[]> = {
@@ -65,7 +60,9 @@ export function selectSource(refs: SourceReferences): { kind: 'reply' | 'forward
 // from: a reply marks the original answered + read, a forward marks it forwarded + read
 // (#60, #54). Without this, the recommended review-the-draft-then-send workflow would be
 // the one flow that leaves the original untouched, while the direct reply/forward
-// send=true paths mark it.
+// send=true paths mark it. (A forward saved with asAttachment records no provenance — the
+// attached .eml is its recorded source — so there is nothing here to resolve and its draft
+// marks nothing; the direct send=true path still marks the original.)
 //
 // Everything after the submission is best-effort: the mail is already gone, so no failure
 // here may fail the call or roll anything back. Where the direct paths just mark an id the
@@ -84,19 +81,12 @@ export async function sendDraftAndMaintainKeywords(
     throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
   }
 
-  const submissionId = await client.sendDraft(emailId);
+  // The provenance rides back on the send: sendDraft reads it off the same pre-send
+  // Email/get that validates the draft, so there is no second fetch and no "the send
+  // worked but we couldn't tell what it was" state — a draft we can't read never sends.
+  const { submissionId, sourceReferences } = await client.sendDraft(emailId);
 
-  // Read the provenance AFTER the send: submission keeps the same email id (it moves to
-  // Sent and drops $draft, it is not recreated), and doing it here costs nothing on the
-  // path where the send itself fails.
-  let refs: SourceReferences;
-  try {
-    refs = await client.getSourceReferences(emailId);
-  } catch {
-    return { submissionId, sourceReadFailed: true };
-  }
-
-  const source = selectSource(refs);
+  const source = selectSource(sourceReferences);
   if (!source) return { submissionId }; // a fresh compose has no original to mark
 
   let candidates: string[];

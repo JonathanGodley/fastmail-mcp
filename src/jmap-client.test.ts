@@ -1460,8 +1460,8 @@ describe('sendDraft', () => {
       return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
     });
 
-    const subId = await client.sendDraft('draft-1');
-    assert.equal(subId, 'sub-1');
+    const { submissionId } = await client.sendDraft('draft-1');
+    assert.equal(submissionId, 'sub-1');
 
     // Verify submission call structure
     const submitCall = makeReq.mock.calls[1].arguments[0];
@@ -1589,7 +1589,7 @@ describe('sendDraft', () => {
       return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
     });
 
-    assert.equal(await client.sendDraft('draft-1'), 'sub-1');
+    assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1');
   });
 
   it('sends a clean text-only draft (absent partner is undefined, not empty)', async () => {
@@ -1606,7 +1606,7 @@ describe('sendDraft', () => {
       return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
     });
 
-    assert.equal(await client.sendDraft('draft-1'), 'sub-1');
+    assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1');
   });
 
   it('sends an html-only draft with real content as-is (image-only/html-only mail is valid)', async () => {
@@ -1623,7 +1623,7 @@ describe('sendDraft', () => {
       return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
     });
 
-    assert.equal(await client.sendDraft('draft-1'), 'sub-1'); // not rejected — html-only is sendable
+    assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1'); // not rejected — html-only is sendable
   });
 });
 
@@ -2318,8 +2318,8 @@ describe('sendDraft wildcard identity', () => {
       return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
     });
 
-    const subId = await client.sendDraft('draft-1');
-    assert.equal(subId, 'sub-1');
+    const { submissionId } = await client.sendDraft('draft-1');
+    assert.equal(submissionId, 'sub-1');
 
     const submitCall = makeReq.mock.calls[1].arguments[0];
     assert.equal(submitCall.methodCalls[0][1].create.submission.identityId, WILDCARD_IDENTITY.id);

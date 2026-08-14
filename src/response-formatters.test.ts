@@ -122,12 +122,6 @@ describe('formatSendDraftResult', () => {
     });
     assert.equal(text, 'Draft sent successfully. Submission ID: sub-1');
   });
-
-  it('discloses that provenance could not be read at all', () => {
-    const text = formatSendDraftResult({ submissionId: 'sub-1', sourceReadFailed: true });
-    assert.match(text, /Draft sent successfully/);
-    assert.match(text, /unknown whether it replied to or forwarded anything; no message was marked/);
-  });
 });
 
 // ---------- simplifyMailbox ----------

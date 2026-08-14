@@ -123,10 +123,6 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
 // reported, matching reply_email/forward_email on the same failure.
 export function formatSendDraftResult(result: SendDraftResult): string {
   const base = `Draft sent successfully. Submission ID: ${result.submissionId}`;
-  if (result.sourceReadFailed) {
-    return `${base} Could not re-read the sent message, so it is unknown whether it replied to or forwarded anything; no message was marked.`;
-  }
-
   const km = result.keywordMaintenance;
   if (!km) return base;
 

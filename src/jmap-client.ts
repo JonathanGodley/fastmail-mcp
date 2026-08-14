@@ -202,10 +202,27 @@ export interface SourceReferences {
   forwardedMessageId: string[];
 }
 
+// Read the provenance headers off a raw Email, tolerating a server that returns neither.
+export function readSourceReferences(email: any): SourceReferences {
+  const forwarded = email?.['header:X-Forwarded-Message-Id:asMessageIds'];
+  return {
+    inReplyTo: Array.isArray(email?.inReplyTo) ? email.inReplyTo : [],
+    forwardedMessageId: Array.isArray(forwarded) ? forwarded : [],
+  };
+}
+
+// What sendDraft returns: the submission, plus the provenance of the message just sent —
+// read off the same pre-send Email/get that validates the draft, so the caller's
+// thread-state maintenance costs no extra round trip.
+export interface SendDraftOutcome {
+  submissionId: string;
+  sourceReferences: SourceReferences;
+}
+
 // Recall cap for the Message-ID lookup. The full-text step can match messages that merely
-// quote or reference the id, so the cap is generous enough to still contain the one message
-// that owns it (the exact-messageId filter afterwards does the discriminating), while
-// bounding a pathological id that appears in hundreds of messages.
+// quote or reference the id; the oldest-first sort guarantees the owner sits on the first
+// page (see findEmailIdsByMessageId), so the cap only bounds how many extra mentions are
+// fetched and filtered out.
 const MESSAGE_ID_LOOKUP_LIMIT = 50;
 
 // `disposition`/`cid` are load-bearing for forward_email's inline-image handling:
@@ -1695,17 +1712,25 @@ export class JmapClient {
     };
   }
 
-  async sendDraft(emailId: string): Promise<string> {
+  async sendDraft(emailId: string): Promise<SendDraftOutcome> {
     const session = await this.getSession();
 
-    // Fetch the existing email to verify it's a draft
+    // Fetch the existing email to verify it's a draft. The two provenance headers ride
+    // along on this existing read: they say which message the draft replies to or
+    // forwards, and they can't change during submission (the draft is submitted by
+    // reference, not recreated), so reading them here rather than after the send costs
+    // nothing and keeps a failed read indistinguishable from the draft-not-found path
+    // this method already has.
     const getRequest: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'textBody', 'htmlBody', 'bodyValues'],
+          properties: [
+            'id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'textBody', 'htmlBody', 'bodyValues',
+            'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds',
+          ],
           bodyProperties: ['partId', 'blobId', 'type', 'size'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
@@ -1811,41 +1836,7 @@ export class JmapClient {
       throw new Error('Draft submission returned no submission ID');
     }
 
-    return submissionId;
-  }
-
-  /**
-   * Read an email's source-reference headers — the provenance a draft carries about the
-   * message it replies to (In-Reply-To) or forwards (X-Forwarded-Message-Id). Deliberately
-   * NOT getEmailById: that fetches every body value, and this is called right after a send
-   * purely to read two header arrays. Both come back as JMAP MessageIds, i.e. BARE ids with
-   * no angle brackets (RFC 8621 section 4.1.1). Throws when the email can't be read, so a
-   * caller can tell "no provenance" from "couldn't look".
-   */
-  async getSourceReferences(emailId: string): Promise<SourceReferences> {
-    const session = await this.getSession();
-
-    const response = await this.makeRequest({
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/get', {
-          accountId: session.accountId,
-          ids: [emailId],
-          properties: ['id', 'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds'],
-        }, 'sourceRefs']
-      ]
-    });
-
-    const email = this.getListResult(response, 0)[0];
-    if (!email) {
-      throw new InvalidInputError(`Email with ID '${emailId}' not found`);
-    }
-    return {
-      inReplyTo: Array.isArray(email.inReplyTo) ? email.inReplyTo : [],
-      forwardedMessageId: Array.isArray(email['header:X-Forwarded-Message-Id:asMessageIds'])
-        ? email['header:X-Forwarded-Message-Id:asMessageIds']
-        : [],
-    };
+    return { submissionId, sourceReferences: readSourceReferences(email) };
   }
 
   /**
@@ -1863,6 +1854,13 @@ export class JmapClient {
    * Fastmail and would do this server-side, but it is unproven against other JMAP servers,
    * and the two-step form needs no such assumption.)
    *
+   * The OLDEST-FIRST sort is load-bearing, not cosmetic. The recall step is capped, and in a
+   * busy thread the id can be mentioned by more messages than the cap — every later reply
+   * carries it in References, every quoted body repeats it. A message can only reference an
+   * id that already exists, so the message that OWNS the id predates all of them: sorting
+   * oldest-first puts the owner on the first page whatever the cap is. Without the sort the
+   * owner can fall off the page and the caller is told, wrongly, that no message carries it.
+   *
    * No Trash/Spam exclusion: this answers "which message is this", not "what should a search
    * show", and a message being in Trash does not make it the wrong one.
    */
@@ -1877,6 +1875,7 @@ export class JmapClient {
         ['Email/query', {
           accountId: session.accountId,
           filter: { text: bare },
+          sort: [{ property: 'receivedAt', isAscending: true }],
           limit: MESSAGE_ID_LOOKUP_LIMIT,
         }, 'query'],
         ['Email/get', {
