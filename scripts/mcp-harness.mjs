@@ -10,6 +10,21 @@
 //      attachment tests). This harness references those var *names* only and never
 //      prints their values.
 //
+// If the shell environment has no live token (or a stale one), do NOT copy the
+// token around by hand or write it to a file. Source it from wherever the working
+// MCP client is configured (e.g. the client config's mcpServers.<name>.env block)
+// at spawn time, in memory only — a tiny wrapper that reads the config and injects
+// the value into the child process env, then streams the probe's output:
+//
+//   import json, os, subprocess, sys                        # run-probe wrapper (python)
+//   cfg = json.load(open(os.path.expanduser('~/.claude.json'), encoding='utf-8'))
+//   env = dict(os.environ)
+//   env['FASTMAIL_API_TOKEN'] = cfg['mcpServers']['fastmail']['env']['FASTMAIL_API_TOKEN']
+//   sys.exit(subprocess.run(['node', 'the-probe.mjs'], env=env).returncode)
+//
+// The token never touches disk, stdout, or the conversation; the probe and this
+// harness never echo env values on any path.
+//
 // Usage as a module:
 //   import { createClient } from './scripts/mcp-harness.mjs';
 //   const c = createClient({ env: process.env });
