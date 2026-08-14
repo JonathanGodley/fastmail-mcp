@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult } from './response-formatters.js';
 
 // ---------- formatEditDraftResult ----------
 
@@ -58,6 +58,75 @@ describe('formatEditDraftResult', () => {
     const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1' });
     assert.match(text, /moved to Trash/);
     assert.doesNotMatch(text, /It contained/);
+  });
+});
+
+// ---------- formatSendDraftResult ----------
+
+describe('formatSendDraftResult', () => {
+  it('reports the submission alone when the draft referenced no message', () => {
+    assert.equal(
+      formatSendDraftResult({ submissionId: 'sub-1' }),
+      'Draft sent successfully. Submission ID: sub-1',
+    );
+  });
+
+  it('reports the answered+read mark for a sent reply draft', () => {
+    const text = formatSendDraftResult({
+      submissionId: 'sub-1',
+      keywordMaintenance: { kind: 'reply', messageId: 'orig@example.com', originalEmailId: 'orig-1', marked: true },
+    });
+    assert.match(text, /Submission ID: sub-1/);
+    assert.match(text, /Original marked answered and read\./);
+  });
+
+  it('reports the forwarded+read mark for a sent forward draft', () => {
+    const text = formatSendDraftResult({
+      submissionId: 'sub-1',
+      keywordMaintenance: { kind: 'forward', messageId: 'fwd@example.com', originalEmailId: 'orig-1', marked: true },
+    });
+    assert.match(text, /Original marked forwarded and read\./);
+  });
+
+  it('names the unmarked message and the reason when the Message-ID matches nothing', () => {
+    const text = formatSendDraftResult({
+      submissionId: 'sub-1',
+      keywordMaintenance: { kind: 'reply', messageId: 'orig@example.com', marked: false, skipReason: 'not-found' },
+    });
+    assert.match(text, /Draft sent successfully/);
+    assert.match(text, /replies to \(Message-ID orig@example\.com\) was not marked answered and read/);
+    assert.match(text, /no stored message carries that Message-ID/);
+  });
+
+  it('says so when the Message-ID matches more than one message', () => {
+    const text = formatSendDraftResult({
+      submissionId: 'sub-1',
+      keywordMaintenance: { kind: 'forward', messageId: 'fwd@example.com', marked: false, skipReason: 'ambiguous' },
+    });
+    assert.match(text, /forwards \(Message-ID fwd@example\.com\) was not marked forwarded and read/);
+    assert.match(text, /more than one stored message carries that Message-ID/);
+  });
+
+  it('says so when the lookup itself failed', () => {
+    const text = formatSendDraftResult({
+      submissionId: 'sub-1',
+      keywordMaintenance: { kind: 'reply', messageId: 'orig@example.com', marked: false, skipReason: 'lookup-failed' },
+    });
+    assert.match(text, /the lookup failed/);
+  });
+
+  it('stays silent about a keyword-write failure, matching reply_email and forward_email', () => {
+    const text = formatSendDraftResult({
+      submissionId: 'sub-1',
+      keywordMaintenance: { kind: 'reply', messageId: 'orig@example.com', originalEmailId: 'orig-1', marked: false },
+    });
+    assert.equal(text, 'Draft sent successfully. Submission ID: sub-1');
+  });
+
+  it('discloses that provenance could not be read at all', () => {
+    const text = formatSendDraftResult({ submissionId: 'sub-1', sourceReadFailed: true });
+    assert.match(text, /Draft sent successfully/);
+    assert.match(text, /unknown whether it replied to or forwarded anything; no message was marked/);
   });
 });
 

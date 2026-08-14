@@ -193,6 +193,21 @@ export const EMAIL_PROPERTIES_VERBOSE = [
   'header:X-Forwarded-Message-Id:asMessageIds',
 ] as const;
 
+// The provenance headers a draft carries about the message it was composed from:
+// In-Reply-To (set by reply_email and every other client's reply) and
+// X-Forwarded-Message-Id (set by forward_email and Fastmail's own clients). Both are
+// arrays of BARE Message-IDs — JMAP MessageIds carry no angle brackets.
+export interface SourceReferences {
+  inReplyTo: string[];
+  forwardedMessageId: string[];
+}
+
+// Recall cap for the Message-ID lookup. The full-text step can match messages that merely
+// quote or reference the id, so the cap is generous enough to still contain the one message
+// that owns it (the exact-messageId filter afterwards does the discriminating), while
+// bounding a pathological id that appears in hundreds of messages.
+const MESSAGE_ID_LOOKUP_LIMIT = 50;
+
 // `disposition`/`cid` are load-bearing for forward_email's inline-image handling:
 // without them every attachments[] part reads as disposition-less and the
 // true-inline (cid) drop predicate can never fire (#30).
@@ -1797,6 +1812,84 @@ export class JmapClient {
     }
 
     return submissionId;
+  }
+
+  /**
+   * Read an email's source-reference headers — the provenance a draft carries about the
+   * message it replies to (In-Reply-To) or forwards (X-Forwarded-Message-Id). Deliberately
+   * NOT getEmailById: that fetches every body value, and this is called right after a send
+   * purely to read two header arrays. Both come back as JMAP MessageIds, i.e. BARE ids with
+   * no angle brackets (RFC 8621 section 4.1.1). Throws when the email can't be read, so a
+   * caller can tell "no provenance" from "couldn't look".
+   */
+  async getSourceReferences(emailId: string): Promise<SourceReferences> {
+    const session = await this.getSession();
+
+    const response = await this.makeRequest({
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/get', {
+          accountId: session.accountId,
+          ids: [emailId],
+          properties: ['id', 'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds'],
+        }, 'sourceRefs']
+      ]
+    });
+
+    const email = this.getListResult(response, 0)[0];
+    if (!email) {
+      throw new InvalidInputError(`Email with ID '${emailId}' not found`);
+    }
+    return {
+      inReplyTo: Array.isArray(email.inReplyTo) ? email.inReplyTo : [],
+      forwardedMessageId: Array.isArray(email['header:X-Forwarded-Message-Id:asMessageIds'])
+        ? email['header:X-Forwarded-Message-Id:asMessageIds']
+        : [],
+    };
+  }
+
+  /**
+   * Resolve an RFC 5322 Message-ID to the JMAP id(s) of the message(s) that CARRY it as
+   * their own Message-ID. Header values name messages by Message-ID, but every write path
+   * needs a JMAP id, so this is the bridge.
+   *
+   * Two steps, because neither alone is right. The full-text query is the recall step:
+   * Fastmail matches a message by its BARE Message-ID (the <bracketed> form finds nothing,
+   * probed live 2026-07-05 — see docs/email-bodies.md), but it is a text search, so it also
+   * returns every message that merely mentions the id — replies whose In-Reply-To/References
+   * carry it, quoted bodies, and the sent copy that referenced it in the first place. The
+   * exact `messageId` comparison is the precision step that keeps only the message the id
+   * actually belongs to. (RFC 8621 section 4.4.1's `header` FilterCondition also works on
+   * Fastmail and would do this server-side, but it is unproven against other JMAP servers,
+   * and the two-step form needs no such assumption.)
+   *
+   * No Trash/Spam exclusion: this answers "which message is this", not "what should a search
+   * show", and a message being in Trash does not make it the wrong one.
+   */
+  async findEmailIdsByMessageId(messageId: string): Promise<string[]> {
+    const bare = String(messageId ?? '').trim().replace(/^<+/, '').replace(/>+$/, '').trim();
+    if (!bare) return [];
+
+    const session = await this.getSession();
+    const response = await this.makeRequest({
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/query', {
+          accountId: session.accountId,
+          filter: { text: bare },
+          limit: MESSAGE_ID_LOOKUP_LIMIT,
+        }, 'query'],
+        ['Email/get', {
+          accountId: session.accountId,
+          '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
+          properties: ['id', 'messageId'],
+        }, 'emails'],
+      ],
+    });
+
+    return this.getListResult(response, 1)
+      .filter((e: any) => Array.isArray(e?.messageId) && e.messageId.includes(bare))
+      .map((e: any) => e.id);
   }
 
   async getRecentEmails(limit: number = 10, mailbox: string = 'inbox', ascending: boolean = false, position: number = 0): Promise<QueryResult> {

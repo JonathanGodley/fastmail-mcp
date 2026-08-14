@@ -1,6 +1,7 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
 import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
+import type { SendDraftResult } from './send-draft-handler.js';
 
 // The query-level summary that heads every list/search response, so the count wording
 // is written once and can't drift between the raw and simplified paths (#51).
@@ -112,6 +113,34 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
     : '';
   return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}`;
+}
+
+// The send_draft result text. Reports the submission, then what happened to the message
+// the draft was composed from (#60): marked when the original was identified and updated,
+// and — because the caller never named that original — an explicit note when the draft
+// pointed at a message this server could not pin down, so the skip is actionable rather
+// than invisible. A keyword-write failure after a successful lookup is deliberately not
+// reported, matching reply_email/forward_email on the same failure.
+export function formatSendDraftResult(result: SendDraftResult): string {
+  const base = `Draft sent successfully. Submission ID: ${result.submissionId}`;
+  if (result.sourceReadFailed) {
+    return `${base} Could not re-read the sent message, so it is unknown whether it replied to or forwarded anything; no message was marked.`;
+  }
+
+  const km = result.keywordMaintenance;
+  if (!km) return base;
+
+  const marking = km.kind === 'reply' ? 'answered and read' : 'forwarded and read';
+  if (km.marked) return `${base} Original marked ${marking}.`;
+  if (!km.skipReason) return base; // keyword write failed; the draft still sent
+
+  const relation = km.kind === 'reply' ? 'replies to' : 'forwards';
+  const why = km.skipReason === 'ambiguous'
+    ? 'more than one stored message carries that Message-ID'
+    : km.skipReason === 'lookup-failed'
+      ? 'the lookup failed'
+      : 'no stored message carries that Message-ID';
+  return `${base} The message this draft ${relation} (Message-ID ${km.messageId}) was not marked ${marking}: ${why}.`;
 }
 
 // Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the

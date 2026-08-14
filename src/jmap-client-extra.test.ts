@@ -1995,3 +1995,95 @@ describe('buildExclusionNote', () => {
     assert.match(note, /NOT excluded/);
   });
 });
+
+// ---------- source-reference read + Message-ID lookup (#60) ----------
+
+describe('getSourceReferences', () => {
+  it('returns the reply and forward provenance headers', async () => {
+    const client = makeClient();
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/get', {
+        list: [{
+          id: 'd1',
+          inReplyTo: ['orig@example.com'],
+          'header:X-Forwarded-Message-Id:asMessageIds': ['fwd@example.com'],
+        }],
+      }, 'sourceRefs']],
+    }));
+
+    const refs = await client.getSourceReferences('d1');
+    assert.deepEqual(refs, { inReplyTo: ['orig@example.com'], forwardedMessageId: ['fwd@example.com'] });
+
+    // Reads only the two header arrays — no body values pulled just to read provenance.
+    const params = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
+    assert.deepEqual(params.properties, ['id', 'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds']);
+    assert.equal(params.fetchTextBodyValues, undefined);
+    assert.equal(params.fetchHTMLBodyValues, undefined);
+  });
+
+  it('normalises missing headers to empty arrays', async () => {
+    const client = makeClient();
+    stubMakeRequest(client, { methodResponses: [['Email/get', { list: [{ id: 'd1' }] }, 'sourceRefs']] });
+    assert.deepEqual(await client.getSourceReferences('d1'), { inReplyTo: [], forwardedMessageId: [] });
+  });
+
+  it('throws when the email cannot be read, so "no provenance" stays distinguishable', async () => {
+    const client = makeClient();
+    stubMakeRequest(client, { methodResponses: [['Email/get', { list: [] }, 'sourceRefs']] });
+    await assert.rejects(() => client.getSourceReferences('gone'), InvalidInputError);
+  });
+});
+
+describe('findEmailIdsByMessageId', () => {
+  function stubLookup(client: JmapClient, list: any[]) {
+    return mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [
+        ['Email/query', { ids: list.map(e => e.id) }, 'query'],
+        ['Email/get', { list }, 'emails'],
+      ],
+    }));
+  }
+
+  it('queries the BARE Message-ID and keeps only messages that own it', async () => {
+    const client = makeClient();
+    const makeReq = stubLookup(client, [
+      { id: 'orig-1', messageId: ['orig@example.com'] },   // the message itself
+      { id: 'reply-1', messageId: ['reply@example.com'] }, // merely references or quotes it
+    ]);
+
+    assert.deepEqual(await client.findEmailIdsByMessageId('orig@example.com'), ['orig-1']);
+    const query = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
+    assert.deepEqual(query.filter, { text: 'orig@example.com' });
+    assert.equal(query.filter.inMailboxOtherThan, undefined); // Trash/Spam are NOT excluded
+  });
+
+  it('strips angle brackets before querying (the bracketed form matches nothing)', async () => {
+    const client = makeClient();
+    const makeReq = stubLookup(client, [{ id: 'orig-1', messageId: ['orig@example.com'] }]);
+    assert.deepEqual(await client.findEmailIdsByMessageId('<orig@example.com>'), ['orig-1']);
+    const query = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
+    assert.deepEqual(query.filter, { text: 'orig@example.com' });
+  });
+
+  it('returns every id when more than one stored message carries it (the caller decides)', async () => {
+    const client = makeClient();
+    stubLookup(client, [
+      { id: 'copy-1', messageId: ['dupe@example.com'] },
+      { id: 'copy-2', messageId: ['dupe@example.com'] },
+    ]);
+    assert.deepEqual(await client.findEmailIdsByMessageId('dupe@example.com'), ['copy-1', 'copy-2']);
+  });
+
+  it('returns [] when nothing owns the id', async () => {
+    const client = makeClient();
+    stubLookup(client, [{ id: 'other-1', messageId: ['other@example.com'] }]);
+    assert.deepEqual(await client.findEmailIdsByMessageId('orig@example.com'), []);
+  });
+
+  it('makes no request for a blank Message-ID', async () => {
+    const client = makeClient();
+    const makeReq = stubLookup(client, []);
+    assert.deepEqual(await client.findEmailIdsByMessageId('  <>  '), []);
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+});

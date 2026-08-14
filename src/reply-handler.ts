@@ -156,6 +156,9 @@ export async function composeReply(
   const submissionId = await client.sendEmail(replyParams);
   // Best-effort thread-state maintenance (#52/#54): mark the original answered + read.
   // The reply already sent; a keyword-set FAILURE must NOT mask that success, so swallow it.
+  // The draft branch marks nothing — a saved draft has answered nothing yet; send_draft
+  // does the same maintenance when it transmits, resolving the original from the draft's
+  // In-Reply-To (#60).
   // ($seen here clears the original's unread state — benign: it only happens as a side effect
   //  of actually sending a reply, and mark_email_read already grants standalone $seen writes.)
   let markedAnswered = false;

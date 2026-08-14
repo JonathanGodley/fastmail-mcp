@@ -12,11 +12,12 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
+import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { composeSend, composeDraft } from './compose-handler.js';
 import { assertBodyInputs } from './body-format.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
@@ -451,7 +452,7 @@ const TOOLS = [
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address. On send=true the original is marked answered and read (best-effort; reported in the success message when it succeeds).',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. By default saves the reply as a draft; set send=true to transmit it immediately. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address. On send=true the original is marked answered and read (best-effort; reported in the success message when it succeeds); sending the saved draft later via send_draft marks it the same way, resolved from the draft\'s In-Reply-To.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -510,7 +511,7 @@ const TOOLS = [
       },
       {
         name: 'forward_email',
-        description: 'Forward an existing email to new recipients. By default saves the forward as a draft; set send=true to transmit it immediately. `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional even when sending: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'. On send=true the original is marked forwarded and read (best-effort; reported in the success message when it succeeds; sending a saved draft later via send_draft does not do this).',
+        description: 'Forward an existing email to new recipients. By default saves the forward as a draft; set send=true to transmit it immediately. `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional even when sending: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'. On send=true the original is marked forwarded and read (best-effort; reported in the success message when it succeeds); sending the saved draft later via send_draft marks it the same way, resolved from the recorded X-Forwarded-Message-Id.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -704,7 +705,7 @@ const TOOLS = [
       },
       {
         name: 'send_draft',
-        description: 'Send an existing draft email. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content (e.g. an image-only message) sends as-is; only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first.',
+        description: 'Send an existing draft email. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content (e.g. an image-only message) sends as-is; only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by forward_email) marks it forwarded and read. Best-effort — the original is found from the Message-ID recorded on the draft; when it succeeds the result says so, and when that message cannot be identified the result says it was not marked and why. A draft that references nothing marks nothing.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1635,18 +1636,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'send_draft': {
-        const { emailId } = args as any;
-        if (!emailId) {
-          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
-        }
-
-        const submissionId = await client.sendDraft(emailId);
+        // The orchestration (submit, then best-effort thread-state maintenance on the
+        // message the draft replied to or forwarded) lives in sendDraftAndMaintainKeywords
+        // so it is unit-testable with a mock client; this handler just maps the result to
+        // the response text.
+        const result = await sendDraftAndMaintainKeywords(args, client);
 
         return {
           content: [
             {
               type: 'text',
-              text: `Draft sent successfully. Submission ID: ${submissionId}`,
+              text: formatSendDraftResult(result),
             },
           ],
         };

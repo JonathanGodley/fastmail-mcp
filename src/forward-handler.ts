@@ -244,8 +244,9 @@ export async function composeForward(
   const submissionId = await client.sendEmail(forwardParams);
   // Best-effort thread-state maintenance: mark the original forwarded + read. The
   // forward already sent; a keyword-set failure must not mask that success, so it is
-  // swallowed (same posture as composeReply). Note this fires only on a direct
-  // send=true — sending the draft later via send_draft does no keyword maintenance.
+  // swallowed (same posture as composeReply). The draft branch marks nothing here — a
+  // saved draft has forwarded nothing yet; send_draft does the same maintenance when it
+  // transmits, resolving the original from the recorded X-Forwarded-Message-Id (#60).
   let markedForwarded = false;
   try {
     await client.addKeywords(originalEmailId, ['$forwarded', '$seen']);
