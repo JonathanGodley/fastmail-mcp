@@ -57,6 +57,14 @@ re-run the gate, and integrate from there.
 3. **The audit ledger, as a hard gate.** See below. No feature work until it is
    clean.
 4. **Feature phases** as ordinary commits on `main`, each carrying its own docs.
+5. **Close with a tool-surface diff.** The sync is done when every upstream tool
+   and every parameter on a shared tool resolves to exactly one of: adopted,
+   adopted as a different shape, declined with the reason recorded where the next
+   reader hits it, or deferred to a named open issue. Derive both surfaces from
+   the code (`git show upstream/main:src/index.ts` against `src/index.ts`), not
+   from memory — the count alone will not tell you that a parameter was renamed
+   or that a tool was folded into another. Post the diff as the ledger issue's
+   closing comment; it is the record that nothing arrived and quietly vanished.
 
 ## Per-file resolution policy
 
@@ -138,13 +146,36 @@ the problem each time. This list is the sync's real cost, so keep it honest.
   pin above.
 - **WebDAV paths stay deleted.** `src/webdav-files-client.ts` and its test were
   removed on security grounds (#90). Future syncs will raise modify/delete
-  conflicts on both; the resolution is keep-deleted.
+  conflicts on both; the resolution is keep-deleted. Two things travel with that
+  decision and are easy to miss because neither raises a conflict:
+  `validateHttpsUrl` in `src/url-validation.ts` has to be re-deleted (it is dead
+  the moment the WebDAV client is gone, and `src/url-validation.ts` is a
+  `--theirs` file, so it arrives again every time), and `.mcp.json` has to have
+  its three `FASTMAIL_WEBDAV_*` passthroughs re-stripped — upstream's copy hands
+  the server a WebDAV password that nothing here reads.
+- **`.mcp.json` is rewritten, not merged.** The key list is this server's
+  `findEnvValue` call sites, so it carries fork-only keys upstream has never seen
+  (`FASTMAIL_ATTACH_DIR`, `FASTMAIL_TIMEZONE`, `FASTMAIL_ALLOW_BLOB_ATTACH`) and
+  omits `FASTMAIL_ALLOW_UNSAFE_BASE_URL` deliberately — that one is a kill switch
+  and stays env-only, out of both this file and the manifest.
 - **`.github/` policy strip.** Upstream's auto-release-on-push is declined; this
   fork's `build-dxt.yml` is restored wholesale rather than patched, because
   deleting only the `decide` job leaves the `release` job referencing a
-  nonexistent one.
-- **`package.json` and `.gitignore` are never a union.** Both look mergeable and
-  both carry deliberate fork deletions.
+  nonexistent one. Two smaller strips in the same directory:
+  `create-tag.yml`'s tag regex is widened to accept the `-fork.N` suffix this
+  fork's versions carry (upstream's accepts plain `vX.Y.Z` only, so a fork tag is
+  rejected outright), and its 20-line header comment is rewritten, because
+  upstream's documents the auto-release flow as the normal path. And
+  `dependabot.yml` needs its `debug` ignore entry re-added: upstream carries only
+  the `@types/node` one. That entry is a security control, not a stability
+  preference — see the comment in the file — and losing it lets a routine bump
+  nest a second `debug` copy under `tsdav` and silently stop the credential-log
+  suppression while every test stays green.
+- **`package.json`, `.gitignore` and `.dxtignore` are never a union.** All three
+  look mergeable and all three carry deliberate fork deletions or fork-only
+  stanzas — `.gitignore`'s `!.claude/skills/**/SKILL.md` un-ignore, `.dxtignore`'s
+  exclusion of `/docs/`, `/AGENTS.md`, `/.claude/` and the build droppings,
+  `package.json`'s extra dependencies and its exact `debug` pin.
 - **Test-fixture email domains diverge in `src/coerce.test.ts`** (~13 lines) and in
   `scripts/scan-secrets.mjs`'s `SAFE_EMAIL_DOMAINS`. Upstream's fixtures use real
   registered placeholder domains (`b.com`, `d.com`, `x.com`, …) and safelist them by

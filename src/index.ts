@@ -1053,6 +1053,15 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
+        // One search tool, not two. The structured filters below (from/to/cc/bcc/subject,
+        // hasAttachment/isUnread/isPinned, the date range, and the mailbox scoping params)
+        // are the whole of what upstream exposes as a separate `advanced_search`; this
+        // server folds them into `search_emails` and ships no second tool. Two tools whose
+        // only difference is which filters they accept forces the caller to pick before
+        // knowing what it needs, and a filter added to one silently makes the other the
+        // weaker choice — the same split-vocabulary failure that made a free-text-only
+        // search and an id-only mailbox parameter worth consolidating (#12). Anything new
+        // here is a parameter on this tool.
         description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
