@@ -35,10 +35,11 @@ But "tolerant read" is **not** "silently drop the promised field." A read tool p
 
 ## Version
 
-The version string lives in three places — update all when bumping:
+The version string lives in **three hand-edited sites plus a regenerated lockfile** — update all when bumping:
 - `package.json` (line 3)
 - `manifest.json` (line 4)
 - `src/index.ts` (Server constructor)
+- then `npm install --package-lock-only` to carry it into `package-lock.json` (which holds it in two places — the root and the `""` package entry). Never hand-edit the lock; it is regenerated. The `version sync` test asserts all four.
 
 ## Building
 
@@ -90,6 +91,8 @@ The dividing line: **an issue explains why ONE tool behaves as it does; a docs f
 `upstream` = `MadLlama25/fastmail-mcp` (the fork's base); `origin` = `JonathanGodley/fastmail-mcp`. `gh` defaults to upstream, so pass `--repo JonathanGodley/fastmail-mcp` for every fork-side issue/PR/release command.
 
 **Strategy.** Track upstream by *generally merging it into the fork whenever that is doable* — a periodic mainline sync that re-bases the fork's differentiators (response simplification, the calendar work) on top of upstream's latest. Supplement that baseline with the fork's own fixes carried ahead of upstream as open PRs *against* upstream. The upstream maintainer is intermittent (active in bursts, absent in between), so never block fork progress on their review: land and release on the fork, offer the general fixes back, and move on whether or not they respond.
+
+**Doing the sync itself.** The per-file resolution policy, why it is a real two-parent merge, the audit ledger that keeps an `--ours` resolution from silently dropping upstream work, and the list of surgery that must be re-done every time all live in `docs/upstream-sync.md`. **The trigger is a release** — the `/release` skill carries a drift check (`git log $(git merge-base HEAD upstream/main)..upstream/main`), because releases are the fork's natural cadence and a two-digit drift list is the moment to schedule a sync rather than discover one. The per-PR issue rule above and that drift check are the same mechanism from two ends: the issues catch incoming work one PR at a time, the drift check catches what merged while nobody was looking.
 
 **Adopting an upstream PR (their work → ours).** **File a fork issue for every open third-party upstream PR** — every PR authored by someone other than us, excluding bot dependency bumps — one issue per PR, titled so it names the PR. Do NOT pre-filter by whether a PR looks worth carrying: raising the issue is just bookkeeping, and the adopt-or-decline call is made *in the issue*, never by judging which PRs deserve one. In the issue, capture what the PR adds and how it interacts with the fork's differentiators (especially response simplification — the fork trims the body from *output* but still *fetches* it, so "metadata-only / never-fetch" PRs are NOT redundant with us). Where the fork's structure has diverged (simplification, the consolidated `search_emails` with default Trash/Spam exclusion, descriptions), **reimplement in the fork's style rather than cherry-pick the patch verbatim.** Link the upstream PR with the fully-qualified `MadLlama25/fastmail-mcp#NN` form (a bare `#NN` in a fork issue links to a fork issue, not upstream). That reference also auto-publishes a backlink on the upstream PR's timeline, so our adoption tracking is visible upstream without us commenting on the thread.
 

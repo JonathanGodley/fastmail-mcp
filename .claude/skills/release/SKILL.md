@@ -13,20 +13,26 @@ The dangerous steps (anything that pushes, publishes, or closes a public issue) 
 
 - **The user explicitly asked to release THIS session.** Releases are never automatic. If they did not ask, the job of this skill is to STOP and report the procedure — a speculative or dry-read invocation must never trigger a release.
 - **Confirm what is bundled.** Prefer batching related changes: every shipped change pays the documentation + 3-file version-bump tax, so a cluster amortizes it.
+- **Check upstream drift.** `git fetch upstream && git log --oneline $(git merge-base HEAD upstream/main)..upstream/main`. Releases are the fork's natural cadence, so this is where a growing divergence gets noticed rather than discovered at 97 commits. A two-digit list means schedule a sync — the method is `docs/upstream-sync.md`. This check never blocks a release; it just makes the drift visible while someone is looking.
 - **Confirm the documentation tax was paid.** Each bundled change must already have shipped its README + tool-description (`src/index.ts`) updates (`CLAUDE.md` "Documentation is mandatory"). A release does not retroactively excuse a missed doc update — if one is outstanding, fix it before tagging.
 
-## 2. Bump the version at all three sites
+## 2. Bump the version — three hand-edited sites, then regenerate the lockfile
 
 Named in `CLAUDE.md` **Version** — match by content, line numbers drift:
 - `package.json`
 - `manifest.json`
 - the `Server` constructor in `src/index.ts`
 
+Then `npm install --package-lock-only`, which carries the new version into
+`package-lock.json` (in two places — the root and the `""` package entry). The
+lockfile is regenerated, never hand-edited, but it is the fourth site the sync
+test checks, and a `.dxt` built from a stale lock ships a mismatched version.
+
 ## 3. Verify clean
 
 Run all three:
 - `npx tsc --noEmit`
-- `npm test` — this **enforces version sync**: the `version sync` test asserts the three files match, so a missed bump fails the suite.
+- `npm test` — this **enforces version sync**: the `version sync` test asserts all four sites match, so a missed bump fails the suite.
 - `npm run build`
 
 ## 4. ⛔ CHECKPOINT — do not cross until this holds
