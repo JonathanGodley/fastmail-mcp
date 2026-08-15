@@ -2525,6 +2525,37 @@ describe('uploadAttachments', () => {
     }
   });
 
+  it('infers the upload Content-Type from the file extension, falling back to octet-stream', async (t) => {
+    const client = clientWithUpload();
+    const seen: string[] = [];
+    t.mock.method(client, 'uploadBlob', async (data: Buffer, ct: string) => {
+      seen.push(ct);
+      return { blobId: 'blob-' + seen.length, type: ct, size: data.length };
+    });
+    // .ics and .eml are the two that change how the mail renders rather than just its
+    // icon: a client decides from this header whether to show a calendar invitation or
+    // a forwarded message inline. .eml is also what forward_email's asAttachment writes.
+    const names = ['invite.ics', 'original.eml', 'logo.svg', 'notes.md', 'shot.webp', 'old.doc', 'old.xls', 'old.ppt', 'blob.unknownext'];
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      for (const n of names) await fsWriteFile(join(root, n), 'x');
+      await client.uploadAttachments(names.map(path => ({ path })), root);
+      assert.deepEqual(seen, [
+        'text/calendar',
+        'message/rfc822',
+        'image/svg+xml',
+        'text/markdown',
+        'image/webp',
+        'application/msword',
+        'application/vnd.ms-excel',
+        'application/vnd.ms-powerpoint',
+        'application/octet-stream',
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('validates every file before uploading any — a later bad path uploads zero blobs (no orphans)', async (t) => {
     const client = clientWithUpload();
     let uploads = 0;

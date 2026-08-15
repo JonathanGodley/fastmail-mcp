@@ -77,20 +77,33 @@ function rejectWindowsPathEscapes(input: string): void {
 
 // Extension -> MIME map for the Content-Type we POST when the caller omits one. Only
 // sets the upload header; the recipient sees whatever type the server echoes back.
+// A missing extension is not an error - it falls back to application/octet-stream - but
+// that fallback is not equally harmless for every type: a receiving client decides from
+// this header whether to render a calendar invitation or a forwarded message inline, so
+// text/calendar and message/rfc822 change how the mail presents, not just its icon.
+// message/rfc822 also covers forward_email's asAttachment output, which is a .eml.
 const EXT_CONTENT_TYPES: Record<string, string> = {
   pdf: 'application/pdf',
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   zip: 'application/zip',
   txt: 'text/plain',
+  md: 'text/markdown',
   csv: 'text/csv',
   json: 'application/json',
   html: 'text/html',
+  ics: 'text/calendar',
+  eml: 'message/rfc822',
 };
 
 function guessContentType(path: string): string {
