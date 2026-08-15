@@ -677,10 +677,12 @@ describe('coerceAttachments', () => {
     assert.deepEqual(coerceAttachments(['{"path":"a.pdf"}']), [{ path: 'a.pdf' }]);
   });
 
-  it('rejects (does not drop) a spec missing path, naming the index', () => {
+  it('rejects (does not drop) a spec naming no source, naming the index', () => {
     assert.throws(
       () => coerceAttachments([{ name: 'x' }]),
-      (err: unknown) => err instanceof McpError && err.code === ErrorCode.InvalidParams && /attachments\[0\].*path/.test(err.message),
+      (err: unknown) => err instanceof McpError && err.code === ErrorCode.InvalidParams
+        && /attachments\[0\] names no source/.test(err.message)
+        && /path/.test(err.message) && /blobId/.test(err.message) && /attachmentId/.test(err.message),
     );
   });
 
@@ -748,6 +750,103 @@ describe('coerceAttachments', () => {
   it('rejects an over-long cid and a non-string cid', () => {
     assert.throws(() => coerceAttachments([{ path: 'a.png', cid: 'x'.repeat(65) }]), McpError);
     assert.throws(() => coerceAttachments([{ path: 'a.png', cid: 42 }]), McpError);
+  });
+
+  // ---- the two in-account sources: blobId, and a part of an existing message ----
+
+  it('accepts a blobId item, which must name the file recipients will see', () => {
+    assert.deepEqual(
+      coerceAttachments([{ blobId: 'G1234', name: 'report.pdf' }]),
+      [{ blobId: 'G1234', name: 'report.pdf' }],
+    );
+  });
+
+  it('rejects a bare blobId with no name rather than inventing a filename', () => {
+    assert.throws(
+      () => coerceAttachments([{ blobId: 'G1234' }]),
+      (err: unknown) => err instanceof McpError && /attachments\[0\] gives a blobId but no 'name'/.test(err.message),
+    );
+    // A blank or whitespace-only name is the same omission wearing a value.
+    assert.throws(() => coerceAttachments([{ blobId: 'G1234', name: '  ' }]), McpError);
+  });
+
+  // `??` cannot tell a blank name from an absent one, so a blank would ride all the way out
+  // as the filename recipients see while the schema promised the source's own default.
+  // Resolved here, once, so all three sources agree on what "no name given" means.
+  it('reads a blank or whitespace-only name as absent, on every source that has a default', () => {
+    assert.deepEqual(coerceAttachments([{ path: 'a.pdf', name: '' }]), [{ path: 'a.pdf' }]);
+    assert.deepEqual(coerceAttachments([{ path: 'a.pdf', name: '   ' }]), [{ path: 'a.pdf' }]);
+    assert.deepEqual(
+      coerceAttachments([{ emailId: 'M1', attachmentId: 'p2', name: ' ' }]),
+      [{ emailId: 'M1', attachmentId: 'p2' }],
+    );
+    // A real name is kept, trimmed — a stray space must not become the filename either.
+    assert.deepEqual(coerceAttachments([{ path: 'a.pdf', name: ' r.pdf ' }]), [{ path: 'a.pdf', name: 'r.pdf' }]);
+    // blobId is the one source with nothing to fall back to, so there the same input is a
+    // rejection rather than a default. Both readings come from one rule, applied once.
+    assert.throws(() => coerceAttachments([{ blobId: 'G1', name: '' }]), McpError);
+  });
+
+  it('accepts an emailId + attachmentId pair, and trims both ids', () => {
+    assert.deepEqual(
+      coerceAttachments([{ emailId: ' M1 ', attachmentId: ' 2.1 ' }]),
+      [{ emailId: 'M1', attachmentId: '2.1' }],
+    );
+  });
+
+  it('rejects half of the emailId/attachmentId pair, in either direction', () => {
+    for (const half of [{ emailId: 'M1' }, { attachmentId: '2.1' }]) {
+      assert.throws(
+        () => coerceAttachments([half]),
+        (err: unknown) => err instanceof McpError
+          && /attachments\[0\] is missing a non-empty/.test(err.message)
+          && /together/.test(err.message),
+      );
+    }
+  });
+
+  it('rejects an item naming two sources, naming the keys it saw', () => {
+    assert.throws(
+      () => coerceAttachments([{ path: 'a.pdf', blobId: 'G1' }]),
+      (err: unknown) => err instanceof McpError && /names more than one source \(path, blobId\)/.test(err.message),
+    );
+    assert.throws(
+      () => coerceAttachments([{ path: 'a.pdf', emailId: 'M1', attachmentId: '2' }]),
+      (err: unknown) => err instanceof McpError && /names more than one source/.test(err.message),
+    );
+  });
+
+  // A key belonging to a source the item did not choose is an error, never a silent
+  // ignore: `{ blobId, attachmentId }` reads as two different intentions, and attaching
+  // the blob while dropping the part reference would send bytes nobody asked for.
+  it('rejects a key irrelevant to the chosen source instead of ignoring it', () => {
+    assert.throws(
+      () => coerceAttachments([{ blobId: 'G1', name: 'r.pdf', attachmentId: '2' }]),
+      (err: unknown) => err instanceof McpError && /names more than one source \(blobId, attachmentId\)/.test(err.message),
+    );
+  });
+
+  // A lenient client that fills every declared key sends null for the ones it has nothing
+  // to say about. Reading those as "this item named four sources" would reject every call
+  // such a client makes.
+  it('treats a null source key as absent, not as a second source', () => {
+    assert.deepEqual(
+      coerceAttachments([{ path: 'a.pdf', blobId: null, emailId: null, attachmentId: null }]),
+      [{ path: 'a.pdf' }],
+    );
+  });
+
+  it('carries name/contentType/cid on every source', () => {
+    assert.deepEqual(
+      coerceAttachments([
+        { blobId: 'G1', name: 'logo.png', contentType: 'image/png', cid: 'cid:logo' },
+        { emailId: 'M1', attachmentId: 'p2', name: 'chart.png', cid: '<chart>' },
+      ]),
+      [
+        { blobId: 'G1', name: 'logo.png', contentType: 'image/png', cid: 'logo' },
+        { emailId: 'M1', attachmentId: 'p2', name: 'chart.png', cid: 'chart' },
+      ],
+    );
   });
 });
 

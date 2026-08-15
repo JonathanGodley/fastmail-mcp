@@ -3748,6 +3748,22 @@ describe('downloadAttachment — reference forms', () => {
     assert.match(await client.downloadAttachment('e1', '1'), /blob-b/);
   });
 
+  // Which FORM matched is reported alongside the resolved blob, because the compose
+  // direction refuses the positional one. It has to be read off what the resolver did:
+  // a partId of "4" and an entry number of "0" can name the same part, and no test of
+  // the string could tell those apart.
+  it('reports which form matched, so the entry-number fallback is distinguishable', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    assert.equal((await client.getAttachmentInfo('e1', '4')).matchedBy, 'partId');
+    assert.equal((await client.getAttachmentInfo('e1', 'blob-pdf')).matchedBy, 'blobId');
+    assert.equal((await client.getAttachmentInfo('e1', 'cid:logo@example.com')).matchedBy, 'cid');
+    // Entry 0 IS the same part that partId "4" names — same blob, different form.
+    const byIndex = await client.getAttachmentInfo('e1', '0');
+    assert.equal(byIndex.matchedBy, 'index');
+    assert.equal(byIndex.blobId, 'blob-pdf');
+  });
+
   it('never lets a bare digit string alias a cid', async () => {
     const client = makeDownloadClient();
     stubEmail(client, {

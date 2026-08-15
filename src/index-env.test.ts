@@ -139,13 +139,22 @@ describe('env-resolution convention', () => {
     }
   });
 
-  it('resolves the CalDAV settings under all four configuration spellings', () => {
+  it('resolves the CalDAV settings and the blob-attach opt-in under all four configuration spellings', () => {
     // The four-name list is what carries a DXT user_config key through to the server. The
     // CalDAV credentials and display name each resolved fewer names than that, so a DXT
     // install configured CalDAV and got calendar tools that reported themselves
     // unavailable with nothing to explain why.
     const source = readFileSync(join(SRC_DIR, 'index.ts'), 'utf8');
-    for (const setting of ['caldav_username', 'caldav_password', 'caldav_display_name']) {
+    // allow_blob_attach rides along here rather than in its own test, but note what this
+    // pins and what it does not: the four-name resolution means the flag WOULD be settable
+    // through a DXT user_config key, not that it is one today. There is no manifest.json
+    // entry for it, so a DXT install currently cannot set it at all — the flag is
+    // environment-only on purpose, the same posture as the base-URL kill switch, and
+    // adding the manifest key is the one-line change that would make the reach real.
+    // The resolution is uniform anyway so the flag cannot become the odd one out later.
+    // (The base-URL kill switch is deliberately NOT in this list — it resolves one name
+    // on purpose; see getAuthConfig.)
+    for (const setting of ['caldav_username', 'caldav_password', 'caldav_display_name', 'allow_blob_attach']) {
       const upper = setting.toUpperCase();
       for (const name of [
         `'FASTMAIL_${upper}'`,

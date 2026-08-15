@@ -411,7 +411,7 @@ describe('composeForward — draft-only orchestration', () => {
       // Serves two jobs: fetching the original, and the post-save confirmation read. The
       // recorded ids are what tell the two apart.
       getEmailById: async (id) => { calls.getId = id; calls.gets.push(id); return makeOriginal(); },
-      uploadAttachments: async (specs, dir, options) => { calls.upload = { specs, dir, options }; return uploadResult; },
+      uploadAttachments: async (specs, dir, allowBlob, options) => { calls.upload = { specs, dir, allowBlob, options }; return uploadResult; },
       createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
       ...over,
     };
@@ -429,7 +429,7 @@ describe('composeForward — draft-only orchestration', () => {
         if (id !== 'draft-7') return original;
         return { id, attachments: (calls.draft?.attachments ?? []).map((a: any) => ({ ...a, size: 1024 })) };
       },
-      uploadAttachments: async (specs, dir, options) => { calls.upload = { specs, dir, options }; return UPLOADED; },
+      uploadAttachments: async (specs, dir, allowBlob, options) => { calls.upload = { specs, dir, allowBlob, options }; return UPLOADED; },
       createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
     };
     return { client, calls };
@@ -437,11 +437,11 @@ describe('composeForward — draft-only orchestration', () => {
 
   it('requires originalEmailId', async () => {
     const { client } = spyClient();
-    await assert.rejects(() => composeForward({ to: ['x@y.example'] }, client, undefined), /originalEmailId is required/);
+    await assert.rejects(() => composeForward({ to: ['x@y.example'] }, client, undefined, false), /originalEmailId is required/);
   });
   it('saves a draft and returns its id and subject', async () => {
     const { client, calls } = spyClient();
-    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.equal(r.emailId, 'draft-7');
     assert.equal(r.subject, 'Fwd: Project update');
     assert.ok(calls.draft);
@@ -452,7 +452,7 @@ describe('composeForward — draft-only orchestration', () => {
   // forward is still saved as a draft — this function has no way to transmit anything.
   it('ignores a stray send flag: the forward is drafted, never transmitted', async () => {
     const { client, calls } = spyClient();
-    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'], send: true }, client, undefined);
+    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'], send: true }, client, undefined, false);
     assert.equal(r.emailId, 'draft-7');
     assert.ok(calls.draft); // the only write is the draft create
   });
@@ -460,18 +460,32 @@ describe('composeForward — draft-only orchestration', () => {
     const { client, calls } = spyClient();
     await composeForward(
       { originalEmailId: 'o1', to: ['x@y.example'], attachments: [{ path: 'new.pdf' }] },
-      client, '/attach/root',
+      client, '/attach/root', false,
     );
     assert.deepEqual(calls.upload, {
-      specs: [{ path: 'new.pdf' }], dir: '/attach/root', options: { inlineCids: new Set() },
+      specs: [{ path: 'new.pdf' }], dir: '/attach/root', allowBlob: false, options: { inlineCids: new Set() },
     });
     assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-doc', 'up-1']);
   });
+  // The other half of the flag. Every case above passes false, so a handler that dropped
+  // the argument and hardcoded "off" would still satisfy them — and the only symptom would
+  // be an in-account source refused on a server configured to allow it.
+  it('passes the blob opt-in through when it is on', async () => {
+    const { client, calls } = spyClient();
+    await composeForward(
+      { originalEmailId: 'o1', to: ['x@y.example'], attachments: [{ blobId: 'G1', name: 'new.pdf' }] },
+      client, undefined, true,
+    );
+    assert.deepEqual(calls.upload, {
+      specs: [{ blobId: 'G1', name: 'new.pdf' }], dir: undefined, allowBlob: true, options: { inlineCids: new Set() },
+    });
+  });
+
   it('appends caller uploads behind the .eml on asAttachment', async () => {
     const { client, calls } = spyClient();
     await composeForward(
       { originalEmailId: 'o1', to: ['x@y.example'], asAttachment: true, attachments: [{ path: 'new.pdf' }] },
-      client, '/attach/root',
+      client, '/attach/root', false,
     );
     assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-orig-raw', 'up-1']);
     assert.equal(calls.draft.attachments[0].type, 'message/rfc822');
@@ -485,12 +499,12 @@ describe('composeForward — draft-only orchestration', () => {
 
   it('reports the images the forwarded block embeds, with their total size', async () => {
     const { client } = echoingClient(referencingOriginal());
-    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.deepEqual(d.notes, ['This draft embeds 1 image(s) from the original (1 KB).']);
   });
   it('re-reads the saved draft for a forward whose only images come from the original', async () => {
     const { client, calls } = echoingClient(referencingOriginal());
-    await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.deepEqual(calls.gets, ['o1', 'draft-7']);
   });
   it('says so when a carried image is not on the saved draft', async () => {
@@ -498,7 +512,7 @@ describe('composeForward — draft-only orchestration', () => {
       // The read-back finds a draft with none of the parts this call attached.
       getEmailById: async (id) => (id === 'draft-7' ? { id, attachments: [] } : referencingOriginal()),
     });
-    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.deepEqual(d.notes, [
       'This draft embeds 1 image(s) from the original (1 KB).',
       '1 embedded image(s) this call attached were not found on the saved draft.' +
@@ -507,7 +521,7 @@ describe('composeForward — draft-only orchestration', () => {
   });
   it('says plainly when a media part could not be embedded and rode along as a file', async () => {
     const { client } = spyClient({ getEmailById: async () => makeOriginal({ attachments: [inlinePng] }) });
-    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.deepEqual(d.notes, [
       '1 media part(s) could not be embedded and were attached as regular attachments: "p.png"' +
       ' — re-run with asAttachment: true for full fidelity, then delete this draft.',
@@ -524,7 +538,7 @@ describe('composeForward — draft-only orchestration', () => {
         attachments: twins,
       }),
     });
-    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.deepEqual(d.notes, [
       '2 media part(s) could not be embedded and were attached as regular attachments:' +
       ' "a.png", "b.png" — re-run with asAttachment: true for full fidelity, then delete this draft.',
@@ -534,7 +548,7 @@ describe('composeForward — draft-only orchestration', () => {
     const { client } = spyClient({
       getEmailById: async () => referencingOriginal({ attachments: [] }),
     });
-    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.deepEqual(d.notes, [
       "1 image reference(s) in the original's body had no matching part; nothing was carried for them.",
     ]);
@@ -545,7 +559,7 @@ describe('composeForward — draft-only orchestration', () => {
     });
     const { client } = echoingClient(withFile);
     const d = await composeForward(
-      { originalEmailId: 'o1', to: ['x@y.example'], includeOriginalAttachments: false }, client, undefined,
+      { originalEmailId: 'o1', to: ['x@y.example'], includeOriginalAttachments: false }, client, undefined, false,
     );
     assert.deepEqual(d.notes, [
       'This draft embeds 1 image(s) from the original (1 KB).',
@@ -556,7 +570,7 @@ describe('composeForward — draft-only orchestration', () => {
   it('omits the carried-anyway sentence when the forward embedded nothing', async () => {
     const { client } = spyClient({ getEmailById: async () => makeOriginal() });
     const d = await composeForward(
-      { originalEmailId: 'o1', to: ['x@y.example'], includeOriginalAttachments: false }, client, undefined,
+      { originalEmailId: 'o1', to: ['x@y.example'], includeOriginalAttachments: false }, client, undefined, false,
     );
     assert.deepEqual(d.notes, [
       '1 attachment(s), including 0 image(s), were not included because includeOriginalAttachments is false.',
@@ -564,13 +578,13 @@ describe('composeForward — draft-only orchestration', () => {
   });
   it('an ordinary forward of a message with a plain attachment says nothing at all', async () => {
     const { client } = spyClient();
-    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.equal(d.notes, undefined);
   });
   it('does not call uploadAttachments when no new attachments are given', async () => {
     let uploadCalled = false;
     const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
-    await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
     assert.equal(uploadCalled, false);
   });
   it('rejects a malformed note before uploading or saving a draft', async () => {
@@ -578,7 +592,7 @@ describe('composeForward — draft-only orchestration', () => {
     await assert.rejects(
       () => composeForward(
         { originalEmailId: 'o1', to: ['x@y.example'], htmlBody: '<![CDATA[<p>FYI</p>]]>', attachments: [{ path: 'new.pdf' }] },
-        client, '/attach/root',
+        client, '/attach/root', false,
       ),
       /htmlBody contains a CDATA section/,
     );
@@ -598,7 +612,7 @@ describe('composeForward — draft-only orchestration', () => {
 
     it('tells the upload which Content-ID the note displays', async () => {
       const { client, calls } = spyClient({}, [CHART]);
-      await composeForward(NOTE_ARGS, client, '/attach/root');
+      await composeForward(NOTE_ARGS, client, '/attach/root', false);
       assert.deepEqual(calls.upload.options, { inlineCids: new Set(['chart']) });
     });
 
@@ -609,7 +623,7 @@ describe('composeForward — draft-only orchestration', () => {
           return { id, attachments: [{ blobId: 'blob-chart', cid: 'chart', size: 2048, disposition: 'inline' }] };
         },
       }, [CHART]);
-      const r = await composeForward(NOTE_ARGS, client, '/attach/root');
+      const r = await composeForward(NOTE_ARGS, client, '/attach/root', false);
       assert.deepEqual(r.notes, ['This draft embeds 1 image(s) (2 KB).']);
     });
 
@@ -618,7 +632,7 @@ describe('composeForward — draft-only orchestration', () => {
       await assert.rejects(
         () => composeForward(
           { originalEmailId: 'o1', to: ['x@y.example'], htmlBody: '<img src="cid:chart">' },
-          client, '/attach/root',
+          client, '/attach/root', false,
         ),
         (e: any) => /your note/.test(e.message) && /Quoted images appear inside the quote automatically/.test(e.message),
       );
@@ -628,7 +642,7 @@ describe('composeForward — draft-only orchestration', () => {
 
     it('does not re-read the draft for an ordinary forward', async () => {
       const { client, calls } = spyClient();
-      await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+      await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined, false);
       assert.deepEqual(calls.gets, ['o1']);
     });
 
@@ -636,7 +650,7 @@ describe('composeForward — draft-only orchestration', () => {
       const { client, calls } = spyClient({}, [CHART]);
       await composeForward(
         { ...NOTE_ARGS, attachments: '[{"path":"chart.png","cid":"chart"}]' },
-        client, '/attach/root',
+        client, '/attach/root', false,
       );
       assert.deepEqual(calls.upload.options, { inlineCids: new Set(['chart']) });
     });
@@ -646,7 +660,7 @@ describe('composeForward — draft-only orchestration', () => {
       await assert.rejects(
         () => composeForward(
           { originalEmailId: 'o1', to: ['x@y.example'], htmlBody: '<p>FYI</p><img src="cid:missing"><![CDATA[x]]>' },
-          client, '/attach/root',
+          client, '/attach/root', false,
         ),
         /htmlBody contains a CDATA section/,
       );

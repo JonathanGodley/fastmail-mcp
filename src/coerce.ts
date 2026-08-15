@@ -34,6 +34,25 @@ export class InvalidInputError extends Error {
   }
 }
 
+// Tagged error for a well-formed reference that simply matched nothing — a missing email,
+// or an attachmentId no part claims. It is deliberately NOT an InvalidInputError: this is
+// the class download_attachment collapses into its generic "Attachment download failed"
+// message so a read cannot be used to confirm what a mailbox holds (see
+// docs/conventions.md, "INPUT-FORM errors vs EXISTENCE errors").
+//
+// It exists so a caller that must NOT collapse it can tell an existence failure apart from
+// a transport failure by class rather than by matching message text — the compose path
+// attaching part of an existing message needs that, because there a plain Error would
+// surface as "server bug" for what is squarely the caller's own mistake. Anything left
+// unhandled maps to InternalError exactly as a plain Error did, so adding the tag changed
+// no existing behaviour.
+export class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
 // Some MCP clients (e.g. Claude Cowork as of 2026-04-08, issue #54) stringify
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.
@@ -391,10 +410,25 @@ export function parseAddress(input: string): { name?: string; email: string } {
   return { email: trimmed };
 }
 
-// One file-to-attach spec as it arrives from a tool call (before path confinement
-// and upload, which happen in jmap-client.ts).
+// One thing-to-attach spec as it arrives from a tool call (before path confinement,
+// gating and upload/resolution, which happen in jmap-client.ts).
+//
+// THREE SOURCES, exactly one per item. They are three ways to name the bytes, not three
+// optional extras, and each is gated separately (see uploadAttachments):
+//
+//   path                    a local file, read off disk and uploaded (FASTMAIL_ATTACH_DIR)
+//   blobId                  content already in the account's blob store
+//   emailId + attachmentId  a part of an existing message, resolved to its blob
+//
+// Every source field is optional HERE because the shape is a union that TypeScript cannot
+// express as one interface without making every consumer narrow it; coerceAttachments is
+// the gate that guarantees exactly one source is set, and it is the only producer of these
+// objects.
 export interface AttachmentSpec {
-  path: string;
+  path?: string;
+  blobId?: string;
+  emailId?: string;
+  attachmentId?: string;
   name?: string;
   contentType?: string;
   // The Content-ID an html body references this file by, to display it inside the message
@@ -404,19 +438,56 @@ export interface AttachmentSpec {
   cid?: string;
 }
 
-const ATTACHMENT_KEYS = new Set(['path', 'name', 'contentType', 'cid']);
+// The keys that NAME the bytes. Exactly one source per item; `emailId` and `attachmentId`
+// are one source spelled in two keys, so they are required together.
+const ATTACHMENT_SOURCE_KEYS = ['path', 'blobId', 'emailId', 'attachmentId'] as const;
+// The keys that DESCRIBE whatever the source named. Valid on every source.
+const ATTACHMENT_COMMON_KEYS = ['name', 'contentType', 'cid'] as const;
+const ATTACHMENT_KEYS = new Set<string>([...ATTACHMENT_SOURCE_KEYS, ...ATTACHMENT_COMMON_KEYS]);
 
 // The item shape named in every whole-parameter refusal below, kept in one place so the
-// three copies cannot drift from the schema.
-const ATTACHMENT_ITEM_SHAPE = '{ path, name?, contentType?, cid? }';
+// copies cannot drift from the schema.
+const ATTACHMENT_ITEM_SHAPE = '{ path | blobId | emailId+attachmentId, name?, contentType?, cid? }';
+
+// The sentence every source-selection refusal ends with, so the three sources are always
+// spelled out the same way wherever the caller lands.
+const ATTACHMENT_SOURCE_RULE =
+  "Give exactly one source per item: 'path' (a local file), 'blobId' (content already in " +
+  "the account), or 'emailId' + 'attachmentId' together (a part of an existing message).";
+
+// Which source an item names. `null` counts as ABSENT, not as a value: a lenient client
+// that fills every declared key emits null for the ones it has nothing to say about, and
+// reading those as "this item names four sources" would reject every call from such a
+// client.
+function namedAttachmentSourceKeys(obj: Record<string, unknown>): string[] {
+  return ATTACHMENT_SOURCE_KEYS.filter((k) => obj[k] !== undefined && obj[k] !== null);
+}
+
+// Read one required string key off an item, rejecting a missing/blank/non-string value by
+// index. Returns the trimmed value: an accidental leading/trailing space would otherwise
+// reach the filesystem (path) or the server (an id) and read as "not found".
+function requireAttachmentString(obj: Record<string, unknown>, key: string, index: number, hint: string): string {
+  const value = obj[key];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new McpError(ErrorCode.InvalidParams, `attachments[${index}] is missing a non-empty '${key}'; ${hint}`);
+  }
+  return value.trim();
+}
 
 // Coerce the `attachments` tool param into AttachmentSpec[] | undefined. Accepts a
 // real array, or a JSON-string array from lenient clients (mirroring
 // coerceStringArray). Per element it REJECTS — never silently drops — a non-object,
-// a spec missing `path`, or an unexpected per-item key, naming the index so the
-// caller can fix it (assertKnownParams is top-level only and won't catch nested
-// keys, so this is the sole guard for the item shape). A bare string element is
-// rejected rather than guessed as a path (too magic); a JSON-object string is parsed.
+// an item naming no source or more than one, an `emailId`/`attachmentId` half-pair, or an
+// unexpected per-item key, naming the index so the caller can fix it (assertKnownParams is
+// top-level only and won't catch nested keys, so this is the sole guard for the item
+// shape). A bare string element is rejected rather than guessed as a path (too magic); a
+// JSON-object string is parsed.
+//
+// A key belonging to a source the item did not choose is a REJECTION, not a silent ignore:
+// `{ blobId, attachmentId }` reads as two different intentions, and picking one of them
+// would attach bytes the caller did not ask for. Because the only source-specific keys ARE
+// the source keys, the exactly-one-source rule is what enforces that — there is no second
+// per-source allowlist pass to drift from it.
 export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined {
   if (value === undefined || value === null) return undefined;
 
@@ -447,26 +518,71 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
           throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] is a string that isn't valid JSON; pass an object with a path.`);
         }
       } else {
-        throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] must be an object with a path, not a bare string.`);
+        throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] must be an object naming a source, not a bare string. ${ATTACHMENT_SOURCE_RULE}`);
       }
     }
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] must be an object with a path.`);
+      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] must be an object shaped ${ATTACHMENT_ITEM_SHAPE}.`);
     }
     const obj = item as Record<string, unknown>;
     const unknownKeys = Object.keys(obj).filter(k => !ATTACHMENT_KEYS.has(k));
     if (unknownKeys.length > 0) {
       throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...ATTACHMENT_KEYS].join(', ')}`);
     }
-    if (typeof obj.path !== 'string' || obj.path.trim() === '') {
-      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] is missing a non-empty 'path'.`);
+
+    // Pick the source BEFORE validating anything else, so a caller that named two sources
+    // (or none) is told that rather than being told the first source's value is malformed.
+    const named = namedAttachmentSourceKeys(obj);
+    const namesMessagePart = named.includes('emailId') || named.includes('attachmentId');
+    // Count SOURCES, not keys: emailId+attachmentId is one source spelled in two keys, so
+    // counting keys would wave through `{ blobId, attachmentId }` — the exact mix this rule
+    // exists to refuse.
+    const distinctSources =
+      (named.includes('path') ? 1 : 0) + (named.includes('blobId') ? 1 : 0) + (namesMessagePart ? 1 : 0);
+    if (named.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] names no source. ${ATTACHMENT_SOURCE_RULE}`);
     }
-    // Trim the path (consistent with coerceStringArray's lenient coercion): an accidental
-    // leading/trailing space would otherwise reach the filesystem and read as "file not found".
-    const spec: AttachmentSpec = { path: obj.path.trim() };
+    if (distinctSources > 1) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `attachments[${i}] names more than one source (${named.join(', ')}). ${ATTACHMENT_SOURCE_RULE}`,
+      );
+    }
+
+    const spec: AttachmentSpec = {};
+    if (namesMessagePart) {
+      // Both halves or neither. One alone is a half-written reference, and guessing the
+      // other half is not possible — an emailId names a message, not a part of one.
+      spec.emailId = requireAttachmentString(obj, 'emailId', i, "a message part is named by 'emailId' AND 'attachmentId' together.");
+      spec.attachmentId = requireAttachmentString(obj, 'attachmentId', i, "a message part is named by 'emailId' AND 'attachmentId' together.");
+    } else if (named[0] === 'blobId') {
+      spec.blobId = requireAttachmentString(obj, 'blobId', i, 'give the blobId of content already in the account.');
+      // A blob is bytes and nothing else: unlike a file it has no basename to fall back on
+      // and unlike a message part it carries no declared filename, so there is nothing to
+      // derive a name from. Defaulting one would put an invented filename on outgoing mail,
+      // so this rejects instead — the fail-loud posture the rest of this coercer takes.
+      if (typeof obj.name !== 'string' || obj.name.trim() === '') {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `attachments[${i}] gives a blobId but no 'name'. A stored blob carries no filename, so name the file recipients will see.`,
+        );
+      }
+    } else {
+      spec.path = requireAttachmentString(obj, 'path', i, 'give the file to attach.');
+    }
+
     if (obj.name !== undefined) {
       if (typeof obj.name !== 'string') throw new McpError(ErrorCode.InvalidParams, `attachments[${i}].name must be a string.`);
-      spec.name = obj.name;
+      // A BLANK name reads as absent, so every source falls back to the default it
+      // documents: the file's basename, or the message part's own name. Kept here rather
+      // than at each consumer because `??` cannot see the difference — `'' ?? info.name`
+      // is `''`, which would put a nameless attachment on outgoing mail while the schema
+      // promised a default. The trim also stops a stray space from becoming the filename
+      // recipients see. The blobId branch above rejects a blank name outright instead,
+      // and the two agree: a blob has no default to fall back to, so there "absent" is
+      // not a usable state.
+      const trimmed = obj.name.trim();
+      if (trimmed) spec.name = trimmed;
     }
     if (obj.contentType !== undefined) {
       if (typeof obj.contentType !== 'string') throw new McpError(ErrorCode.InvalidParams, `attachments[${i}].contentType must be a string.`);

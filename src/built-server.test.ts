@@ -170,6 +170,77 @@ describe('every error path reaching tool output is redacted', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 1b. The capability flag as the real process parses it
+// ---------------------------------------------------------------------------
+//
+// FASTMAIL_ALLOW_BLOB_ATTACH opens a send capability, so how its value is PARSED is a
+// security property, not a formatting detail: under a truthy-string test the value "false"
+// would enable the capability the operator wrote it to refuse. That parse runs once at
+// module load in the real process, against the real environment — an in-process unit test
+// cannot reach it, because the flag is resolved before any exported function is called. So
+// the check spawns the built server and reads the clause it advertises in tools/list, which
+// is derived from the same resolved value the handlers use.
+
+describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
+  before(() => assertDistIsCurrent());
+
+  // The advertised attachments description of create_draft, from a server started with the
+  // given flag value. Every FASTMAIL_* name is stripped from the child environment first, so
+  // an ambient setting cannot be what the assertion sees.
+  async function attachmentsClause(value: string | undefined): Promise<string> {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+    }
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+    if (value !== undefined) env.FASTMAIL_ALLOW_BLOB_ATTACH = value;
+
+    const client = createClient({ env });
+    try {
+      await client.init();
+      const result: any = await client.list();
+      const tool = result.tools.find((t: any) => t.name === 'create_draft');
+      return String(tool.inputSchema.properties.attachments.description);
+    } finally {
+      client.close();
+    }
+  }
+
+  it('treats "false" as disabled — the parse this strictness exists for', async () => {
+    const clause = await attachmentsClause('false');
+    assert.match(clause, /blobId and emailId\+attachmentId are disabled until FASTMAIL_ALLOW_BLOB_ATTACH=true/);
+  });
+
+  it('leaves the capability off when the variable is unset', async () => {
+    const clause = await attachmentsClause(undefined);
+    assert.match(clause, /disabled until FASTMAIL_ALLOW_BLOB_ATTACH=true/);
+  });
+
+  it('enables it on "true" and on "1"', async () => {
+    for (const value of ['true', '1']) {
+      const clause = await attachmentsClause(value);
+      assert.match(clause, /blobId and emailId\+attachmentId are ENABLED/, `value ${value} did not enable it`);
+    }
+  });
+
+  // The values an operator reaching for "on" actually types. All of them fail CLOSED today,
+  // which is the right direction for a capability gate — a flag that half-works is worse
+  // than one that plainly did not take. Pinned so a later "be more helpful about spellings"
+  // change has to be a deliberate edit here, and so the same widening cannot arrive by
+  // accident and drag "FALSE"/"False" in with it.
+  it('leaves every other spelling disabled, including the ones that look like yes', async () => {
+    for (const value of ['TRUE', 'True', 'yes', 'on', '0', '2', ' ', '']) {
+      const clause = await attachmentsClause(value);
+      assert.match(
+        clause,
+        /blobId and emailId\+attachmentId are disabled until FASTMAIL_ALLOW_BLOB_ATTACH=true/,
+        `value ${JSON.stringify(value)} unexpectedly enabled the capability`,
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. Credential logging reaching stderr
 // ---------------------------------------------------------------------------
 

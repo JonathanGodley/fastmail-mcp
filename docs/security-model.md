@@ -1,9 +1,16 @@
 # Path-confinement security model
 
-Two tools touch the local filesystem: attachment download (writes a file) and
-send-with-attachment (reads a file). Both are constrained to a configured directory and
-can never be told to escape it. This spans both features, so the model lives here; the
-per-feature rationale is in issues #5 (download) and #1 (attachments).
+Two tools touch the local filesystem: attachment download (writes a file, under
+`FASTMAIL_DOWNLOAD_DIR`) and send-with-attachment (reads a file, under
+`FASTMAIL_ATTACH_DIR`). Both are constrained to a configured directory and can never be
+told to escape it. This spans both features, so the model lives here; the per-feature
+rationale is in issues #5 (download) and #1 (attachments).
+
+An `attachments` item can also name content that is **already in the account** — a
+`blobId`, or a part of an existing message — and neither of those crosses the local-disk
+boundary at all. `FASTMAIL_ATTACH_DIR` therefore has nothing to say about them; they are
+gated separately on `FASTMAIL_ALLOW_BLOB_ATTACH`, and the posture behind that second gate
+is its own section below.
 
 ## Confinement is always on, never bypassable
 
@@ -195,9 +202,12 @@ file is **refused** (it would ship visibly broken and the caller can fix it from
 alone), while a supplied file nothing displays is **attached anyway and reported as such**
 (those bytes are the caller's, and dropping them silently would be the worse failure).
 
-The refusals stay honest about the opt-in. When `FASTMAIL_ATTACH_DIR` is unset there is no
-way to supply the missing file at all, so the "add it to attachments" repair is dropped from
-the wording rather than pointing the caller at a parameter that cannot work on this server.
+The refusals stay honest about the opt-in, and about **both** of them. When neither
+`FASTMAIL_ATTACH_DIR` nor `FASTMAIL_ALLOW_BLOB_ATTACH` is set there is no way to supply the
+missing image at all, so the "add it to attachments" repair is dropped from the wording
+rather than pointing the caller at a parameter that cannot work on this server. Either gate
+being open restores the repair, because either source can supply the image — so the flag
+threaded into the refusal builders is the combination, not the attach directory alone.
 
 ### forward_email attachment postures (#30)
 
@@ -230,6 +240,67 @@ the wording rather than pointing the caller at a parameter that cannot work on t
   no client-side cap applies — Fastmail's own message-size limit governs, and an oversized
   send fails loudly server-side. Parity with `edit_draft`'s carry, which re-references the
   same way.
+
+## Attaching in-account content is its own opt-in (`FASTMAIL_ALLOW_BLOB_ATTACH`)
+
+An `attachments` item names its bytes in one of three ways, and the gates split by which
+boundary the source crosses, not by which tool is calling:
+
+- `path` reads a **local file** and emails it out. That is the exfiltration vector
+  `FASTMAIL_ATTACH_DIR` exists for, and it is unchanged by this feature.
+- `blobId` and `emailId` + `attachmentId` reference content the account **already holds**.
+  No byte is read off disk, no path guard is in play, and nothing is uploaded — the part is
+  re-referenced by blob, the same mechanism a quote or forwarded block already uses. So
+  `FASTMAIL_ATTACH_DIR` has nothing to say about them, and gating them on it would be a
+  guard over a boundary they never cross. They are gated on `FASTMAIL_ALLOW_BLOB_ATTACH`
+  instead, off by default, parsed strictly (`true`/`1` only, so a literal `"false"` cannot
+  enable what the operator wrote it to refuse), and refused per source with a message naming
+  the variable.
+
+**What `emailId` + `attachmentId` actually adds is provenance loss, not reach.** The reach
+is already available with the gate closed: `forward_email` produces a draft carrying the
+original's attachments, and `send_draft` transmits it — so a caller that can forward can
+already put another message's attachment in front of an arbitrary recipient. What changes is
+what the recipient and the account can see afterwards. A forward carries the visible
+forwarded-message block and records `X-Forwarded-Message-Id` on the draft; a fresh draft with
+a blob-attached part carries neither, so nothing on the sent message says where the file came
+from. The honest statement is therefore *equal reach, weaker after-the-fact detectability* —
+not "no new capability".
+
+**`blobId` reaches further than an attachment listing, and this is stated because it is easy
+to get wrong.** The whole-message `blobId` is in `EMAIL_PROPERTIES_COMPACT`: it is emitted in
+the DEFAULT output of every list, search and get, with no `raw` needed. So with the gate open,
+a caller holding ordinary read output can attach a **complete raw RFC822 message** — the same
+bytes `forward_email`'s `asAttachment` mode produces, with the full transport-header and
+Sent-copy-`Bcc` exposure documented above — to a fresh draft that carries none of a forward's
+provenance. It is not true that blobIds only come from attachment reads.
+
+**Decision: `blobId` is NOT restricted to ids surfaced by `get_email_attachments`.** The
+restriction was considered and declined, on the grounds that it would cost real capability
+while buying no security:
+
+- It is not enforceable without new state. A blobId is an opaque server-assigned string;
+  deciding whether a given one "came from an attachment listing" would mean either keeping a
+  server-side memory of what this process has emitted (lost on restart, and a per-session
+  allowlist is not a security boundary) or issuing an extra read per item to re-derive the
+  legitimate set — and the caller can always run that read itself and pass the id back.
+- It would not close the raw-message hole anyway: a message's own blobId is reachable from
+  `get_email_attachments` on any message that has a `message/rfc822` part, and from a forward.
+- It would break the legitimate case the parameter exists for — attaching content the caller
+  obtained from any read — while the id it would refuse is one call away.
+
+The mitigation is the gate itself: the capability is off until an operator turns it on, and
+the reach it grants is documented here rather than implied. `emailId` + `attachmentId` is the
+narrower form and the one to prefer, because it resolves through the single attachment
+resolution path and cannot name a whole message.
+
+**A positional `attachmentId` is refused on the way out.** `download_attachment` accepts an
+entry number (`0`, `1`, …) because a wrong read is a wrong read and costs nothing. Attaching
+is different: the mis-resolved file is baked into a draft that `send_draft` then transmits,
+so an `attachmentId` that resolved **only through the entry-number fallback** is rejected on
+the compose path. The refusal is decided from **how the resolver matched**, never from
+whether the string looks numeric — `parseInt` accepts `"2abc"`, so a string test would both
+over-match (a real `partId` of `"2"`) and miss.
 
 ## `originalEmailId` is an in-account read-and-embed primitive (accepted residual)
 

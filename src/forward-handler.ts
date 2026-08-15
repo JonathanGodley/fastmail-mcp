@@ -311,6 +311,7 @@ export interface ForwardClient {
   uploadAttachments(
     specs: AttachmentSpec[],
     attachDir: string | undefined,
+    allowBlobAttach: boolean,
     options?: UploadAttachmentsOptions,
   ): Promise<AttachmentPart[]>;
   createDraft(params: ForwardParams): Promise<string>;
@@ -330,12 +331,14 @@ export interface ComposeForwardResult {
 // (marking the original forwarded + read), resolved from the draft's recorded
 // X-Forwarded-Message-Id header (#60; see docs/conventions.md "Draft provenance"),
 // recorded on both inline and asAttachment forwards.
-// Mirrors composeReply so the index handler stays a thin wrapper. attachDir is passed
-// in (resolved by the caller) so this reads no environment itself.
+// Mirrors composeReply so the index handler stays a thin wrapper. attachDir and
+// allowBlobAttach are passed in (resolved by the caller) so this reads no environment
+// itself; between them they say which attachment SOURCES this server will accept.
 export async function composeForward(
   args: any,
   client: ForwardClient,
   attachDir: string | undefined,
+  allowBlobAttach: boolean,
 ): Promise<ComposeForwardResult> {
   const originalEmailId = args?.originalEmailId;
   if (!originalEmailId) {
@@ -354,14 +357,14 @@ export async function composeForward(
   const { forwardParams, inlinePlan, quoteImages, carry } = buildForwardParams(
     args,
     originalEmail,
-    { specs, attachmentsEnabled: !!attachDir },
+    { specs, attachmentsEnabled: !!attachDir || allowBlobAttach },
   );
 
   // Upload NEW attachments (if any) after the pure builder and append them behind
   // the carried/.eml parts.
   let uploaded: AttachmentPart[] | undefined;
   if (specs?.length) {
-    uploaded = await client.uploadAttachments(specs, attachDir, { inlineCids: inlinePlan.inlineCids });
+    uploaded = await client.uploadAttachments(specs, attachDir, allowBlobAttach, { inlineCids: inlinePlan.inlineCids });
     forwardParams.attachments = [...(forwardParams.attachments ?? []), ...uploaded];
   }
 

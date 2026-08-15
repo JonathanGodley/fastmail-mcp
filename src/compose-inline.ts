@@ -39,7 +39,8 @@ export type AuthoredInlineSurface = 'compose' | 'note';
  * Passed in rather than read from the tool args, because a lenient client may send the whole
  * attachments array as a JSON string: a check reading the raw argument would see no items
  * and wave through a message whose images are all missing. `attachmentsEnabled` rides along
- * because a refusal must not suggest supplying a file on a server that cannot attach one.
+ * because a refusal must not suggest supplying a file on a server that cannot attach one —
+ * true when EITHER attachment source is enabled, since either one can supply the image.
  */
 export interface AuthoredInlineContext {
   specs?: AttachmentSpec[];
@@ -58,7 +59,12 @@ export interface AuthoredInlineInput {
   htmlShips: boolean;
   /** The already-coerced attachment specs (canonical Content-IDs — see coerceAttachments). */
   specs?: AttachmentSpec[];
-  /** False when FASTMAIL_ATTACH_DIR is unset, which changes what a repair may suggest. */
+  /**
+   * False when this server can attach nothing at all — neither a local file
+   * (FASTMAIL_ATTACH_DIR) nor content already in the account (FASTMAIL_ALLOW_BLOB_ATTACH).
+   * It changes what a repair may suggest: with either source open, "add an attachments
+   * item" is a repair the caller can actually carry out.
+   */
   attachmentsEnabled: boolean;
   surface: AuthoredInlineSurface;
 }

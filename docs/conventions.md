@@ -505,7 +505,8 @@ quadratic serializer** below), so an `InternalError` would not merely be inaccur
 would invite the bare retry that repeats the cost.
 
 **One deliberate carve-out:** `download_attachment` returns `InternalError` for a bad
-`emailId`/`attachmentId`. Its local catch collapses non-path errors to a generic message
+`emailId`/`attachmentId` — `download_attachment` alone, not every consumer of the lookup
+underneath it (see the compose re-raise below). Its local catch collapses non-path errors to a generic message
 on purpose, so it does not leak attachment metadata (see `docs/security-model.md`). So a
 bad id is `InvalidParams` on `get_email`/`get_thread` but `InternalError` on
 `download_attachment` — an accepted, documented asymmetry.
@@ -529,8 +530,26 @@ not a shape this tool accepts", which is answerable from the caller's own string
   DOES resolve leaves the caller retrying a request that can never succeed, with no way
   to learn that a different reference form is required. Neither message reveals a blobId,
   a filename, or a count.
-- **Existence failures** — a well-formed reference that simply matches nothing — stay a
-  plain `Error` and collapse to the generic "Attachment download failed" message.
+- **Existence failures** — a well-formed reference that simply matches nothing — throw
+  `NotFoundError` and collapse to the generic "Attachment download failed" message.
+
+**That split is `download_attachment`'s contract, not a promise to every caller**, and the
+difference became load-bearing when `getAttachmentInfo` gained a third caller: an
+`attachments` item naming `emailId` + `attachmentId`. There the generic collapse is wrong.
+The carve-out is justified by a READ not confirming what a mailbox holds, and a compose is
+not a read: the ids came from this same caller moments earlier, so a mistyped one is
+squarely caller-fixable, while an `InternalError` says "server bug" and invites a retry that
+can never succeed. `uploadAttachments` therefore re-raises `NotFoundError` as
+`InvalidInputError`, naming the attachments index and echoing only the caller's own ids —
+which `get_email` and `get_email_attachments` would answer for anyway.
+
+`NotFoundError` exists so that re-raise can be made **by class**. Matching the message text
+would reintroduce exactly the string-coupling this file records removing elsewhere, and
+would catch a transport failure that happened to read "not found". A plain `Error` cannot be
+told apart from a socket failure at all. Anything that does not catch the tag still maps to
+`InternalError`, so adding it changed no existing behaviour — it only made the distinction
+available to a caller that needs it. **A new caller must make the same call consciously**:
+neither class is a default to inherit by accident.
 
 Mechanically, `download_attachment`'s local catch **re-throws** `InvalidInputError`
 rather than mapping it there, so the top-level branch applies the `InvalidParams` mapping
@@ -904,10 +923,12 @@ MIME header, so it is the one direction that gets a vet rather than a comparison
   body ships, or the body references something else — is still attached as an ordinary
   file, and the result says so. A body reference with no matching item is the reverse case
   and is refused outright, because that one ships visibly broken.
-- **The refusal is honest about the opt-in.** When `FASTMAIL_ATTACH_DIR` is unset there is
-  no way to supply the missing file at all, so the wording drops the "add it to
-  attachments" repair rather than pointing at a parameter that cannot work. The flag is
-  threaded into the refusal builders for exactly that reason.
+- **The refusal is honest about the opt-in.** When NEITHER attachment source is enabled —
+  no `FASTMAIL_ATTACH_DIR` for a local file and no `FASTMAIL_ALLOW_BLOB_ATTACH` for content
+  already in the account — there is no way to supply the missing file at all, so the wording
+  drops the "add it to attachments" repair rather than pointing at a parameter that cannot
+  work. Either gate being open restores the repair, because either source can supply the
+  image. The combined flag is threaded into the refusal builders for exactly that reason.
 
 ## Index tightening: `download_attachment`'s entry-number form
 
@@ -937,6 +958,21 @@ appends body-routed parts after it, so indices into the old listing still mean w
 did. They remain unstable in general — any change to what the message or the server
 reports moves them — which is why the tool description says to prefer a
 `partId`/`blobId`/`cid` for any reference that will be reused.
+
+**The form is READ-ONLY: it is refused when the reference feeds outgoing mail.** The same
+`attachmentId` grammar is now accepted in a second place — an `attachments` item naming a
+part of an existing message — and there the positional form is rejected. The asymmetry is
+the consequence, not the direction of travel: a wrong download is a wrong file on disk and
+costs one retry, while a wrong attach is baked into a draft that `send_draft` then
+transmits, with nothing on the sent message to show it was wrong. So the resolver reports
+WHICH form matched (`partId` / `blobId` / `cid` / `index`) and the compose path refuses
+`index`.
+
+That refusal is defined by **how the resolver matched, never by how the string looks**.
+A looks-numeric test would fail in both directions at once: `parseInt` accepts `"2abc"`
+(which the resolver refuses outright as unusable), and a real `partId` of `"2"` is a
+perfectly valid exact reference that such a test would wrongly refuse. This is the same
+trap the `parseInt` reversal above closed, met from the other side.
 
 ## Draft provenance: how a draft names the message it came from
 

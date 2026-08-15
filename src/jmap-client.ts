@@ -1,6 +1,7 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, PathAccessError, InvalidInputError, NotFoundError } from './coerce.js';
+import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml } from './reply-quote.js';
 import { isSettableMessageId } from './forward-handler.js';
@@ -156,6 +157,18 @@ function validateContentType(value: string, index: number): string {
   return v;
 }
 
+// The opt-in gate for attaching content that is ALREADY in the account, named per source so
+// the refusal says which key it refused and which variable enables it — the shape the
+// attach-directory gate set. InvalidInputError rather than PathAccessError: no filesystem
+// path is involved on these sources, and PathAccessError is the tag for path decisions.
+function assertBlobAttachEnabled(allowBlobAttach: boolean, index: number, source: string): void {
+  if (allowBlobAttach) return;
+  throw new InvalidInputError(
+    `attachments[${index}] attaches by ${source}, which is disabled. ` +
+    'Set FASTMAIL_ALLOW_BLOB_ATTACH=true to allow attaching content already in the account, then restart the server to enable it.'
+  );
+}
+
 /**
  * Substitute `{placeholder}` slots in a JMAP session URL template (RFC 8620 §1.6.2 —
  * downloadUrl, uploadUrl) with values inserted LITERALLY.
@@ -211,7 +224,19 @@ export interface AttachmentInfo {
   type: string;
   name: string;
   size?: number;
+  /**
+   * WHICH form of the caller's `attachmentId` matched (see resolveAttachmentRef).
+   *
+   * Non-optional so a consumer that cares cannot forget to ask. Only one does: attaching a
+   * message part to outgoing mail refuses `'index'`, because a positional reference names a
+   * different file whenever the listing shifts and the mistake would be baked into a draft
+   * that send_draft then transmits. The read path (download_attachment) keeps the form.
+   */
+  matchedBy: AttachmentRefMatch;
 }
+
+/** How resolveAttachmentRef matched a reference; `'index'` is the positional fallback. */
+export type AttachmentRefMatch = 'partId' | 'blobId' | 'cid' | 'index';
 
 export interface JmapRequest {
   using: string[];
@@ -388,10 +413,16 @@ export interface EmailAttachmentsResult {
  * the caller; a well-formed reference that simply matches nothing returns undefined
  * and becomes the tool's generic not-found, which deliberately reveals no mailbox
  * metadata. That input-vs-existence split is documented in docs/conventions.md.
+ *
+ * WHICH form matched is returned alongside the part, because one consumer has to refuse the
+ * positional form: attaching a part to outgoing mail (uploadAttachments) rejects a match
+ * that came only from the entry-number fallback. That has to be decided from what the
+ * resolver DID, never from what the string looks like — `parseInt` accepts "2abc", so a
+ * looks-numeric test would both over-match (a partId of "2" is a real part) and miss.
  */
-function resolveAttachmentRef(parts: any[], attachmentId: string): any {
+function resolveAttachmentRef(parts: any[], attachmentId: string): { part: any; matchedBy: AttachmentRefMatch } | undefined {
   const byPartId = parts.find((p: any) => p?.partId === attachmentId);
-  if (byPartId) return byPartId;
+  if (byPartId) return { part: byPartId, matchedBy: 'partId' };
 
   // First match, deliberately NOT rejected when several parts share the blobId. Blobs
   // are content-addressed, so sharing one means the parts ARE the same bytes — the
@@ -400,7 +431,7 @@ function resolveAttachmentRef(parts: any[], attachmentId: string): any {
   // reject-on-ambiguity rule below belongs to the cid form, where two parts sharing a
   // Content-ID are genuinely different content.
   const byBlobId = parts.find((p: any) => p?.blobId === attachmentId);
-  if (byBlobId) return byBlobId;
+  if (byBlobId) return { part: byBlobId, matchedBy: 'blobId' };
 
   if (/^cid:/i.test(attachmentId)) {
     // First occurrence only: `cid:cid:x` names the Content-ID "cid:x". A Content-ID may
@@ -421,19 +452,20 @@ function resolveAttachmentRef(parts: any[], attachmentId: string): any {
     );
     const literalMatches = parts.filter((p: any) => p?.cid === literal);
     if (literalMatches.length > 1) throw ambiguous();
-    if (literalMatches.length === 1) return literalMatches[0];
+    if (literalMatches.length === 1) return { part: literalMatches[0], matchedBy: 'cid' };
 
     const decoded = cidKey(attachmentId);
     if (decoded !== literal) {
       const decodedMatches = parts.filter((p: any) => p?.cid === decoded);
       if (decodedMatches.length > 1) throw ambiguous();
-      if (decodedMatches.length === 1) return decodedMatches[0];
+      if (decodedMatches.length === 1) return { part: decodedMatches[0], matchedBy: 'cid' };
     }
     return undefined;
   }
 
   if (/^\d+$/.test(attachmentId)) {
-    return parts[Number(attachmentId)];
+    const part = parts[Number(attachmentId)];
+    return part ? { part, matchedBy: 'index' } : undefined;
   }
 
   // Anything parseInt would have swallowed as a number ("3a", "-1", "1.5") used to
@@ -1978,10 +2010,11 @@ export class JmapClient {
     originalEmailId?: string;
     noQuote?: boolean;
   }, options: {
-    // Whether this server can attach files at all (FASTMAIL_ATTACH_DIR is set). It changes
-    // only which repair a refusal offers: pointing at "add an attachments item" when the
-    // server would then refuse to read one is a dead end. Defaults to the attachment-capable
-    // wording, which is right for every caller that never had the gate to begin with.
+    // Whether this server can attach anything at all — a local file (FASTMAIL_ATTACH_DIR) or
+    // content already in the account (FASTMAIL_ALLOW_BLOB_ATTACH). It changes only which
+    // repair a refusal offers: pointing at "add an attachments item" when the server would
+    // then refuse every source is a dead end. Defaults to the attachment-capable wording,
+    // which is right for every caller that never had the gate to begin with.
     attachmentsEnabled?: boolean;
   } = {}): Promise<UpdateDraftResult> {
     // The caller-supplied-body guard for edit_draft. It lives here, unlike the other four
@@ -3625,8 +3658,18 @@ export class JmapClient {
    * The error split is deliberate. A malformed REFERENCE (and a part carrying no blob)
    * throws InvalidInputError, which download_attachment lets through so the caller can
    * correct what it passed. A well-formed reference that simply matches nothing, and a
-   * missing email, stay a plain `Error` that maps to a generic InternalError — that is
-   * how a lookup avoids confirming what a mailbox holds.
+   * missing email, throw NotFoundError, which download_attachment collapses into its
+   * generic message — that is how a READ avoids confirming what a mailbox holds.
+   *
+   * That split is download_attachment's contract, not a promise to every caller, and the
+   * distinction became load-bearing once this method gained a third caller. The classes
+   * above say WHAT happened; each call site decides what its own tool should say about it.
+   * uploadAttachments therefore re-raises NotFoundError as an InvalidInputError naming the
+   * attachments index: on the compose path the generic collapse would report a caller's
+   * mistyped id as a server fault, and the ids it echoes are the caller's own — a message
+   * this server would answer for anyway through get_email / get_email_attachments. A NEW
+   * caller must make the same call consciously; inheriting either class by accident is the
+   * failure mode this comment exists to stop.
    */
   async getAttachmentInfo(emailId: string, attachmentId: string): Promise<AttachmentInfo> {
     const session = await this.getSession();
@@ -3652,15 +3695,16 @@ export class JmapClient {
     const email = this.getListResult(response, 0)[0];
 
     if (!email) {
-      throw new Error('Email not found');
+      throw new NotFoundError('Email not found');
     }
 
     const parts = buildUnionParts(email).map((u) => u.part);
-    const attachment = resolveAttachmentRef(parts, attachmentId);
+    const resolved = resolveAttachmentRef(parts, attachmentId);
 
-    if (!attachment) {
-      throw new Error('Attachment not found.');
+    if (!resolved) {
+      throw new NotFoundError('Attachment not found.');
     }
+    const attachment = resolved.part;
 
     // Rejected here rather than at URL-build time because resolution is single: this one
     // check covers every consumer (metadata read, URL build, byte fetch, save-to-file),
@@ -3683,6 +3727,7 @@ export class JmapClient {
       // `|| 'attachment'` fallback (it returns that for a missing or unusable name).
       name: sanitizeDownloadFilename(attachment.name),
       size: attachment.size,
+      matchedBy: resolved.matchedBy,
     };
   }
 
@@ -3938,15 +3983,34 @@ export class JmapClient {
   }
 
   /**
-   * Confine, read, and upload each file spec, returning the JMAP attachment parts to
-   * splat into an Email. Re-checks the opt-in gate (so a caller that skipped safeReadPath
-   * can't bypass it), validates the caller contentType against the MIME token grammar,
-   * rejects an over-cap file via fstat.size BEFORE reading, then does a bounded read from
-   * the confined handle.
+   * Turn each attachment spec into the JMAP attachment part to splat into an Email.
+   *
+   * THREE SOURCES, TWO GATES. A spec names its bytes in one of three ways (see
+   * AttachmentSpec), and the two capabilities are gated independently because they cross
+   * different boundaries:
+   *
+   *  - `path` reads a local file and emails it out, so it stays behind `attachDir`
+   *    (FASTMAIL_ATTACH_DIR). Re-checked here as well as inside safeReadPath, so a caller
+   *    that skipped the path guard can't bypass the opt-in.
+   *  - `blobId` and `emailId`+`attachmentId` reference content ALREADY in the account. No
+   *    byte is read off disk, so the local-disk opt-in has nothing to say about them; they
+   *    are gated on `allowBlobAttach` (FASTMAIL_ALLOW_BLOB_ATTACH) instead. Both flags are
+   *    injected rather than read from the environment here, matching every other setting
+   *    this client takes as a parameter.
+   *
+   * The gates are per SOURCE, not per call: a batch mixing a local file and a stored blob
+   * needs both enabled, and the refusal names the variable that would enable the source it
+   * refused.
+   *
+   * The local-file path is unchanged: contentType validated against the MIME token grammar,
+   * an over-cap file rejected via fstat.size BEFORE reading, then a bounded read from the
+   * confined handle. The size caps apply to local reads ONLY — a referenced blob is never
+   * read client-side, so there is nothing to cap (same footing as the quote/forward carry;
+   * see docs/security-model.md).
    *
    * Each part is a FRESH literal built here, never the carriedAttachments shape — that one
-   * passes through a server-set `size` a strict server rejects. A file with no Content-ID
-   * is a 4-key part; a file the caller gave one is a 5-key part carrying its `cid`.
+   * passes through a server-set `size` a strict server rejects. A part with no Content-ID
+   * is a 4-key part; one the caller gave a Content-ID is a 5-key part carrying its `cid`.
    *
    * The DISPOSITION of a Content-ID-bearing part is the caller's decision expressed through
    * `inlineCids`: a part is marked `inline` only when the message being composed actually
@@ -3958,38 +4022,117 @@ export class JmapClient {
    * keeping it is what lets a later edit add the html that displays the file.
    */
   async uploadAttachments(
-    specs: { path: string; name?: string; contentType?: string; cid?: string }[],
+    specs: AttachmentSpec[],
     attachDir: string | undefined,
+    allowBlobAttach: boolean,
     options: UploadAttachmentsOptions = {},
   ): Promise<AttachmentPart[]> {
-    if (!attachDir) {
-      throw new PathAccessError(
-        'Sending attachments is disabled. Set FASTMAIL_ATTACH_DIR to the directory attachable files live in, then restart the server to enable it.'
-      );
-    }
-
-    // Two passes so a confinement/size failure orphans NO blobs. Pass 1 validates and
-    // opens every file (path confinement + per-file/total size caps) before a single
-    // upload; a bad path or oversize file anywhere in the batch rejects with zero blobs
-    // uploaded. Pass 2 reads + uploads the already-validated handles. (A network failure
-    // mid-upload can still orphan a blob — unavoidable without server-side transactions;
-    // Fastmail garbage-collects unreferenced blobs.)
+    // Two passes so a confinement/size/resolution failure orphans NO blobs. Pass 1 validates
+    // every spec — path confinement + per-file/total size caps for a local file, the gate and
+    // the part resolution for an in-account reference — before a single upload; a failure
+    // anywhere in the batch rejects with zero blobs uploaded. Pass 2 reads + uploads the
+    // already-validated handles. (A network failure mid-upload can still orphan a blob —
+    // unavoidable without server-side transactions; Fastmail garbage-collects unreferenced
+    // blobs.) Prepared entries stay in SPEC ORDER, because the compose paths map the returned
+    // parts back onto their specs by position.
     const inlineCids = options.inlineCids;
-    const opened: { handle: FileHandle; size: number; contentType: string; name: string; cid?: string }[] = [];
+    type PreparedFile = { kind: 'file'; handle: FileHandle; size: number; contentType: string; name: string; cid?: string };
+    type PreparedRef = { kind: 'ref'; blobId: string; type: string; name: string; cid?: string };
+    const prepared: (PreparedFile | PreparedRef)[] = [];
     try {
       let totalBytes = 0;
       for (let i = 0; i < specs.length; i++) {
         const spec = specs[i];
-        // contentType grammar is validated before any fs work (no handle to leak yet).
-        const contentType = spec.contentType
-          ? validateContentType(spec.contentType, i)
-          : guessContentType(spec.path);
-        const { handle, size } = await JmapClient.safeReadPath(spec.path, attachDir);
+        // contentType grammar is validated before any fs or network work on every branch.
+        const callerType = spec.contentType ? validateContentType(spec.contentType, i) : undefined;
+
+        if (spec.blobId !== undefined) {
+          assertBlobAttachEnabled(allowBlobAttach, i, 'blobId');
+          prepared.push({
+            kind: 'ref',
+            blobId: spec.blobId,
+            // A blob is bytes with no metadata attached, so there is nothing to ask the
+            // server for: the type comes from the caller, or is inferred from the name they
+            // were required to give (coerceAttachments rejects a nameless blobId). The blob's
+            // existence is not probed either — an unknown blobId fails the Email/set loudly.
+            type: callerType ?? guessContentType(spec.name as string),
+            name: spec.name as string,
+            cid: spec.cid,
+          });
+          continue;
+        }
+
+        if (spec.emailId !== undefined) {
+          assertBlobAttachEnabled(allowBlobAttach, i, 'emailId + attachmentId');
+          // getAttachmentInfo's not-found class is tuned for download_attachment, which
+          // collapses it to a generic message so a READ cannot confirm what a mailbox
+          // holds. That is wrong for a compose: here the ids came from this same caller
+          // moments ago, so a mistyped one is squarely caller-fixable and the collapse
+          // would report it as a server fault (an InternalError the caller can only
+          // retry). Re-raised by CLASS, never by matching the message text — a transport
+          // failure is not a NotFoundError and still propagates untouched.
+          let info: AttachmentInfo;
+          try {
+            info = await this.getAttachmentInfo(spec.emailId, spec.attachmentId as string);
+          } catch (e) {
+            if (e instanceof NotFoundError) {
+              throw new InvalidInputError(
+                `attachments[${i}] names emailId "${describePart(spec.emailId)}" and attachmentId ` +
+                `"${describePart(spec.attachmentId as string)}", which did not resolve to a part of an existing message. ` +
+                'List the message with get_email_attachments and pass a partId or blobId from it.'
+              );
+            }
+            throw e;
+          }
+          // A reference that resolved ONLY by position is refused on the way OUT, though the
+          // read path still honours it. Positional references shift whenever the listing
+          // does, and here the mis-resolution is baked into a draft that send_draft then
+          // transmits — a wrong file mailed out, with nothing to show it was wrong. Decided
+          // from what the resolver did, never from whether the string looks numeric.
+          if (info.matchedBy === 'index') {
+            throw new InvalidInputError(
+              `attachments[${i}] resolved attachmentId "${describePart(spec.attachmentId as string)}" only as an entry number in the part listing. ` +
+              'An entry number moves whenever the listing does, and this attaches the file to mail you may then send. ' +
+              'Pass the partId or blobId from get_email_attachments instead.'
+            );
+          }
+          prepared.push({
+            kind: 'ref',
+            blobId: info.blobId,
+            type: callerType ?? info.type,
+            name: spec.name ?? info.name,
+            cid: spec.cid,
+          });
+          continue;
+        }
+
+        // The `path` branch is the tail of a three-way dispatch, so it must not be reached
+        // by falling off the end of one. coerceAttachments guarantees exactly one source is
+        // set, but that guarantee lives in another module and a future source added there
+        // would land here silently — with `spec.path` undefined, `guessContentType` reading
+        // a default off nothing and safeReadPath resolving the attach root itself. Made
+        // explicit rather than trusted, because the failure it prevents is an attachment
+        // built from a file the caller never named.
+        if (typeof spec.path !== 'string') {
+          throw new InvalidInputError(
+            `attachments[${i}] names no source this server can attach. ` +
+            "Give exactly one of: 'path', 'blobId', or 'emailId' + 'attachmentId'."
+          );
+        }
+
+        if (!attachDir) {
+          throw new PathAccessError(
+            'Sending attachments is disabled. Set FASTMAIL_ATTACH_DIR to the directory attachable files live in, then restart the server to enable it.'
+          );
+        }
+        const path = spec.path;
+        const contentType = callerType ?? guessContentType(path);
+        const { handle, size } = await JmapClient.safeReadPath(path, attachDir);
         // Push BEFORE the size checks so the finally closes this handle even if a cap throws.
-        opened.push({ handle, size, contentType, name: spec.name ?? basename(spec.path), cid: spec.cid });
+        prepared.push({ kind: 'file', handle, size, contentType, name: spec.name ?? basename(path), cid: spec.cid });
         if (size > JmapClient.MAX_ATTACHMENT_BYTES) {
           throw new PathAccessError(
-            `attachments[${i}] (${basename(spec.path)}) is ${size} bytes, over the ${JmapClient.MAX_ATTACHMENT_BYTES}-byte per-file guard. Fastmail's own limit ultimately governs.`
+            `attachments[${i}] (${basename(path)}) is ${size} bytes, over the ${JmapClient.MAX_ATTACHMENT_BYTES}-byte per-file guard. Fastmail's own limit ultimately governs.`
           );
         }
         totalBytes += size;
@@ -4001,7 +4144,18 @@ export class JmapClient {
       }
 
       const parts: AttachmentPart[] = [];
-      for (const o of opened) {
+      for (const o of prepared) {
+        const disposition = o.cid && inlineCids?.has(o.cid) ? 'inline' : 'attachment';
+        if (o.kind === 'ref') {
+          parts.push({
+            blobId: o.blobId,
+            type: o.type,
+            name: o.name,
+            disposition,
+            ...(o.cid && { cid: o.cid }),
+          });
+          continue;
+        }
         // Bounded read of exactly `size` bytes from the validated handle (never read the
         // whole handle then check .length — that buffers a hostile oversize file first).
         const buffer = Buffer.alloc(o.size);
@@ -4013,13 +4167,13 @@ export class JmapClient {
           blobId: uploaded.blobId,
           type: uploaded.type,
           name: o.name,
-          disposition: o.cid && inlineCids?.has(o.cid) ? 'inline' : 'attachment',
+          disposition,
           ...(o.cid && { cid: o.cid }),
         });
       }
       return parts;
     } finally {
-      for (const o of opened) await o.handle.close().catch(() => {});
+      for (const o of prepared) if (o.kind === 'file') await o.handle.close().catch(() => {});
     }
   }
 

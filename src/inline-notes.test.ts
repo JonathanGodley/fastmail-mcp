@@ -266,8 +266,8 @@ describe('the refusals a call raises', () => {
     assert.equal(
       rejectDanglingCidRef('logo', DISABLED),
       'htmlBody references cid "logo" but no attachment supplies it. ' +
-      'Remove the <img> reference (sending attachments is disabled on this server — ' +
-      'FASTMAIL_ATTACH_DIR is not set — so no attachments item can supply it).',
+      'Remove the <img> reference (sending attachments is disabled on this server — neither ' +
+      'FASTMAIL_ATTACH_DIR nor FASTMAIL_ALLOW_BLOB_ATTACH is set — so no attachments item can supply it).',
     );
   });
 
@@ -399,7 +399,7 @@ describe('the refusals a call raises', () => {
   });
 
   it('drops the note author\'s repair clause when attachments are disabled', () => {
-    assert.ok(rejectNoteCidRef('logo', DISABLED).includes('FASTMAIL_ATTACH_DIR is not set'));
+    assert.ok(rejectNoteCidRef('logo', DISABLED).includes('neither FASTMAIL_ATTACH_DIR nor FASTMAIL_ALLOW_BLOB_ATTACH is set'));
   });
 });
 

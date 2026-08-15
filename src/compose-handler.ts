@@ -30,6 +30,7 @@ export interface ComposeClient {
   uploadAttachments(
     specs: AttachmentSpec[],
     attachDir: string | undefined,
+    allowBlobAttach: boolean,
     options?: UploadAttachmentsOptions,
   ): Promise<AttachmentPart[]>;
   createDraft(params: DraftParams): Promise<string>;
@@ -49,8 +50,9 @@ export interface ComposeDraftResult {
 // Orchestrate create_draft: validate the caller's bodies, coerce the recipient lists,
 // upload any attachments, then create the draft. Extracted from the index tool handler so
 // the validation and the attachment seam are unit-testable with a mock client (the
-// handler is a thin result-to-text wrapper). attachDir is passed in so this function
-// reads no environment itself. Transmission is a separate step: send_draft is the only
+// handler is a thin result-to-text wrapper). attachDir and allowBlobAttach are passed in
+// so this function reads no environment itself; between them they say which attachment
+// SOURCES this server will accept (a local file, and content already in the account). Transmission is a separate step: send_draft is the only
 // tool that submits mail.
 //
 // The body guard belongs HERE rather than in JmapClient.createDraft: that method is
@@ -61,6 +63,7 @@ export async function composeDraft(
   args: any,
   client: ComposeClient,
   attachDir: string | undefined,
+  allowBlobAttach: boolean,
 ): Promise<ComposeDraftResult> {
   const a = args ?? {};
   assertBodyInputs(a);
@@ -92,12 +95,12 @@ export async function composeDraft(
     callerHtml: htmlBody,
     htmlShips: !isBlank(htmlBody),
     specs,
-    attachmentsEnabled: !!attachDir,
+    attachmentsEnabled: !!attachDir || allowBlobAttach,
     surface: 'compose',
   });
 
   const attachments = specs?.length
-    ? await client.uploadAttachments(specs, attachDir, { inlineCids: plan.inlineCids })
+    ? await client.uploadAttachments(specs, attachDir, allowBlobAttach, { inlineCids: plan.inlineCids })
     : undefined;
 
   const emailId = await client.createDraft({

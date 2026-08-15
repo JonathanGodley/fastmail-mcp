@@ -13,13 +13,13 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { composeDraft } from './compose-handler.js';
-import { assertBodyInputs } from './body-format.js';
+import { editDraft } from './edit-draft-handler.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
@@ -216,21 +216,54 @@ function getAttachDir(): string | undefined {
   ]).value;
 }
 
-// Shared `attachments` schema + description for the compose tools. Read getAttachDir()
-// at module load (same as the download `path` description reads getDownloadDir()), and
-// render an honest disabled clause when it's unset — attachments have no fallback
-// default the way downloads do, so we must not print a phantom root.
+// Opt-in for attaching content that is ALREADY in the account — an `attachments` item
+// naming a blobId, or a part of an existing message. Separate from FASTMAIL_ATTACH_DIR
+// because it crosses a different boundary: nothing is read off local disk, so the
+// local-disk opt-in has nothing to say about it (see docs/security-model.md).
+//
+// Parsed STRICTLY: only "true" or "1" enable it. A truthy-string test would read
+// FASTMAIL_ALLOW_BLOB_ATTACH="false" as ON, turning an operator's explicit refusal into the
+// capability they refused. Same parse as the base-URL kill switch — but resolved through the
+// four-name fallback the configurable settings use, not that one's deliberate single name,
+// so a host that only forwards USER_CONFIG_* spellings can still set it.
+//
+// ENVIRONMENT-ONLY for now: there is deliberately no manifest.json user_config entry, so a
+// DXT install cannot offer this as a checkbox — exposing a capability gate in an installer
+// UI is a posture call, not an implementation detail. The four names above mean adding that
+// entry is the only change needed if the posture changes; nothing here would move.
+function getAllowBlobAttach(): boolean {
+  const info = findEnvValue([
+    'FASTMAIL_ALLOW_BLOB_ATTACH',
+    'USER_CONFIG_FASTMAIL_ALLOW_BLOB_ATTACH',
+    'USER_CONFIG_fastmail_allow_blob_attach',
+    'fastmail_allow_blob_attach',
+  ]);
+  return info.value === 'true' || info.value === '1';
+}
+
+// Shared `attachments` schema + description for the compose tools. Read getAttachDir() and
+// getAllowBlobAttach() at module load (same as the download `path` description reads
+// getDownloadDir()), and render an honest disabled clause for whichever source is off —
+// attachments have no fallback default the way downloads do, so we must not print a phantom
+// root, and a caller must not be sent at a source this server would refuse.
 function attachmentsDescription(forEdit: boolean): string {
   const dir = getAttachDir();
   const gate = dir
-    ? `Files must resolve within ${dir} (set via FASTMAIL_ATTACH_DIR); a bare filename or relative path resolves against it, and an absolute path must fall inside it.`
-    : `Attachments are disabled until FASTMAIL_ATTACH_DIR is set (restart to enable); each path will then resolve within that directory.`;
+    ? `path: files must resolve within ${dir} (set via FASTMAIL_ATTACH_DIR); a bare filename or relative path resolves against it, and an absolute path must fall inside it.`
+    : `path is disabled until FASTMAIL_ATTACH_DIR is set (restart to enable); each path will then resolve within that directory.`;
+  const blobGate = getAllowBlobAttach()
+    ? `blobId and emailId+attachmentId are ENABLED (FASTMAIL_ALLOW_BLOB_ATTACH is set to true): they attach content already in the account, so nothing is read off local disk and no size guard applies.`
+    : `blobId and emailId+attachmentId are disabled until FASTMAIL_ALLOW_BLOB_ATTACH=true is set (restart to enable).`;
   const base =
-    `Files to attach, each an object { path (required), name?, contentType?, cid? }. ${gate} ` +
-    `contentType is inferred from the file extension when omitted; an explicit contentType is echoed by Fastmail as-is (not re-detected), so a wrong value rides out wrong. ` +
+    `Things to attach, each an object { path | blobId | emailId+attachmentId, name?, contentType?, cid? }. ` +
+    `Each item names EXACTLY ONE source: path (a local file this server reads and uploads), blobId (content already in the account), or emailId + attachmentId together (a part of an existing message). ` +
+    `Naming none, naming two, or naming half of the emailId/attachmentId pair is rejected by index; so is a key belonging to a source the item did not choose. ` +
+    `A blobId item MUST also give a name — a stored blob carries no filename and none is invented for you. ` +
+    `${gate} ${blobGate} ` +
+    `contentType is inferred from the file extension when omitted (from the part's own declared type on an emailId+attachmentId item); an explicit contentType is echoed by Fastmail as-is (not re-detected), so a wrong value rides out wrong. ` +
     `Give an item a cid to EMBED it in the message body instead of hanging it off the end: reference it from htmlBody as <img src="cid:THE_CID">. ` +
     `An htmlBody reference with no matching item is rejected, and an item whose cid nothing displays (no htmlBody, or no reference to it) is still attached as an ordinary file and the result says so — a supplied file is never dropped. ` +
-    `Size caps (~25 MB/file, ~45 MB total) are a fail-fast guard — Fastmail's own limit ultimately governs.`;
+    `Size caps (~25 MB/file, ~45 MB total) are a fail-fast guard on LOCAL files only — nothing is read client-side for the other two sources — and Fastmail's own limit ultimately governs.`;
   if (!forEdit) return base;
   return base +
     ` On edit_draft this APPENDS to the draft's existing attachments (they are kept). ` +
@@ -238,21 +271,40 @@ function attachmentsDescription(forEdit: boolean): string {
     `To remove all, use clearFields:['attachments']. Passing attachments together with clearFields:['attachments'] is rejected as a conflict.`;
 }
 
+// How an `attachmentId` names a part, shared verbatim by the two places a caller supplies
+// one: download_attachment (read a part out) and an attachments item (attach a part to
+// outgoing mail). Written once because the resolver is one function — a per-site copy would
+// drift from it and from each other, and the entry-number rule differs between the sites in
+// exactly one way, which is stated here rather than left to two half-descriptions.
+const ATTACHMENT_REF_DESC =
+  'Which part to use. Four accepted forms, resolved in this fixed order: (1) a partId from get_email_attachments; (2) a blobId; (3) cid:<value> for an embedded image, using the cid from get_email — the cid: prefix is REQUIRED for this form, only the first one is stripped (cid:cid:x looks up the Content-ID "cid:x"), and a value matching more than one part is rejected rather than guessed at; (4) a plain entry number (0, 1, 2, ...) counting from the start of the get_email_attachments listing. The order is a real precedence, not a single match: every part is checked for a matching partId before any is checked for a matching blobId, and digits therefore resolve as a partId FIRST — Fastmail partIds are themselves digit strings — so the entry-number form applies only when no part claims that value. A number with anything else in it (3a, -1, 1.5) is rejected rather than silently read as an entry number. ' +
+  'The entry-number form is READ-ONLY: entry numbers are positional and shift whenever the listing does, so download_attachment accepts one for a one-off read, while attaching a part to outgoing mail rejects a reference that resolved only that way (the rejection is on how it resolved, not on how the string looks) — pass a partId or blobId there, and prefer one anywhere you will reuse the reference.';
+
 // `leadIn` prepends tool-specific context to the shared description (defaulted to ''
 // so send/reply/create/edit are untouched) — forward_email uses it to state how NEW
 // uploads relate to the original's own carried attachments.
+//
+// The item schema is FLAT: all seven keys sit in one `properties` map, with the exactly-one-
+// source rule stated in prose. Item-level `oneOf` branches would hide the key list from a
+// reader for no enforcement gain — the SDK does not validate inputSchema at all, so
+// coerceAttachments' source rules are the only real gate either way. (A TOP-LEVEL oneOf on a
+// tool's inputSchema would be worse than useless: it leaves `properties` undefined, which
+// empties that tool's TOOL_SCHEMAS key set and makes assertKnownParams reject every call.)
+// There is no `required` for the same reason: no single key is required on every item.
 function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
   return {
     type: 'array',
     items: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Path to the file to attach: an absolute path within the attach directory, or a bare filename/relative path resolved against it.' },
-        name: { type: 'string', description: "Filename recipients see (optional; defaults to the file's basename)." },
-        contentType: { type: 'string', description: 'MIME type like application/pdf (optional; inferred from the file extension when omitted).' },
+        path: { type: 'string', description: 'SOURCE file to READ off this machine and upload: an absolute path within the attach directory (FASTMAIL_ATTACH_DIR), or a bare filename/relative path resolved against it. This is the opposite direction from download_attachment\'s `path`, which is a DESTINATION written under FASTMAIL_DOWNLOAD_DIR. One of the three sources; omit it when using blobId or emailId+attachmentId.' },
+        blobId: { type: 'string', description: 'Blob already stored in this account to attach, instead of reading a file off disk (requires FASTMAIL_ALLOW_BLOB_ATTACH). Nothing is uploaded — the blob is referenced. A blob carries no filename and no type, so `name` is REQUIRED alongside it and contentType is inferred from that name unless you give one. One of the three sources.' },
+        emailId: { type: 'string', description: 'Message whose part you want to attach, used TOGETHER with attachmentId (requires FASTMAIL_ALLOW_BLOB_ATTACH). This attaches one specific part of an existing message — the way to forward a subset of another message\'s attachments. Name and content type default to the part\'s own. One of the three sources; passing it without attachmentId is rejected.' },
+        attachmentId: { type: 'string', description: 'Which part of emailId to attach. ' + ATTACHMENT_REF_DESC },
+        name: { type: 'string', description: "Filename recipients see. Optional on a path item (defaults to the file's basename) and on an emailId+attachmentId item (defaults to the part's own name); REQUIRED on a blobId item." },
+        contentType: { type: 'string', description: 'MIME type like application/pdf (optional). Defaults to the type inferred from the file extension (path), inferred from `name` (blobId), or declared by the part itself (emailId+attachmentId).' },
         cid: { type: 'string', description: 'Content-ID to embed this file under (optional), referenced from htmlBody as <img src="cid:THE_CID">. A simple token of up to 64 letters, digits, dot, dash or underscore, of your choosing — a spelling copied from HTML ("cid:logo") or a header ("<logo>") is accepted and normalised. Each item needs a distinct one. Omit it for an ordinary attachment; identifiers of the form ii-<hex>@inline.invalid are reserved for images this server embeds on your behalf and cannot be authored.' },
       },
-      required: ['path'],
     },
     description: leadIn + attachmentsDescription(forEdit),
   };
@@ -730,7 +782,7 @@ const TOOLS = [
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and is re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE QUOTE by default, and are re-sent to this reply\'s recipients — so a reply can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' The only way to send none of it is quoteOriginal=false, which omits the whole quote; there is no setting for quote text without its images. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the reply ships an HTML body — a text-only reply drops them, and the result says how many. You can also embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one does require FASTMAIL_ATTACH_DIR).',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and is re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE QUOTE by default, and are re-sent to this reply\'s recipients — so a reply can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' The only way to send none of it is quoteOriginal=false, which omits the whole quote; there is no setting for quote text without its images. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the reply ships an HTML body — a text-only reply drops them, and the result says how many. You can also embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -785,7 +837,7 @@ const TOOLS = [
       },
       {
         name: 'forward_email',
-        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default (includeOriginalAttachments). Images the original\'s body DISPLAYED are carried too, and are carried even when includeOriginalAttachments is false, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it. ' + CARRIED_IMAGE_BOUND_DESC + ' Short of not forwarding the message, there is no way to reproduce the body and leave those images behind. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. An image the block cannot display — a text-only forward, or a reference this server could not resolve to exactly one image part — rides as a regular attachment instead (subject to includeOriginalAttachments), and the result says so; asAttachment is the lossless alternative. The subject defaults to \'Fwd: <original subject>\'. You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one does require FASTMAIL_ATTACH_DIR).',
+        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default (includeOriginalAttachments). Images the original\'s body DISPLAYED are carried too, and are carried even when includeOriginalAttachments is false, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it. ' + CARRIED_IMAGE_BOUND_DESC + ' Short of not forwarding the message, there is no way to reproduce the body and leave those images behind. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. An image the block cannot display — a text-only forward, or a reference this server could not resolve to exactly one image part — rides as a regular attachment instead (subject to includeOriginalAttachments), and the result says so; asAttachment is the lossless alternative. The subject defaults to \'Fwd: <original subject>\'. You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -828,7 +880,7 @@ const TOOLS = [
             },
             includeOriginalAttachments: {
               type: ['boolean', 'string'],
-              description: lenientBool("Carry the original message's attached FILES on the forward (default true; all-or-none — to drop individual ones, save the default draft and use edit_draft's removeAttachments). This flag does not govern the images the original's body displayed: those are body content and are carried either way (see the tool description for the bound on that). What it does govern, besides the ordinary files, is an image the forwarded block could not display — that one rides as a regular attachment when this is true, and is left behind when it is false. Ignored when asAttachment is set — the .eml already embeds every original attachment."),
+              description: lenientBool("Carry the original message's attached FILES on the forward (default true; all-or-none — for a subset, either trim the saved draft with edit_draft's removeAttachments, or set this false and name the parts you want as attachments items (emailId + attachmentId), which sends them with no forwarded-message block or X-Forwarded-Message-Id to say where they came from). This flag does not govern the images the original's body displayed: those are body content and are carried either way (see the tool description for the bound on that). What it does govern, besides the ordinary files, is an image the forwarded block could not display — that one rides as a regular attachment when this is true, and is left behind when it is false. Ignored when asAttachment is set — the .eml already embeds every original attachment."),
             },
             asAttachment: {
               type: ['boolean', 'string'],
@@ -839,14 +891,14 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
             },
-            attachments: attachmentsSchemaProperty(false, "NEW files to upload and attach (the original's own attachments are carried automatically — see includeOriginalAttachments). "),
+            attachments: attachmentsSchemaProperty(false, "NEW attachments to add (the original's own attachments are carried automatically — see includeOriginalAttachments). "),
           },
           required: ['originalEmailId', 'to'],
         },
       },
       {
         name: 'create_draft',
-        description: 'Create an email draft without sending it (transmit it later with send_draft, the only tool that sends mail). Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message. You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; requires FASTMAIL_ATTACH_DIR).',
+        description: 'Create an email draft without sending it (transmit it later with send_draft, the only tool that sends mail). Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message. You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; requires FASTMAIL_ATTACH_DIR for a local file, or FASTMAIL_ALLOW_BLOB_ATTACH for content already in the account).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1642,7 +1694,7 @@ const TOOLS = [
       },
       {
         name: 'get_email_attachments',
-        description: 'List an email\'s parts, as raw JMAP part objects (partId, blobId, type, size, name, disposition, cid) rather than the simplified shape the read tools return. ' + UNION_SCOPE_DESC + ' A body-embedded part usually reports disposition:null rather than "inline", and nothing in this raw listing tells it apart from a genuinely attached file — the derived isInline flag lives only in get_email (and get_thread with includeBodies), so cross-check there before acting on an entry, e.g. before handing its blobId to edit_draft removeAttachments, which would strip an image the body still displays. ' + MINTED_CID_NONDURABILITY + ' This listing is also what download_attachment counts from: its first entry is attachmentId "0".',
+        description: 'List an email\'s parts, as raw JMAP part objects (partId, blobId, type, size, name, disposition, cid) rather than the simplified shape the read tools return. ' + UNION_SCOPE_DESC + ' A body-embedded part usually reports disposition:null rather than "inline", and nothing in this raw listing tells it apart from a genuinely attached file — the derived isInline flag lives only in get_email (and get_thread with includeBodies), so cross-check there before acting on an entry, e.g. before handing its blobId to edit_draft removeAttachments, which would strip an image the body still displays. ' + MINTED_CID_NONDURABILITY + ' This listing is where an attachmentId comes from: pass back an entry\'s partId or blobId — those are the durable handles, to download_attachment and to an attachments item that attaches this part to a new message (emailId + attachmentId, which needs FASTMAIL_ALLOW_BLOB_ATTACH). This listing is also what download_attachment\'s entry numbers count from: its first entry is attachmentId "0". Entry numbers are read-only and positional — they shift whenever the listing does, and attaching a part to outgoing mail rejects one.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1670,11 +1722,11 @@ const TOOLS = [
             },
             attachmentId: {
               type: 'string',
-              description: 'Which part to download. Four accepted forms, resolved in this fixed order: (1) a partId from get_email_attachments; (2) a blobId; (3) cid:<value> for an embedded image, using the cid from get_email — the cid: prefix is REQUIRED for this form, only the first one is stripped (cid:cid:x looks up the Content-ID "cid:x"), and a value matching more than one part is rejected rather than guessed at; (4) a plain entry number (0, 1, 2, ...) counting from the start of the get_email_attachments listing. Digits resolve as a partId FIRST — Fastmail partIds are themselves digit strings — so the entry-number form applies only when no part claims that value. A number with anything else in it (3a, -1, 1.5) is rejected rather than silently read as an entry number. Entry numbers are positional: they shift whenever the listing does, so prefer a partId, blobId or cid when you will reuse the reference.',
+              description: ATTACHMENT_REF_DESC,
             },
             path: {
               type: 'string',
-              description: `File path to save the attachment to. May be absolute or relative; relative paths resolve against ${getDownloadDir() || '~/Downloads/fastmail-mcp/'} (configurable via FASTMAIL_DOWNLOAD_DIR), so a bare filename lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected for security. To save directly into your own location, set FASTMAIL_DOWNLOAD_DIR to that root. Parent directories will be created automatically.`,
+              description: `DESTINATION file path to WRITE the attachment to. This is the opposite direction from the compose tools' attachments[].path, which is a SOURCE file read under FASTMAIL_ATTACH_DIR; this one is written under FASTMAIL_DOWNLOAD_DIR. May be absolute or relative; relative paths resolve against ${getDownloadDir() || '~/Downloads/fastmail-mcp/'} (configurable via FASTMAIL_DOWNLOAD_DIR), so a bare filename lands there in one step. Absolute paths must fall within that directory; traversal or symlink escape outside it is rejected for security. To save directly into your own location, set FASTMAIL_DOWNLOAD_DIR to that root. Parent directories will be created automatically.`,
             },
           },
           required: ['emailId', 'attachmentId'],
@@ -1990,7 +2042,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // The orchestration (fetch original, assemble reply, upload + thread attachments,
         // save the draft) lives in composeReply so it is unit-testable with a mock client;
         // this handler just maps the result to the response text.
-        const result = await composeReply(args, client, getAttachDir());
+        const result = await composeReply(args, client, getAttachDir(), getAllowBlobAttach());
         const text = `Reply draft saved successfully (Email ID: ${result.emailId}). Use send_draft to transmit it. Subject: ${result.subject}${formatInlineNotes(result.notes)}`;
         return { content: [{ type: 'text', text }] };
       }
@@ -2000,7 +2052,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // carry/.eml attachments, upload new ones, save the draft) lives in
         // composeForward so it is unit-testable with a mock client; this handler just
         // maps the result to the response text.
-        const result = await composeForward(args, client, getAttachDir());
+        const result = await composeForward(args, client, getAttachDir(), getAllowBlobAttach());
         const text = `Forward draft saved successfully (Email ID: ${result.emailId}). Use send_draft to transmit it. Subject: ${result.subject}${formatInlineNotes(result.notes)}`;
         return { content: [{ type: 'text', text }] };
       }
@@ -2009,7 +2061,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // The orchestration (body validation, recipient coercion, the contentless-draft
         // guard, attachment upload, create) lives in composeDraft so it is unit-testable
         // with a mock client; this handler just maps the result to the response text.
-        const { emailId, subject, to, cc, notes } = await composeDraft(args, client, getAttachDir());
+        const { emailId, subject, to, cc, notes } = await composeDraft(args, client, getAttachDir(), getAllowBlobAttach());
 
         const summary = [
           `Draft created successfully (Email ID: ${emailId}).`,
@@ -2029,50 +2081,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'edit_draft': {
-        const { emailId, from, subject, textBody, htmlBody, originalEmailId } = args as any;
-        const { to, cc, bcc, replyTo } = coerceRecipients(args as any);
-        const clearFields = coerceStringArray((args as any).clearFields);
-        const removeAttachments = coerceStringArray((args as any).removeAttachments);
-        // Coerce to a real boolean (lenient clients send "true"/"false"); a non-bool like
-        // "garbage" yields undefined, never true — so it can never silently drop the quote.
-        const noQuote = coerceBool((args as any).noQuote) === true;
-        if (!emailId) {
-          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
-        }
-
-        // Ordering belt only: updateDraft runs the same check and remains the authoritative
-        // seam for this tool. Running it here too means a malformed body is refused before
-        // any attachment is read off disk and pushed to the blob store, matching the other
-        // four compose paths (the guard is a pure, idempotent input check).
-        assertBodyInputs(args as any);
-
-        const editAttachmentSpecs = coerceAttachments((args as any).attachments);
-        // No inline decision is made here, unlike the compose tools: an edit's shipping body
-        // is only settled inside updateDraft (the caller's html merged with the draft's own),
-        // so that is where a supplied Content-ID is matched against the body and marked.
-        const editAttachments = editAttachmentSpecs?.length
-          ? await client.uploadAttachments(editAttachmentSpecs, getAttachDir())
-          : undefined;
-
-        const updateResult = await client.updateDraft(emailId, {
-          to,
-          cc,
-          bcc,
-          from,
-          subject,
-          textBody,
-          htmlBody,
-          replyTo,
-          clearFields,
-          attachments: editAttachments,
-          removeAttachments,
-          originalEmailId,
-          noQuote,
-        }, {
-          // Whether this server can attach files at all, which decides whether a refusal
-          // over a missing embedded image may suggest supplying it via `attachments`.
-          attachmentsEnabled: !!getAttachDir(),
-        });
+        // The orchestration (field coercion, the body guard, attachment upload/resolution,
+        // the update) lives in editDraft so it is unit-testable with a mock client — the
+        // attachment seam decides whether a capability gate refuses the call, and a gate
+        // proved only by a live run is not regression protection. This handler just maps
+        // the result to the response text.
+        const updateResult = await editDraft(args, client, getAttachDir(), getAllowBlobAttach());
 
         // JMAP content is immutable, so an edit creates a replacement draft and moves the
         // old one to Trash. The summary reports where that old copy went and what it held,

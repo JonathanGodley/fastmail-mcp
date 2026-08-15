@@ -161,6 +161,7 @@ export interface ReplyClient {
   uploadAttachments(
     specs: AttachmentSpec[],
     attachDir: string | undefined,
+    allowBlobAttach: boolean,
     options?: UploadAttachmentsOptions,
   ): Promise<AttachmentPart[]>;
   createDraft(params: ReplyParams): Promise<string>;
@@ -181,12 +182,14 @@ export interface ComposeReplyResult {
 // docs/conventions.md "Draft provenance"). Extracted from
 // the index tool handler so the attachment-threading seam (the one piece that touches
 // I/O via the injected client) is unit-testable without the MCP server or a live
-// account — the handler is a thin wrapper over this. attachDir is passed in (resolved
-// by the caller) so this function reads no environment itself.
+// account — the handler is a thin wrapper over this. attachDir and allowBlobAttach are
+// passed in (resolved by the caller) so this function reads no environment itself; between
+// them they say which attachment SOURCES this server will accept.
 export async function composeReply(
   args: any,
   client: ReplyClient,
   attachDir: string | undefined,
+  allowBlobAttach: boolean,
 ): Promise<ComposeReplyResult> {
   const originalEmailId = args?.originalEmailId;
   if (!originalEmailId) {
@@ -206,13 +209,13 @@ export async function composeReply(
 
   const { replyParams, inlinePlan, quoteImages } = buildReplyParams(args, originalEmail, {
     specs,
-    attachmentsEnabled: !!attachDir,
+    attachmentsEnabled: !!attachDir || allowBlobAttach,
   });
 
   // Upload attachments (if any) after the pure builder, then thread the parts into
   // the draft.
   const uploaded = specs?.length
-    ? await client.uploadAttachments(specs, attachDir, { inlineCids: inlinePlan.inlineCids })
+    ? await client.uploadAttachments(specs, attachDir, allowBlobAttach, { inlineCids: inlinePlan.inlineCids })
     : undefined;
 
   // The images the quote carries are APPENDED to the caller's own files, never assigned over

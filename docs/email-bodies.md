@@ -130,6 +130,14 @@ the four compose paths, *before* a reply quote or forwarded-message block is mer
 the top of `updateDraft` (`src/jmap-client.ts`, edit_draft's only caller — which is why the
 guard sits in the client method there, alongside the rest of the edit-body rules).
 
+`editDraft` (`src/edit-draft-handler.ts`) runs the same check ahead of its attachment
+coercion and upload. That is an ordering belt, not a fifth seam: `updateDraft` stays
+authoritative, and because the guard is a pure idempotent check on the caller's own input,
+running it earlier refuses nothing new — it only stops a body that was always going to be
+rejected from orphaning freshly uploaded blobs first. Its position above the attachment
+coercion matters as much as its presence: the compose paths report a body defect ahead of
+an attachments-item defect, and edit_draft agrees with them on identical input.
+
 Two constraints pin that placement:
 
 - **The merge masks the defect.** `jmap-client.ts`'s existing no-readable-body reject

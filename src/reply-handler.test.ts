@@ -203,7 +203,7 @@ describe('composeReply — draft-only orchestration', () => {
       // Serves two jobs: fetching the original, and the post-save confirmation read. The
       // recorded ids are what tell the two apart.
       getEmailById: async (id) => { calls.getId = id; calls.gets.push(id); return makeOriginal(); },
-      uploadAttachments: async (specs, dir, options) => { calls.upload = { specs, dir, options }; return uploadResult; },
+      uploadAttachments: async (specs, dir, allowBlob, options) => { calls.upload = { specs, dir, allowBlob, options }; return uploadResult; },
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
       ...over,
     };
@@ -212,7 +212,7 @@ describe('composeReply — draft-only orchestration', () => {
 
   it('saves a draft and returns its id and subject', async () => {
     const { client, calls } = spyClient();
-    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined, false);
     assert.deepEqual(r, { subject: 'Re: Project update', emailId: 'draft-9' });
     assert.equal(calls.getId, 'o1');
     assert.ok(calls.draft);
@@ -222,7 +222,7 @@ describe('composeReply — draft-only orchestration', () => {
     const { client, calls } = spyClient();
     const r = await composeReply(
       { originalEmailId: 'o1', textBody: 'hi', subject: 'Budget sign-off' },
-      client, undefined,
+      client, undefined, false,
     );
     assert.equal(calls.draft.subject, 'Budget sign-off');
     assert.equal(r.subject, 'Budget sign-off');
@@ -232,13 +232,27 @@ describe('composeReply — draft-only orchestration', () => {
     const { client, calls } = spyClient();
     const r = await composeReply(
       { originalEmailId: 'o1', textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
-      client, '/attach/root',
+      client, '/attach/root', false,
     );
     assert.equal(r.emailId, 'draft-9');
     assert.deepEqual(calls.upload, {
-      specs: [{ path: 'a.pdf' }], dir: '/attach/root', options: { inlineCids: new Set() },
+      specs: [{ path: 'a.pdf' }], dir: '/attach/root', allowBlob: false, options: { inlineCids: new Set() },
     });
     assert.deepEqual(calls.draft.attachments, UPLOADED); // threaded into createDraft
+  });
+
+  // The other half of the flag. Every case above passes false, so a handler that dropped
+  // the argument and hardcoded "off" would still satisfy them — and the only symptom would
+  // be an in-account source refused on a server configured to allow it.
+  it('passes the blob opt-in through when it is on', async () => {
+    const { client, calls } = spyClient();
+    await composeReply(
+      { originalEmailId: 'o1', textBody: 'hi', attachments: [{ emailId: 'M1', attachmentId: 'p2' }] },
+      client, undefined, true,
+    );
+    assert.deepEqual(calls.upload, {
+      specs: [{ emailId: 'M1', attachmentId: 'p2' }], dir: undefined, allowBlob: true, options: { inlineCids: new Set() },
+    });
   });
 
   // The send parameter was removed when the compose surface went draft-first (#32/#66):
@@ -247,7 +261,7 @@ describe('composeReply — draft-only orchestration', () => {
   // reply is still saved as a draft — this function has no way to transmit anything.
   it('ignores a stray send flag: the reply is drafted, never transmitted', async () => {
     const { client, calls } = spyClient();
-    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi', send: true }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi', send: true }, client, undefined, false);
     assert.equal(r.emailId, 'draft-9');
     assert.ok(calls.draft); // the only write is the draft create
   });
@@ -255,14 +269,14 @@ describe('composeReply — draft-only orchestration', () => {
   it('does not call uploadAttachments when no attachments are given', async () => {
     let uploadCalled = false;
     const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
-    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, '/attach/root');
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, '/attach/root', false);
     assert.equal(r.emailId, 'draft-9');
     assert.equal(uploadCalled, false);
   });
 
   it('requires originalEmailId', async () => {
     const { client } = spyClient();
-    await assert.rejects(() => composeReply({ textBody: 'hi' }, client, undefined), /originalEmailId is required/);
+    await assert.rejects(() => composeReply({ textBody: 'hi' }, client, undefined, false), /originalEmailId is required/);
   });
 
   it('rejects a malformed body before uploading or saving a draft', async () => {
@@ -270,7 +284,7 @@ describe('composeReply — draft-only orchestration', () => {
     await assert.rejects(
       () => composeReply(
         { originalEmailId: 'o1', htmlBody: '<![CDATA[<p>hi</p>]]>', attachments: [{ path: 'a.pdf' }] },
-        client, '/attach/root',
+        client, '/attach/root', false,
       ),
       /htmlBody contains a CDATA section/,
     );
@@ -289,7 +303,7 @@ describe('composeReply — draft-only orchestration', () => {
 
     it('tells the upload which Content-ID the note displays', async () => {
       const { client, calls } = spyClient({}, [CHART]);
-      await composeReply(NOTE_ARGS, client, '/attach/root');
+      await composeReply(NOTE_ARGS, client, '/attach/root', false);
       assert.deepEqual(calls.upload.options, { inlineCids: new Set(['chart']) });
     });
 
@@ -300,7 +314,7 @@ describe('composeReply — draft-only orchestration', () => {
           return { id, attachments: [{ blobId: 'blob-chart', cid: 'chart', size: 2048, disposition: 'inline' }] };
         },
       }, [CHART]);
-      const r = await composeReply(NOTE_ARGS, client, '/attach/root');
+      const r = await composeReply(NOTE_ARGS, client, '/attach/root', false);
       assert.deepEqual(r.notes, ['This draft embeds 1 image(s) (2 KB).']);
       assert.equal(calls.draft.attachments.length, 1);
     });
@@ -312,7 +326,7 @@ describe('composeReply — draft-only orchestration', () => {
       await assert.rejects(
         () => composeReply(
           { originalEmailId: 'o1', htmlBody: '<img src="cid:chart">' },
-          client, '/attach/root',
+          client, '/attach/root', false,
         ),
         (e: any) => /your note/.test(e.message) && /Quoted images appear inside the quote automatically/.test(e.message),
       );
@@ -324,7 +338,7 @@ describe('composeReply — draft-only orchestration', () => {
     // builds carries its own identifiers and must not be held against the caller.
     it('does not re-read the draft for an ordinary reply', async () => {
       const { client, calls } = spyClient();
-      await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined);
+      await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined, false);
       assert.deepEqual(calls.gets, ['o1']);
     });
 
@@ -332,7 +346,7 @@ describe('composeReply — draft-only orchestration', () => {
       const { client, calls } = spyClient({}, [CHART]);
       await composeReply(
         { ...NOTE_ARGS, attachments: '[{"path":"chart.png","cid":"chart"}]' },
-        client, '/attach/root',
+        client, '/attach/root', false,
       );
       assert.deepEqual(calls.upload.options, { inlineCids: new Set(['chart']) });
     });
@@ -342,7 +356,7 @@ describe('composeReply — draft-only orchestration', () => {
       await assert.rejects(
         () => composeReply(
           { originalEmailId: 'o1', htmlBody: '<p>hi</p><img src="cid:missing"><![CDATA[x]]>' },
-          client, '/attach/root',
+          client, '/attach/root', false,
         ),
         /htmlBody contains a CDATA section/,
       );
@@ -533,7 +547,7 @@ describe('composeReply — threading the quote images onto the draft', () => {
     const { client, calls } = imageClient(withInlineImage(), uploaded);
     await composeReply(
       { originalEmailId: 'o1', htmlBody: '<p>hi</p>', attachments: [{ path: 'a.pdf' }] },
-      client, '/attach/root',
+      client, '/attach/root', false,
     );
     assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['up-1', 'blob-png']);
     assert.equal(calls.draft.attachments[1].disposition, 'inline');
@@ -541,14 +555,14 @@ describe('composeReply — threading the quote images onto the draft', () => {
 
   it('carries the quoted image even with no attachments directory configured', async () => {
     const { client, calls } = imageClient();
-    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-png']);
     assert.deepEqual(r.notes, ['This draft embeds 1 image(s) from the quoted message (1 KB).']);
   });
 
   it('re-reads the saved draft for a reply whose only images come from the quote', async () => {
     const { client, calls } = imageClient();
-    await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.deepEqual(calls.gets, ['o1', 'draft-9']);
   });
 
@@ -560,7 +574,7 @@ describe('composeReply — threading the quote images onto the draft', () => {
       uploadAttachments: async () => [],
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
     };
-    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.deepEqual(r.notes, [
       'This draft embeds 1 image(s) from the quoted message (1 KB).',
       '1 embedded image(s) this call attached were not found on the saved draft.' +
@@ -570,20 +584,20 @@ describe('composeReply — threading the quote images onto the draft', () => {
 
   it('does not re-read the draft for a reply that carries no images at all', async () => {
     const { client, calls } = imageClient(makeOriginal());
-    await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.deepEqual(calls.gets, ['o1']);
   });
 
   it('leaves attachments unset when the reply carries nothing', async () => {
     const { client, calls } = imageClient(makeOriginal());
-    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.equal('attachments' in calls.draft, false);
     assert.equal(r.notes, undefined);
   });
 
   it('says plainly that a text-only reply dropped the images the original displayed', async () => {
     const { client } = imageClient();
-    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined, false);
     assert.deepEqual(r.notes, [
       '1 image(s) from the quoted message were dropped and are not part of this draft.',
     ]);
@@ -592,7 +606,7 @@ describe('composeReply — threading the quote images onto the draft', () => {
   it('reports a shortfall when the quote could not carry everything it referenced', async () => {
     const twin = { ...inlinePng, partId: '5', blobId: 'blob-png-2', name: 'pic2.png' };
     const { client } = imageClient(withInlineImage({ attachments: [inlinePng, twin] }));
-    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.deepEqual(r.notes, [
       'Embedded 0 of 2 image part(s) referenced by the quote (0 KB embedded); ' +
       '2 could not be embedded and are not part of this draft.',
@@ -609,7 +623,7 @@ describe('composeReply — threading the quote images onto the draft', () => {
       },
     });
     const { client } = imageClient(orig);
-    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.deepEqual(r.notes, [
       'This draft embeds 1 image(s) from the quoted message (1 KB).',
       '2 image(s) in the quoted message used a reference form this server cannot carry into' +
@@ -619,7 +633,7 @@ describe('composeReply — threading the quote images onto the draft', () => {
 
   it('reports a reference in the quoted body that matched no part', async () => {
     const { client } = imageClient(withInlineImage({ attachments: [] }));
-    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined, false);
     assert.deepEqual(r.notes, ['1 reference(s) matched no part and were skipped.']);
   });
 });

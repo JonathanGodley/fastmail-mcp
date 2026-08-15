@@ -5,7 +5,7 @@ import { resolve, join, basename, sep } from 'path';
 import { JmapClient } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
-import { InvalidInputError } from './coerce.js';
+import { InvalidInputError, NotFoundError, PathAccessError } from './coerce.js';
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
 
 // ---------- helpers ----------
@@ -2685,7 +2685,7 @@ describe('uploadAttachments', () => {
   it('throws the opt-in error when attachDir is undefined', async () => {
     const client = clientWithUpload();
     await assert.rejects(
-      () => client.uploadAttachments([{ path: 'x.pdf' }], undefined),
+      () => client.uploadAttachments([{ path: 'x.pdf' }], undefined, false),
       /FASTMAIL_ATTACH_DIR/,
     );
   });
@@ -2698,7 +2698,7 @@ describe('uploadAttachments', () => {
     const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
     try {
       await fsWriteFile(join(root, 'report.pdf'), 'hello');
-      const parts = await client.uploadAttachments([{ path: 'report.pdf' }], root);
+      const parts = await client.uploadAttachments([{ path: 'report.pdf' }], root, false);
       assert.deepEqual(parts, [
         { blobId: 'blob-up', type: 'application/pdf', name: 'report.pdf', disposition: 'attachment' },
       ]);
@@ -2716,6 +2716,7 @@ describe('uploadAttachments', () => {
       const parts = await client.uploadAttachments(
         [{ path: 'logo.png', cid: 'logo' }],
         root,
+        false,
         { inlineCids: new Set(['logo']) },
       );
       assert.deepEqual(parts, [
@@ -2735,7 +2736,7 @@ describe('uploadAttachments', () => {
     const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
     try {
       await fsWriteFile(join(root, 'logo.png'), 'png');
-      const parts = await client.uploadAttachments([{ path: 'logo.png', cid: 'logo' }], root, {});
+      const parts = await client.uploadAttachments([{ path: 'logo.png', cid: 'logo' }], root, false, {});
       assert.deepEqual(parts, [
         { blobId: 'blob-img', type: 'image/png', name: 'logo.png', disposition: 'attachment', cid: 'logo' },
       ]);
@@ -2743,6 +2744,7 @@ describe('uploadAttachments', () => {
       const other = await client.uploadAttachments(
         [{ path: 'logo.png', cid: 'logo' }],
         root,
+        false,
         { inlineCids: new Set(['something-else']) },
       );
       assert.equal(other[0].disposition, 'attachment');
@@ -2758,7 +2760,7 @@ describe('uploadAttachments', () => {
     try {
       await fsWriteFile(join(root, 'f.bin'), 'x');
       await assert.rejects(
-        () => client.uploadAttachments([{ path: 'f.bin', contentType: 'not a mime type' }], root),
+        () => client.uploadAttachments([{ path: 'f.bin', contentType: 'not a mime type' }], root, false),
         /invalid contentType/,
       );
     } finally {
@@ -2774,7 +2776,7 @@ describe('uploadAttachments', () => {
     try {
       await fsWriteFile(join(root, 'a.txt'), 'aa');
       await fsWriteFile(join(root, 'b.txt'), 'bbb');
-      const parts = await client.uploadAttachments([{ path: 'a.txt' }, { path: 'b.txt', contentType: 'text/plain' }], root);
+      const parts = await client.uploadAttachments([{ path: 'a.txt' }, { path: 'b.txt', contentType: 'text/plain' }], root, false);
       assert.deepEqual(parts.map(p => p.name), ['a.txt', 'b.txt']);
       assert.deepEqual(parts.map(p => p.blobId), ['blob-1', 'blob-2']);
     } finally {
@@ -2796,7 +2798,7 @@ describe('uploadAttachments', () => {
     const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
     try {
       for (const n of names) await fsWriteFile(join(root, n), 'x');
-      await client.uploadAttachments(names.map(path => ({ path })), root);
+      await client.uploadAttachments(names.map(path => ({ path })), root, false);
       assert.deepEqual(seen, [
         'text/calendar',
         'message/rfc822',
@@ -2813,6 +2815,193 @@ describe('uploadAttachments', () => {
     }
   });
 
+  // ---- the two in-account sources, behind their own opt-in ----
+
+  // The gate is per SOURCE. FASTMAIL_ATTACH_DIR governs reading a local file off disk;
+  // these two reference content the account already holds, so the local-disk opt-in has
+  // nothing to say about them and refusing them is FASTMAIL_ALLOW_BLOB_ATTACH's job.
+  it('refuses a blobId item when blob attaching is off, even with an attach dir set', async () => {
+    const client = clientWithUpload();
+    await assert.rejects(
+      () => client.uploadAttachments([{ blobId: 'G1', name: 'r.pdf' }], '/attach/root', false),
+      (e: unknown) => e instanceof InvalidInputError
+        && /attachments\[0\] attaches by blobId, which is disabled/.test((e as Error).message)
+        && /FASTMAIL_ALLOW_BLOB_ATTACH/.test((e as Error).message),
+    );
+  });
+
+  it('refuses an emailId + attachmentId item when blob attaching is off', async () => {
+    const client = clientWithUpload();
+    await assert.rejects(
+      () => client.uploadAttachments([{ emailId: 'M1', attachmentId: 'p2', name: 'r.pdf' }], '/attach/root', false),
+      (e: unknown) => e instanceof InvalidInputError
+        && /attaches by emailId \+ attachmentId, which is disabled/.test((e as Error).message)
+        && /FASTMAIL_ALLOW_BLOB_ATTACH/.test((e as Error).message),
+    );
+  });
+
+  // And the mirror: the blob opt-in does NOT open the local-disk source.
+  it('still refuses a path item on the attach-dir gate when only blob attaching is on', async () => {
+    const client = clientWithUpload();
+    await assert.rejects(
+      () => client.uploadAttachments([{ path: 'x.pdf' }], undefined, true),
+      (e: unknown) => e instanceof PathAccessError && /FASTMAIL_ATTACH_DIR/.test((e as Error).message),
+    );
+  });
+
+  it('references a blobId without uploading anything, inferring the type from the name', async (t) => {
+    const client = clientWithUpload();
+    let uploads = 0;
+    t.mock.method(client, 'uploadBlob', async () => { uploads++; return { blobId: 'nope', type: 'x/y', size: 1 }; });
+    const parts = await client.uploadAttachments([{ blobId: 'G-stored', name: 'report.pdf' }], undefined, true);
+    assert.deepEqual(parts, [
+      { blobId: 'G-stored', type: 'application/pdf', name: 'report.pdf', disposition: 'attachment' },
+    ]);
+    assert.equal(uploads, 0);
+  });
+
+  it('lets a caller contentType override the inferred type on a blobId item, through the MIME vet', async () => {
+    const client = clientWithUpload();
+    const parts = await client.uploadAttachments(
+      [{ blobId: 'G-stored', name: 'report.bin', contentType: 'application/pdf' }], undefined, true,
+    );
+    assert.equal(parts[0].type, 'application/pdf');
+    await assert.rejects(
+      () => client.uploadAttachments([{ blobId: 'G1', name: 'r.bin', contentType: 'not a mime type' }], undefined, true),
+      /invalid contentType/,
+    );
+  });
+
+  it("resolves an emailId + attachmentId to the part's blob, name and type", async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'getAttachmentInfo', async () => ({
+      blobId: 'G-part', type: 'image/png', name: 'chart.png', size: 12, matchedBy: 'partId',
+    }));
+    const parts = await client.uploadAttachments([{ emailId: 'M1', attachmentId: '2' }], undefined, true);
+    assert.deepEqual(parts, [
+      { blobId: 'G-part', type: 'image/png', name: 'chart.png', disposition: 'attachment' },
+    ]);
+  });
+
+  it('lets the caller override the resolved name and type of a message part', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'getAttachmentInfo', async () => ({
+      blobId: 'G-part', type: 'image/png', name: 'chart.png', size: 12, matchedBy: 'blobId',
+    }));
+    const parts = await client.uploadAttachments(
+      [{ emailId: 'M1', attachmentId: 'G-part', name: 'renamed.png', contentType: 'image/webp', cid: 'chart' }],
+      undefined,
+      true,
+      { inlineCids: new Set(['chart']) },
+    );
+    assert.deepEqual(parts, [
+      { blobId: 'G-part', type: 'image/webp', name: 'renamed.png', disposition: 'inline', cid: 'chart' },
+    ]);
+  });
+
+  // The compose direction refuses a reference that resolved ONLY by position: an entry
+  // number names a different file after any change to the listing, and here the wrong file
+  // is baked into a draft that send_draft then transmits.
+  it('refuses a message part that resolved only through the entry-number fallback', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'getAttachmentInfo', async () => ({
+      blobId: 'G-part', type: 'image/png', name: 'chart.png', matchedBy: 'index',
+    }));
+    await assert.rejects(
+      () => client.uploadAttachments([{ emailId: 'M1', attachmentId: '2' }], undefined, true),
+      (e: unknown) => e instanceof InvalidInputError
+        && /only as an entry number/.test((e as Error).message)
+        && /get_email_attachments/.test((e as Error).message),
+    );
+  });
+
+  // The rejection is on HOW the reference resolved, never on how the string looks.
+  // parseInt("2abc") is 2, so a looks-numeric test would call this the index form — while
+  // the resolver rejects it outright as unusable, and a partId of "2" is a real part that
+  // such a test would wrongly refuse.
+  it('decides the entry-number refusal from the resolution, not from a numeric-looking string', async (t) => {
+    const client = clientWithUpload();
+    // "2abc" never reaches the index branch at all: the resolver refuses it as unusable.
+    t.mock.method(client, 'getAttachmentInfo', async () => {
+      throw new InvalidInputError('attachmentId "2abc" is not a usable attachment reference.');
+    });
+    await assert.rejects(
+      () => client.uploadAttachments([{ emailId: 'M1', attachmentId: '2abc' }], undefined, true),
+      (e: unknown) => e instanceof InvalidInputError && /not a usable attachment reference/.test((e as Error).message),
+    );
+
+    // And a digit string that matched a real partId is accepted, though it looks numeric.
+    const digits = clientWithUpload();
+    t.mock.method(digits, 'getAttachmentInfo', async () => ({
+      blobId: 'G-part', type: 'text/plain', name: 'note.txt', matchedBy: 'partId',
+    }));
+    const parts = await digits.uploadAttachments([{ emailId: 'M1', attachmentId: '2' }], undefined, true);
+    assert.equal(parts[0].blobId, 'G-part');
+  });
+
+  // getAttachmentInfo's not-found class is tuned for download_attachment, which collapses it
+  // to a generic message so a read cannot confirm what a mailbox holds. Inheriting that here
+  // would report a mistyped id — the caller's own, supplied moments earlier — as an
+  // InternalError, i.e. a server bug the caller can only retry.
+  it('reports an unresolvable message part as caller input, not as a server fault', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'getAttachmentInfo', async () => {
+      throw new NotFoundError('Attachment not found.');
+    });
+    await assert.rejects(
+      () => client.uploadAttachments([{ emailId: 'M1', attachmentId: 'p404' }], undefined, true),
+      (e: unknown) => e instanceof InvalidInputError
+        && /attachments\[0\]/.test((e as Error).message)
+        && /did not resolve to a part of an existing message/.test((e as Error).message)
+        && /get_email_attachments/.test((e as Error).message),
+    );
+  });
+
+  // The re-raise is by CLASS. A transport failure is not a caller mistake and must not be
+  // relabelled as one — that would send the caller off correcting ids that were fine.
+  it('does not relabel a transport failure as bad caller input', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'getAttachmentInfo', async () => {
+      throw new Error('socket hang up');
+    });
+    await assert.rejects(
+      () => client.uploadAttachments([{ emailId: 'M1', attachmentId: 'p2' }], undefined, true),
+      (e: unknown) => !(e instanceof InvalidInputError) && /socket hang up/.test((e as Error).message),
+    );
+  });
+
+  // coerceAttachments guarantees exactly one source, but that guarantee lives in another
+  // module. If a future source were added there and not here, this dispatch would fall
+  // through to the path branch with no path — an attachment built from a file nobody named.
+  it('refuses a spec that reaches it naming no source at all', async () => {
+    const client = clientWithUpload();
+    await assert.rejects(
+      () => client.uploadAttachments([{ name: 'orphan.pdf' } as any], '/attach/root', true),
+      (e: unknown) => e instanceof InvalidInputError && /names no source/.test((e as Error).message),
+    );
+  });
+
+  it('keeps parts in spec order across a mixed batch of sources', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'uploadBlob', async () => ({ blobId: 'blob-local', type: 'text/plain', size: 2 }));
+    t.mock.method(client, 'getAttachmentInfo', async () => ({
+      blobId: 'G-part', type: 'image/png', name: 'chart.png', matchedBy: 'partId',
+    }));
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      await fsWriteFile(join(root, 'a.txt'), 'aa');
+      const parts = await client.uploadAttachments(
+        [{ blobId: 'G-stored', name: 'first.pdf' }, { path: 'a.txt' }, { emailId: 'M1', attachmentId: 'p9' }],
+        root,
+        true,
+      );
+      assert.deepEqual(parts.map((p) => p.blobId), ['G-stored', 'blob-local', 'G-part']);
+      assert.deepEqual(parts.map((p) => p.name), ['first.pdf', 'a.txt', 'chart.png']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('validates every file before uploading any — a later bad path uploads zero blobs (no orphans)', async (t) => {
     const client = clientWithUpload();
     let uploads = 0;
@@ -2822,7 +3011,7 @@ describe('uploadAttachments', () => {
       await fsWriteFile(join(root, 'good.txt'), 'ok');
       await assert.rejects(
         // good.txt validates+opens in pass 1, then the escaping path rejects — pass 2 never runs.
-        () => client.uploadAttachments([{ path: 'good.txt' }, { path: '../escape.txt' }], root),
+        () => client.uploadAttachments([{ path: 'good.txt' }, { path: '../escape.txt' }], root, false),
         /must be within/,
       );
       assert.equal(uploads, 0);

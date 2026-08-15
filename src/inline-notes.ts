@@ -261,7 +261,10 @@ export function noteUnparsableCidText(): string {
 // Rejects
 // ---------------------------------------------------------------------------
 
-/** Whether this server can attach files at all, which changes what a repair can suggest. */
+/**
+ * Whether this server can attach anything at all — from local disk or from the account's own
+ * content — which changes what a repair can suggest.
+ */
 export interface AttachmentAvailability {
   attachmentsEnabled: boolean;
 }
@@ -269,8 +272,8 @@ export interface AttachmentAvailability {
 // The sentence offered instead of "add an attachments item" when this server cannot attach
 // anything. Suggesting a repair the server would then refuse is worse than saying why.
 const ATTACHMENTS_DISABLED_CLAUSE =
-  'Remove the <img> reference (sending attachments is disabled on this server — ' +
-  'FASTMAIL_ATTACH_DIR is not set — so no attachments item can supply it).';
+  'Remove the <img> reference (sending attachments is disabled on this server — neither ' +
+  'FASTMAIL_ATTACH_DIR nor FASTMAIL_ALLOW_BLOB_ATTACH is set — so no attachments item can supply it).';
 
 /**
  * The body references an embedded image nothing supplies.
