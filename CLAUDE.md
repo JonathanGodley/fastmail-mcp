@@ -33,6 +33,14 @@ But "tolerant read" is **not** "silently drop the promised field." A read tool p
 
 **Index-read caveat (RFC 8620 §3.4).** A JMAP response returns one entry per method call, in order, but errors are `error` entries — not absences. Our `getMethodResult`/`getListResult` index reads are safe ONLY because `Email/get`/`Mailbox/get`/`Thread/get` are each single-response in our batches; match method responses by their **call-id**, not a positional index, before generalizing index reads to any batch where a method could appear more than once or be reordered.
 
+## A destroy must not remove what this server cannot recreate
+
+A tool that **irreversibly destroys** a record must refuse a record whose **kind** this server's create surface cannot produce. The recovery artifact a destroy hands back — `deletedCard`, or any other pre-write echo — is only as good as the create tool that would consume it: where nothing here can make that kind of record at all, the echo cannot rebuild it, so the destroy has no recovery path and is not offered. That is why `delete_contact` rejects a contact GROUP (`create_contact` has no `kind` and no `members` parameter), matching the refusal `update_contact` already had; both raise it through one shared message so they read as a single rule.
+
+**Get the granularity right: the test is the record KIND, not the fields.** Almost every real record carries fields the create tool cannot set — a contact card's titles, organizations, photos — and refusing to destroy all of those would break the tool. A field the echo cannot rebuild is a documented limit (see the echo bound in `docs/conventions.md`); a *kind of thing* that cannot be made at all is a refusal. Write the in-code comment so the next reader applies the narrow reading, because that is the one that stays correct as the create surface grows.
+
+This governs delete paths not yet written. When adding one, check it against the create surface first, and if the two disagree, either refuse the unmakeable kind or say plainly why the destroy is still safe (e.g. `delete_email` moves to Trash rather than destroying, so nothing is lost to recreate).
+
 ## Version
 
 The version string lives in **three hand-edited sites plus a regenerated lockfile** — update all when bumping:

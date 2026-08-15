@@ -2255,6 +2255,34 @@ describe('label mailboxId resolution accepts a path, and reports failures in sep
     );
   });
 
+  it('reports a name/path collision in its own bucket, never as "not found"', async () => {
+    // The label arrays inherit the matcher, so the collision has to reach a caller here too —
+    // and in a bucket of its own, because its correction (an id) differs from both a typo's
+    // and a duplicated name's.
+    client = makeClient();
+    stubMailboxes(client, [
+      ...DEFAULT_MAILBOXES,
+      { id: 'mb-literal', name: 'A/B' },
+      { id: 'mb-a', name: 'A' },
+      { id: 'mb-b', name: 'B', parentId: 'mb-a' },
+    ]);
+    const makeReq = stubRequests(client, async () => { throw new Error('should not be called'); });
+    await assert.rejects(
+      () => client.addLabels('e1', ['A/B', 'nope']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Mailbox\(es\) not found: 'nope'\./);
+        assert.match(
+          err.message,
+          /name a folder AND describe a path to a different mailbox[^.]*'A\/B' matches folder named 'A\/B' \(id: mb-literal\), nested folder A > B \(id: mb-b\)/,
+        );
+        assert.match(err.message, /retry with an id/);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 0); // still all-or-nothing
+  });
+
   it('reports an unwalkable path entry in its own bucket', async () => {
     client = makeClient();
     stubMailboxes(client, [...DEFAULT_MAILBOXES, ...LOOPED_TREE]);
@@ -2346,17 +2374,82 @@ describe('findMailboxExact', () => {
     assert.equal(match, undefined);
   });
 
-  it('lets a unique flat name win over reading the same text as a path', () => {
-    // A folder literally named "A/B" alongside a real A > B nesting. The flat name has to
-    // win or the folder becomes unreachable by the only name its owner knows it by.
+  it('lets a unique flat name win when no other mailbox answers to the same text', () => {
+    // A top-level folder literally named "A/B", with no A > B nesting. Its own computed path
+    // is "A/B" too, so the name branch and the path branch land on the SAME mailbox — nothing
+    // to be ambiguous about, and the folder stays reachable by the only name its owner knows
+    // it by.
+    const tree = [
+      { id: 'mb-literal', name: 'A/B' },
+      { id: 'mb-a', name: 'A' },
+    ];
+    const match = findMailboxExact(tree, 'A/B');
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-literal');
+  });
+
+  it('resolves a flat name containing the separator that matches nothing by path', () => {
+    // Here the folder named "A/B" is nested, so its path is "X/A/B" and the input matches
+    // by name only. The name branch answers, exactly as it did before the collision check.
+    const tree = [
+      { id: 'mb-x', name: 'X' },
+      { id: 'mb-literal', name: 'A/B', parentId: 'mb-x' },
+    ];
+    const match = findMailboxExact(tree, 'A/B');
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-literal');
+  });
+
+  it('resolves a path that matches no flat name', () => {
+    const tree = [
+      { id: 'mb-a', name: 'A' },
+      { id: 'mb-b', name: 'B', parentId: 'mb-a' },
+    ];
+    const match = findMailboxExact(tree, 'A/B');
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-b');
+  });
+
+  it('reports a folder name that also reads as a path to a DIFFERENT mailbox as ambiguous', () => {
+    // A folder literally named "A/B" alongside a real A > B nesting. Silently applying the
+    // flat-name tie-break here files a write into the flat folder while the caller had every
+    // reason to mean the nesting, and nothing in the response says a second mailbox answered
+    // to the same text.
     const tree = [
       { id: 'mb-literal', name: 'A/B' },
       { id: 'mb-a', name: 'A' },
       { id: 'mb-b', name: 'B', parentId: 'mb-a' },
     ];
     const match = findMailboxExact(tree, 'A/B');
-    assert.ok(match && 'mailbox' in match);
-    assert.equal(match.mailbox.id, 'mb-literal');
+    assert.ok(match && 'ambiguous' in match);
+    assert.equal(match.ambiguous, 'A/B');
+    assert.equal(match.nameVsPath, true);
+    // Both candidates carry the id, which is the only form that separates them, and each says
+    // which mailbox it is — two renderings of the path "A/B" would be useless here.
+    assert.deepEqual(match.candidates, [
+      "folder named 'A/B' (id: mb-literal)",
+      'nested folder A > B (id: mb-b)',
+    ]);
+    // Every id offered resolves when pasted back.
+    for (const id of ['mb-literal', 'mb-b']) {
+      const again = findMailboxExact(tree, id);
+      assert.ok(again && 'mailbox' in again, id);
+    }
+  });
+
+  it('reports the collision the same way for a deeper nesting', () => {
+    const tree = [
+      { id: 'mb-literal', name: 'Archive/2026' },
+      { id: 'mb-archive', name: 'Archive', role: 'archive' },
+      { id: 'mb-2026', name: '2026', parentId: 'mb-archive' },
+    ];
+    const match = findMailboxExact(tree, 'Archive/2026');
+    assert.ok(match && 'ambiguous' in match);
+    assert.equal(match.nameVsPath, true);
+    assert.deepEqual(match.candidates, [
+      "folder named 'Archive/2026' (id: mb-literal)",
+      'nested folder Archive > 2026 (id: mb-2026)',
+    ]);
   });
 
   it('reports a duplicated flat name as ambiguous, with the candidates as full paths', () => {
@@ -2486,6 +2579,27 @@ describe('resolveMailbox failure shapes', () => {
         assert.match(err.message, /is ambiguous: 2 mailboxes share that name/);
         assert.match(err.message, /Candidates: Personal\/Receipts, Work\/Receipts/);
         // A caller told "not found" would go re-spell a name that was already right.
+        assert.doesNotMatch(err.message, /not found/);
+        return true;
+      },
+    );
+  });
+
+  it('tells a name/path collision to retry with an id, not with a path', () => {
+    // The generic ambiguity advice ("retry with one of their full paths") is the input that
+    // just failed here, so this failure gets its own message.
+    const tree = [
+      { id: 'mb-literal', name: 'A/B' },
+      { id: 'mb-a', name: 'A' },
+      { id: 'mb-b', name: 'B', parentId: 'mb-a' },
+    ];
+    assert.throws(
+      () => resolveMailbox(tree, 'A/B'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /is ambiguous: it is both the name of one folder and the path to a different mailbox/);
+        assert.match(err.message, /Retry with the id of the one you mean/);
+        assert.match(err.message, /Candidates: folder named 'A\/B' \(id: mb-literal\), nested folder A > B \(id: mb-b\)/);
         assert.doesNotMatch(err.message, /not found/);
         return true;
       },

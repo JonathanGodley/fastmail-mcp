@@ -881,6 +881,32 @@ function formatMailboxAmbiguous(input: string, candidates: string[]): string {
     `Retry with one of their full paths, or with an id. Candidates: ${joinCapped(candidates)}`;
 }
 
+// The other ambiguity: one reference reads BOTH as the name of a folder that contains the
+// separator and as the path to a different, nested mailbox. It gets its own message because
+// its correction is different — the advice above ("retry with a full path") is exactly the
+// input that just failed, since the path IS the ambiguous text. Only an id separates them.
+function formatMailboxNameVsPath(input: string, candidates: string[]): string {
+  return `Mailbox '${input}' is ambiguous: it is both the name of one folder and the path to a different ` +
+    `mailbox, and a path cannot tell those apart. Retry with the id of the one you mean. ` +
+    `Candidates: ${joinCapped(candidates)}`;
+}
+
+// The two sides of a name/path collision both render as the SAME path string ("A/B"), so a
+// candidate list built from paths alone would hand the caller identical text twice and no way
+// to choose. Each side is therefore named for what it is — the folder whose own name carries
+// the separator, versus the nesting the same text describes — and carries the id, which is the
+// one form that picks either of them. Unlike the candidates of a duplicated name, these are
+// descriptions rather than pasteable input; the id inside each one is what gets pasted back.
+function describeFlatCandidate(mb: any): string {
+  return `folder named '${normalizeMailboxSegment(mb?.name)}' (id: ${mb?.id})`;
+}
+
+function describeNestedCandidate(mb: any, paths: Map<string, string>): string {
+  const path = paths.get(mb?.id);
+  const nesting = path ? path.split(MAILBOX_PATH_SEPARATOR).join(' > ') : String(mb?.id);
+  return `nested folder ${nesting} (id: ${mb?.id})`;
+}
+
 // Distinct from both "not found" and "ambiguous": the tree itself is unwalkable, so no
 // path input can be resolved at all. Says which mailbox broke the walk and which input
 // forms still work.
@@ -921,6 +947,11 @@ function formatMailboxesNotFound(unresolved: string[], mailboxes: any[]): string
 export interface MailboxResolutionFailures {
   notFound: string[];
   ambiguous: Array<{ input: string; candidates: string[] }>;
+  // A reference that matched a folder name AND a different mailbox by path. Kept out of the
+  // `ambiguous` bucket even though both are ambiguities, for the same reason a typo is kept
+  // out of it: the correction differs. A duplicated name is fixed by picking one of the paths
+  // listed; this one is fixed only by an id, because the path is the text that failed.
+  nameVsPath: Array<{ input: string; candidates: string[] }>;
   unwalkable: Array<{ input: string; id: string }>;
 }
 
@@ -936,6 +967,16 @@ function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailbox
       '; ',
     );
     parts.push(`Ambiguous mailbox name(s) — retry with a full path or an id: ${listed}.`);
+  }
+  if (failures.nameVsPath.length > 0) {
+    const listed = joinCapped(
+      failures.nameVsPath.map(a => `'${clampUnresolvedValue(a.input)}' matches ${joinCapped(a.candidates)}`),
+      '; ',
+    );
+    parts.push(
+      `Mailbox reference(s) that name a folder AND describe a path to a different mailbox — ` +
+      `retry with an id, which is the only form that tells them apart: ${listed}.`,
+    );
   }
   if (failures.unwalkable.length > 0) {
     const listed = joinCapped(
@@ -961,6 +1002,11 @@ function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailbox
  *   { mailbox }              — resolved.
  *   { ambiguous, candidates} — a flat name matched more than one mailbox; `candidates` are
  *                              their full paths, i.e. the input that disambiguates them.
+ *   { ambiguous, candidates, nameVsPath } — the same text named one folder AND described the
+ *                              path to a different mailbox. Its own sub-shape because its
+ *                              recovery differs: full paths cannot separate these two (the
+ *                              path is the failing text), so only an id can, and `candidates`
+ *                              are descriptions carrying that id rather than pasteable paths.
  *   { unwalkable, id }       — a parent chain never reached a top-level mailbox, so no path
  *                              can be computed. Reported rather than folded into "not
  *                              found": a corrupt tree is not a caller typo, and saying so
@@ -969,7 +1015,7 @@ function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailbox
  */
 export type MailboxMatch =
   | { mailbox: any }
-  | { ambiguous: string; candidates: string[] }
+  | { ambiguous: string; candidates: string[]; nameVsPath?: true }
   | { unwalkable: true; id: string };
 
 // Exact-only mailbox match, in resolution order:
@@ -982,6 +1028,15 @@ export type MailboxMatch =
 // A flat name matching exactly one mailbox WINS over reading the same text as a path, so a
 // mailbox whose own name contains a "/" stays reachable by that name. A flat name matching
 // several mailboxes is reported as ambiguous rather than silently resolving to the first.
+//
+// That tie-break applies ONLY where nothing else answers to the same text. When a reference
+// matches one flat name AND, by path walk, a DIFFERENT mailbox — a top-level folder literally
+// named "A/B" alongside a real A > B nesting — the reference is reported as ambiguous instead.
+// Applying the tie-break there would file a write into the flat folder while the caller had
+// every reason to mean the nesting, with nothing in the response saying a second mailbox
+// answered to the same text; a wrong destination is worth a retry to avoid. When the flat name
+// and the path resolve to the SAME mailbox (a top-level folder named "A/B" and no such
+// nesting), there is nothing to be ambiguous about and it resolves normally.
 //
 // NO substring matching (substring is an injection-steering primitive on write paths and
 // can mis-resolve). Edge: a custom mailbox literally named after a role (e.g. "Archive") is
@@ -1006,7 +1061,6 @@ export function findMailboxExact(mailboxes: any[], input: string): MailboxMatch 
   // type — and so the name branch and the path branch cannot disagree about what a
   // segment is.
   const byName = list.filter(mb => mb && normalizeMailboxSegment(mb.name).toLowerCase() === lower);
-  if (byName.length === 1) return { mailbox: byName[0] };
   if (byName.length > 1) {
     const { paths } = buildMailboxPathMap(list);
     return { ambiguous: raw, candidates: byName.map(mb => mailboxLabel(mb, paths)) };
@@ -1015,17 +1069,41 @@ export function findMailboxExact(mailboxes: any[], input: string): MailboxMatch 
   // Path form. A leading, trailing or doubled separator leaves an empty segment: that is
   // not a path this server accepts (the documented form is root-anchored with no leading
   // or trailing slash), and guessing which slash the caller meant is exactly the kind of
-  // unclear intent the input conventions refuse to recover.
-  if (!raw.includes(MAILBOX_PATH_SEPARATOR)) return undefined;
-  const segments = raw.split(MAILBOX_PATH_SEPARATOR).map(normalizeMailboxSegment);
-  if (segments.some(s => s === '')) return undefined;
-  const target = segments.join(MAILBOX_PATH_SEPARATOR).toLowerCase();
+  // unclear intent the input conventions refuse to recover. Such an input is simply not a
+  // path — which leaves a unique flat name matching it free to win below, as before.
+  const rawSegments = raw.includes(MAILBOX_PATH_SEPARATOR)
+    ? raw.split(MAILBOX_PATH_SEPARATOR).map(normalizeMailboxSegment)
+    : undefined;
+  const segments = rawSegments && !rawSegments.some(s => s === '') ? rawSegments : undefined;
 
-  const { paths, unpathable } = buildMailboxPathMap(list);
-  const matches = list.filter(mb => {
-    const p = mb && paths.get(mb.id);
-    return typeof p === 'string' && p.toLowerCase() === target;
-  });
+  // The path walk runs BEFORE the flat-name tie-break is applied, because whether that
+  // tie-break is safe depends on what the path resolves to.
+  let paths = new Map<string, string>();
+  let unpathable: string[] = [];
+  let matches: any[] = [];
+  if (segments) {
+    const target = segments.join(MAILBOX_PATH_SEPARATOR).toLowerCase();
+    ({ paths, unpathable } = buildMailboxPathMap(list));
+    matches = list.filter(mb => {
+      const p = mb && paths.get(mb.id);
+      return typeof p === 'string' && p.toLowerCase() === target;
+    });
+  }
+
+  if (byName.length === 1) {
+    const flat = byName[0];
+    // The path resolving to the very mailbox the name matched is not a collision, so the
+    // usual resolution stands. Anything else answering to the same text is.
+    const collidingWith = matches.filter(mb => mb.id !== flat.id);
+    if (collidingWith.length === 0) return { mailbox: flat };
+    return {
+      ambiguous: raw,
+      nameVsPath: true,
+      candidates: [describeFlatCandidate(flat), ...collidingWith.map(mb => describeNestedCandidate(mb, paths))],
+    };
+  }
+
+  if (!segments) return undefined;
   if (matches.length === 1) return { mailbox: matches[0] };
   if (matches.length > 1) return { ambiguous: raw, candidates: matches.map(mb => mailboxLabel(mb, paths)) };
 
@@ -1059,7 +1137,11 @@ export function resolveMailbox(mailboxes: any[], input: string): any {
   if (match && 'mailbox' in match) return match.mailbox;
   const raw = String(input).trim();
   if (match && 'ambiguous' in match) {
-    throw new InvalidInputError(formatMailboxAmbiguous(raw, match.candidates));
+    throw new InvalidInputError(
+      match.nameVsPath
+        ? formatMailboxNameVsPath(raw, match.candidates)
+        : formatMailboxAmbiguous(raw, match.candidates),
+    );
   }
   if (match && 'unwalkable' in match) {
     throw new InvalidInputError(formatMailboxUnwalkable(raw, match.id));
@@ -3308,16 +3390,20 @@ export class JmapClient {
   private async resolveLabelMailboxIds(inputs: string[]): Promise<string[]> {
     const mailboxes = await this.getMailboxes();
     const resolved: string[] = [];
-    const failures: MailboxResolutionFailures = { notFound: [], ambiguous: [], unwalkable: [] };
+    const failures: MailboxResolutionFailures = { notFound: [], ambiguous: [], nameVsPath: [], unwalkable: [] };
     for (const input of inputs) {
       const match = findMailboxExact(mailboxes, input);
       const raw = String(input).trim();
       if (match && 'mailbox' in match) resolved.push(match.mailbox.id);
-      else if (match && 'ambiguous' in match) failures.ambiguous.push({ input: raw, candidates: match.candidates });
+      else if (match && 'ambiguous' in match) {
+        const bucket = match.nameVsPath ? failures.nameVsPath : failures.ambiguous;
+        bucket.push({ input: raw, candidates: match.candidates });
+      }
       else if (match && 'unwalkable' in match) failures.unwalkable.push({ input: raw, id: match.id });
       else failures.notFound.push(raw);
     }
-    const failed = failures.notFound.length + failures.ambiguous.length + failures.unwalkable.length;
+    const failed = failures.notFound.length + failures.ambiguous.length
+      + failures.nameVsPath.length + failures.unwalkable.length;
     if (failed > 0) {
       // The single-bucket case keeps the original wording verbatim, so the common
       // all-typos message a caller has learned to read does not change shape.

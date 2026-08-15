@@ -349,7 +349,7 @@ const SCOPE_RELIABILITY_CONTRACT =
 // and nowhere else in the schemas.
 const MAILBOX_REF_FORMS =
   'Accepts an id, a role (inbox, archive, sent, drafts, trash, junk), a folder name (e.g. Receipts), or a root-anchored path (e.g. Archive/2026/Receipts): "/"-separated, no leading or trailing slash, segments matched case-insensitively. ' +
-  'A folder name matching exactly one mailbox wins over reading the same text as a path, so a folder whose own name contains "/" stays reachable by that name. ' +
+  'A folder name matching exactly one mailbox wins over reading the same text as a path, so a folder whose own name contains "/" stays reachable by that name — unless the same text ALSO reaches a different mailbox as a path (a folder named "A/B" alongside a real A > B nesting), which is rejected as ambiguous and answered with the id of each, since no path can tell those two apart. ' +
   'A name shared by several mailboxes is rejected as ambiguous, listing their full paths — retry with one of those, or with the id. An unknown mailbox is rejected with the valid list. ' +
   'list_mailboxes returns each mailbox\'s path, and a path it returns can be pasted straight back into this parameter.';
 
@@ -1230,7 +1230,7 @@ const TOOLS = [
         description:
           'Delete a contact. Returns {deleted, deletedCard} — the id, and the full card as it stood immediately before the destroy. ' +
           CONTACT_ECHO_DESC +
-          ' This is IRREVERSIBLE: unlike an email, a deleted contact does not go to Trash, so the echoed card is the only copy left — keep it if there is any chance the delete was wrong. create_contact can rebuild the name, emails, phones, addresses and note from it, but NOT the rest of the card (photos, titles, organizations, nicknames, URLs, anniversaries, group membership, the uid, or the per-entry contexts/pref), so recreating gives you a similar contact rather than the one that was deleted. There is deliberately no confirmation parameter.',
+          ' This is IRREVERSIBLE: unlike an email, a deleted contact does not go to Trash, so the echoed card is the only copy left — keep it if there is any chance the delete was wrong. create_contact can rebuild the name, emails, phones, addresses and note from it, but NOT the rest of the card (photos, titles, organizations, nicknames, URLs, anniversaries, group membership, the uid, or the per-entry contexts/pref), so recreating gives you a similar contact rather than the one that was deleted. A contact GROUP is REFUSED: create_contact has no kind or members parameter, so this server cannot make a group and will not destroy one it could never put back — delete a group in the Fastmail web interface. (That refusal is about the kind of record, not about fields create_contact cannot set: an ordinary card carrying titles or organizations still deletes.) There is deliberately no confirmation parameter.',
         inputSchema: {
           type: 'object',
           properties: {

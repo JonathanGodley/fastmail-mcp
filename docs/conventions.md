@@ -177,6 +177,19 @@ organizations, nicknames, URLs, anniversaries, group membership, the `uid` and t
 saying the delete is irreversible. The general rule: an echo's documented promise is bounded
 by what the tool can actually write back, not by what the echo contains.
 
+**Where that bound turns into a refusal.** An echo that cannot rebuild a *field* is a
+documented limit; a destroy aimed at a record the create surface cannot produce **at all** is
+refused outright, because there the echo is worth nothing. That is why `delete_contact` rejects
+a contact GROUP: `create_contact` has no `kind` and no `members` parameter, so a group destroyed
+here is gone for good, `deletedCard` included - `update_contact` already refused the same card
+kind, and both raise it through one shared message so they read as a single rule. The
+granularity is the point, and it is the narrow reading that stays correct as the create surface
+grows: refuse when the KIND of record is unmakeable, not when a record merely carries fields the
+create tool cannot set. Nearly every real card has titles, organizations or photos this server
+cannot write, and refusing to delete those would break the tool. The general rule lives in
+`CLAUDE.md` ("A destroy must not remove what this server cannot recreate") because it governs
+delete paths not yet written.
+
 **The override is scoped to the field that was actually ambiguous**, not to the call.
 `allowEntryReplace` is checked per entry array, after that array's own merge has run — so a
 call editing `emails` ambiguously and `phones` cleanly whole-replaces `emails` only, and
@@ -229,10 +242,12 @@ Every mailbox-taking parameter resolves through one exact matcher (`findMailboxE
 
 No substring matching at any step. A flat name matching exactly one mailbox **wins over**
 reading the same text as a path, so a mailbox whose own name contains a `/` stays reachable
-by that name. That tie has a consequence on writes: where a flat `A/B` folder and a real
-`A > B` nesting both exist, `move_email targetMailbox:"A/B"` files into the flat one and the
-nested one is only unambiguously reachable by id. It is stated rather than smoothed over, in
-`docs/security-model.md` under the path-form bullet.
+by that name. That tie-break is scoped to the case where nothing else answers to the same
+text: where a flat `A/B` folder and a real `A > B` nesting **both** exist, the reference is
+reported as ambiguous instead, because applying the tie-break there sent a write into the
+flat folder with nothing in the response saying a second mailbox had also matched - and a
+wrong destination is worth a retry to avoid. A flat name and a path landing on the *same*
+mailbox (a top-level folder named `A/B`, no such nesting) is not a collision and resolves.
 
 The walk lives in `findMailboxExact` rather than in its throwing wrapper, and that placement
 is the point: both callers inherit it. The label tools' `mailboxIds` arrays (`add_labels` /
@@ -243,14 +258,22 @@ vocabulary that #50 closed and that made this fork decline upstream's separate
 same core, and `list_mailboxes` publishes the same paths it accepts, so a path read out of a
 listing goes straight back into any mailbox parameter.
 
-**Three failure shapes, not one.** The matcher RETURNS a discriminated result and never
+**Four failure shapes, not one.** The matcher RETURNS a discriminated result and never
 throws, because only its caller knows what to do with a failure: the single-input wrapper
 throws on the spot, while the array resolver collects failures across the whole array. The
 shapes are resolved, ambiguous (a flat name matched several mailboxes - candidates are given
-as full paths, the form that disambiguates them), unwalkable (some mailbox's `parentId` chain
+as full paths, the form that disambiguates them), a name/path collision (the same text named
+one folder and the path to a *different* mailbox), unwalkable (some mailbox's `parentId` chain
 never reaches a top-level mailbox, so no path can be computed), and a genuine miss. Upstream's
 path lookup silently truncates its bounded parent walk into "not found"; reporting the
 unwalkable tree instead is what lets a caller stop hunting for a typo that was never there.
+
+The collision is a *separate* shape from the plain ambiguity for the same reason a typo is:
+the correction differs. A duplicated name is fixed by picking one of the candidate paths, but
+a path is precisely the text that failed in a collision, so the candidates there are
+descriptions - which one is the folder, which one is the nesting - each carrying the **id**,
+the only form that separates them. Rendering both as their computed path would hand the
+caller the same string twice and no way to choose.
 
 The array resolver stays **all-or-nothing** - if any entry fails it applies no labels, rather
 than half-applying a mutation the caller must reconcile - and it names *every* failing entry

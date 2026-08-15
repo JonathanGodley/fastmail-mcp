@@ -257,6 +257,31 @@ export function mergeEntryMap(
 const MAX_ECHOED_DROPPED_ENTRIES = 5;
 
 /**
+ * Whether a card is a contact GROUP rather than a person card.
+ *
+ * A group card carries a `members` map of the uids it contains and none of the person fields.
+ * This server's contact surface has no `kind` parameter and no `members` parameter, so it can
+ * neither create a group nor describe one — which is why both write tools that can meet one
+ * refuse it, from a single rule stated in one place rather than two lookalike checks.
+ */
+export function isContactGroupCard(card: any): boolean {
+  return card?.kind === 'group';
+}
+
+/**
+ * The shared refusal both group-aware write tools raise, so they read as one rule.
+ *
+ * `because` carries the part that genuinely differs — an update has no parameters that
+ * describe a group, a delete cannot put back what it destroys — and `recovery` names where
+ * the caller can do it instead. Everything a caller needs to recognise the rule (this is a
+ * group; this tool will not touch it) is fixed here.
+ */
+export function contactGroupRefusal(opts: { id: string; tool: string; because: string; recovery: string }): string {
+  return `Contact ${opts.id} is a contact GROUP, not a person card, so ${opts.tool} refuses it: ` +
+    `${opts.because} ${opts.recovery}`;
+}
+
+/**
  * Whether this field's merge is the one shape that cannot be resolved: entries dropped AND
  * entries added in the same call.
  *

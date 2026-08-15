@@ -379,17 +379,20 @@ than overclaimed:
   `bulk_remove_labels` now resolve their `mailboxIds` arrays by exact id/role/name/path too, so an
   injected agent can label a message into e.g. `"trash"` blind-one-shot-by-name, the same modest
   escalation as move. Accepted on the same footing; not a new capability class.
-- **The path form (#27), and where it can send a write somewhere the caller did not mean.**
+- **The path form (#27), and the collision it made reachable on write paths.**
   A root-anchored path is still exact matching over mailboxes a bare name could already reach, so
-  it mostly just disambiguates. But the tie rule has a real consequence on write paths, and it is
-  stated here rather than argued away: **an exact flat name wins over reading the same text as a
-  path.** So if a top-level folder is literally named `A/B` while a real `A > B` nesting also
-  exists, `move_email targetMailbox:"A/B"` files the message into the flat folder, silently, even
-  though the same text describes the nesting. A folder whose own name contains the separator
-  therefore takes precedence over the nesting that text describes, on every write that names a
-  destination. In that situation the nested folder's only unambiguous handle is its id, which is
-  why this is called out here rather than treated as covered. Anyone who can create a folder can
-  set the collision up, so treat it as reachable by a caller who wants it.
+  it mostly just disambiguates. But the tie rule (**an exact flat name wins over reading the same
+  text as a path**) had a real consequence on write paths: if a top-level folder is literally
+  named `A/B` while a real `A > B` nesting also exists, `move_email targetMailbox:"A/B"` filed the
+  message into the flat folder, silently, even though the same text describes the nesting — and
+  anyone who can create a folder can set that collision up, so treat it as reachable by a caller
+  who wants it. **That silent resolution is now refused**: a reference matching one flat name AND
+  a *different* mailbox by path is rejected as ambiguous, naming both with their ids, so the write
+  does not land anywhere until the caller picks one. The tie-break survives only where nothing
+  else answers to the same text, which is what keeps a folder whose own name contains the
+  separator reachable by that name. What remains accepted is the retry cost: a caller that meant
+  the flat folder now has to name it by id, which is the cheaper side of the trade against a
+  message filed where it was not meant to go.
 - **`create_mailbox` adds no concealment reach.** It lets a caller mint a destination rather than
   pick one, but concealment comes from the *move*, and `move_email` into an existing folder already
   conceals with zero disclosure (the bullet below). Creating the folder first only decides where

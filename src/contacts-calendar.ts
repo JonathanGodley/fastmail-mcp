@@ -10,7 +10,9 @@ import {
 import {
   assertUnambiguousEntryEdit,
   buildEntryMap,
+  contactGroupRefusal,
   isAmbiguousEntryEdit,
+  isContactGroupCard,
   mergeContactName,
   mergeContactNotes,
   mergeEntryMap,
@@ -447,13 +449,17 @@ export class ContactsCalendarClient extends JmapClient {
     // so an update aimed at a group is refused rather than half-applied to a record whose
     // shape it does not fit. (The group's membership is untouched either way — a PatchObject
     // only replaces the properties named in it — but a call that reads as "set this group's
-    // phone number" has no correct outcome.)
-    if (previousCard.kind === 'group') {
-      throw new InvalidInputError(
-        `Contact ${id} is a contact GROUP, not a person card, so update_contact cannot edit it: ` +
-          `its members are not editable through this server, and name/emails/phones/addresses/notes ` +
-          `do not describe a group. Edit it in the Fastmail interface instead.`,
-      );
+    // phone number" has no correct outcome.) deleteContact refuses the same card kind from
+    // the same rule; both raise it through contactGroupRefusal so they read as one.
+    if (isContactGroupCard(previousCard)) {
+      throw new InvalidInputError(contactGroupRefusal({
+        id,
+        tool: 'update_contact',
+        because:
+          'its members are not editable through this server, and name/emails/phones/addresses/notes ' +
+          'do not describe a group.',
+        recovery: 'Edit it in the Fastmail web interface instead.',
+      }));
     }
 
     const patchObject: Record<string, any> = {};
@@ -533,9 +539,44 @@ export class ContactsCalendarClient extends JmapClient {
    * `error` entry must not throw: that would report a failure for a completed irreversible
    * write and discard the only thing the caller could still act on. `deletedCard` is then
    * undefined and the tool states the degrade.
+   *
+   * A contact GROUP is refused outright — see the guard below.
    */
   async deleteContact(id: string, expectState?: string): Promise<DeleteContactResult> {
     const accountId = await this.contactsAccountId();
+
+    // A destroy must not remove a record this server has no way to recreate, and a group is
+    // exactly that: `create_contact` has no `kind` and no `members` parameter, so the echoed
+    // card — the whole safety net on this irreversible call — could not rebuild a membership
+    // list that on a real card runs to a hundred-odd uids. `update_contact` already refuses a
+    // group; this is the same rule from the other side.
+    //
+    // The check is scoped to the record KIND, not to fields create_contact cannot set. Almost
+    // every real card carries titles, organizations or photos that this server cannot write,
+    // and refusing to delete all of those would break the tool. What makes a group different
+    // is that there is no way to make one at all. Keep it that way as create_contact grows.
+    //
+    // It costs its own round trip: a JMAP batch cannot make one method conditional on
+    // another's result, so the card has to be read in a request that completes before the
+    // destroy is sent. The echo still comes from the read inside the destroy batch, so it
+    // remains the card as it stood at the moment it was destroyed. A card that cannot be read
+    // at ALL fails here, before anything is destroyed — the safe direction on an irreversible
+    // call, and unlike the post-destroy read there is nothing yet to lose by throwing. A card
+    // the account simply does not hold reads as undefined and falls through to the destroy,
+    // whose own `notFound` is the authoritative answer for a bad id.
+    const doomedCard = await this.fetchCardOrUndefined(accountId, id);
+    if (isContactGroupCard(doomedCard)) {
+      throw new InvalidInputError(contactGroupRefusal({
+        id,
+        tool: 'delete_contact',
+        because:
+          'this server cannot create a group — create_contact has no kind or members parameter — so it ' +
+          'will not destroy one it could never put back, and the deletedCard echo could not rebuild its ' +
+          'members either.',
+        recovery: 'Delete it in the Fastmail web interface instead.',
+      }));
+    }
+
     const response = await this.makeRequest({
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'],
       methodCalls: [

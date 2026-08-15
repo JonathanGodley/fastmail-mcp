@@ -830,7 +830,9 @@ describe('deleteContact', () => {
   });
 
   // The destroy request reads the card and destroys it in ONE batch, get first, so the
-  // response carries a ContactCard/get before the ContactCard/set.
+  // response carries a ContactCard/get before the ContactCard/set. The guard read that runs
+  // ahead of it is a lone ContactCard/get, and reads its card out of slot 0 of the same
+  // canned response.
   function destroyResponse(card: any, setResult: any) {
     return {
       methodResponses: [
@@ -840,24 +842,47 @@ describe('deleteContact', () => {
     };
   }
 
+  /** The request that actually destroys, whichever round trip it was. */
+  function destroyRequest(makeReq: RecordedCalls<[any]>): any {
+    const [request] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls.some((mc: any) => mc[0] === 'ContactCard/set'),
+      'issuing ContactCard/set',
+    );
+    return request;
+  }
+
   it('destroys by id', async () => {
     const makeReq = stubMakeRequest(client, destroyResponse({ id: 'C1' }, { destroyed: ['C1'] }));
     await client.deleteContact('C1');
-    assert.deepEqual(callArguments(makeReq)[0].methodCalls[1][1].destroy, ['C1']);
+    assert.deepEqual(destroyRequest(makeReq).methodCalls[1][1].destroy, ['C1']);
   });
 
   it('reads the card in the same request as the destroy, before it', async () => {
     // A card fetched in an earlier round trip could have changed before the destroy landed,
     // so the echo would not be what was actually deleted. Ordering the get ahead of the set
-    // inside one request is what makes the echo the destroyed card.
+    // inside one request is what makes the echo the destroyed card — and it stays that way
+    // even though the kind guard reads the card once beforehand, because the guard's copy is
+    // never used as the echo.
     const makeReq = stubMakeRequest(client, destroyResponse({ id: 'C1' }, { destroyed: ['C1'] }));
     await client.deleteContact('C1');
-    assert.equal(makeReq.mock.calls.length, 1);
-    const [get, set] = callArguments(makeReq)[0].methodCalls;
+    const [get, set] = destroyRequest(makeReq).methodCalls;
     assert.equal(get[0], 'ContactCard/get');
     assert.equal(set[0], 'ContactCard/set');
     // No properties filter: a recreate needs every field the account stores.
     assert.ok(!('properties' in get[1]), 'the pre-destroy read must not filter properties');
+  });
+
+  it('reads the card once before the destroy request, so a group can be refused in time', async () => {
+    // The guard cannot ride in the destroy batch: a JMAP batch cannot make one method
+    // conditional on another's result, so by the time the in-batch read comes home the
+    // destroy has already happened.
+    const makeReq = stubMakeRequest(client, destroyResponse({ id: 'C1' }, { destroyed: ['C1'] }));
+    await client.deleteContact('C1');
+    assert.equal(makeReq.mock.calls.length, 2);
+    const guard = callArguments(makeReq)[0];
+    assert.equal(guard.methodCalls.length, 1);
+    assert.equal(guard.methodCalls[0][0], 'ContactCard/get');
   });
 
   it('returns the full pre-destroy card, so a wrong delete leaves the card visible', async () => {
@@ -906,15 +931,55 @@ describe('deleteContact', () => {
 
   it('survives an error entry in the leading read rather than throwing after the destroy', async () => {
     // RFC 8620 section 3.4: a failed method occupies its slot with an `error` entry. A hard
-    // read of slot 0 would throw here — after the card was already destroyed.
-    stubMakeRequest(client, {
-      methodResponses: [
-        ['error', { type: 'invalidArguments' }, 'doomedCard'],
-        ['ContactCard/set', { destroyed: ['C1'] }, 'deleteContact'],
-      ],
+    // read of slot 0 would throw here — after the card was already destroyed. The guard read
+    // that runs first is answered normally, so this covers the echo read alone.
+    let call = 0;
+    mock.method(client, 'makeRequest', async (_request: JmapRequest) => {
+      call += 1;
+      if (call === 1) return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'card']] };
+      return {
+        methodResponses: [
+          ['error', { type: 'invalidArguments' }, 'doomedCard'],
+          ['ContactCard/set', { destroyed: ['C1'] }, 'deleteContact'],
+        ],
+      };
     });
     const result = await client.deleteContact('C1');
     assert.equal(result.deletedCard, undefined);
+  });
+
+  it('refuses to delete a contact group, and destroys nothing', async () => {
+    // create_contact has no kind or members parameter, so a destroyed group could not be
+    // rebuilt from the echo — or from anything else this server offers.
+    const makeReq = stubMakeRequest(
+      client,
+      destroyResponse({ id: 'G1', kind: 'group', name: { full: 'Team' }, members: { 'uid-1': true } }, { destroyed: ['G1'] }),
+    );
+    await assert.rejects(
+      () => client.deleteContact('G1'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /GROUP/);
+        assert.match(err.message, /cannot create a group/);
+        assert.match(err.message, /Fastmail web interface/);
+        return true;
+      },
+    );
+    for (const call of makeReq.mock.calls) {
+      for (const methodCall of call.arguments[0].methodCalls) {
+        assert.notEqual(methodCall[0], 'ContactCard/set', 'a group must be refused before any destroy');
+      }
+    }
+  });
+
+  it('deletes an ordinary card and still echoes it, so the group guard is scoped to the kind', async () => {
+    // The rule is about a record KIND create_contact cannot produce, NOT about fields it
+    // cannot set — a card carrying titles or organizations still deletes.
+    const card = { id: 'C1', kind: 'individual', titles: { t1: { name: 'Countess' } }, name: { full: 'Ada Lovelace' } };
+    const makeReq = stubMakeRequest(client, destroyResponse(card, { destroyed: ['C1'] }));
+    const result = await client.deleteContact('C1');
+    assert.deepEqual(result.deletedCard, card);
+    assert.deepEqual(destroyRequest(makeReq).methodCalls[1][1].destroy, ['C1']);
   });
 
   it('refuses to call a destroy successful when the server acknowledged neither outcome', async () => {
@@ -973,6 +1038,6 @@ describe('deleteContact', () => {
   it('passes expectState through as ifInState', async () => {
     const makeReq = stubMakeRequest(client, destroyResponse({ id: 'C1' }, { destroyed: ['C1'] }));
     await client.deleteContact('C1', 'state-7');
-    assert.equal(callArguments(makeReq)[0].methodCalls[1][1].ifInState, 'state-7');
+    assert.equal(destroyRequest(makeReq).methodCalls[1][1].ifInState, 'state-7');
   });
 });
