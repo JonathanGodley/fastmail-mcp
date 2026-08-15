@@ -19,7 +19,7 @@ describe('coerceStringArray', () => {
   });
 
   it('returns array as-is', () => {
-    assert.deepEqual(coerceStringArray(['a@b.com', 'c@d.com']), ['a@b.com', 'c@d.com']);
+    assert.deepEqual(coerceStringArray(['a@b.example', 'c@d.example']), ['a@b.example', 'c@d.example']);
   });
 
   it('stringifies array elements', () => {
@@ -27,15 +27,15 @@ describe('coerceStringArray', () => {
   });
 
   it('parses JSON-stringified array', () => {
-    assert.deepEqual(coerceStringArray('["a@b.com", "c@d.com"]'), ['a@b.com', 'c@d.com']);
+    assert.deepEqual(coerceStringArray('["a@b.example", "c@d.example"]'), ['a@b.example', 'c@d.example']);
   });
 
   it('parses JSON-stringified array with whitespace', () => {
-    assert.deepEqual(coerceStringArray('  ["a@b.com"]  '), ['a@b.com']);
+    assert.deepEqual(coerceStringArray('  ["a@b.example"]  '), ['a@b.example']);
   });
 
   it('splits comma-separated string', () => {
-    assert.deepEqual(coerceStringArray('a@b.com, c@d.com'), ['a@b.com', 'c@d.com']);
+    assert.deepEqual(coerceStringArray('a@b.example, c@d.example'), ['a@b.example', 'c@d.example']);
   });
 
   it('wraps single address as one-item array', () => {
@@ -47,7 +47,7 @@ describe('coerceStringArray', () => {
   });
 
   it('trims whitespace and filters empty segments in comma-split', () => {
-    assert.deepEqual(coerceStringArray('a@b.com, ,c@d.com,'), ['a@b.com', 'c@d.com']);
+    assert.deepEqual(coerceStringArray('a@b.example, ,c@d.example,'), ['a@b.example', 'c@d.example']);
   });
 
   it('falls back to comma-split when JSON parsing fails', () => {
@@ -58,16 +58,16 @@ describe('coerceStringArray', () => {
 describe('coerceRecipients', () => {
   it('coerces all four fields from arrays, JSON-strings, comma-strings, and bare strings', () => {
     const result = coerceRecipients({
-      to: ['a@b.com'],
-      cc: '["c@d.com", "e@f.com"]',
-      bcc: 'g@h.com, i@j.com',
-      replyTo: 'k@l.com',
+      to: ['a@b.example'],
+      cc: '["c@d.example", "e@f.example"]',
+      bcc: 'g@h.example, i@j.example',
+      replyTo: 'k@l.example',
     });
     assert.deepEqual(result, {
-      to: ['a@b.com'],
-      cc: ['c@d.com', 'e@f.com'],
-      bcc: ['g@h.com', 'i@j.com'],
-      replyTo: ['k@l.com'],
+      to: ['a@b.example'],
+      cc: ['c@d.example', 'e@f.example'],
+      bcc: ['g@h.example', 'i@j.example'],
+      replyTo: ['k@l.example'],
     });
   });
 
@@ -516,31 +516,31 @@ describe('validateClearFields', () => {
 
 describe('parseAddress', () => {
   it('parses "Name <email>" into name + email', () => {
-    assert.deepEqual(parseAddress('Alice <a@x.com>'), { name: 'Alice', email: 'a@x.com' });
+    assert.deepEqual(parseAddress('Alice <a@x.example>'), { name: 'Alice', email: 'a@x.example' });
   });
 
   it('strips surrounding double-quotes from a quoted display name', () => {
-    assert.deepEqual(parseAddress('"Doe, John" <j@x.com>'), { name: 'Doe, John', email: 'j@x.com' });
+    assert.deepEqual(parseAddress('"Doe, John" <j@x.example>'), { name: 'Doe, John', email: 'j@x.example' });
   });
 
   it('passes a bare address through as { email }', () => {
-    assert.deepEqual(parseAddress('a@x.com'), { email: 'a@x.com' });
+    assert.deepEqual(parseAddress('a@x.example'), { email: 'a@x.example' });
   });
 
   it('omits the name when angle brackets carry no display name', () => {
-    assert.deepEqual(parseAddress('<a@x.com>'), { email: 'a@x.com' });
+    assert.deepEqual(parseAddress('<a@x.example>'), { email: 'a@x.example' });
   });
 
   it('trims surrounding whitespace and an empty name', () => {
-    assert.deepEqual(parseAddress('   <a@x.com>  '), { email: 'a@x.com' });
+    assert.deepEqual(parseAddress('   <a@x.example>  '), { email: 'a@x.example' });
   });
 
   it('trims whitespace around name and email', () => {
-    assert.deepEqual(parseAddress('  Bob   <  b@x.com  >  '), { name: 'Bob', email: 'b@x.com' });
+    assert.deepEqual(parseAddress('  Bob   <  b@x.example  >  '), { name: 'Bob', email: 'b@x.example' });
   });
 
   it('uses the last angle-bracket pair so a name may contain "<"', () => {
-    assert.deepEqual(parseAddress('a<b <c@x.com>'), { name: 'a<b', email: 'c@x.com' });
+    assert.deepEqual(parseAddress('a<b <c@x.example>'), { name: 'a<b', email: 'c@x.example' });
   });
 });
 

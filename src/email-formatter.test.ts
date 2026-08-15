@@ -539,7 +539,7 @@ describe('simplifyEmail inReplyTo', () => {
     const raw = {
       id: 'e-reply-1',
       subject: 'Re: Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       inReplyTo: ['<msg-123@example.com>'],
     };
     const result = simplifyEmail(raw);
@@ -551,7 +551,7 @@ describe('simplifyEmail inReplyTo', () => {
     const raw = {
       id: 'e-reply-2',
       subject: 'Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       inReplyTo: null,
     };
     const result = simplifyEmail(raw);
@@ -567,7 +567,7 @@ describe('simplifyEmail non-standard keywords', () => {
     const raw = {
       id: 'e-kw-1',
       subject: 'Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       keywords: {
         '$seen': true,
         '$flagged': true,
@@ -589,7 +589,7 @@ describe('simplifyEmail non-standard keywords', () => {
     const raw = {
       id: 'e-kw-2',
       subject: 'Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       keywords: { '$seen': true },
     };
     const result = simplifyEmail(raw);
@@ -600,7 +600,7 @@ describe('simplifyEmail non-standard keywords', () => {
     const raw = {
       id: 'e-kw-3',
       subject: 'Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       keywords: {
         '$seen': true,
         '$canunsubscribe': true,
@@ -619,7 +619,7 @@ describe('simplifyEmail blobId and size', () => {
     const raw = {
       id: 'e-blob-1',
       subject: 'Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       blobId: 'B-abc123',
     };
     const result = simplifyEmail(raw);
@@ -630,7 +630,7 @@ describe('simplifyEmail blobId and size', () => {
     const raw = {
       id: 'e-size-1',
       subject: 'Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       size: 48210,
     };
     const result = simplifyEmail(raw);
@@ -646,7 +646,7 @@ describe('simplifyEmail attachment partId', () => {
     const raw = {
       id: 'e-att-1',
       subject: 'Test',
-      from: [{ email: 'a@b.com' }],
+      from: [{ email: 'a@b.example' }],
       attachments: [
         { partId: 'part-1', blobId: 'B-123', type: 'application/pdf', size: 1024, name: 'doc.pdf' },
       ],
@@ -664,7 +664,7 @@ describe('simplifyEmail mailboxes (#10)', () => {
     }
     return raw;
   }
-  const base = { id: 'm1', subject: 'Hi', from: [{ email: 'a@b.com' }] };
+  const base = { id: 'm1', subject: 'Hi', from: [{ email: 'a@b.example' }] };
 
   it('emits a single mailbox name', () => {
     const result = simplifyEmail(withNames({ ...base }, ['Inbox']));
@@ -713,7 +713,7 @@ describe('simplifyEmail roles + unresolvedMailboxIds (#49, #53)', () => {
     if (fields.unresolved !== undefined) Object.defineProperty(raw, '_unresolvedMailboxIds', { value: fields.unresolved, enumerable: false, configurable: true });
     return raw;
   }
-  const base = { id: 'r1', subject: 'Hi', from: [{ email: 'a@b.com' }] };
+  const base = { id: 'r1', subject: 'Hi', from: [{ email: 'a@b.example' }] };
 
   it('surfaces roles from _mailboxRoles', () => {
     const result = simplifyEmail(withInfo({ ...base }, { names: ['Trash'], roles: ['trash'] }));
@@ -785,7 +785,7 @@ describe('simplifyEmail roles + unresolvedMailboxIds (#49, #53)', () => {
 
 describe('simplifyEmail — forwardedMessageId (#30)', () => {
   it('surfaces the X-Forwarded-Message-Id header as forwardedMessageId', () => {
-    const raw = { id: 'e1', subject: 'Fwd: x', from: [{ email: 'a@b.com' }], 'header:X-Forwarded-Message-Id:asMessageIds': ['orig@example.com'] };
+    const raw = { id: 'e1', subject: 'Fwd: x', from: [{ email: 'a@b.example' }], 'header:X-Forwarded-Message-Id:asMessageIds': ['orig@example.com'] };
     const result = simplifyEmail(raw);
     assert.deepEqual(result.forwardedMessageId, ['orig@example.com']);
   });
@@ -798,7 +798,7 @@ describe('simplifyEmail — forwardedMessageId (#30)', () => {
 describe('simplifyEmail — sourceEmailId', () => {
   const SRC = 'header:X-Fastmail-MCP-Source-Id:asText';
   it('surfaces the X-Fastmail-MCP-Source-Id header as sourceEmailId, trimmed', () => {
-    const raw = { id: 'd1', subject: 'Re: x', from: [{ email: 'a@b.com' }], [SRC]: ' Mabc123 ' };
+    const raw = { id: 'd1', subject: 'Re: x', from: [{ email: 'a@b.example' }], [SRC]: ' Mabc123 ' };
     assert.equal(simplifyEmail(raw).sourceEmailId, 'Mabc123');
   });
   it('omits it when the header is absent, null, or blank (never an empty field)', () => {
@@ -810,7 +810,7 @@ describe('simplifyEmail — sourceEmailId', () => {
 
 describe('simplifyEmail — stripQuoted (#73)', () => {
   const withBodies = (text: string | null, html?: string) => {
-    const raw: any = { id: 'e1', subject: 's', from: [{ email: 'a@b.com' }], bodyValues: {} };
+    const raw: any = { id: 'e1', subject: 's', from: [{ email: 'a@b.example' }], bodyValues: {} };
     if (text !== null) {
       raw.textBody = [{ partId: 't', type: 'text/plain' }];
       raw.bodyValues.t = { value: text };

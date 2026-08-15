@@ -33,5 +33,19 @@ jobs:
       - name: Build
         run: npm run build
 
+      # A glob that matches nothing must never read as a passing suite. The test
+      # script's pattern is expanded by the runner's shell, so a pattern that
+      # works on one platform can silently select zero files on another; this
+      # step fails loudly instead, and pins the floor against a wholesale loss
+      # of test files.
+      - name: Check the test glob still selects the suite
+        run: |
+          count=$(ls src/*.test.ts | wc -l)
+          echo "test files matched: $count"
+          if [ "$count" -lt 20 ]; then
+            echo "::error::src/*.test.ts matched $count files; the suite has 20+. The glob is wrong or test files have been lost."
+            exit 1
+          fi
+
       - name: Test
         run: npm test

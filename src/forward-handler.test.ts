@@ -40,40 +40,40 @@ describe('EMAIL_BODY_PROPERTIES — forward prerequisites', () => {
 
 describe('buildForwardParams — subject', () => {
   it("defaults to 'Fwd: <original subject>'", () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal());
     assert.equal(forwardParams.subject, 'Fwd: Project update');
   });
   it('does not double-prefix an existing Fwd:/fw:/FWD:', () => {
     for (const s of ['Fwd: Hello', 'fw: Hello', 'FWD: Hello', 'FW: Hello']) {
-      const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ subject: s }));
+      const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal({ subject: s }));
       assert.equal(forwardParams.subject, s);
     }
   });
   it('uses a caller-supplied subject verbatim', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: 'Custom line' }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'], subject: 'Custom line' }, makeOriginal());
     assert.equal(forwardParams.subject, 'Custom line');
   });
   it('treats a supplied-but-blank subject as omitted (falls to the default rule)', () => {
     // Zero-width-aware, like every other emptiness test: '​' renders as empty.
     for (const blank of ['', '   ', '​']) {
-      const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: blank }, makeOriginal());
+      const { forwardParams } = buildForwardParams({ to: ['x@y.example'], subject: blank }, makeOriginal());
       assert.equal(forwardParams.subject, 'Fwd: Project update');
     }
   });
   it('treats a null subject as omitted, as lenient clients spell an unset field', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], subject: null }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'], subject: null }, makeOriginal());
     assert.equal(forwardParams.subject, 'Fwd: Project update');
   });
   it('rejects a non-string subject rather than silently using the default (#68)', () => {
     for (const bad of [42, ['a'], { s: 1 }, true]) {
       assert.throws(
-        () => buildForwardParams({ to: ['x@y.com'], subject: bad }, makeOriginal()),
+        () => buildForwardParams({ to: ['x@y.example'], subject: bad }, makeOriginal()),
         /subject must be a string/,
       );
     }
   });
   it('handles an original with no subject', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ subject: undefined }));
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal({ subject: undefined }));
     assert.equal(forwardParams.subject, 'Fwd: ');
   });
 });
@@ -84,22 +84,22 @@ describe('buildForwardParams — recipients', () => {
     assert.throws(() => buildForwardParams({ to: [] }, makeOriginal()), /to is required for a forward/);
   });
   it('accepts a comma-separated to string (lenient coercion)', () => {
-    const { forwardParams } = buildForwardParams({ to: 'a@x.com, b@y.com' }, makeOriginal());
-    assert.deepEqual(forwardParams.to, ['a@x.com', 'b@y.com']);
+    const { forwardParams } = buildForwardParams({ to: 'a@x.example, b@y.example' }, makeOriginal());
+    assert.deepEqual(forwardParams.to, ['a@x.example', 'b@y.example']);
   });
 });
 
 describe('buildForwardParams — malformed caller notes (#62, #71/#77, #78)', () => {
   it('rejects a non-string note instead of crashing on it', () => {
     assert.throws(
-      () => buildForwardParams({ to: ['x@y.com'], htmlBody: 42 }, makeOriginal()),
+      () => buildForwardParams({ to: ['x@y.example'], htmlBody: 42 }, makeOriginal()),
       (e: any) => e instanceof InvalidInputError && /htmlBody must be a string/.test(e.message),
     );
   });
 
   it('rejects an entirely HTML-escaped note', () => {
     assert.throws(
-      () => buildForwardParams({ to: ['x@y.com'], htmlBody: '&lt;p&gt;FYI&lt;/p&gt;' }, makeOriginal()),
+      () => buildForwardParams({ to: ['x@y.example'], htmlBody: '&lt;p&gt;FYI&lt;/p&gt;' }, makeOriginal()),
       /htmlBody appears to be HTML-escaped/,
     );
   });
@@ -109,25 +109,25 @@ describe('buildForwardParams — malformed caller notes (#62, #71/#77, #78)', ()
   // with the note itself missing from the plain-text part.
   it('rejects a CDATA-wrapped note even though the forwarded block would supply content', () => {
     assert.throws(
-      () => buildForwardParams({ to: ['x@y.com'], htmlBody: '<![CDATA[<p>FYI</p>]]>' }, makeOriginal()),
+      () => buildForwardParams({ to: ['x@y.example'], htmlBody: '<![CDATA[<p>FYI</p>]]>' }, makeOriginal()),
       /htmlBody contains a CDATA section/,
     );
     assert.throws(
-      () => buildForwardParams({ to: ['x@y.com'], textBody: '<![CDATA[FYI]]>' }, makeOriginal()),
+      () => buildForwardParams({ to: ['x@y.example'], textBody: '<![CDATA[FYI]]>' }, makeOriginal()),
       /textBody is wrapped in a CDATA section/,
     );
   });
 
   it('rejects on the asAttachment path too (the note is the whole body there)', () => {
     assert.throws(
-      () => buildForwardParams({ to: ['x@y.com'], asAttachment: true, htmlBody: '<![CDATA[<p>FYI</p>]]>' }, makeOriginal()),
+      () => buildForwardParams({ to: ['x@y.example'], asAttachment: true, htmlBody: '<![CDATA[<p>FYI</p>]]>' }, makeOriginal()),
       /CDATA/,
     );
   });
 
   it('leaves a legitimate note alone: escaped markup inside real tags', () => {
     const { forwardParams } = buildForwardParams(
-      { to: ['x@y.com'], htmlBody: '<p>See the <code>&lt;config&gt;</code> block below</p>' },
+      { to: ['x@y.example'], htmlBody: '<p>See the <code>&lt;config&gt;</code> block below</p>' },
       makeOriginal(),
     );
     assert.match(forwardParams.htmlBody!, /&lt;config&gt;/);
@@ -136,11 +136,11 @@ describe('buildForwardParams — malformed caller notes (#62, #71/#77, #78)', ()
 
 describe('buildForwardParams — forwardedMessageId (recorded source)', () => {
   it("records the original's Message-ID", () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal());
     assert.deepEqual(forwardParams.forwardedMessageId, ['orig-msg@example.com']);
   });
   it('omits it when the original has no Message-ID', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ messageId: undefined }));
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal({ messageId: undefined }));
     assert.equal(forwardParams.forwardedMessageId, undefined);
   });
   it('omits a malformed Message-ID rather than fail the create (Fastmail rejects/mangles these on SET)', () => {
@@ -153,39 +153,39 @@ describe('buildForwardParams — forwardedMessageId (recorded source)', () => {
       'x'.repeat(999) + '@example.com',
       '',
     ]) {
-      const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ messageId: [bad] }));
+      const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal({ messageId: [bad] }));
       assert.equal(forwardParams.forwardedMessageId, undefined, `should omit: ${JSON.stringify(bad.slice(0, 40))}`);
     }
   });
   it('records it on asAttachment forwards too (send_draft resolves it to mark the original)', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'], asAttachment: true }, makeOriginal());
     assert.deepEqual(forwardParams.forwardedMessageId, ['orig-msg@example.com']);
   });
 });
 
 describe('buildForwardParams — bodies', () => {
   it('caller-neither with an html original emits an html forward (no fabricated text side)', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal());
     assert.equal(forwardParams.textBody, undefined);
     assert.match(forwardParams.htmlBody!, /----- Original message -----/);
     assert.match(forwardParams.htmlBody!, /original html/);
   });
   it('caller-neither with a TEXT-ONLY original emits a text forward (never fabricates html)', () => {
     const orig = makeOriginal({ htmlBody: undefined, bodyValues: { t: { value: 'plain only' } } });
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, orig);
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, orig);
     assert.equal(forwardParams.htmlBody, undefined);
     assert.match(forwardParams.textBody!, /----- Original message -----/);
     assert.match(forwardParams.textBody!, /plain only/);
   });
   it('places the caller note above the block', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], textBody: 'FYI folks' }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'], textBody: 'FYI folks' }, makeOriginal());
     assert.match(forwardParams.textBody!, /^FYI folks\n\n\n----- Original message -----/);
   });
 });
 
 describe('buildForwardParams — asAttachment (.eml)', () => {
   it("attaches the original's own blobId as message/rfc822 with a subject-derived name", () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'], asAttachment: true }, makeOriginal());
     assert.deepEqual(forwardParams.attachments, [{
       blobId: 'blob-orig-raw',
       type: 'message/rfc822',
@@ -194,14 +194,14 @@ describe('buildForwardParams — asAttachment (.eml)', () => {
     }]);
   });
   it('note-less: emits the non-marker filler (gives the draft a readable body, arms no guard)', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'], asAttachment: true }, makeOriginal());
     assert.equal(forwardParams.textBody, 'Forwarded message attached.');
     assert.equal(forwardParams.htmlBody, undefined);
     assert.equal(hasTextForwardMarker(forwardParams.textBody), false);
   });
   it('with a note: passes the caller bodies through with NO forwarded-message block', () => {
     const { forwardParams } = buildForwardParams(
-      { to: ['x@y.com'], asAttachment: true, textBody: 'see attached', htmlBody: '<p>see attached</p>' },
+      { to: ['x@y.example'], asAttachment: true, textBody: 'see attached', htmlBody: '<p>see attached</p>' },
       makeOriginal(),
     );
     assert.equal(forwardParams.textBody, 'see attached');
@@ -211,7 +211,7 @@ describe('buildForwardParams — asAttachment (.eml)', () => {
   });
   it('throws when the original has no blobId', () => {
     assert.throws(
-      () => buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal({ blobId: undefined })),
+      () => buildForwardParams({ to: ['x@y.example'], asAttachment: true }, makeOriginal({ blobId: undefined })),
       /no blobId/,
     );
   });
@@ -259,20 +259,20 @@ describe('buildForwardParams — attachment carry', () => {
   const inlineNoCid = { partId: '5', blobId: 'blob-odd', type: 'application/zip', size: 10, name: 'odd.zip', disposition: 'inline', cid: null };
 
   it('carries non-inline originals through the whitelist (never server-set partId/size)', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal());
     assert.deepEqual(forwardParams.attachments, [
       { blobId: 'blob-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' },
     ]);
   });
   it('drops true-inline (cid) parts and counts them in droppedInlineImages', () => {
     const orig = makeOriginal({ attachments: [makeOriginal().attachments[0], inlinePng] });
-    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.com'] }, orig);
+    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.example'] }, orig);
     assert.equal(droppedInlineImages, 1);
     assert.deepEqual(forwardParams.attachments!.map((a) => a.blobId), ['blob-doc']);
   });
   it("normalizes inline-WITHOUT-cid to disposition 'attachment' (kept, not counted; keeps the draft editable)", () => {
     const orig = makeOriginal({ attachments: [inlineNoCid] });
-    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.com'] }, orig);
+    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.example'] }, orig);
     assert.equal(droppedInlineImages, 0);
     assert.deepEqual(forwardParams.attachments, [
       { blobId: 'blob-odd', type: 'application/zip', name: 'odd.zip', disposition: 'attachment' },
@@ -281,14 +281,14 @@ describe('buildForwardParams — attachment carry', () => {
   it('includeOriginalAttachments:false drops the carry but still counts inline drops (the body strips their <img> either way)', () => {
     const orig = makeOriginal({ attachments: [makeOriginal().attachments[0], inlinePng] });
     const { forwardParams, droppedInlineImages } = buildForwardParams(
-      { to: ['x@y.com'], includeOriginalAttachments: false }, orig,
+      { to: ['x@y.example'], includeOriginalAttachments: false }, orig,
     );
     assert.equal(forwardParams.attachments, undefined);
     assert.equal(droppedInlineImages, 1);
   });
   it('asAttachment: droppedInlineImages is ABSENT even for an inline-bearing original (the .eml embeds them losslessly)', () => {
     const orig = makeOriginal({ attachments: [inlinePng] });
-    const { droppedInlineImages } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, orig);
+    const { droppedInlineImages } = buildForwardParams({ to: ['x@y.example'], asAttachment: true }, orig);
     assert.equal(droppedInlineImages, undefined);
   });
 });
@@ -312,11 +312,11 @@ describe('composeForward — draft-only orchestration', () => {
 
   it('requires originalEmailId', async () => {
     const { client } = spyClient();
-    await assert.rejects(() => composeForward({ to: ['x@y.com'] }, client, undefined), /originalEmailId is required/);
+    await assert.rejects(() => composeForward({ to: ['x@y.example'] }, client, undefined), /originalEmailId is required/);
   });
   it('saves a draft and returns its id and subject', async () => {
     const { client, calls } = spyClient();
-    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
+    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
     assert.equal(r.emailId, 'draft-7');
     assert.equal(r.subject, 'Fwd: Project update');
     assert.ok(calls.draft);
@@ -327,14 +327,14 @@ describe('composeForward — draft-only orchestration', () => {
   // forward is still saved as a draft — this function has no way to transmit anything.
   it('ignores a stray send flag: the forward is drafted, never transmitted', async () => {
     const { client, calls } = spyClient();
-    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'], send: true }, client, undefined);
+    const r = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'], send: true }, client, undefined);
     assert.equal(r.emailId, 'draft-7');
     assert.ok(calls.draft); // the only write is the draft create
   });
   it('appends caller uploads BEHIND the carried originals', async () => {
     const { client, calls } = spyClient();
     await composeForward(
-      { originalEmailId: 'o1', to: ['x@y.com'], attachments: [{ path: 'new.pdf' }] },
+      { originalEmailId: 'o1', to: ['x@y.example'], attachments: [{ path: 'new.pdf' }] },
       client, '/attach/root',
     );
     assert.deepEqual(calls.upload, {
@@ -345,7 +345,7 @@ describe('composeForward — draft-only orchestration', () => {
   it('appends caller uploads behind the .eml on asAttachment', async () => {
     const { client, calls } = spyClient();
     await composeForward(
-      { originalEmailId: 'o1', to: ['x@y.com'], asAttachment: true, attachments: [{ path: 'new.pdf' }] },
+      { originalEmailId: 'o1', to: ['x@y.example'], asAttachment: true, attachments: [{ path: 'new.pdf' }] },
       client, '/attach/root',
     );
     assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-orig-raw', 'up-1']);
@@ -354,20 +354,20 @@ describe('composeForward — draft-only orchestration', () => {
   it('surfaces droppedInlineImages in the result', async () => {
     const inline = { partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'p.png', disposition: 'inline', cid: 'img-1' };
     const { client } = spyClient({ getEmailById: async () => makeOriginal({ attachments: [inline] }) });
-    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
     assert.equal(d.droppedInlineImages, 1);
   });
   it('does not call uploadAttachments when no new attachments are given', async () => {
     let uploadCalled = false;
     const { client } = spyClient({ uploadAttachments: async () => { uploadCalled = true; return []; } });
-    await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
+    await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
     assert.equal(uploadCalled, false);
   });
   it('rejects a malformed note before uploading or saving a draft', async () => {
     const { client, calls } = spyClient();
     await assert.rejects(
       () => composeForward(
-        { originalEmailId: 'o1', to: ['x@y.com'], htmlBody: '<![CDATA[<p>FYI</p>]]>', attachments: [{ path: 'new.pdf' }] },
+        { originalEmailId: 'o1', to: ['x@y.example'], htmlBody: '<![CDATA[<p>FYI</p>]]>', attachments: [{ path: 'new.pdf' }] },
         client, '/attach/root',
       ),
       /htmlBody contains a CDATA section/,
@@ -380,7 +380,7 @@ describe('composeForward — draft-only orchestration', () => {
   describe('embedded images in the caller\'s note', () => {
     const NOTE_ARGS = {
       originalEmailId: 'o1',
-      to: ['x@y.com'],
+      to: ['x@y.example'],
       htmlBody: '<p>Context:</p><img src="cid:chart">',
       attachments: [{ path: 'chart.png', cid: 'chart' }],
     };
@@ -407,7 +407,7 @@ describe('composeForward — draft-only orchestration', () => {
       const { client, calls } = spyClient();
       await assert.rejects(
         () => composeForward(
-          { originalEmailId: 'o1', to: ['x@y.com'], htmlBody: '<img src="cid:chart">' },
+          { originalEmailId: 'o1', to: ['x@y.example'], htmlBody: '<img src="cid:chart">' },
           client, '/attach/root',
         ),
         (e: any) => /your note/.test(e.message) && /Quoted images appear inside the quote automatically/.test(e.message),
@@ -418,7 +418,7 @@ describe('composeForward — draft-only orchestration', () => {
 
     it('does not re-read the draft for an ordinary forward', async () => {
       const { client, calls } = spyClient();
-      await composeForward({ originalEmailId: 'o1', to: ['x@y.com'] }, client, undefined);
+      await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
       assert.deepEqual(calls.gets, ['o1']);
     });
 
@@ -435,7 +435,7 @@ describe('composeForward — draft-only orchestration', () => {
       const { client } = spyClient();
       await assert.rejects(
         () => composeForward(
-          { originalEmailId: 'o1', to: ['x@y.com'], htmlBody: '<p>FYI</p><img src="cid:missing"><![CDATA[x]]>' },
+          { originalEmailId: 'o1', to: ['x@y.example'], htmlBody: '<p>FYI</p><img src="cid:missing"><![CDATA[x]]>' },
           client, '/attach/root',
         ),
         /htmlBody contains a CDATA section/,
@@ -446,17 +446,17 @@ describe('composeForward — draft-only orchestration', () => {
 
 describe('buildForwardParams — recorded source instance', () => {
   it("records the original's JMAP id as sourceEmailId on an inline forward", () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal());
     assert.equal(forwardParams.sourceEmailId, 'orig-1');
   });
 
   it('records it on an asAttachment forward too', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'], asAttachment: true }, makeOriginal());
     assert.equal(forwardParams.sourceEmailId, 'orig-1');
   });
 
   it('records it even when the original has no settable Message-ID (id refines WHICH copy; the header still gates marking)', () => {
-    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ messageId: undefined }));
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal({ messageId: undefined }));
     assert.equal(forwardParams.forwardedMessageId, undefined);
     assert.equal(forwardParams.sourceEmailId, 'orig-1');
   });

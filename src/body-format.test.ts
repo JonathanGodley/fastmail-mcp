@@ -238,7 +238,7 @@ describe('assertBodyInputs — HTML-escaped htmlBody (#71/#77)', () => {
   // "&lt; anything &gt;" test rejected every one of them.
   it('accepts a tag-less body whose escaped brackets are placeholders or addresses', () => {
     assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'Hi &lt;name&gt;, see attached.' }));
-    assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'mail me at &lt;a@b.com&gt;' }));
+    assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'mail me at &lt;a@b.example&gt;' }));
     assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'Please reply with &lt;approve&gt; or &lt;reject&gt;.' }));
   });
 
@@ -256,9 +256,9 @@ describe('assertBodyInputs — HTML-escaped htmlBody (#71/#77)', () => {
   });
 
   it('does not treat an escaped element name without a tag delimiter as markup', () => {
-    // "a" is an element name, but "a@b.com" and "ary" are not tags — the lookahead
+    // "a" is an element name, but "a@b.example" and "ary" are not tags — the lookahead
     // requires whitespace, "/", or "&gt;" straight after the name.
-    assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'contact &lt;a@b.com&gt; today' }));
+    assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'contact &lt;a@b.example&gt; today' }));
     assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'the &lt;primary&gt; option' }));
     assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'sizes &lt;big-item&gt; here' }));
   });

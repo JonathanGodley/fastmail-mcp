@@ -5,7 +5,7 @@ import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker } from './reply-qu
 describe('hasQuoteMarker (#37 reply-quote detection)', () => {
   it('detects the marker buildReplyBodies emits', () => {
     const html = buildReplyBodies({
-      original: { from: [{ email: 'a@b.com' }], textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [], bodyValues: { t: { value: 'hi' } } },
+      original: { from: [{ email: 'a@b.example' }], textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [], bodyValues: { t: { value: 'hi' } } },
       htmlBody: '<p>reply</p>', quoteOriginal: true,
     }).htmlBody!;
     assert.equal(hasQuoteMarker(html), true);
@@ -448,7 +448,7 @@ describe('cross-predicate disjointness (forward vs reply markers)', () => {
 describe('normalizeName NEL widening also protects the reply attribution line', () => {
   it('collapses U+0085 in a reply attribution display name', () => {
     const nel = String.fromCharCode(0x85);
-    const original = fwdOriginal({ from: [{ name: 'Eve' + nel + 'Impostor', email: 'e@x.com' }] });
+    const original = fwdOriginal({ from: [{ name: 'Eve' + nel + 'Impostor', email: 'e@x.example' }] });
     const { textBody } = buildReplyBodies({ original, textBody: 'r', quoteOriginal: true });
     const attribution = textBody!.split('\n').find((l) => l.includes('wrote:'))!;
     assert.equal(attribution.includes(nel), false);

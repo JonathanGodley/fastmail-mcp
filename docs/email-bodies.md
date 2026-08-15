@@ -85,10 +85,10 @@ visible to a human who opens the draft or to the recipient.
   Both halves of the test are load-bearing, and the escaped half needs to be narrow. Because
   the guard only fires when there is **no** real markup, it is by definition judging prose —
   and in prose, escaped angle brackets are ordinary content. A loose "`&lt;` anything `&gt;`"
-  test rejected real messages: `Hi &lt;name&gt;, see attached.`, `mail me at &lt;a@b.com&gt;`,
+  test rejected real messages: `Hi &lt;name&gt;, see attached.`, `mail me at &lt;a@b.example&gt;`,
   `Please reply with &lt;approve&gt; or &lt;reject&gt;.` So the escaped tag NAME must be a
   known HTML element, followed by a genuine tag delimiter (whitespace, `/`, or the closing
-  `&gt;`) — which is what tells `&lt;a href=…&gt;` from `&lt;a@b.com&gt;`.
+  `&gt;`) — which is what tells `&lt;a href=…&gt;` from `&lt;a@b.example&gt;`.
 
   **Residual false-positive surface (accepted):** a body with no real markup whose escaped
   brackets happen to wrap a known element name *and* a tag-like delimiter — e.g. prose whose

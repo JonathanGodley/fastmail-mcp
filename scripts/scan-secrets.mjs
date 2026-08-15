@@ -32,16 +32,30 @@ const IGNORE = [
 // Domains considered non-personal placeholders/services. An email on any other
 // domain is flagged as possible real PII. This list is intentionally generic —
 // it names no personal domains.
+// RFC 2606 / RFC 6761 reserve these top-level domains so they can never be
+// delegated. An address under one of them cannot belong to a real person, so
+// matching on the TLD is not a blind spot the way listing a registered domain
+// would be - it closes the whole space rather than one name at a time.
+const RESERVED_TLDS = ['.example', '.invalid', '.test', '.localhost'];
+
+// Entries here are exempt by NAME, which means the scanner is permanently blind
+// to a genuine address at that domain. Keep the list to names that cannot
+// plausibly carry one, and prefer moving a fixture under a RESERVED_TLDS suffix
+// over adding to it.
 const SAFE_EMAIL_DOMAINS = new Set([
-  'example.com', 'example.org', 'example.net', 'test.com', 'localhost',
+  'example.com', 'example.org', 'example.net', 'localhost',
   'fastmail.com', 'api.fastmail.com', 'caldav.fastmail.com',
   'www.fastmailusercontent.com', 'fastmailusercontent.com',
   'anthropic.com',
-  // short placeholder domains used in coerce comma-split tests
-  'b.com', 'd.com', 'f.com', 'h.com', 'j.com', 'l.com',
-  // adversary/other placeholders that are semantically meaningful in tests
+  // Adversary placeholders that have to read as a real-looking hostile domain
+  // for the fixture to mean anything. Accepted blind spot, recorded in
+  // CONTRIBUTING.md.
   'evil.com', 'other.com',
 ]);
+
+function isSafeEmailDomain(domain) {
+  return SAFE_EMAIL_DOMAINS.has(domain) || RESERVED_TLDS.some((tld) => domain.endsWith(tld));
+}
 
 const RULES = [
   { name: 'Fastmail API token', re: /fmu\d+-[A-Za-z0-9_-]{20,}/g },
@@ -105,7 +119,7 @@ for (const file of targetFiles()) {
     const emails = line.match(EMAIL_RE) || [];
     for (const e of emails) {
       const domain = e.split('@')[1].toLowerCase();
-      if (!SAFE_EMAIL_DOMAINS.has(domain)) {
+      if (!isSafeEmailDomain(domain)) {
         findings.push({ file, lineNo, rule: 'possible personal email', snippet: e });
       }
     }

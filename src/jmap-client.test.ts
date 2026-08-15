@@ -934,7 +934,7 @@ describe('updateDraft', () => {
   it('rejects setting and clearing the same field', async () => {
     mockUpdate(client, EXISTING_DRAFT);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { cc: ['x@y.com'], clearFields: ['cc'] }),
+      () => client.updateDraft('draft-1', { cc: ['x@y.example'], clearFields: ['cc'] }),
       /cannot both set and clear cc/,
     );
   });
@@ -2132,10 +2132,10 @@ describe('recipient name parsing', () => {
       methodResponses: [['Email/set', { created: { draft: { id: 'd-1' } } }, 'createDraft']],
     }));
 
-    await client.createDraft({ subject: 'Hi', to: ['Alice <a@x.com>'] });
+    await client.createDraft({ subject: 'Hi', to: ['Alice <a@x.example>'] });
 
     const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.com' }]);
+    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.example' }]);
   });
 
   it('updateDraft parses "Name <email>" recipients into { name, email }', async () => {
@@ -2146,10 +2146,10 @@ describe('recipient name parsing', () => {
       return { methodResponses: [['Email/set', { created: { draft: { id: 'd-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
     });
 
-    await client.updateDraft('draft-1', { to: ['Alice <a@x.com>'] });
+    await client.updateDraft('draft-1', { to: ['Alice <a@x.example>'] });
 
     const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.com' }]);
+    assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.example' }]);
   });
 
 });

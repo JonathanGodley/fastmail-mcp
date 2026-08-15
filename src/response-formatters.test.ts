@@ -286,8 +286,8 @@ describe('simplifyContact', () => {
     id: 'ct-1',
     name: { full: 'Alice Smith' },
     emails: {
-      work: { address: 'alice@work.com' },
-      home: { address: 'alice@home.com' },
+      work: { address: 'alice@work.example' },
+      home: { address: 'alice@home.example' },
     },
     phones: {
       mobile: { number: '+1234567890' },
@@ -317,7 +317,7 @@ describe('simplifyContact', () => {
     const result = simplifyContact(raw);
     assert.equal(result.id, 'ct-1');
     assert.equal(result.name, 'Alice Smith');
-    assert.deepEqual(result.emails, ['alice@work.com', 'alice@home.com']);
+    assert.deepEqual(result.emails, ['alice@work.example', 'alice@home.example']);
     assert.deepEqual(result.phones, ['+1234567890']);
     assert.equal(result.organization, 'Acme Corp');
     assert.equal(result.notes, 'VIP client');

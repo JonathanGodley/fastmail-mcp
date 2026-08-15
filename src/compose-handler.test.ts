@@ -29,15 +29,15 @@ function inlinePart(cid: string, name = 'logo.png') {
 describe('composeDraft — creation and summary fields', () => {
   it('creates the draft and returns the fields the handler summarises', async () => {
     const { client, calls } = spyClient();
-    const r = await composeDraft({ to: ['a@b.com'], cc: ['c@d.com'], subject: 'Hi', textBody: 'hello' }, client, undefined);
-    assert.deepEqual(r, { emailId: 'draft-9', subject: 'Hi', to: ['a@b.com'], cc: ['c@d.com'] });
+    const r = await composeDraft({ to: ['a@b.example'], cc: ['c@d.example'], subject: 'Hi', textBody: 'hello' }, client, undefined);
+    assert.deepEqual(r, { emailId: 'draft-9', subject: 'Hi', to: ['a@b.example'], cc: ['c@d.example'] });
     assert.equal(calls.draft.subject, 'Hi');
   });
 
   it('coerces a lone recipient string to an array (lenient-client input)', async () => {
     const { client, calls } = spyClient();
-    await composeDraft({ to: 'a@b.com', subject: 'Hi', textBody: 'hello' }, client, undefined);
-    assert.deepEqual(calls.draft.to, ['a@b.com']);
+    await composeDraft({ to: 'a@b.example', subject: 'Hi', textBody: 'hello' }, client, undefined);
+    assert.deepEqual(calls.draft.to, ['a@b.example']);
   });
 
   // Pin the WHOLE outgoing object, so a field dropped from the handoff fails the suite
@@ -45,9 +45,9 @@ describe('composeDraft — creation and summary fields', () => {
   it('passes every supported field through to createDraft', async () => {
     const { client, calls } = spyClient();
     await composeDraft({
-      to: ['a@b.com'],
-      cc: ['c@d.com'],
-      bcc: ['e@f.com'],
+      to: ['a@b.example'],
+      cc: ['c@d.example'],
+      bcc: ['e@f.example'],
       from: 'me@example.com',
       mailbox: 'Drafts',
       subject: 'Hi',
@@ -59,9 +59,9 @@ describe('composeDraft — creation and summary fields', () => {
       attachments: [{ path: 'a.pdf' }],
     }, client, '/attach/root');
     assert.deepEqual(calls.draft, {
-      to: ['a@b.com'],
-      cc: ['c@d.com'],
-      bcc: ['e@f.com'],
+      to: ['a@b.example'],
+      cc: ['c@d.example'],
+      bcc: ['e@f.example'],
       from: 'me@example.com',
       mailbox: 'Drafts',
       subject: 'Hi',
@@ -77,7 +77,7 @@ describe('composeDraft — creation and summary fields', () => {
   it('uploads attachments with the given attachDir and threads the parts through', async () => {
     const { client, calls } = spyClient();
     await composeDraft(
-      { to: ['a@b.com'], subject: 'Hi', textBody: 'hello', attachments: [{ path: 'a.pdf' }] },
+      { to: ['a@b.example'], subject: 'Hi', textBody: 'hello', attachments: [{ path: 'a.pdf' }] },
       client, '/attach/root',
     );
     // The upload is told which Content-IDs the message displays; an ordinary attachment
@@ -90,7 +90,7 @@ describe('composeDraft — creation and summary fields', () => {
 
   it('does not upload when no attachments are given', async () => {
     const { client, calls } = spyClient();
-    await composeDraft({ to: ['a@b.com'], subject: 'Hi', textBody: 'hello' }, client, '/attach/root');
+    await composeDraft({ to: ['a@b.example'], subject: 'Hi', textBody: 'hello' }, client, '/attach/root');
     assert.equal(calls.upload, undefined);
   });
 
@@ -196,7 +196,7 @@ describe('composeDraft — threading-header coercion', () => {
 
 describe('composeDraft — embedding the caller\'s own images (#13)', () => {
   const EMBED_ARGS = {
-    to: ['a@b.com'],
+    to: ['a@b.example'],
     subject: 'Logo',
     htmlBody: '<p>See:</p><img src="cid:logo">',
     attachments: [{ path: 'logo.png', cid: 'logo' }],
@@ -233,7 +233,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
   it('does not read the draft back when nothing was embedded', async () => {
     const { client, calls } = spyClient();
     const r = await composeDraft(
-      { to: ['a@b.com'], subject: 'Hi', textBody: 'hello', attachments: [{ path: 'a.pdf' }] },
+      { to: ['a@b.example'], subject: 'Hi', textBody: 'hello', attachments: [{ path: 'a.pdf' }] },
       client, '/attach/root',
     );
     assert.equal(calls.readBacks, 0);
@@ -261,7 +261,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
     const { client, calls } = spyClient();
     await assert.rejects(
       () => composeDraft(
-        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<img src="cid:missing">', attachments: [{ path: 'a.pdf' }] },
+        { to: ['a@b.example'], subject: 'Hi', htmlBody: '<img src="cid:missing">', attachments: [{ path: 'a.pdf' }] },
         client, '/attach/root',
       ),
       (e: any) => e instanceof InvalidInputError
@@ -276,7 +276,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
     const { client } = spyClient();
     await assert.rejects(
       () => composeDraft(
-        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<img src="cid:missing">' },
+        { to: ['a@b.example'], subject: 'Hi', htmlBody: '<img src="cid:missing">' },
         client, undefined,
       ),
       (e: any) => e instanceof InvalidInputError
@@ -289,7 +289,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
     const { client } = spyClient();
     await assert.rejects(
       () => composeDraft(
-        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<img src="cid:ii-' + 'a'.repeat(32) + '@inline.invalid">' },
+        { to: ['a@b.example'], subject: 'Hi', htmlBody: '<img src="cid:ii-' + 'a'.repeat(32) + '@inline.invalid">' },
         client, '/attach/root',
       ),
       (e: any) => e instanceof InvalidInputError && /server-managed identifier/.test(e.message),
@@ -300,7 +300,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
     const { client, calls } = spyClient();
     await assert.rejects(
       () => composeDraft({
-        to: ['a@b.com'],
+        to: ['a@b.example'],
         subject: 'Hi',
         htmlBody: '<img src="cid:logo">',
         // Two spellings of ONE identifier: the collision is judged on the canonical value.
@@ -316,7 +316,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
     const degraded = [{ blobId: 'blob-logo', type: 'image/png', name: 'logo.png', disposition: 'attachment', cid: 'logo' }];
     const { client, calls } = spyClient({}, degraded);
     const r = await composeDraft(
-      { to: ['a@b.com'], subject: 'Hi', textBody: 'no html here', attachments: [{ path: 'logo.png', cid: 'logo' }] },
+      { to: ['a@b.example'], subject: 'Hi', textBody: 'no html here', attachments: [{ path: 'logo.png', cid: 'logo' }] },
       client, '/attach/root',
     );
     assert.deepEqual(calls.upload.options, { inlineCids: new Set() });
@@ -331,7 +331,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
     const degraded = [{ blobId: 'blob-spare', type: 'image/png', name: 'spare.png', disposition: 'attachment', cid: 'spare' }];
     const { client, calls } = spyClient({}, degraded);
     const r = await composeDraft({
-      to: ['a@b.com'],
+      to: ['a@b.example'],
       subject: 'Hi',
       htmlBody: '<p>text, and no image reference at all</p>',
       attachments: [{ path: 'spare.png', cid: 'spare' }],
@@ -365,7 +365,7 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
     const { client } = spyClient();
     await assert.rejects(
       () => composeDraft(
-        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<p>ok</p><img src="cid:missing"><![CDATA[x]]>' },
+        { to: ['a@b.example'], subject: 'Hi', htmlBody: '<p>ok</p><img src="cid:missing"><![CDATA[x]]>' },
         client, '/attach/root',
       ),
       /htmlBody contains a CDATA section/,

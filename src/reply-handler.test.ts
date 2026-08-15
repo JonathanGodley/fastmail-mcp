@@ -114,7 +114,7 @@ describe('buildReplyParams — subject, recipients, threading', () => {
     assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, orig).replyParams.to, ['noname@example.com']);
   });
   it('uses an explicit to over the original sender', () => {
-    assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', to: ['alice@x.com'] }, makeOriginal()).replyParams.to, ['alice@x.com']);
+    assert.deepEqual(buildReplyParams({ originalEmailId: 'e1', textBody: 'x', to: ['alice@x.example'] }, makeOriginal()).replyParams.to, ['alice@x.example']);
   });
   it('builds inReplyTo and appends to references', () => {
     const { replyParams } = buildReplyParams({ originalEmailId: 'e1', textBody: 'x' }, makeOriginal());

@@ -38,10 +38,10 @@ export function isBlank(s: string | undefined | null): boolean {
 // The escaped test is deliberately narrow, because it only ever fires on a body with NO
 // real markup — i.e. on prose, where escaped angle brackets are ordinary content. A loose
 // "&lt; anything &gt;" test rejected real messages: "Hi &lt;name&gt;, see attached.",
-// "mail me at &lt;a@b.com&gt;", "reply with &lt;approve&gt; or &lt;reject&gt;". So the
+// "mail me at &lt;a@b.example&gt;", "reply with &lt;approve&gt; or &lt;reject&gt;". So the
 // escaped tag NAME must be a known HTML element, and the lookahead requires a genuine tag
 // delimiter after it (whitespace, `/`, or the closing `&gt;`) — which is what separates
-// `&lt;a href=…&gt;` (an anchor) from `&lt;a@b.com&gt;` (an email address).
+// `&lt;a href=…&gt;` (an anchor) from `&lt;a@b.example&gt;` (an email address).
 const ESCAPED_TAG = /&lt;\/?(p|br|div|span|a|b|i|u|em|strong|ul|ol|li|h[1-6]|table|thead|tbody|tr|td|th|img|pre|code|blockquote|hr|body|html|head|style|font|sub|sup|small|big|center)(?=\s|\/|&gt;)/i;
 const REAL_TAG = /<[a-z][^>]*>/i;
 // Case-insensitive: an HTML parser treats `<!` as the start of a markup declaration
