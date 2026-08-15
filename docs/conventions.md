@@ -501,10 +501,16 @@ Platform facts behind the design (live-probed 2026-08-14 against Fastmail):
 - **A Fastmail-UI reply draft records nothing richer than `In-Reply-To`/`References`**,
   plus a private `X-PersonalityId` (an internal sending-identity id). There is no
   platform-provided exact-instance record to reuse, so this server writes its own.
-- **A private header survived a Fastmail-UI draft edit** (their edit also recreates the
-  message): `x-forwarded-message-id` came through intact. Fastmail recognizes that
-  header as its own convention, so survival of a *truly foreign* header is unverified —
-  one more reason the Message-ID fallback stays load-bearing rather than vestigial.
+- **A Fastmail-UI draft edit keeps its own convention headers but DROPS truly foreign
+  ones** (their edit also recreates the message under a new id).
+  `x-forwarded-message-id` came through an edit intact (Fastmail recognizes it as its
+  own convention), but `X-Fastmail-MCP-Source-Id` did not (probed live 2026-08-15: a
+  tool-made reply draft edited in the UI came back with `In-Reply-To` preserved and the
+  source-id header gone). So a UI-edited reply/forward draft loses its exact-instance
+  record, and `send_draft` degrades to the Message-ID fallback — the designed path for
+  record-less drafts, and the reason that fallback stays load-bearing rather than
+  vestigial. A forward's edit guard is unaffected: it keys on `x-forwarded-message-id`,
+  which survives.
 - **EmailSubmission transmits stored headers verbatim.** The delivered copy of a
   self-forward still carried `x-forwarded-message-id`, and a reply sent from Fastmail's
   mobile app arrived still carrying `X-PersonalityId`. Header stripping at send is a
