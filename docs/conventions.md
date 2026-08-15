@@ -133,6 +133,24 @@ can't be resolved it names every unresolved value in one error (so all typos are
 single retry) and applies no labels, rather than half-applying a mutation the caller must
 reconcile. `resolveMailbox` is the throwing single-input wrapper over the same core.
 
+**Two destinations are deliberately NOT caller-resolvable at all**: `delete_email`/`bulk_delete`
+find Trash, and `archive_email` finds Archive, by **exact role only** (`findByExactRole`), with no
+name fallback and no destination parameter. These are fixed, membership-replacing defaults, and a
+folder can be created with any name a caller likes, "Trash" or "archive" included. Resolving the
+name would make the destination of a destructive default something text the model merely read could
+aim; a role is assigned by the server and cannot be minted that way. A caller who wants a different
+destination has one: `move_email`, where naming it is the whole point.
+
+`move_email`, `bulk_move` and `archive_email` all set `mailboxIds` **whole-value** in a single
+`Email/set` (RFC 8620 §5.3) rather than reading the current membership and patching each id away.
+It states the promised contract directly ("replaces all mailbox membership") and has no read/write
+window in which a newly-added mailbox survives the move. None of the three writes a keyword: a move
+changes where a message is filed and nothing about its read or flagged state, so archiving does not
+mark a message read. Marking read is `mark_email_read`. This is a deliberate divergence from
+upstream PR `MadLlama25/fastmail-mcp#67`, whose `archive_email` writes `$seen` as part of the move:
+folding two effects into one verb means a caller who wanted only the filing cannot get it, while a
+caller who wanted both can still make the second call.
+
 ## Error classification: `InvalidParams` vs `InternalError`
 
 The same recover-clear-intent / refuse-to-guess principle extends to *which* MCP error
@@ -160,6 +178,15 @@ wrong — re-form it; don't blind-retry as-is,"** while `InternalError` (-32603)
   input: zero sending identities, a missing system mailbox (Drafts/Sent/Trash), a
   transport error, a set-error naming a server/account/state condition, or a
   post-condition like "returned no ID." These stay a plain `Error`.
+
+A **missing Archive mailbox is the one that switches sides**: `archive_email` on an account
+with no archive-role mailbox throws `InvalidInputError` (`InvalidParams`), not the plain
+`Error` its Trash counterpart throws. The split is recoverability, and it really does differ
+here. "Archive" is a filing convention, so the caller substitutes any folder they like via
+`move_email` and gets the same outcome, which is a re-formed call and so the definition of
+caller-fixable. A missing Drafts/Sent/Trash has no substitute: nothing else *is* the trash,
+and no argument to any tool produces a delete without it. The error message therefore names
+`move_email`, because the classification is only honest if the route it implies exists.
 
 This rule is **tool-family-agnostic.** Because the calendar tools share the same
 `requireNonEmpty` / `validateClearFields` helpers from `src/coerce.ts`, their input

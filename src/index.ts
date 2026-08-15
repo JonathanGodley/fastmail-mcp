@@ -457,6 +457,22 @@ const STRIP_QUOTED_DESC =
   'Applies to `bodyText` only — a `bodyHtml` returned alongside it is NOT stripped. Cannot be combined with raw (raw is unmodified JMAP). ' +
   'Stripping can also over-reach, because these markers are conventions rather than syntax: a leading ">" is equally a markdown blockquote or a pasted shell prompt, a pasted email header block (From: with an address, plus To:/Sent:/Subject:) is treated as a quoted section and cuts to the end of the message, and a FORWARDED message\'s content sits below the same "-----Original Message-----" marker, leaving only the covering note. So treat a `quotedBytesStripped` that looks too large for the message as the cue to re-read that message without the flag.';
 
+// The destination parameter shared by move_email and bulk_move, declared once so the two
+// cannot drift on what a destination accepts or on how an unknown one is refused.
+const TARGET_MAILBOX_PARAM_DESC =
+  'Destination mailbox — id, role (e.g. archive, trash), or name. Unknown mailbox is rejected with the valid list.';
+
+// The membership warning carried by every tool that sets mailboxIds whole-value
+// (move_email, bulk_move, archive_email). Written once because the consequence is the
+// same on each: a message filed under several labels keeps only the destination, and the
+// additive alternative is the one a caller usually wants. The additive tool is a
+// parameter rather than a fixed word — a bulk caller sent to the single-email
+// `add_labels` would find it rejects their `emailIds`, which is a worse outcome than no
+// pointer at all.
+const membershipReplaceDesc = (additiveTool: 'add_labels' | 'bulk_add_labels') =>
+  'This REPLACES the message\'s entire mailbox membership: every other label/folder it was filed under is removed. ' +
+  `To file it somewhere while KEEPING its existing labels, use ${additiveTool} instead.`;
+
 // Single source of truth for the tool catalog. Hoisted to module scope so the
 // CallTool handler can derive each tool's declared parameter set for the
 // unknown-parameter guard (#11) — no drift from what clients see via ListTools.
@@ -1204,7 +1220,7 @@ const TOOLS = [
       },
       {
         name: 'move_email',
-        description: 'Move an email to a different mailbox (replaces its mailbox membership). The destination accepts an id, role, or name. An unknown destination is rejected with the valid list.',
+        description: 'Move an email to a different mailbox. ' + membershipReplaceDesc('add_labels') + ' The destination accepts an id, role, or name. An unknown destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1214,10 +1230,24 @@ const TOOLS = [
             },
             targetMailbox: {
               type: 'string',
-              description: 'Destination mailbox — id, role (e.g. archive, trash), or name. Unknown mailbox is rejected with the valid list.',
+              description: TARGET_MAILBOX_PARAM_DESC,
             },
           },
           required: ['emailId', 'targetMailbox'],
+        },
+      },
+      {
+        name: 'archive_email',
+        description: 'Archive an email: file it into the account\'s Archive folder, the mailbox carrying the JMAP archive role. ' + membershipReplaceDesc('add_labels') + ' It does NOT mark the message read — archiving and reading are separate actions, so call mark_email_read as well if you want both. The destination is fixed and takes no parameter: it is found by role, never by folder name, so a folder merely NAMED "archive" is not it. To file into any other mailbox use move_email. An account with no archive-role mailbox is rejected, pointing you at move_email.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            emailId: {
+              type: 'string',
+              description: 'ID of the email to archive',
+            },
+          },
+          required: ['emailId'],
         },
       },
       {
@@ -1392,7 +1422,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_move',
-        description: 'Move multiple emails to a mailbox (replaces each one\'s mailbox membership). The destination accepts an id, role, or name. An unknown destination is rejected with the valid list.',
+        description: 'Move multiple emails to a mailbox. ' + membershipReplaceDesc('bulk_add_labels') + ' The destination accepts an id, role, or name. An unknown destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1403,7 +1433,7 @@ const TOOLS = [
             },
             targetMailbox: {
               type: 'string',
-              description: 'Destination mailbox — id, role (e.g. archive, trash), or name. Unknown mailbox is rejected with the valid list.',
+              description: TARGET_MAILBOX_PARAM_DESC,
             },
           },
           required: ['emailIds', 'targetMailbox'],
@@ -2020,6 +2050,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'archive_email': {
+        const { emailId } = args as any;
+        if (!emailId) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
+        }
+        const client = initializeClient();
+        await client.archiveEmail(emailId);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'Email archived successfully (moved to Archive; read state unchanged)',
+            },
+          ],
+        };
+      }
+
       case 'add_labels': {
         const { emailId } = args as any;
         const mailboxIds = coerceStringArray((args as any).mailboxIds);
@@ -2374,7 +2421,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             available: true,
             functions: [
               'list_mailboxes', 'list_emails', 'get_email', 'reply_email', 'forward_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
-              'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email',
+              'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email', 'archive_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
               'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'

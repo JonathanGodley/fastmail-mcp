@@ -436,51 +436,36 @@ describe('moveEmail', () => {
   beforeEach(() => {
     client = makeClient();
     // moveEmail resolves the destination against getMailboxes(); stub it so 'mb-archive'
-    // resolves and makeRequest only sees the Email/get + Email/set pair.
+    // resolves and makeRequest only sees the Email/set.
     stubMailboxes(client);
   });
 
-  it('moves email successfully', async () => {
-    // First call: getEmail to read current mailboxIds
-    // Second call: Email/set to move
-    let callCount = 0;
-    stubRequests(client, async () => {
-      callCount++;
-      if (callCount === 1) {
-        return {
-          methodResponses: [
-            ['Email/get', { list: [{ id: 'e1', mailboxIds: { 'mb-inbox': true } }] }, 'getEmail'],
-          ],
-        };
-      }
-      return {
-        methodResponses: [
-          ['Email/set', { updated: { 'e1': null } }, 'moveEmail'],
-        ],
-      };
-    });
+  it('sets mailboxIds whole-value in a single request, and writes no keywords', async () => {
+    // The membership is REPLACED rather than read and patched id-by-id, which is what the
+    // tool promises and what keeps a mailbox added between a read and a write from
+    // surviving the move. And a move is a filing change only: writing a keyword here would
+    // silently change a message's read or flagged state.
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { updated: { 'e1': null } }, 'moveEmail']],
+    }));
 
     await client.moveEmail('e1', 'mb-archive');
-    assert.equal(callCount, 2);
+
+    assert.equal(makeReq.mock.callCount(), 1, 'no pre-read round trip');
+    const methodCalls = callArguments(makeReq, 0)[0].methodCalls;
+    assert.equal(methodCalls.length, 1);
+    assert.equal(methodCalls[0][0], 'Email/set');
+    const update = methodCalls[0][1].update.e1;
+    assert.deepEqual(update, { mailboxIds: { 'mb-archive': true } });
+    assert.deepEqual(Object.keys(update), ['mailboxIds']);
   });
 
-  // Drive a notUpdated failure with a chosen SetError, returning the get then the set.
+  // Drive a notUpdated failure with a chosen SetError.
   function stubMoveFailure(setError: { type: string; description?: string }) {
-    let callCount = 0;
-    stubRequests(client, async () => {
-      callCount++;
-      if (callCount === 1) {
-        return {
-          methodResponses: [
-            ['Email/get', { list: [{ id: 'e1', mailboxIds: { 'mb-inbox': true } }] }, 'getEmail'],
-          ],
-        };
-      }
-      return {
-        methodResponses: [
-          ['Email/set', { notUpdated: { 'e1': setError } }, 'moveEmail'],
-        ],
-      };
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { notUpdated: { 'e1': setError } }, 'moveEmail'],
+      ],
     });
   }
 
@@ -573,6 +558,127 @@ describe('moveEmail', () => {
       );
     });
   }
+});
+
+// ---------- archiveEmail ----------
+
+describe('archiveEmail', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client);
+  });
+
+  it('replaces membership with the archive mailbox alone, and writes no keywords', async () => {
+    // A pure move: exactly one destination id, set whole-value, and no keywords key at
+    // all. The read state is deliberately untouched — archiving a message does not read it
+    // (mark_email_read is the separate call), so a $seen write here would be a silent
+    // second effect.
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'archiveEmail']],
+    }));
+
+    await client.archiveEmail('e1');
+
+    assert.equal(makeReq.mock.callCount(), 1, 'no pre-read round trip');
+    const methodCalls = callArguments(makeReq, 0)[0].methodCalls;
+    assert.equal(methodCalls.length, 1);
+    assert.equal(methodCalls[0][0], 'Email/set');
+    const update = methodCalls[0][1].update.e1;
+    assert.deepEqual(update, { mailboxIds: { 'mb-archive': true } });
+    assert.deepEqual(Object.keys(update), ['mailboxIds']);
+    assert.equal(Object.keys(update.mailboxIds).length, 1);
+  });
+
+  it('prefers the archive ROLE over a folder that merely carries the name', async () => {
+    // Half of the guard: with both present, the role wins. On its own this case cannot
+    // tell an exact-role lookup apart from a role-then-name fallback, because a
+    // role-first fallback picks the same mailbox — the case below is the one that
+    // separates them, and the two are only meaningful together.
+    stubMailboxes(client, [
+      INBOX_MAILBOX,
+      { id: 'mb-imposter', name: 'archive' },
+      { id: 'mb-real-archive', name: 'Old mail', role: 'archive' },
+    ]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'archiveEmail']],
+    }));
+
+    await client.archiveEmail('e1');
+
+    const update = callArguments(makeReq, 0)[0].methodCalls[0][1].update.e1;
+    assert.deepEqual(update.mailboxIds, { 'mb-real-archive': true });
+  });
+
+  it('refuses a folder named "archive" when no mailbox carries the role', async () => {
+    // The case the whole role-only rule exists for, and the only one that discriminates:
+    // a name fallback would file the mail into a folder ANY caller can create, under an
+    // innocuous verb. Nothing may be sent at all here — the assertion on makeRequest is
+    // the substantive half, since a wrong destination would still look like a success.
+    stubMailboxes(client, [INBOX_MAILBOX, TRASH_MAILBOX, { id: 'mb-imposter', name: 'Archive' }]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'archiveEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.archiveEmail('e1'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /archive role/);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.callCount(), 0, 'a named folder must not receive the mail');
+  });
+
+  it('rejects an account with no archive-role mailbox, naming the alternative', async () => {
+    stubMailboxes(client, [INBOX_MAILBOX, TRASH_MAILBOX]);
+
+    await assert.rejects(
+      () => client.archiveEmail('e1'),
+      (err: Error) => {
+        // Caller-fixable: they can name any destination on move_email, so the message has
+        // to say so and the class has to tell the client to re-form rather than retry.
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /archive role/);
+        assert.match(err.message, /move_email/);
+        return true;
+      },
+    );
+  });
+
+  it('routes a notUpdated bad id through the shared set-error classifier', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { notUpdated: { e1: { type: 'notFound' } } }, 'archiveEmail']],
+    });
+
+    await assert.rejects(
+      () => client.archiveEmail('e1'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.equal(err.message, 'Failed to archive email: notFound');
+        return true;
+      },
+    );
+  });
+
+  it('keeps an operational notUpdated reason a server-side failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { notUpdated: { e1: { type: 'forbidden', description: 'mailbox is read-only' } } }, 'archiveEmail'],
+      ],
+    });
+
+    await assert.rejects(
+      () => client.archiveEmail('e1'),
+      (err: Error) => {
+        assert.ok(!(err instanceof InvalidInputError));
+        assert.equal(err.message, 'Failed to archive email: forbidden - mailbox is read-only');
+        return true;
+      },
+    );
+  });
 });
 
 // ---------- deleteEmail ----------
@@ -770,21 +876,10 @@ describe('bulk set-error formatting', () => {
     stubMailboxes(client);
   });
 
-  // bulkMove issues an Email/get (to read mailboxIds) then the Email/set; drive the set
-  // to a notUpdated map of our choosing.
+  // bulkMove issues only the Email/set (the destination resolves off the stubbed mailbox
+  // list), so a single stub drives it to a notUpdated map of our choosing.
   function stubBulkMoveFailure(notUpdated: Record<string, { type: string; description?: string }>) {
-    let callCount = 0;
-    stubRequests(client, async () => {
-      callCount++;
-      if (callCount === 1) {
-        return {
-          methodResponses: [
-            ['Email/get', { list: [{ id: 'e1', mailboxIds: { 'mb-inbox': true } }, { id: 'e2', mailboxIds: { 'mb-inbox': true } }] }, 'getEmails'],
-          ],
-        };
-      }
-      return { methodResponses: [['Email/set', { notUpdated }, 'bulkMove']] };
-    });
+    stubMakeRequest(client, { methodResponses: [['Email/set', { notUpdated }, 'bulkMove']] });
   }
 
   it('groups failing ids by reason, surfacing type AND description (#22)', async () => {
@@ -1943,19 +2038,15 @@ describe('bulkMove resolution', () => {
     stubMailboxes(client);
   });
 
-  it('resolves the destination by name and targets the resolved id', async () => {
-    let call = 0;
-    const makeReq = stubRequests(client, async () => {
-      call++;
-      if (call === 1) {
-        return { methodResponses: [['Email/get', { list: [{ id: 'e1', mailboxIds: { 'mb-inbox': true } }] }, 'getEmails']] };
-      }
-      return { methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkMove']] };
-    });
+  it('resolves the destination by name and replaces membership whole-value', async () => {
+    const makeReq = stubRequests(client, async () => (
+      { methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkMove']] }
+    ));
     await client.bulkMove(['e1'], 'Archive');
-    const update = callArguments(makeReq, 1)[0].methodCalls[0][1].update;
-    assert.equal(update.e1['mailboxIds/mb-archive'], true);
-    assert.equal(update.e1['mailboxIds/mb-inbox'], null);
+    assert.equal(makeReq.mock.callCount(), 1, 'no pre-read round trip');
+    const update = callArguments(makeReq, 0)[0].methodCalls[0][1].update;
+    // Same shape as moveEmail: one whole-value mailboxIds per email, and no keyword.
+    assert.deepEqual(update.e1, { mailboxIds: { 'mb-archive': true } });
   });
 
   it('throws InvalidInputError on an unknown destination', async () => {

@@ -2850,36 +2850,20 @@ export class JmapClient {
     const mailboxes = await this.getMailboxes();
     const targetMailboxId = resolveMailbox(mailboxes, target).id;
 
-    // Fetch current mailboxIds to build a proper JMAP patch
-    const getRequest: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/get', {
-          accountId: session.accountId,
-          ids: [emailId],
-          properties: ['mailboxIds']
-        }, 'getEmail']
-      ]
-    };
-    const getResponse = await this.makeRequest(getRequest);
-    const email = this.getListResult(getResponse, 0)[0];
-
-    // Build patch: remove from all current mailboxes, add to target
-    const patch: Record<string, boolean | null> = {};
-    if (email?.mailboxIds) {
-      for (const mbId of Object.keys(email.mailboxIds)) {
-        patch[`mailboxIds/${mbId}`] = null;
-      }
-    }
-    patch[`mailboxIds/${targetMailboxId}`] = true;
-
+    // Set mailboxIds WHOLE-VALUE rather than reading the current membership and patching
+    // each id away: one method call, and it says exactly what the tool promises ("replaces
+    // all mailbox membership"). RFC 8620 §5.3 allows either form. The read-then-patch it
+    // replaced carried a race — a mailbox added between the read and the write survived
+    // the "move", leaving the message in two places — and a whole-value replace cannot
+    // miss an id it never had to enumerate. NO keyword is written here: a move changes
+    // where a message is filed and nothing about its read/flag state.
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
         ['Email/set', {
           accountId: session.accountId,
           update: {
-            [emailId]: patch
+            [emailId]: { mailboxIds: { [targetMailboxId]: true } }
           }
         }, 'moveEmail']
       ]
@@ -2890,6 +2874,58 @@ export class JmapClient {
 
     if (result.notUpdated && result.notUpdated[emailId]) {
       this.throwSingleSetError(result.notUpdated[emailId], 'move email');
+    }
+  }
+
+  /**
+   * File an email into the account's Archive folder. A pure move: it replaces the
+   * message's whole mailbox membership and writes no keywords, so an unread message stays
+   * unread. Marking read is a separate call to markEmailRead. Folding the two together
+   * would leave a caller who wanted only the filing with no way to get it, while a caller
+   * who wanted both can always make the second call.
+   *
+   * The destination is resolved by EXACT ROLE ONLY, and there is deliberately no
+   * destination parameter — moveEmail owns custom destinations. Both halves of that are
+   * the point: this tool's whole job is a fixed, membership-replacing default, and a
+   * caller (or text a model merely read) can create a mailbox literally NAMED "archive".
+   * Resolving the name would hand that text a lever over where mail is filed; a role is
+   * assigned by the server and cannot be minted the same way. Same reasoning as
+   * deleteEmail's exact-role Trash lookup.
+   */
+  async archiveEmail(emailId: string): Promise<void> {
+    const session = await this.getSession();
+
+    const mailboxes = await this.getMailboxes();
+    const archiveMailbox = this.findByExactRole(mailboxes, 'archive');
+
+    // Classified as caller-fixable (unlike deleteEmail's missing-Trash, which is a plain
+    // Error): the caller has a real route out of it without a server-side change — name
+    // any destination they like on move_email. "Archive" is a filing convention, so a
+    // substitute folder is theirs to choose; there is no substitute for Trash.
+    if (!archiveMailbox) {
+      throw new InvalidInputError(
+        'This account has no mailbox with the archive role, so there is nowhere to archive to. ' +
+        'Use move_email with a destination of your choice instead.'
+      );
+    }
+
+    const request: JmapRequest = {
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/set', {
+          accountId: session.accountId,
+          update: {
+            [emailId]: { mailboxIds: { [archiveMailbox.id]: true } }
+          }
+        }, 'archiveEmail']
+      ]
+    };
+
+    const response = await this.makeRequest(request);
+    const result = this.getMethodResult(response, 0);
+
+    if (result.notUpdated && result.notUpdated[emailId]) {
+      this.throwSingleSetError(result.notUpdated[emailId], 'archive email');
     }
   }
 
@@ -3963,31 +3999,11 @@ export class JmapClient {
     const mailboxes = await this.getMailboxes();
     const targetMailboxId = resolveMailbox(mailboxes, target).id;
 
-    // Fetch current mailboxIds for all emails to build proper JMAP patches
-    const getRequest: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/get', {
-          accountId: session.accountId,
-          ids: emailIds,
-          properties: ['id', 'mailboxIds']
-        }, 'getEmails']
-      ]
-    };
-    const getResponse = await this.makeRequest(getRequest);
-    const emails: any[] = this.getListResult(getResponse, 0);
-    const mailboxMap: Record<string, Record<string, boolean>> = {};
-    emails.forEach((e: any) => { mailboxMap[e.id] = e.mailboxIds || {}; });
-
-    // Build patch per email: remove all current mailboxes, add target
+    // Whole-value mailboxIds per email — see moveEmail for why this replaces the
+    // read-then-patch (one call, no read/write race, and no keyword is written).
     const updates: Record<string, any> = {};
     emailIds.forEach(id => {
-      const patch: Record<string, boolean | null> = {};
-      for (const mbId of Object.keys(mailboxMap[id] || {})) {
-        patch[`mailboxIds/${mbId}`] = null;
-      }
-      patch[`mailboxIds/${targetMailboxId}`] = true;
-      updates[id] = patch;
+      updates[id] = { mailboxIds: { [targetMailboxId]: true } };
     });
 
     const request: JmapRequest = {

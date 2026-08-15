@@ -382,7 +382,23 @@ than overclaimed:
 - **The hidden-count note covers ONLY Trash/Spam.** It does **not** disclose a `move_email` to
   `Archive` or a custom folder — that conceals mail with **zero disclosure**. So move concealment
   is not "mitigated by the note" for non-Trash/Spam destinations; this is stated plainly rather
-  than implied covered.
+  than implied covered. **`archive_email` (#21) sits in exactly this gap and is the cheapest way
+  into it**: one call, one required argument, and mail leaves the Inbox with nothing reporting it.
+  Its fixed destination narrows only where the mail can be aimed. An injected agent cannot choose
+  the folder, but Archive is where it wanted the mail anyway. It adds no capability `move_email`
+  (`targetMailbox:"archive"`) did not already have; it is the same concealment at a lower bar.
+  Accepted on the same footing as move-to-any, and for the same reason: the restriction that would
+  change it is the deferred move-target guard (fork #43), not a disclosure note.
+- **`archive_email`'s destination is EXACT-ROLE ONLY, and that is a real (small) hardening.**
+  Its destination is not caller-supplied at all: no `targetMailbox`, no name fallback, role
+  lookup only. It shares that shape with `delete_email`/`bulk_delete`, whose Trash is found the
+  same way, and those three are the only destinations on the server that work like it (see the
+  resolver section of `docs/conventions.md`). The reason is that a caller can
+  create a mailbox literally *named* `archive`; had the tool resolved names, "archive this" (a
+  phrase an untrusted message body can plant) would file mail into an attacker-chosen folder
+  under the innocuous verb. Against a *deliberate* attacker holding `move_email` this changes
+  nothing (they name the folder outright). It removes the case where a **cooperative** agent
+  running an innocuous instruction is steered by a folder someone else created.
 - **Resolver error message is an information oracle, reachable account-wide.** A bad `mailbox`/
   `targetMailbox`/`mailboxIds` to *any* swept tool (search, list, stats, move, compose, labels)
   reflects the caller's input and a capped list of mailbox names **reachable by the configured

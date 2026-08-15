@@ -30,7 +30,7 @@ This fork adds a **response simplification system** that reduces token usage whe
 - Reply to emails with proper threading (In-Reply-To, References headers), carrying the images the original displayed into the quote
 - Forward emails with attachment carry and a lossless `.eml` (`asAttachment`) mode; an inline forward carries the original's body images too
 - Create, edit, and send email drafts (with or without threading)
-- Email management: mark read/unread, pin/unpin, delete, move between folders
+- Email management: mark read/unread, pin/unpin, delete, move between folders, archive
 
 ### Advanced Email Features
 - **Attachment Handling**: List and download email attachments; attach local files to outgoing mail (opt-in via `FASTMAIL_ATTACH_DIR`), including images embedded in the body — and replies/forwards carry the images the original displayed
@@ -50,8 +50,9 @@ This fork adds a **response simplification system** that reduces token usage whe
 - Create, update, and delete calendar events
 
 ### Label vs Move Operations
-- **move_email/bulk_move**: Replaces ALL mailboxes for an email (folder behavior)
-- **add_labels/remove_labels**: Adds/removes SPECIFIC mailboxes while preserving others (label behavior)
+- **move_email/bulk_move/archive_email**: Replaces ALL mailboxes for an email (folder behavior). Whatever else the message was filed under is dropped, so a message carrying three labels comes out of a move carrying one.
+- **add_labels/remove_labels/bulk_add_labels/bulk_remove_labels**: Adds/removes SPECIFIC mailboxes while preserving others (label behavior). This is what you want when the message should gain a folder rather than change folders.
+- `archive_email` is the fixed-destination case: it files into the folder holding the JMAP `archive` role, takes no destination parameter, and does not mark the message read. Use `move_email` for any other destination.
 
 ### Identity & Account Management
 - List available sending identities
@@ -254,7 +255,7 @@ On booleans specifically:
 - **Only those two spellings are recognised.** Anything else (`"1"`, `"yes"`, `"on"`) is not an error; it falls back to the parameter's documented default. So send the exact words rather than a near-miss, which would look accepted and do nothing.
 - **List parameters take a bare string too** - a single value, a comma-separated string or a JSON-encoded array all coerce to an array. That covers `to`/`cc`/`bcc`/`replyTo`, `emailIds`/`mailboxIds`, `clearFields`, and `inReplyTo`/`references` on `create_draft`.
 
-Error codes follow the same recoverability logic: a failure you can fix by changing input (a bad/empty field, a not-found id, a non-sendable draft) returns `InvalidParams`, while a server/operational failure you can't fix that way (a permission refusal, a missing system mailbox, a transport error) returns `InternalError` — so a client knows whether to re-form the call or simply retry. A refused mutation also carries the server's stated reason.
+Error codes follow the same recoverability logic: a failure you can fix by changing input (a bad/empty field, a not-found id, a non-sendable draft) returns `InvalidParams`, while a server/operational failure you can't fix that way (a permission refusal, a missing system mailbox such as Drafts/Sent/Trash, a transport error) returns `InternalError` — so a client knows whether to re-form the call or simply retry. A refused mutation also carries the server's stated reason. The one mailbox that sits on the other side is Archive: `archive_email` on an account with no archive-role mailbox returns `InvalidParams`, because you can reach the same result yourself by naming any destination on `move_email`, while nothing substitutes for a missing Trash.
 
 When the refusal comes from the server rather than from this server's own checks, the JMAP error type decides which of the two you get. A type you can act on — the id matched nothing (`notFound`), a property value was rejected (`invalidProperties`), an argument or patch was malformed (`invalidArguments`, `invalidPatch`), the object was over the size limit (`tooLarge`), the target's type forbids the operation (`singleton`) — returns `InvalidParams`, because re-forming the call is the route to success. A type describing the server, the account or its state — `forbidden`, `overQuota`, `rateLimit`, `serverFail`, `stateMismatch`, `accountReadOnly` and anything unrecognised — returns `InternalError`. A bulk operation is `InvalidParams` only when *every* failure in the batch is one of the first kind. The message text is the same either way (it always carries the server's `type` and description); only the code differs. Per-type reasoning: `docs/conventions.md`.
 
@@ -381,7 +382,7 @@ The signature fields are the identity's configured sign-off, the same text the F
 - Notes extracted from JMAP's `{hash: {note}}` object format
 - Verbose: addresses as objects, titles as strings, online/URLs as URIs
 
-## Available Tools (39 Total)
+## Available Tools (40 Total)
 
 **🎯 Most Popular Tools:**
 - **check_function_availability**: Check what's available and get setup guidance  
@@ -440,8 +441,10 @@ The signature fields are the identity's configured sign-off, the same text the F
   - Parameters: `emailId` (required), `pinned` (default: true)
 - **delete_email**: Delete an email (move to trash)
   - Parameters: `emailId` (required)
-- **move_email**: Move an email to a different mailbox (replaces all mailboxes)
+- **move_email**: Move an email to a different mailbox. **Replaces the message's entire mailbox membership** - every other label or folder it was filed under is removed. To file it somewhere while keeping those, use `add_labels`. No keyword is changed, so the message keeps its read/unread and flagged state.
   - Parameters: `emailId` (required), `targetMailbox` (required — id, role, or name)
+- **archive_email**: File an email into the account's Archive folder - the mailbox carrying the JMAP `archive` role. **Replaces the message's entire mailbox membership**, same as `move_email` (use `add_labels` to keep the existing labels), and it **does not mark the message read** - archiving and reading are separate actions, so call `mark_email_read` too if you want both. The destination is fixed and takes no parameter: it is found by role, never by folder name, so a folder merely *named* "archive" is not it. That is deliberate - a name-resolved destination would let text the model merely read decide where mail lands. For any other destination use `move_email`. An account with no archive-role mailbox is rejected with `InvalidParams` pointing at `move_email` ([#21](https://github.com/JonathanGodley/fastmail-mcp/issues/21)).
+  - Parameters: `emailId` (required)
 - **add_labels**: Add labels (mailboxes) to an email without removing existing ones
   - Parameters: `emailId` (required), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
 - **remove_labels**: Remove specific labels (mailboxes) from an email
@@ -598,7 +601,7 @@ Images written as `data:` URIs are dropped and counted rather than converted, as
   - Parameters: `emailIds` (required array), `read` (default: true)
 - **bulk_pin**: Pin or unpin multiple emails
   - Parameters: `emailIds` (required array), `pinned` (default: true)
-- **bulk_move**: Move multiple emails to a mailbox
+- **bulk_move**: Move multiple emails to a mailbox. **Replaces each message's entire mailbox membership** - every other label or folder each one was filed under is removed. To file them somewhere while keeping those, use `bulk_add_labels`. No keyword is changed, so each message keeps its read/unread and flagged state.
   - Parameters: `emailIds` (required array), `targetMailbox` (required — id, role, or name)
 - **bulk_delete**: Delete multiple emails (move to trash)
   - Parameters: `emailIds` (required array)

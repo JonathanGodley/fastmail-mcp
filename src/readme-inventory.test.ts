@@ -1,4 +1,7 @@
-// Drift guard keeping README's tool reference in step with the tools the server ships.
+// Drift guards keeping the two catalogues DERIVED from the tool list in step with it:
+// README's tool reference, and the report `check_function_availability` returns. Both are
+// hand-maintained lists of tool names sitting next to the `TOOLS` array they describe, and
+// both go stale the same way — a tool is added and its entry is simply never written.
 //
 // The failure this exists to catch is not a stale count. A tool gets appended to TOOLS,
 // the "Available Tools (N Total)" heading is bumped along with it, and the tool's own
@@ -29,6 +32,16 @@
 //
 // If you restructure that part of README, keep the shape above or real entries will stop
 // counting here and this guard will report them as missing.
+//
+// AVAILABILITY REPORT CONTRACT — what `check_function_availability` has to list:
+//
+//   Every tool the server ships appears in exactly ONE of the report's `functions: [...]`
+//   arrays (email / identity / contacts / calendar), so a caller asking what it can do
+//   gets the whole surface and never sees a tool claimed by two capability groups. The two
+//   meta-tools are exempt: they report on the server rather than acting on an account, so
+//   they belong to no capability group and are listed in README's "Most Popular Tools"
+//   teaser instead. A tool missing from the report is invisible to any caller that plans
+//   its work off it, which is the whole reason the report exists.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -63,6 +76,29 @@ function collectShippedToolNames(): string[] {
     if (match) names.push(match[1]);
   }
   return names;
+}
+
+// The tools that deliberately appear in no capability group of the availability report:
+// check_function_availability reports on the server itself, and test_bulk_operations is a
+// self-test harness. Adding a name here excuses a tool from the coverage assertion below,
+// so only a tool that genuinely acts on no account capability belongs in it.
+const AVAILABILITY_EXEMPT_TOOLS = new Set(['check_function_availability', 'test_bulk_operations']);
+
+// The `functions: [...]` arrays of the availability report, one entry per capability
+// group, read out of the `const availability = {` literal in src/index.ts. Kept as groups
+// rather than flattened so a name listed under two groups is detectable.
+function collectAvailabilityGroups(): string[][] {
+  const lines = readLines(SCHEMA_FILE);
+  const start = lines.findIndex((l) => l.trim() === 'const availability = {');
+  assert.notEqual(start, -1, 'could not find the `const availability = {` literal in src/index.ts');
+  const end = lines.findIndex((l, i) => i > start && l.trim() === '};');
+  assert.notEqual(end, -1, 'could not find the end of the availability literal in src/index.ts');
+
+  const groups: string[][] = [];
+  for (const array of lines.slice(start, end).join('\n').matchAll(/functions:\s*\[([^\]]*)\]/g)) {
+    groups.push([...array[1].matchAll(/'([a-z][a-z0-9_]*)'/g)].map((m) => m[1]));
+  }
+  return groups;
 }
 
 // The tool names README documents, plus the number written into the section heading.
@@ -123,6 +159,49 @@ describe('README tool inventory', () => {
       [],
       `the README documents a tool that does not exist: ${phantom.join(', ')}. It was ` +
         `removed from TOOLS (or renamed) and its entry was left behind — delete the entry`,
+    );
+  });
+
+  it('reports every tool in check_function_availability, in exactly one group', () => {
+    const shipped = collectShippedToolNames();
+    const groups = collectAvailabilityGroups();
+    // A floor on the scan itself, so a reformatted availability literal fails here rather
+    // than passing against an empty set of groups.
+    assert.ok(
+      groups.length >= 4,
+      `found only ${groups.length} capability groups in the availability report; the ` +
+        `source scan has probably stopped matching`,
+    );
+
+    const listed = groups.flat();
+    const unreported = shipped.filter(
+      (name) => !AVAILABILITY_EXEMPT_TOOLS.has(name) && !listed.includes(name),
+    );
+    assert.deepEqual(
+      unreported,
+      [],
+      `this tool ships but check_function_availability never reports it: ` +
+        `${unreported.join(', ')}. Add it to the \`functions\` array of the capability ` +
+        `group it belongs to, so a caller planning off that report can see it`,
+    );
+
+    const repeated = listed.filter((name, i) => listed.indexOf(name) !== i);
+    assert.deepEqual(
+      repeated,
+      [],
+      `these tools are reported under more than one capability group: ` +
+        `${repeated.join(', ')}. A tool's availability then depends on which group the ` +
+        `caller read`,
+    );
+
+    const shippedNames = new Set(shipped);
+    const phantom = listed.filter((name) => !shippedNames.has(name));
+    assert.deepEqual(
+      phantom,
+      [],
+      `check_function_availability reports a tool that does not exist: ` +
+        `${phantom.join(', ')}. It was removed from TOOLS (or renamed) and the report was ` +
+        `left behind`,
     );
   });
 
