@@ -10,11 +10,20 @@ on:
       - 'v*'
 
 # Read-only by default. The job below opts up to contents: write because it
-# publishes the release asset, and Actions grants permissions per job rather
-# than per step — so the npm and pack steps run under that same token. What
-# keeps that from being a soft target is the rest of this file: the checkout
-# carries no pushable git credential, and the artifact is gated on the test
+# publishes the release asset. Permissions are granted per job, so that scope
+# bounds every step — but the token itself is NOT ambient: Actions does not put
+# GITHUB_TOKEN into a run: step's environment, it materializes only where a step
+# references secrets.GITHUB_TOKEN or github.token. In this file that is exactly
+# one place, the release step's env:, so npm ci and the pack step hold no
+# write-capable credential at all. The checkout also carries no pushable git
+# credential (persist-credentials: false), and the artifact is gated on the test
 # suite and the secret scan before anything is packed.
+#
+# The residual worth knowing is therefore about artifact content, not token
+# reach: npm ci runs third-party install scripts in the same workspace that is
+# about to be packed, so a compromised dependency could alter dist/ before pack.
+# Splitting the jobs would not change that — it is why the pack tool is pinned
+# by exact version and the release is gated behind the scan.
 permissions:
   contents: read
 
