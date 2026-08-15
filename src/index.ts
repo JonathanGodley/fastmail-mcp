@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildAttachmentListContent, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -238,6 +238,34 @@ function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
       required: ['path'],
     },
     description: leadIn + attachmentsDescription(forEdit),
+  };
+}
+
+// Shared `participants` schema for the two calendar write tools, so the accepted shapes
+// stay identical between create and update. `leadIn` carries the per-tool sentence
+// (create adds an ORGANIZER; update REPLACES the whole attendee list).
+//
+// The type is widened to ['array', 'string'] for the same reason every lenient boolean is
+// widened: coerceParticipants accepts a JSON-stringified array from clients that
+// stringify structured params, and a client validating against a narrow `type: 'array'`
+// would reject that string before dispatch, making the coercion unreachable. The
+// description spells out which strings work, because the type alone does not say.
+function participantsSchemaProperty(leadIn: string) {
+  return {
+    type: ['array', 'string'],
+    items: {
+      type: ['object', 'string'],
+      properties: {
+        email: { type: 'string', description: `Participant email address (max ${MAX_ICAL_FIELD_KB}KB)` },
+        name: { type: 'string', description: `Participant display name (optional, max ${MAX_ICAL_FIELD_KB}KB)` },
+      },
+      required: ['email'],
+    },
+    description:
+      leadIn +
+      ` Each entry is either an object { email, name? } or a bare email-address string (equivalent to { email }).` +
+      ` An entry with any other key, a missing or non-string email, or a non-string name is rejected naming its position, e.g. participants[2] — nothing is silently dropped.` +
+      ` The whole array may also be sent as a JSON string ('[{"email":"a@example.com"}]'), for clients that stringify structured parameters; a comma-joined list is NOT accepted.`,
   };
 }
 
@@ -951,7 +979,7 @@ const TOOLS = [
       },
       {
         name: 'create_calendar_event',
-        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
+        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. Write both as strict ISO-8601 (2026-04-07, 2026-04-07T14:00:00, 2026-04-07T14:00:00Z, or 2026-04-07T14:00:00+10:00): other spellings such as 2026/04/07 or "April 7 2026" are rejected rather than guessed at, since guessing would place the event on a day that depends on the server's own time zone, and so is a day that does not exist in its month (2026-02-31). participants entries may be { email, name? } objects or bare email-address strings. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
@@ -969,35 +997,26 @@ const TOOLS = [
             },
             start: {
               type: 'string',
-              description: 'Start time in ISO 8601 format (e.g. 2026-04-07T14:00:00Z) or date-only for all-day events (e.g. 2026-04-07). Must be in the same form as end.',
+              description: 'Start time in ISO 8601 format (e.g. 2026-04-07T14:00:00Z) or date-only for all-day events (e.g. 2026-04-07). Must be in the same form as end. Only these spellings are accepted — 2026-04-07, 2026-04-07T14:00:00, ...Z, or ...+HH:MM — and the date must be a real day in its month.',
             },
             end: {
               type: 'string',
-              description: 'End time in ISO 8601 format, in the SAME form as start (both date-only, both with a Z/offset, or both without one) and later than start. For all-day events, DTEND is exclusive — a one-day event on April 1 requires end: 2026-04-02',
+              description: 'End time in ISO 8601 format, in the SAME form as start (both date-only, both with a Z/offset, or both without one) and later than start. Same accepted spellings as start. For all-day events, DTEND is exclusive — a one-day event on April 1 requires end: 2026-04-02',
             },
             location: {
               type: 'string',
               description: `Event location (optional, max ${MAX_ICAL_FIELD_KB}KB)`,
             },
-            participants: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  email: { type: 'string', description: `Participant email address (max ${MAX_ICAL_FIELD_KB}KB)` },
-                  name: { type: 'string', description: `Participant display name (optional, max ${MAX_ICAL_FIELD_KB}KB)` }
-                },
-                required: ['email'],
-              },
-              description: `Event participants (optional, at most ${MAX_ICAL_PARTICIPANTS}). Automatically adds ORGANIZER from CalDAV username.`,
-            },
+            participants: participantsSchemaProperty(
+              `Event participants (optional, at most ${MAX_ICAL_PARTICIPANTS}). Automatically adds ORGANIZER from CalDAV username.`,
+            ),
           },
           required: ['calendarId', 'title', 'start', 'end'],
         },
       },
       {
         name: 'update_calendar_event',
-        description: `Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
+        description: `Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. Both are read as strict ISO-8601, matching create_calendar_event: a non-ISO spelling like 2026/04/07, or a day its month does not have (2026-02-31), is rejected rather than guessed at. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees, and its entries may be { email, name? } objects or bare email-address strings. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1015,28 +1034,19 @@ const TOOLS = [
             },
             start: {
               type: 'string',
-              description: 'New start time in ISO 8601 format. Floating times (no Z/offset) preserve the original timezone. Must end up in the same form as the end it sits beside (the one you pass, or the stored one) and before it — pass both start and end when moving the event.',
+              description: 'New start time in ISO 8601 format (2026-04-07, 2026-04-07T14:00:00, ...Z, or ...+HH:MM; the date must be a real day in its month). Floating times (no Z/offset) preserve the original timezone. Must end up in the same form as the end it sits beside (the one you pass, or the stored one) and before it — pass both start and end when moving the event.',
             },
             end: {
               type: 'string',
-              description: 'New end time in ISO 8601 format, in the same form as the start it sits beside and later than it. DTEND is exclusive per RFC 5545',
+              description: 'New end time in ISO 8601 format, in the same form as the start it sits beside and later than it. Same accepted spellings as start. DTEND is exclusive per RFC 5545',
             },
             location: {
               type: 'string',
               description: `New event location (max ${MAX_ICAL_FIELD_KB}KB)`,
             },
-            participants: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  email: { type: 'string', description: `Participant email address (max ${MAX_ICAL_FIELD_KB}KB)` },
-                  name: { type: 'string', description: `Participant display name (optional, max ${MAX_ICAL_FIELD_KB}KB)` }
-                },
-                required: ['email'],
-              },
-              description: `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
-            },
+            participants: participantsSchemaProperty(
+              `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
+            ),
             clearFields: {
               type: 'array',
               items: { type: 'string', enum: ['description', 'location'] },
@@ -1794,7 +1804,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'create_calendar_event': {
-        const { calendarId, title, description, start, end, location, participants } = args as any;
+        const { calendarId, title, description, start, end, location } = args as any;
+        // Coerce BEFORE the size guard below, so it measures the real array rather than a
+        // lenient client's JSON string (which would slip through as a non-array and be
+        // left unmeasured). Per-item shape and key checks live in coerceParticipants.
+        const participants = coerceParticipants((args as any).participants);
         // Bound the text before anything measures, escapes or folds it: the iCal line
         // folding these values pass through is quadratic in the field length, so an
         // unbounded description or participant name stalls the whole process. Rejects
@@ -1814,7 +1828,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'update_calendar_event': {
-        const { eventId, title, description, start, end, location, participants } = args as any;
+        const { eventId, title, description, start, end, location } = args as any;
+        // Same coercion, and the same ordering, as create_calendar_event. An omitted
+        // participants stays undefined here ("leave the attendees alone"), so the
+        // no-field-to-update check and updateCalendarEvent still read it correctly.
+        const participants = coerceParticipants((args as any).participants);
         // Same bound the create path applies, for the same reason: the update path folds
         // SUMMARY/DESCRIPTION/LOCATION and every ATTENDEE line through the same quadratic
         // folder, so it is the identical stall from the identical input. See ical-limits.ts.

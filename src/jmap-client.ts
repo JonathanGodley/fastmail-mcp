@@ -156,6 +156,33 @@ function validateContentType(value: string, index: number): string {
   return v;
 }
 
+/**
+ * Substitute `{placeholder}` slots in a JMAP session URL template (RFC 8620 §1.6.2 —
+ * downloadUrl, uploadUrl) with values inserted LITERALLY.
+ *
+ * The literal part is the whole point. `String.prototype.replace` with a string
+ * replacement interprets `$&`, `` $` ``, `$'`, `$1`…`$9` and `$$` inside that string, so
+ * a value carrying any of them splices template text into the URL instead of the value:
+ * a blobId of `` a$`b `` would inject the entire prefix of the template that precedes the
+ * slot. Both the template and the values come from the session, so this is reachable
+ * whenever the server is hostile or compromised. Passing a *function* as the replacement
+ * suppresses that interpretation entirely — its return value is used verbatim.
+ *
+ * Substitution is a SINGLE pass over the template, which is what keeps a value from
+ * introducing a slot of its own: a value that happens to read `{accountId}` stays that
+ * text, because the scan never revisits what it has already written. A slot the caller
+ * supplied no value for is left in place rather than emptied, so it stays visible in the
+ * finished URL instead of silently collapsing the path segment around it.
+ *
+ * This is not a substitute for validating the finished URL — a value can still damage the
+ * path or query — so callers re-run `validateFastmailUrl` on the result.
+ */
+export function fillUrlTemplate(template: string, values: Record<string, string>): string {
+  return template.replace(/\{[^{}]*\}/g, (slot) => (
+    Object.prototype.hasOwnProperty.call(values, slot) ? values[slot] : slot
+  ));
+}
+
 export interface JmapSession {
   apiUrl: string;
   accountId: string;
@@ -897,16 +924,77 @@ export class JmapClient {
   }
 
   /**
+   * The JMAP set-error types a caller can resolve by re-forming the call, and therefore
+   * the ones that surface as `InvalidParams` rather than `InternalError`.
+   *
+   * The dividing question is NOT "whose fault is it" but "what should the caller do
+   * next": `InvalidParams` says *re-form the arguments*, `InternalError` says *this is
+   * not about your input; a bare retry may or may not help*. A type belongs here only
+   * when changing the request is the route to success. Anything unrecognised stays out
+   * — an unknown type gets the plain-`Error` default rather than an assumption that the
+   * caller's input was wrong.
+   *
+   * Types are drawn from the RFC 8620 §5.3 `SetError` list, plus the §3.6.2 method-level
+   * names that servers do in practice hand back inside a `notCreated`/`notUpdated` map.
+   *
+   * IN (caller-fixable):
+   * - `notFound`      — the id names nothing; correcting the id is the only route.
+   * - `invalidProperties` — the record carries a property value the server rejected;
+   *                     every such property comes from the call's own arguments.
+   * - `invalidArguments`  — an argument is missing or the wrong type. Method-level in the
+   *                     spec, but it appears as a per-record reason on real servers, and
+   *                     the meaning is the same either way: the request is malformed.
+   * - `invalidPatch`  — the patch does not apply to the record. We build the patch from
+   *                     the caller's fields, so a different call is what fixes it.
+   * - `tooLarge`      — the object exceeds the server's per-object size limit; the fix is
+   *                     to send something smaller. Matches how `uploadBlob` already
+   *                     classifies an over-limit attachment before it is even sent.
+   * - `singleton`     — the target's type forbids being created or destroyed. A retry can
+   *                     never succeed; only naming a different target can.
+   *
+   * OUT (server, account or state — plain `Error`):
+   * - `forbidden`     — an ACL/permission refusal. No argument grants permission.
+   * - `overQuota`     — the account is at its object-count/total-size limit. Neither code
+   *                     is a perfect fit (a bare retry will not help either), but the
+   *                     resolution is freeing account capacity, not re-forming the call,
+   *                     so it stays on the not-your-input side.
+   * - `rateLimit`     — too many operations too quickly; retrying after a pause is exactly
+   *                     the right recovery, which is what `InternalError` signals.
+   * - `serverFail` / `serverPartialFail` — server-side failures by definition.
+   * - `stateMismatch` — the record changed underneath the request. Recovery is re-read
+   *                     then retry, not a corrected argument.
+   * - `accountReadOnly` — the whole account refuses writes.
+   * - `cannotCalculateChanges` — a server-side state-window limitation.
+   * - `willDestroy`   — the server ignored an update because the same call also destroyed
+   *                     the record. This client never batches an update and a destroy for
+   *                     the same id, so it cannot arise from the caller's arguments.
+   */
+  private static readonly CALLER_FIXABLE_SET_ERROR_TYPES: ReadonlySet<string> = new Set([
+    'notFound',
+    'invalidProperties',
+    'invalidArguments',
+    'invalidPatch',
+    'tooLarge',
+    'singleton',
+  ]);
+
+  private static isCallerFixableSetError(type: string): boolean {
+    return JmapClient.CALLER_FIXABLE_SET_ERROR_TYPES.has(type);
+  }
+
+  /**
    * Throw the correctly-classified error for a single-id Email/set failure, surfacing
    * the server's reason (#22) and discriminating the MCP code by SetError type (#41):
-   * a `notFound` is a bad id the caller can fix → InvalidInputError (InvalidParams);
-   * any other type (`forbidden`, `serverFail`, …) is an operational failure the caller
-   * can't fix by re-forming args → plain Error (InternalError). `action` is the verb
+   * a type the caller can resolve by re-forming the call (a bad id, a rejected property,
+   * a malformed argument or patch, an oversized object) → InvalidInputError
+   * (InvalidParams); anything else (`forbidden`, `serverFail`, …) is an operational
+   * failure the caller can't fix that way → plain Error (InternalError). See
+   * CALLER_FIXABLE_SET_ERROR_TYPES for the per-type reasoning. `action` is the verb
    * phrase, e.g. "move email", yielding "Failed to move email: notFound - …".
    */
   protected throwSingleSetError(entry: { type: string; description?: string }, action: string): never {
     const message = `Failed to ${action}: ${this.describeSetError(entry)}`;
-    if (entry.type === 'notFound') {
+    if (JmapClient.isCallerFixableSetError(entry.type)) {
       throw new InvalidInputError(message);
     }
     throw new Error(message);
@@ -920,9 +1008,10 @@ export class JmapClient {
    * Caps the ids-per-reason and reason count; on truncation it says the list is PARTIAL
    * (so a truncated list never reads as complete) and points at re-running the full input
    * set, which is safe because these mutators are idempotent. Classified per #41: if every
-   * failure is `notFound` the whole batch is caller-fixable bad ids → InvalidInputError
-   * (InvalidParams); any other type means at least one operational failure → plain Error
-   * (InternalError).
+   * failure is a caller-fixable type the whole batch is the caller's to re-form →
+   * InvalidInputError (InvalidParams); one operational failure in the batch means a bare
+   * re-form cannot clear it → plain Error (InternalError). The type split is
+   * CALLER_FIXABLE_SET_ERROR_TYPES above.
    */
   protected throwBulkSetError(
     notUpdated: Record<string, { type: string; description?: string }>,
@@ -958,7 +1047,7 @@ export class JmapClient {
       message += '. (Partial list — not every failure is shown. These operations are idempotent, so re-run with the full input set to retry every failure safely.)';
     }
 
-    if (failedIds.every(id => notUpdated[id].type === 'notFound')) {
+    if (failedIds.every(id => JmapClient.isCallerFixableSetError(notUpdated[id].type))) {
       throw new InvalidInputError(message);
     }
     throw new Error(message);
@@ -1344,9 +1433,11 @@ export class JmapClient {
 
     const result = this.getMethodResult(response, 0);
 
-    // Propagate server-provided error details from notCreated
+    // Propagate server-provided error details from notCreated, classified the same way
+    // every other set-error site is: a rejected property or a malformed argument came
+    // from this call, so the caller can fix it by re-forming the request.
     if (result.notCreated?.draft) {
-      throw new Error(`Failed to create draft: ${this.describeSetError(result.notCreated.draft)}`);
+      this.throwSingleSetError(result.notCreated.draft, 'create draft');
     }
 
     // Throw if created ID is missing instead of returning silently
@@ -2180,7 +2271,7 @@ export class JmapClient {
     if (createResult.notCreated?.draft) {
       // Create failed → old draft is untouched (no destroy was issued). This is the
       // data-loss-prevention path: surface the error, leave the draft as-is.
-      throw new Error(`Failed to create updated draft: ${this.describeSetError(createResult.notCreated.draft)}`);
+      this.throwSingleSetError(createResult.notCreated.draft, 'create updated draft');
     }
 
     const newEmailId = createResult.created?.draft?.id;
@@ -2465,7 +2556,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const submissionResult = this.getMethodResult(response, 0);
     if (submissionResult.notCreated?.submission) {
-      throw new Error(`Failed to submit draft: ${this.describeSetError(submissionResult.notCreated.submission)}`);
+      this.throwSingleSetError(submissionResult.notCreated.submission, 'submit draft');
     }
 
     const submissionId = submissionResult.created?.submission?.id;
@@ -3065,11 +3156,12 @@ export class JmapClient {
       throw new Error('Download capability not available in session');
     }
 
-    const url = downloadUrl
-      .replace('{accountId}', session.accountId)
-      .replace('{blobId}', info.blobId)
-      .replace('{type}', encodeURIComponent(info.type))
-      .replace('{name}', encodeURIComponent(info.name));
+    const url = fillUrlTemplate(downloadUrl, {
+      '{accountId}': session.accountId,
+      '{blobId}': info.blobId,
+      '{type}': encodeURIComponent(info.type),
+      '{name}': encodeURIComponent(info.name),
+    });
 
     // Re-validate after substitution, before the URL is used to send the bearer token:
     // the session-time check saw the template, and placeholder values could rewrite the
@@ -3261,7 +3353,7 @@ export class JmapClient {
       throw new InvalidInputError(`Attachment is ${data.length} bytes; the server's upload limit is ${maxSize} bytes`);
     }
 
-    const url = session.uploadUrl.replace('{accountId}', session.accountId);
+    const url = fillUrlTemplate(session.uploadUrl, { '{accountId}': session.accountId });
     // Re-validate after substitution, mirroring the download path: the session-time check
     // saw the template, and the substituted value could rewrite the origin the bearer
     // token is about to be sent to.

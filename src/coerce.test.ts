@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -682,5 +682,135 @@ describe('coerceAttachments', () => {
   it('rejects an over-long cid and a non-string cid', () => {
     assert.throws(() => coerceAttachments([{ path: 'a.png', cid: 'x'.repeat(65) }]), McpError);
     assert.throws(() => coerceAttachments([{ path: 'a.png', cid: 42 }]), McpError);
+  });
+});
+
+describe('coerceParticipants', () => {
+  const isInvalidInput = (pattern: RegExp) => (err: unknown) =>
+    err instanceof InvalidInputError && pattern.test(err.message);
+
+  it('returns undefined for undefined/null', () => {
+    assert.equal(coerceParticipants(undefined), undefined);
+    assert.equal(coerceParticipants(null), undefined);
+  });
+
+  it('passes through an array of well-formed entries', () => {
+    const specs = [{ email: 'a@example.com' }, { email: 'b@example.com', name: 'Bee' }];
+    assert.deepEqual(coerceParticipants(specs), specs);
+  });
+
+  it('parses a JSON-stringified array (lenient client)', () => {
+    assert.deepEqual(
+      coerceParticipants('[{"email":"a@example.com"},{"email":"b@example.com","name":"Bee"}]'),
+      [{ email: 'a@example.com' }, { email: 'b@example.com', name: 'Bee' }],
+    );
+  });
+
+  it('parses a JSON-stringified empty array as the empty list, which clears attendees', () => {
+    assert.deepEqual(coerceParticipants('[]'), []);
+  });
+
+  it('parses a per-item JSON-object string', () => {
+    assert.deepEqual(coerceParticipants(['{"email":"a@example.com","name":"Ay"}']), [
+      { email: 'a@example.com', name: 'Ay' },
+    ]);
+  });
+
+  it('accepts a bare address string as the email, matching the recipient lists', () => {
+    assert.deepEqual(coerceParticipants(['a@example.com', { email: 'b@example.com' }]), [
+      { email: 'a@example.com' },
+      { email: 'b@example.com' },
+    ]);
+  });
+
+  it('trims a stray space around an address, from either entry shape', () => {
+    assert.deepEqual(coerceParticipants(['  a@example.com  ', { email: ' b@example.com ' }]), [
+      { email: 'a@example.com' },
+      { email: 'b@example.com' },
+    ]);
+  });
+
+  it('treats a blank string parameter as omitted, never as the destructive empty list', () => {
+    // An empty array REMOVES every attendee on update_calendar_event, so an ambiguous
+    // blank must not resolve in that direction.
+    assert.equal(coerceParticipants(''), undefined);
+    assert.equal(coerceParticipants('   '), undefined);
+  });
+
+  it('rejects a non-array, non-string value', () => {
+    assert.throws(() => coerceParticipants(42), isInvalidInput(/must be an array/));
+    assert.throws(() => coerceParticipants({ email: 'a@example.com' }), isInvalidInput(/must be an array/));
+  });
+
+  it('rejects a string that is not JSON, rather than comma-splitting it', () => {
+    assert.throws(
+      () => coerceParticipants('a@example.com,b@example.com'),
+      isInvalidInput(/must be an array/),
+    );
+  });
+
+  it('rejects a JSON string that parses to something other than an array', () => {
+    assert.throws(() => coerceParticipants('{"email":"a@example.com"}'), isInvalidInput(/must be an array/));
+  });
+
+  it('rejects an entry missing a usable email, naming the index', () => {
+    assert.throws(
+      () => coerceParticipants([{ email: 'a@example.com' }, { name: 'Bee' }]),
+      isInvalidInput(/participants\[1\].*email/),
+    );
+    assert.throws(
+      () => coerceParticipants([{ email: '   ' }]),
+      isInvalidInput(/participants\[0\].*email/),
+    );
+  });
+
+  it('rejects an unknown per-item key, naming the index and the key', () => {
+    // The MCP SDK does not enforce inputSchema, so an rsvp/role the tool never declared
+    // would otherwise ride through into the ATTENDEE line.
+    assert.throws(
+      () => coerceParticipants([{ email: 'a@example.com' }, { email: 'b@example.com', rsvp: true }]),
+      isInvalidInput(/participants\[1\].*rsvp/),
+    );
+  });
+
+  it('rejects a non-string email, which the schema alone does not stop', () => {
+    assert.throws(
+      () => coerceParticipants([{ email: 42 }]),
+      isInvalidInput(/participants\[0\].*email/),
+    );
+    assert.throws(
+      () => coerceParticipants([{ email: ['a@example.com'] }]),
+      isInvalidInput(/participants\[0\].*email/),
+    );
+  });
+
+  it('rejects a non-string name, which the schema alone does not stop', () => {
+    assert.throws(
+      () => coerceParticipants([{ email: 'a@example.com', name: { first: 'Ay' } }]),
+      isInvalidInput(/participants\[0\]\.name must be a string/),
+    );
+  });
+
+  it('rejects a non-object, non-string element', () => {
+    assert.throws(() => coerceParticipants([42]), isInvalidInput(/participants\[0\]/));
+    assert.throws(() => coerceParticipants([null]), isInvalidInput(/participants\[0\]/));
+    assert.throws(() => coerceParticipants([['a@example.com']]), isInvalidInput(/participants\[0\]/));
+  });
+
+  it('rejects an empty-string element', () => {
+    assert.throws(() => coerceParticipants(['  ']), isInvalidInput(/participants\[0\]/));
+  });
+
+  it('rejects a brace-wrapped element that is not valid JSON', () => {
+    assert.throws(() => coerceParticipants(['{oops}']), isInvalidInput(/participants\[0\].*JSON/));
+  });
+
+  it('builds fresh objects rather than passing the caller\'s through', () => {
+    // A future key added to ParticipantSpec must be a conscious edit here, not something
+    // that starts flowing through because the caller's object was reused.
+    const input = [{ email: 'a@example.com', name: 'Ay' }];
+    const out = coerceParticipants(input)!;
+    assert.notEqual(out[0], input[0]);
+    assert.deepEqual(out[0], { email: 'a@example.com', name: 'Ay' });
   });
 });

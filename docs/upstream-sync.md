@@ -135,6 +135,19 @@ the problem each time. This list is the sync's real cost, so keep it honest.
   nonexistent one.
 - **`package.json` and `.gitignore` are never a union.** Both look mergeable and
   both carry deliberate fork deletions.
+- **Test-fixture email domains diverge in `src/coerce.test.ts`** (~13 lines) and in
+  `scripts/scan-secrets.mjs`'s `SAFE_EMAIL_DOMAINS`. Upstream's fixtures use real
+  registered placeholder domains (`b.com`, `d.com`, `x.com`, …) and safelist them by
+  name; the fork moved those fixtures to RFC 2606 reserved forms (`@b.example`) and
+  dropped the corresponding safelist entries. Expect a mechanical conflict on those
+  lines whenever upstream touches them — the resolution is the fork's form.
+
+  The rule going forward, so this does not grow: **match upstream's fixtures in
+  upstream-shared files; use reserved-TLD forms in fork-authored ones.** The
+  reserved-TLD suffix rule in the scanner is additive and touches nothing upstream
+  wrote, so it survives any resolution. Reverting the existing divergence was
+  considered and declined — 13 mechanical lines is cheaper than the churn of undoing
+  it, and the fixtures are equally correct either way.
 
 ## What the sync must not silently change
 

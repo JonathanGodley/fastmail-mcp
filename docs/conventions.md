@@ -16,6 +16,14 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
 - `coerceRecipients` — fans `coerceStringArray` over `to` / `cc` / `bcc` / `replyTo` so
   no recipient field can reach `.map(parseAddress)` as a bare string (the original
   `cc:""` / `bcc:""` crash class).
+- `coerceParticipants` — the `participants` array on the calendar write tools to
+  `{ email, name? }[]` (or `undefined`). Accepts a real array or a JSON-string array; a
+  bare string entry is read as the address, matching the recipient lists. Every other
+  shape is a loud reject naming the offending index (unknown per-item key,
+  missing/non-string `email`, non-string `name`) — the MCP SDK does not enforce
+  `inputSchema`, so this is the only guard on the item shape. A blank string for the
+  whole parameter reads as *omitted*, never as the empty list, because an empty list
+  removes every attendee on update.
 - `coerceBool` — stringified / actual boolean to `boolean` (or `undefined`).
 - `coerceUtcDate` — a date or datetime to the JMAP `UTCDate` shape (`2026-07-20T00:00:00Z`)
   for the `search_emails` `after` / `before` filters. `YYYY-MM-DD` expands to midnight UTC
@@ -28,6 +36,16 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   window instead of failing. A guess the caller can't see is worse than an error they can.
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
   shared by `update_calendar_event` and `edit_draft`.
+
+The calendar write path carries the same exception for the same reason.
+`validateAndFormatICalDate` (`src/caldav-client.ts`) is the single validator for
+`start`/`end`: it matches the accepted ISO shapes explicitly so nothing reaches
+`new Date()`'s fallback parser, and probes the calendar date so `2026-02-31` cannot roll
+into March. `formatDateTimeProperty` calls it and only chooses the property form
+(`;VALUE=DATE:`, `TZID`, or UTC) from the serialized result — it never parses the caller's
+string itself. Both parsing it separately is exactly how the two drifted apart: for a
+while the live path accepted `2026/04/18` and read it as *server-local* midnight, while
+the validator that would have rejected it sat exported with no callers.
 
 Leniency has a limit: a value is coerced when the intent is unambiguous, and rejected when
 guessing would change the message. `textBody` / `htmlBody` are the reject side — a
@@ -64,10 +82,12 @@ a guard reading a stale `dist/` would miss exactly the newly added tool it exist
 `tsc` does not rewrite string literals, so the source and the shipped schema cannot
 disagree here.
 
-The same reasoning applies to the array coercions, but those schemas are still narrow
-(`type: 'array'` on `clearFields`, `emailIds`, `mailboxIds` and the recipient lists) even
-though `coerceStringArray` runs behind them. That is unfinished work rather than a
-decision, and no guard covers it.
+The same reasoning applies to the array coercions. `participants` on the calendar write
+tools now declares `type: ['array', 'string']` alongside `coerceParticipants`, but the rest
+are still narrow (`type: 'array'` on `clearFields`, `emailIds`, `mailboxIds`, `attachments`
+and the recipient lists) even though `coerceStringArray` / `coerceAttachments` run behind
+them. That is unfinished work rather than a decision, and no guard covers it — tracked as
+fork issue #98.
 
 ### Verifying coercion
 
@@ -132,12 +152,13 @@ wrong — re-form it; don't blind-retry as-is,"** while `InternalError` (-32603)
   covers bad/empty fields, a not-found id (`get_email`/`get_thread`, `originalEmailId`, a
   draft-mutation target), the body-coupling rejects, an unverified `from`, the
   `send_draft` draft-state guards (no recipients / no from / from not matching an
-  identity), and a server-side `notFound` SetError on a mutation. These throw the tagged
+  identity), and a server-side SetError whose type the caller can act on (see **The JMAP
+  set-error split** below). These throw the tagged
   `InvalidInputError` (`src/coerce.ts`), which the top-level CallTool catch maps to
   `InvalidParams` (after `redactBearerTokens`).
 - **Operational / server → `InternalError`.** A failure the caller cannot fix by changing
   input: zero sending identities, a missing system mailbox (Drafts/Sent/Trash), a
-  transport error, a `notCreated`/non-`notFound` set-error (server refusal), or a
+  transport error, a set-error naming a server/account/state condition, or a
   post-condition like "returned no ID." These stay a plain `Error`.
 
 This rule is **tool-family-agnostic.** Because the calendar tools share the same
@@ -229,6 +250,47 @@ The JMAP set-error reason itself is surfaced (not just the code): every throwing
 mutators additionally report success/fail counts and the caller's failing ids grouped by
 reason. The helper concatenates only server-authored text — we add no message body of our
 own.
+
+### The JMAP set-error split
+
+When the server refuses a write, `throwSingleSetError` decides the MCP code from the
+`SetError.type` alone (`CALLER_FIXABLE_SET_ERROR_TYPES` in `src/jmap-client.ts`; the same
+list drives the bulk classifier). The question it answers is not *whose fault is it* but
+*what should the caller do next* — so a type is caller-fixable only when re-forming the
+request is the route to success:
+
+| Type | Code | Why |
+| --- | --- | --- |
+| `notFound` | `InvalidParams` | The id names nothing; correcting it is the only route. |
+| `invalidProperties` | `InvalidParams` | A property value the server rejected — and every one of them came from the call's arguments. |
+| `invalidArguments` | `InvalidParams` | A malformed argument. Method-level in RFC 8620 §3.6.2, but servers return it per-record too, and it means the same thing there. |
+| `invalidPatch` | `InvalidParams` | The patch does not apply. We build it from the caller's fields. |
+| `tooLarge` | `InvalidParams` | Over the per-object size limit; send something smaller. Matches how `uploadBlob` already classifies an over-limit attachment before it is sent. |
+| `singleton` | `InvalidParams` | The target's type forbids the operation. A retry can never succeed; naming a different target can. |
+| `forbidden` | `InternalError` | A permission refusal. No argument grants permission. |
+| `overQuota` | `InternalError` | The account is at capacity. Neither code fits perfectly — a bare retry will not help either — but the fix is freeing capacity, not re-forming the call. |
+| `rateLimit` | `InternalError` | Retrying after a pause is exactly the right recovery, which is what `InternalError` signals. |
+| `serverFail` / `serverPartialFail` | `InternalError` | Server-side by definition. |
+| `stateMismatch` | `InternalError` | The record moved underneath the request; recovery is re-read then retry. |
+| `accountReadOnly` | `InternalError` | The whole account refuses writes. |
+| `cannotCalculateChanges` | `InternalError` | A server-side state-window limitation. |
+| `willDestroy` | `InternalError` | The server ignored an update because the same call also destroyed the record. This client never batches an update and a destroy for one id, so it cannot come from the caller's arguments. |
+| anything else | `InternalError` | An unrecognised type is not evidence that the caller's input was wrong, so the default stays server-side. |
+
+A bulk mutator applies the same table per entry and is caller-fixable only when **every**
+failure in the batch is: one operational failure means no single re-form clears the call.
+
+Every throwing set-error site routes through the classifier — `Email/set` `notUpdated`,
+`ContactCard/set` `notCreated`/`notUpdated`/`notDestroyed`, and the three draft-lifecycle
+`notCreated` throws (`createDraft`, the `edit_draft` recreate, and the `EmailSubmission/set`
+in `send_draft`). Those last three built their message from `describeSetError` directly for
+a while and stayed a plain `Error` whatever the type, which meant `create_contact` failing
+on `invalidProperties` reported a caller-fixable error while `create_draft` failing the same
+way reported a server bug. Route new set-error sites through `throwSingleSetError`; reaching
+for `describeSetError` alone is how that inconsistency reappears.
+
+The messages are identical on both sides of the split — only the code differs — so a client
+that reads `error.message` sees no change.
 
 ## Bounding a quadratic serializer
 

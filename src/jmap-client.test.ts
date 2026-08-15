@@ -36,6 +36,75 @@ function stubMakeRequest(client: JmapClient, response: any) {
 
 // ---------- tests ----------
 
+// Every throwing set-error site routes through throwSingleSetError, so the same JMAP
+// reason means the same MCP error code wherever it surfaces. The draft-lifecycle
+// notCreated throws were the exception for a while: a create rejected for
+// invalidProperties reported a server bug while the identical failure on a contact
+// reported a caller-fixable one. The behavioural cases below pin the create path; the
+// source check pins the other two, which need a whole draft lifecycle to reach and would
+// otherwise be guarded by nothing.
+describe('draft-lifecycle set errors are classified, not just described', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  function stubCreateFailure(setError: { type: string; description?: string }) {
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { notCreated: { draft: setError } }, 'createDraft'],
+      ],
+    });
+  }
+
+  it('reports a rejected property on create as the caller\'s to fix', async () => {
+    stubCreateFailure({ type: 'invalidProperties', description: 'to' });
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Hello' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.equal(err.message, 'Failed to create draft: invalidProperties - to');
+        return true;
+      },
+    );
+  });
+
+  it('keeps a create refused on quota a server-side failure', async () => {
+    stubCreateFailure({ type: 'overQuota' });
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Hello' }),
+      (err: Error) => {
+        assert.ok(!(err instanceof InvalidInputError));
+        assert.equal(err.message, 'Failed to create draft: overQuota');
+        return true;
+      },
+    );
+  });
+
+  it('builds no set-error message outside the classifier', async () => {
+    const { readFileSync } = await import('fs');
+    const source = readFileSync(new URL('./jmap-client.ts', import.meta.url), 'utf-8');
+
+    // describeSetError formats the reason; throwSingleSetError formats AND classifies it.
+    // A throw that reaches for the formatter directly has skipped the classification, so
+    // it always surfaces as InternalError regardless of what the server actually said.
+    const unclassified = source
+      .split('\n')
+      .map((line, i) => ({ line, lineNo: i + 1 }))
+      .filter(({ line }) => /throw new Error\(.*describeSetError\(/.test(line))
+      .map(({ line, lineNo }) => `${lineNo}: ${line.trim()}`);
+
+    assert.deepEqual(
+      unclassified,
+      [],
+      'these throws format a set error without classifying it; route them through throwSingleSetError',
+    );
+  });
+});
+
 describe('createDraft', () => {
   let client: JmapClient;
 
@@ -127,8 +196,9 @@ describe('createDraft', () => {
       (err: Error) => {
         assert.match(err.message, /invalidProperties/);
         assert.match(err.message, /subject too long/);
-        // a server-side create refusal is operational → plain Error → InternalError
-        assert.equal(err.name, 'Error');
+        // the rejected property came from this call, so the caller can fix it by
+        // re-forming the request → InvalidInputError → InvalidParams
+        assert.equal(err.name, 'InvalidInputError');
         return true;
       },
     );

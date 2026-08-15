@@ -436,3 +436,106 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
   }
   return specs;
 }
+
+// One calendar-event attendee as it arrives from a tool call, before
+// validateAttendeeEmail vets the address and the iCal ATTENDEE line is built.
+export interface ParticipantSpec {
+  email: string;
+  name?: string;
+}
+
+const PARTICIPANT_KEYS = new Set(['email', 'name']);
+
+// The item shape named in every whole-parameter refusal below, kept in one place so the
+// copies cannot drift from the schema.
+const PARTICIPANT_ITEM_SHAPE = '{ email, name? }';
+
+// Coerce the `participants` tool param into ParticipantSpec[] | undefined, the same way
+// coerceAttachments handles its own array-of-objects param. Accepts a real array or a
+// JSON-string array; a comma-joined string is NOT split, because an item here is an
+// object, not a scalar, so there is no unambiguous reading of one.
+//
+// Per element it REJECTS — never silently drops — a non-object, a missing/blank `email`,
+// an unexpected key, or a key of the wrong type, naming the index so the caller can fix
+// it. assertKnownParams is top-level only and won't see nested keys, and the MCP SDK does
+// not enforce inputSchema, so this is the sole guard on the item shape: without it a
+// non-string `email` or an object `name` would reach the ATTENDEE serializer.
+//
+// A BARE STRING element is accepted and read as the address: `["a@example.com"]` means
+// the same as `[{ email: "a@example.com" }]`. That differs from coerceAttachments, which
+// refuses a bare string, and the difference is deliberate — an attachment spec has four
+// keys and a lone string could plausibly be a path or a display name, whereas a
+// participant's only required key is the address. It also matches the recipient lists
+// (`to`/`cc`/`bcc`), which have always taken bare address strings. The address itself is
+// NOT vetted here: validateAttendeeEmail (src/caldav-client.ts) owns the address rules
+// for both the create and update paths, and a second copy of them would drift.
+//
+// The returned objects are built fresh from the validated keys rather than passed through,
+// so a key added to ParticipantSpec later has to be handled here explicitly instead of
+// arriving by accident.
+export function coerceParticipants(value: unknown): ParticipantSpec[] | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  let arr: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    // A blank string reads as "not supplied", not as the empty list. On
+    // update_calendar_event an empty array REMOVES every attendee, so resolving an
+    // ambiguous blank in that direction would destroy data on a guess; resolving it as
+    // omitted leaves the event alone. To clear attendees, pass an actual empty array.
+    if (!trimmed) return undefined;
+    try {
+      arr = JSON.parse(trimmed);
+    } catch {
+      throw new InvalidInputError(`participants must be an array of ${PARTICIPANT_ITEM_SHAPE} objects.`);
+    }
+  }
+
+  if (!Array.isArray(arr)) {
+    throw new InvalidInputError(`participants must be an array of ${PARTICIPANT_ITEM_SHAPE} objects.`);
+  }
+
+  const specs: ParticipantSpec[] = [];
+  for (let i = 0; i < arr.length; i++) {
+    let item: unknown = arr[i];
+    if (typeof item === 'string') {
+      const t = item.trim();
+      if (t.startsWith('{') && t.endsWith('}')) {
+        try {
+          item = JSON.parse(t);
+        } catch {
+          throw new InvalidInputError(`participants[${i}] is a string that isn't valid JSON; pass an email address or an object with an email.`);
+        }
+      } else {
+        if (!t) {
+          throw new InvalidInputError(`participants[${i}] is an empty string; pass an email address or an object with an email.`);
+        }
+        specs.push({ email: t });
+        continue;
+      }
+    }
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new InvalidInputError(`participants[${i}] must be an email address or an object with an email.`);
+    }
+    const obj = item as Record<string, unknown>;
+    const unknownKeys = Object.keys(obj).filter(k => !PARTICIPANT_KEYS.has(k));
+    if (unknownKeys.length > 0) {
+      throw new InvalidInputError(`participants[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...PARTICIPANT_KEYS].join(', ')}`);
+    }
+    if (typeof obj.email !== 'string' || obj.email.trim() === '') {
+      throw new InvalidInputError(`participants[${i}] is missing a non-empty 'email'.`);
+    }
+    // Trim the address for the same reason coerceAttachments trims a path: a stray
+    // leading/trailing space would otherwise fail validateAttendeeEmail's no-whitespace
+    // rule and read as "invalid address" for an address that is fine.
+    const spec: ParticipantSpec = { email: obj.email.trim() };
+    if (obj.name !== undefined) {
+      if (typeof obj.name !== 'string') {
+        throw new InvalidInputError(`participants[${i}].name must be a string.`);
+      }
+      spec.name = obj.name;
+    }
+    specs.push(spec);
+  }
+  return specs;
+}

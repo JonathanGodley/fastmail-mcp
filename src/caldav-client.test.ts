@@ -503,6 +503,30 @@ describe('validateAndFormatICalDate', () => {
       assert.match((e as Error).message, /event\.end/);
     }
   });
+
+  it('rejects a day its month does not have, in either form', () => {
+    // new Date() rolls 2026-02-31 forward to 3 March, so accepting it would create the
+    // event on a day the caller never named and report success.
+    assert.throws(() => validateAndFormatICalDate('2026-02-31', 'start'), /not a real calendar date/);
+    assert.throws(() => validateAndFormatICalDate('2026-02-31T10:00:00Z', 'start'), /not a real calendar date/);
+    assert.throws(() => validateAndFormatICalDate('2026-06-31T10:00:00', 'start'), /not a real calendar date/);
+  });
+
+  it('classes every rejection as caller-fixable input', () => {
+    for (const bad of ['garbage', '2026-02-31', '2026-04-18T10:00:00Z\r\nX', 42 as any]) {
+      assert.throws(
+        () => validateAndFormatICalDate(bad, 'start'),
+        (err: unknown) => err instanceof Error && err.name === 'InvalidInputError',
+      );
+    }
+  });
+
+  it('trims surrounding whitespace before deciding the form', () => {
+    // Untrimmed, ' 2026-04-18 ' misses the date-only shape and would be read as an
+    // instant instead of an all-day value.
+    assert.equal(validateAndFormatICalDate('  2026-04-18  ', 'start'), '20260418');
+    assert.equal(validateAndFormatICalDate(' 2026-04-18T10:00:00Z ', 'start'), '20260418T100000Z');
+  });
 });
 
 describe('CalDAVCalendarClient.updateCalendarEvent', () => {
@@ -2827,6 +2851,80 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
     const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
     assert.ok(ical.includes('DTSTART:20260320T083000'));
     assert.ok(ical.includes('DTEND:20260320T093000'));
+  });
+});
+
+// The serialization path used to parse the caller's start/end itself and hand anything it
+// did not recognise to `new Date()`, whose legacy fallback parser accepts a great deal and
+// resolves it against the SERVER's time zone. A create call therefore had no single
+// meaning: the same arguments produced a different day depending on where the server ran,
+// and an impossible day was rolled quietly into the next month. Every case below reaches
+// the write path — none of them is stopped by the shape guard the update path applies
+// before it — so they are the evidence for validating the value in one place.
+describe('createCalendarEvent rejects date spellings that would be resolved by guesswork', () => {
+  function createMockedCreateClient() {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      createCalendarObject: mock.fn(async () => ({})),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function create(client: CalDAVCalendarClient, start: string, end: string) {
+    return client.createCalendarEvent({ calendarId: 'Personal', title: 'T', start, end });
+  }
+
+  it('rejects a non-ISO date spelling instead of resolving it in the server time zone', async () => {
+    for (const [start, end] of [
+      ['2026/04/07', '2026/04/08'],
+      ['April 7 2026', 'April 8 2026'],
+      ['7 Apr 2026 14:00', '7 Apr 2026 15:00'],
+    ]) {
+      const { client, mockDAVClient } = createMockedCreateClient();
+      await assert.rejects(
+        () => create(client, start, end),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, /must be ISO-8601/);
+          return true;
+        },
+      );
+      assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0, `wrote for ${start}`);
+    }
+  });
+
+  it('rejects a day its month does not have instead of rolling it into the next one', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-02-31T10:00:00Z', '2026-02-31T11:00:00Z'),
+      /not a real calendar date/,
+    );
+    assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
+  });
+
+  it('rejects an out-of-range wall-clock time instead of emitting it verbatim', async () => {
+    // A floating value was previously copied straight into the property line without ever
+    // being parsed, so DTSTART:20260320T253000 could be written to the server.
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T25:30:00', '2026-03-20T26:30:00'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+    assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
+  });
+
+  it('keeps a padded date-only value an all-day event rather than an instant', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await create(client, ' 2026-03-20 ', ' 2026-03-21 ');
+    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    assert.ok(ical.includes('DTSTART;VALUE=DATE:20260320'), ical);
+    assert.ok(ical.includes('DTEND;VALUE=DATE:20260321'), ical);
   });
 });
 

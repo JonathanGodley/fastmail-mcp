@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion, readSourceReferences } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion, readSourceReferences, fillUrlTemplate } from './jmap-client.js';
 import { InvalidInputError } from './coerce.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { buildExclusionNote } from './response-formatters.js';
@@ -498,6 +498,65 @@ describe('moveEmail', () => {
       },
     );
   });
+
+  // Both halves of the JMAP set-error split are pinned by type. Asserting only the
+  // caller-fixable half would let a later blanket widening — every type becoming
+  // InvalidInputError — pass unnoticed, which would tell callers to re-form arguments
+  // in the face of failures no argument can clear.
+  const CALLER_FIXABLE_TYPES = [
+    'notFound',
+    'invalidProperties',
+    'invalidArguments',
+    'invalidPatch',
+    'tooLarge',
+    'singleton',
+  ];
+
+  for (const type of CALLER_FIXABLE_TYPES) {
+    it(`classes a ${type} set error as caller-fixable input`, async () => {
+      stubMoveFailure({ type });
+
+      await assert.rejects(
+        () => client.moveEmail('e1', 'mb-archive'),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError, `${type} should map to InvalidParams`);
+          // the message is the shared "Failed to <action>: <type>" format either way
+          assert.equal(err.message, `Failed to move email: ${type}`);
+          return true;
+        },
+      );
+    });
+  }
+
+  const SERVER_SIDE_TYPES = [
+    'forbidden',
+    'overQuota',
+    'rateLimit',
+    'serverFail',
+    'serverPartialFail',
+    'stateMismatch',
+    'accountReadOnly',
+    'cannotCalculateChanges',
+    'willDestroy',
+    // A type this client has no judgement about falls to the same side: an unknown
+    // failure is not evidence that the caller's input was wrong.
+    'someFutureJmapError',
+  ];
+
+  for (const type of SERVER_SIDE_TYPES) {
+    it(`keeps a ${type} set error a server-side failure`, async () => {
+      stubMoveFailure({ type });
+
+      await assert.rejects(
+        () => client.moveEmail('e1', 'mb-archive'),
+        (err: Error) => {
+          assert.ok(!(err instanceof InvalidInputError), `${type} must not map to InvalidParams`);
+          assert.equal(err.message, `Failed to move email: ${type}`);
+          return true;
+        },
+      );
+    });
+  }
 });
 
 // ---------- deleteEmail ----------
@@ -724,14 +783,32 @@ describe('bulk set-error formatting', () => {
         assert.match(err.message, /Failed to move 2 of 2 emails \(0 succeeded\)/);
         // both ids share one reason → grouped under it together
         assert.match(err.message, /invalidArguments - bad patch: e1, e2/);
-        // invalidArguments is not a bad id → operational → plain Error → InternalError
+        // a malformed argument is fixed by re-forming the call → InvalidInputError
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+
+  it('groups a server-side reason the same way, and keeps the batch a plain Error', async () => {
+    // The grouping/description formatting is independent of the classification, so it is
+    // pinned on both sides of the split rather than only on the caller-fixable one.
+    stubBulkMoveFailure({
+      e1: { type: 'overQuota', description: 'mailbox full' },
+      e2: { type: 'overQuota', description: 'mailbox full' },
+    });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
+      (err: Error) => {
+        assert.match(err.message, /overQuota - mailbox full: e1, e2/);
         assert.equal(err.name, 'Error');
         return true;
       },
     );
   });
 
-  it('throws InvalidInputError only when EVERY failure is notFound (#41)', async () => {
+  it('throws InvalidInputError only when EVERY failure is caller-fixable (#41)', async () => {
     stubBulkMoveFailure({ e1: { type: 'notFound' }, e2: { type: 'notFound' } });
 
     await assert.rejects(
@@ -748,6 +825,34 @@ describe('bulk set-error formatting', () => {
 
   it('stays a plain Error when failures are MIXED (one operational keeps the whole batch InternalError)', async () => {
     stubBulkMoveFailure({ e1: { type: 'notFound' }, e2: { type: 'forbidden' } });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
+      (err: Error) => {
+        assert.equal(err.name, 'Error');
+        return true;
+      },
+    );
+  });
+
+  it('treats a batch of assorted caller-fixable reasons as caller-fixable', async () => {
+    // The batch rule is per-type, not "all the same type": a mix of reasons that are each
+    // fixable by re-forming the call is still one re-form away from succeeding.
+    stubBulkMoveFailure({ e1: { type: 'invalidProperties' }, e2: { type: 'invalidPatch' } });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+
+  it('leaves an unrecognised reason on the server-side default', async () => {
+    // A type this client has made no judgement about must not be presumed to be the
+    // caller's fault; the default stays the plain Error.
+    stubBulkMoveFailure({ e1: { type: 'someFutureJmapError' }, e2: { type: 'notFound' } });
 
     await assert.rejects(
       () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
@@ -2773,5 +2878,117 @@ describe('downloadAttachment — the URL is re-validated after substitution', ()
     } finally {
       fetchMock.mock.restore();
     }
+  });
+});
+
+// ---------- URL templates: values are inserted literally ----------
+
+// Every sequence String.prototype.replace treats specially inside a *string* replacement:
+// the whole match, the text before it, the text after it, a numbered group, and an
+// escaped dollar. Substituted with a string replacement, each of these would splice part
+// of the template back into the URL instead of the value; substituted literally, they
+// come out exactly as written. Both the templates and the values arrive from the session,
+// so this is what a hostile or compromised server would reach for.
+const DOLLAR_SPLICE = "a$&b$`c$'d$1e$$f";
+
+describe('fillUrlTemplate', () => {
+  it('inserts a value containing replacement-pattern sequences verbatim', () => {
+    assert.equal(
+      fillUrlTemplate('https://host.example/{a}/end', { '{a}': DOLLAR_SPLICE }),
+      `https://host.example/${DOLLAR_SPLICE}/end`,
+    );
+  });
+
+  it('fills every named slot, leaving unnamed ones untouched', () => {
+    assert.equal(
+      fillUrlTemplate('https://host.example/{a}/{b}?x={c}', { '{a}': '1', '{b}': '2' }),
+      'https://host.example/1/2?x={c}',
+    );
+  });
+
+  it('does not re-substitute a placeholder that a value introduced', () => {
+    // A value naming a slot must stay data: filling {a} with the literal text "{b}"
+    // leaves that text in the URL, and does not consume {b}'s own value on the way.
+    assert.equal(
+      fillUrlTemplate('https://host.example/{a}/{b}', { '{a}': '{b}', '{b}': 'real' }),
+      'https://host.example/{b}/real',
+    );
+  });
+});
+
+describe('download and upload URLs are built with literal substitution', () => {
+  // An allowlisted template with all four slots, so one assertion covers the raw
+  // substitutions (accountId, blobId) and the percent-encoded ones (type, name).
+  const TEMPLATE =
+    'https://www.fastmailusercontent.com/{accountId}/{blobId}?type={type}&name={name}';
+
+  function clientWithTemplate(): JmapClient {
+    const client = makeClient();
+    mock.method(client, 'getSession', async () => ({
+      apiUrl: 'https://api.example.com/jmap/api/',
+      accountId: ACCOUNT_ID,
+      capabilities: {},
+      downloadUrl: TEMPLATE,
+    }));
+    return client;
+  }
+
+  it('builds the exact download URL for a blobId, type and name full of dollar sequences', async () => {
+    const client = clientWithTemplate();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{
+        partId: 'p1',
+        type: `image/${DOLLAR_SPLICE}`,
+        size: 5,
+        blobId: DOLLAR_SPLICE,
+        name: `${DOLLAR_SPLICE}.png`,
+      }],
+    });
+
+    // Asserted as exact bytes, not as "it parsed" or "it validated": a spliced URL still
+    // parses and still passes the host allowlist, so only the string shows the bug.
+    // blobId is inserted raw; type and name are percent-encoded, which turns every '$'
+    // into %24 and makes them inert regardless.
+    assert.equal(
+      await client.downloadAttachment('e1', 'p1'),
+      "https://www.fastmailusercontent.com/acct-123/a$&b$`c$'d$1e$$f"
+        + "?type=image%2Fa%24%26b%24%60c%24'd%241e%24%24f"
+        + "&name=a%24%26b%24%60c%24'd%241e%24%24f.png",
+    );
+  });
+
+  it('builds the exact upload URL for an accountId full of dollar sequences', async () => {
+    const auth = new FastmailAuth({ apiToken: 'fake-token' });
+    const client = new JmapClient(auth);
+    mock.method(client, 'getSession', async () => ({
+      apiUrl: 'https://api.example.com/jmap/api/',
+      accountId: DOLLAR_SPLICE,
+      capabilities: {},
+      uploadUrl: 'https://api.fastmail.com/jmap/upload/{accountId}/',
+    }));
+
+    const fetchMock = mock.method(globalThis, 'fetch', async () => new Response(
+      JSON.stringify({ blobId: 'B1', type: 'text/plain', size: 5 }), { status: 200 },
+    ));
+    try {
+      await client.uploadBlob(Buffer.from('hello'), 'text/plain');
+      const [url] = fetchMock.mock.calls[0].arguments as [string, any];
+      assert.equal(url, "https://api.fastmail.com/jmap/upload/a$&b$`c$'d$1e$$f/");
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it('still re-validates the finished URL, which literal substitution does not replace', async () => {
+    // Literal insertion stops the template from leaking into the URL; it does not stop a
+    // value from damaging the URL. The origin check after substitution remains the
+    // control that catches that.
+    const client = makeSplicingDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    await assert.rejects(
+      () => client.downloadAttachment('e1', '4'),
+      /not in the Fastmail allowlist/,
+    );
   });
 });

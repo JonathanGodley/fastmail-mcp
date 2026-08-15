@@ -173,8 +173,21 @@ describe('assertICalTextLimits: legitimate events pass', () => {
       description: null,
       participants: [null, 'not-an-object', { email: 7 }],
     }));
-    // A stringified participants array (from a lenient client) is not measured here;
-    // it is rejected downstream by the attendee-email validation.
-    assert.doesNotThrow(() => assertICalTextLimits({ participants: '[{"email":"a@example.com"}]' }));
+  });
+
+  it('cannot bound a participants list that is still a string, which is why coercion runs first', () => {
+    // This guard measures an ARRAY. A lenient client's JSON string has no length it can
+    // read, so 600 stringified participants pass unmeasured — the count cap and the
+    // per-name byte cap both see nothing. The calendar handlers therefore run
+    // coerceParticipants (src/coerce.ts) BEFORE this call, so what arrives here is the
+    // real array. If that ordering is ever swapped, this is the bound that goes silent.
+    const oversized = JSON.stringify(
+      Array.from({ length: MAX_ICAL_PARTICIPANTS + 100 }, (_, i) => ({ email: `p${i}@example.com` })),
+    );
+    assert.doesNotThrow(() => assertICalTextLimits({ participants: oversized }));
+    assert.throws(
+      () => assertICalTextLimits({ participants: JSON.parse(oversized) }),
+      InvalidInputError,
+    );
   });
 });

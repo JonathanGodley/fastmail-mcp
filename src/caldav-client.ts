@@ -754,6 +754,17 @@ export function escapeICalText(value: string): string {
  * Rejects any control characters or unexpected content. Returns the ICS-safe
  * serialized form (no `-` or `:`, with `Z` suffix for instants, or `YYYYMMDD`
  * for date-only). Throws on invalid input.
+ *
+ * This is the ONLY thing that turns a caller-supplied start/end into an iCal value:
+ * formatDateTimeProperty wraps the result in the property line and never parses the
+ * caller's string itself. That matters because the two jobs have opposite instincts —
+ * a serializer reaches for `new Date()` to normalize, and `new Date()`'s legacy
+ * fallback parser accepts `2026/04/18` and `April 18 2026` and reads them as
+ * HOST-LOCAL midnight, which puts the event on a different day for a caller in a
+ * different zone. The anchored shapes above are matched explicitly so nothing reaches
+ * that parser, and a real-calendar-date probe rejects an impossible day (`2026-02-31`)
+ * that Date would otherwise roll silently into the next month. Same reasoning, and the
+ * same two traps, as coerceUtcDate in src/coerce.ts.
  */
 export function validateAndFormatICalDate(value: string, fieldName: string): string {
   // Every rejection below names the caller's own field and value, so all of them are
@@ -767,8 +778,7 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
   const trimmed = value.trim();
   // Date-only: 2026-04-18
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    const d = new Date(trimmed + 'T00:00:00Z');
-    if (Number.isNaN(d.getTime())) throw new InvalidInputError(`${fieldName} is not a valid date`);
+    assertRealCalendarDate(trimmed, trimmed, fieldName);
     return trimmed.replace(/-/g, '');
   }
   // Datetime forms: floating, UTC (Z), or with offset (+/-HH:MM, +/-HHMM, +/-HH)
@@ -777,10 +787,14 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
     throw new InvalidInputError(`${fieldName} must be ISO-8601 date or datetime (got: ${trimmed.slice(0, 60)})`);
   }
   const [, datePart, timePart, tz] = dtMatch;
+  // Probe the calendar date on its own rather than the whole value: an offset
+  // legitimately moves the UTC date, so the round-trip check below only holds for the
+  // bare date part.
+  assertRealCalendarDate(datePart, trimmed, fieldName);
   const isoForParse = `${datePart}T${timePart}${tz || ''}`;
   const d = new Date(isoForParse);
   if (Number.isNaN(d.getTime())) {
-    throw new InvalidInputError(`${fieldName} is not a valid datetime`);
+    throw new InvalidInputError(`${fieldName} is not a valid datetime (got: ${trimmed.slice(0, 60)})`);
   }
   if (!tz) {
     // Floating: emit as-is without zone designator
@@ -789,6 +803,25 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
   // UTC or offset: normalize to UTC instant
   const utc = d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   return utc;
+}
+
+/**
+ * Reject a YYYY-MM-DD that names a day its month does not have.
+ *
+ * `new Date('2026-02-31T00:00:00Z')` parses happily and lands on 3 March, so without
+ * this an event asked for on a nonexistent day would be created a few days later and
+ * reported as created — a silent move, not an error the caller can see. Round-tripping
+ * through toISOString is the check: a rolled-over date no longer starts with the string
+ * it was built from.
+ *
+ * @param echo the caller's whole value, so the message quotes what they wrote rather
+ *   than the date fragment this probe happens to look at.
+ */
+function assertRealCalendarDate(datePart: string, echo: string, fieldName: string): void {
+  const probe = new Date(`${datePart}T00:00:00Z`);
+  if (Number.isNaN(probe.getTime()) || !probe.toISOString().startsWith(datePart)) {
+    throw new InvalidInputError(`${fieldName} is not a real calendar date (got: ${echo.slice(0, 60)})`);
+  }
 }
 
 /**
@@ -872,6 +905,14 @@ export function quoteParamValue(value: string): string {
  * 1. Date-only (2026-04-01) → DTXXX;VALUE=DATE:20260401
  * 2. Floating time (2026-03-20T09:30:00) → preserve original TZID
  * 3. UTC/offset (2026-03-20T09:30:00Z) → DTXXX:20260320T093000Z
+ *
+ * Validation and serialization of the caller's string are delegated wholesale to
+ * validateAndFormatICalDate; this function only decides which property FORM the
+ * result belongs in, and it decides that from the serialized value rather than by
+ * re-reading the input. The serialized form is unambiguous — eight digits is an
+ * all-day date, a trailing Z is an instant, anything else is a floating wall-clock
+ * time — so the two functions cannot disagree about what the caller wrote, which is
+ * exactly what went wrong while each of them parsed the input separately.
  */
 function formatDateTimeProperty(
   propName: string,
@@ -879,36 +920,22 @@ function formatDateTimeProperty(
   originalVevent: string | null,
   lineEnding: string
 ): string {
-  // Same guard as validateAndFormatICalDate (v1.9.3): reject control characters
-  // outright so a hostile value can never reach the property-serialization paths.
-  // `value` is the start/end the tool caller passed, so these are input errors.
-  if (typeof value !== 'string') {
-    throw new InvalidInputError(`${propName} must be a string`);
-  }
-  if (/[\x00-\x1F\x7F]/.test(value)) {
-    throw new InvalidInputError(`${propName} contains control characters`);
-  }
+  const serialized = validateAndFormatICalDate(value, propName);
 
   // Date-only
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const d = new Date(value);
-    if (isNaN(d.getTime()) || !d.toISOString().startsWith(value)) {
-      throw new InvalidInputError(`Invalid date: ${value}`);
-    }
-    const icalDate = value.replace(/-/g, '');
-    return foldICalLine(`${propName};VALUE=DATE:${icalDate}`, lineEnding);
+  if (/^\d{8}$/.test(serialized)) {
+    return foldICalLine(`${propName};VALUE=DATE:${serialized}`, lineEnding);
   }
 
   // Floating time (no offset, no Z)
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(value)) {
-    const icalTime = value.replace(/[-:]/g, '');
+  if (!serialized.endsWith('Z')) {
     // Try to preserve original TZID
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
         const tzMatch = rawLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
         if (tzMatch) {
-          return foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding);
+          return foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding);
         }
       }
       // If propName is DTEND and no TZID found (DURATION-based), fall back to DTSTART's TZID
@@ -917,17 +944,17 @@ function formatDateTimeProperty(
         if (startLines.length > 0) {
           const tzMatch = startLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
           if (tzMatch) {
-            return foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding);
+            return foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding);
           }
         }
       }
     }
     // No TZID to preserve — emit as floating
-    return foldICalLine(`${propName}:${icalTime}`, lineEnding);
+    return foldICalLine(`${propName}:${serialized}`, lineEnding);
   }
 
-  // UTC or offset — convert to UTC
-  return foldICalLine(`${propName}:${toICalUTC(value)}`, lineEnding);
+  // UTC or offset — already normalized to a UTC instant
+  return foldICalLine(`${propName}:${serialized}`, lineEnding);
 }
 
 /**
