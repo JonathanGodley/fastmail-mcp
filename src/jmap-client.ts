@@ -638,7 +638,11 @@ export class JmapClient {
 
     const response = await fetch(this.auth.getSessionUrl(), {
       method: 'GET',
-      headers: this.auth.getAuthHeaders()
+      headers: this.auth.getAuthHeaders(),
+      // Never follow a redirect on a token-bearing request: the session URL is built from
+      // the allowlist-validated base URL, so a 3xx could only point off-allowlist — the
+      // bearer token would be replayed to an unvalidated host.
+      redirect: 'error',
     });
 
     if (!response.ok) {
@@ -695,7 +699,11 @@ export class JmapClient {
     const response = await fetch(session.apiUrl, {
       method: 'POST',
       headers: this.auth.getAuthHeaders(),
-      body: JSON.stringify(request)
+      body: JSON.stringify(request),
+      // Never follow a redirect on a token-bearing request: session.apiUrl was
+      // allowlist-validated in getSession, so a 3xx could only point off-allowlist — the
+      // bearer token would be replayed to an unvalidated host.
+      redirect: 'error',
     });
 
     if (!response.ok) {

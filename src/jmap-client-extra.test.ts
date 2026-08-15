@@ -2184,6 +2184,75 @@ describe('uploadBlob request discipline', () => {
   });
 });
 
+// ---------- session/API calls: token-bearing request discipline ----------
+
+// getSession and makeRequest both send the bearer token to a URL that has already been
+// checked against the host allowlist (the base URL at construction, session.apiUrl inside
+// getSession), so a redirect on either can only point off-allowlist. Both therefore pass
+// redirect: 'error'. A grep proves the string is in the file; only reading the options
+// off the fetch call proves it reaches fetch, which is what these two cover.
+describe('session and API request discipline', () => {
+  const AUTH_HEADERS = {
+    'Authorization': 'Bearer fake-token',
+    'Content-Type': 'application/json',
+  };
+
+  it('getSession refuses to follow redirects on the token-bearing session GET', async () => {
+    const client = new JmapClient(new FastmailAuth({ apiToken: 'fake-token' }));
+    const fetchMock = mock.method(globalThis, 'fetch', async () => new Response(
+      JSON.stringify({
+        apiUrl: 'https://api.fastmail.com/jmap/api/',
+        primaryAccounts: { 'urn:ietf:params:jmap:mail': ACCOUNT_ID },
+        accounts: { [ACCOUNT_ID]: {} },
+        capabilities: {},
+      }),
+      { status: 200 },
+    ));
+    try {
+      const session = await client.getSession();
+      assert.equal(session.accountId, ACCOUNT_ID);
+      const [url, opts] = fetchMock.mock.calls[0].arguments as [string, any];
+      assert.equal(url, 'https://api.fastmail.com/jmap/session');
+      // Whole option surface, not just the redirect key: the token is in these headers,
+      // and a 3xx must fail rather than replay it to whatever host the redirect names.
+      assert.deepEqual(opts, {
+        method: 'GET',
+        headers: AUTH_HEADERS,
+        redirect: 'error',
+      });
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it('makeRequest refuses to follow redirects on the token-bearing API POST', async () => {
+    const client = new JmapClient(new FastmailAuth({ apiToken: 'fake-token' }));
+    mock.method(client, 'getSession', async () => ({
+      apiUrl: 'https://api.fastmail.com/jmap/api/',
+      accountId: ACCOUNT_ID,
+      capabilities: {},
+    }));
+    const fetchMock = mock.method(globalThis, 'fetch', async () => new Response(
+      JSON.stringify({ methodResponses: [] }), { status: 200 },
+    ));
+    const request = { using: ['urn:ietf:params:jmap:core'], methodCalls: [] };
+    try {
+      const out = await client.makeRequest(request as any);
+      assert.deepEqual(out.methodResponses, []);
+      const [url, opts] = fetchMock.mock.calls[0].arguments as [string, any];
+      assert.equal(url, 'https://api.fastmail.com/jmap/api/');
+      assert.deepEqual(opts, {
+        method: 'POST',
+        headers: AUTH_HEADERS,
+        body: JSON.stringify(request),
+        redirect: 'error',
+      });
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+});
+
 // ---------- downloadAttachmentToFile: exclusive-create discipline ----------
 
 // downloadAttachmentToFile writes with O_EXCL ('wx') so a symlink planted at the target
