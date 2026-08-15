@@ -21,8 +21,7 @@ All email tools that return email data must use the simplified format from `src/
 ## JMAP property consistency
 
 All email list/search methods in `src/jmap-client.ts` must request the same set of Email/get properties. If you add a property to one, add it to all:
-- `getEmails()` and `searchEmails()` (both run through the shared `runFilteredQuery` helper, which sets `EMAIL_PROPERTIES_COMPACT` once — so they stay in sync by construction)
-- `getRecentEmails()`
+- `getEmails()`, `searchEmails()` and `getRecentEmails()` (all three run through the shared `runFilteredQuery` helper, which sets `EMAIL_PROPERTIES_COMPACT` once — so they stay in sync by construction; `getRecentEmails()` reaches it by delegating to `getEmails()` and assembles no batch of its own)
 - `getThread()` (full mode) and `getEmailById()` request additional body properties and must be a superset of the list set, so that `raw: true` returns a complete JMAP response.
 
 When you append an extra method call to an existing batch (e.g. a trailing `Mailbox/get` to resolve mailbox names), read its result **defensively** with `readListResultIfPresent`, not a hard index. `getMethodResult`/`getListResult` throw on a missing index, and existing tests stub only the original method responses, so a hard index would make them throw — and a real server that drops the trailing method would error in production. The tolerant read **stays**: a dropped trailing method is a benign degrade.

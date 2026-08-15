@@ -423,7 +423,9 @@ shape; the cost of suppressing it is a missing warning on a fuzzy match.
 caller of `runFilteredQuery` computes for itself (`getEmails` over `opts.*`, `searchEmails`
 over `filters.*`). The shared helper does not compute it, so "they both go through
 `runFilteredQuery`" does not keep them in step — anything that changes what counts as an
-explicit scope has two edit sites. Naming folders to look **in** (`mailbox`,
+explicit scope has two edit sites. It is still two and not three after `get_recent_emails`
+joined the default exclusion (#29): `getRecentEmails` delegates to `getEmails` rather than
+assembling its own batch, precisely so it inherits that expression instead of copying it. Naming folders to look **in** (`mailbox`,
 `requiredMailboxes`) is an explicit scope and turns the default off; naming folders to
 exclude is not, because narrowing by exclusion says nothing about wanting Trash/Spam back.
 
@@ -772,8 +774,8 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   never the requested `limit`, so a short final page ends the listing instead of
   advertising a page that does not exist.
 - **One seam.** `position` is threaded through `runFilteredQuery` into `Email/query`, so
-  `list_emails` and `search_emails` inherit it together; `getRecentEmails` builds its own
-  batch and takes the same parameter. The filters (including the default Trash/Spam
+  `list_emails`, `search_emails` and `get_recent_emails` inherit it together (the last of
+  those through `getEmails`, which it delegates to). The filters (including the default Trash/Spam
   exclusion, which lives inside the JMAP `filter` as `inMailboxOtherThan`) are applied
   server-side to every page, so paging cannot change what matches, and the hidden-count
   query stays a count — it carries no `position`. That count is over the whole filtered

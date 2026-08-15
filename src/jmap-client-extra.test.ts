@@ -129,7 +129,7 @@ describe('getRecentEmails', () => {
       ],
     });
 
-    const result = await client.getRecentEmails(10, 'inbox');
+    const result = await client.getRecentEmails({ limit: 10, mailbox: 'inbox' });
     assert.equal(result.items.length, 2);
     assert.equal(result.items[0].subject, 'First');
   });
@@ -138,7 +138,7 @@ describe('getRecentEmails', () => {
     stubMailboxes(client, [INBOX_MAILBOX]);
 
     await assert.rejects(
-      () => client.getRecentEmails(10, 'nonexistent'),
+      () => client.getRecentEmails({ limit: 10, mailbox: 'nonexistent' }),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
         assert.match(err.message, /not found/);
@@ -156,22 +156,89 @@ describe('getRecentEmails', () => {
       ],
     });
 
-    const result = await client.getRecentEmails(5, 'inbox');
+    const result = await client.getRecentEmails({ limit: 5, mailbox: 'inbox' });
     assert.deepEqual(result.items, []);
   });
 
-  it('falls back to inbox for a blank mailbox (does not throw)', async () => {
+  // No mailbox means all mail minus the default Trash/Spam exclusion, not the Inbox (#29).
+  it('reads all mail with the default Trash/Spam exclusion when no mailbox is given', async () => {
     stubMailboxes(client);
-    const makeReq = stubRequests(client, async () => ({
-      methodResponses: [
-        ['Email/query', { ids: [] }, 'query'],
-        ['Email/get', { list: [] }, 'emails'],
-      ],
-    }));
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 4, broaderTotal: 6 }),
+    );
 
-    await client.getRecentEmails(5, '   ');
+    const result = await client.getRecentEmails({ limit: 5 });
     const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
-    assert.equal(filter.inMailbox, 'mb-inbox');
+    assert.equal(filter.inMailbox, undefined);
+    assert.deepEqual([...filter.inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
+    assert.equal(result.exclusion?.hidden, 2);
+    assert.deepEqual(result.exclusion?.excludedRoles, ['Trash', 'Spam']);
+  });
+
+  // A blank or whitespace mailbox is an omitted mailbox — it used to fall back to the
+  // Inbox, which silently narrowed the read to one folder.
+  it('treats a blank mailbox as no mailbox', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
+    );
+
+    await client.getRecentEmails({ limit: 5, mailbox: '   ' });
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+    assert.equal(filter.inMailbox, undefined);
+    assert.deepEqual([...filter.inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
+  });
+
+  // An explicit mailbox is the caller's own scope, so the default exclusion (and its note)
+  // steps aside — the same rule list_emails and search_emails follow.
+  it('drops the default exclusion when a mailbox is named', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }),
+    );
+
+    const result = await client.getRecentEmails({ limit: 5, mailbox: 'trash' });
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+    assert.equal(filter.inMailbox, 'mb-trash');
+    assert.equal(filter.inMailboxOtherThan, undefined);
+    assert.equal(result.exclusion, undefined);
+  });
+
+  it('honours includeTrash, includeSpam and excludeDrafts', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
+    );
+
+    await client.getRecentEmails({ limit: 5, includeTrash: true, excludeDrafts: true });
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+    // Only Spam left in the excluded set, and the draft filter rides alongside it.
+    assert.deepEqual(filter.conditions[0].inMailboxOtherThan, ['mb-junk']);
+    assert.deepEqual(filter.conditions[1], { notKeyword: '$draft' });
+
+    const bothIncluded = makeClient();
+    stubMailboxes(bothIncluded);
+    const bothReq = stubRequests(bothIncluded, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    const result = await bothIncluded.getRecentEmails({ limit: 5, includeTrash: true, includeSpam: true });
+    assert.equal(callArguments(bothReq)[0].methodCalls[0][1].filter.inMailboxOtherThan, undefined);
+    assert.equal(result.exclusion, undefined);
+  });
+
+  // The limit reaches JMAP exactly as passed: the bound has one owner, the get_recent_emails
+  // handler's clampLimit(limit, 10, 50), and a second clamp here could only disagree with it.
+  //
+  // Read this assertion for what it is — it pins that the client does NOT bound the value,
+  // which is only safe while every call site clamps first. That precondition is not
+  // observable from here, so it is asserted where it lives, over the call sites, by the
+  // limit-ownership guard in tool-schema.test.ts. The tool's own default (10) and cap (50)
+  // are asserted there too, against what the schema advertises; neither number exists on
+  // this method any more, so there is nothing here to assert them against.
+  it('passes the limit through to JMAP unclamped', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }));
+
+    await client.getRecentEmails({ limit: 999 });
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].limit, 999);
   });
 });
 
@@ -355,10 +422,27 @@ describe('paging with position', () => {
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 90, position: 50 }),
     );
 
-    const result = await client.getRecentEmails(50, 'inbox', false, 50);
+    const result = await client.getRecentEmails({ limit: 50, mailbox: 'inbox', ascending: false, position: 50 });
     assert.equal(emailQuery(makeReq).position, 50);
     assert.equal(result.position, 50);
     assert.equal(result.total, 90);
+  });
+
+  // The same page, read on the default all-mail scope: the paging offset has to survive
+  // the route through the shared query helper, exclusion and all (#29, #51).
+  it('getRecentEmails pages the default all-mail scope with the exclusion still applied', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 8, broaderTotal: 11, position: 40 }),
+    );
+
+    const result = await client.getRecentEmails({ limit: 10, position: 40 });
+    const batch = callArguments(makeReq)[0].methodCalls;
+    assert.equal(batch[0][1].position, 40);
+    assert.deepEqual([...batch[0][1].filter.inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
+    // The hidden-count query is a count, not a page: it carries no position.
+    assert.equal('position' in batch[2][1], false);
+    assert.equal(result.position, 40);
+    assert.equal(result.exclusion?.hidden, 3);
   });
 
   it('getRecentEmails sends no position by default', async () => {
@@ -366,7 +450,7 @@ describe('paging with position', () => {
       queryResponse({ ids: [], list: [], total: 0 }),
     );
 
-    await client.getRecentEmails(10, 'inbox');
+    await client.getRecentEmails({ limit: 10, mailbox: 'inbox' });
     assert.equal('position' in emailQuery(makeReq), false);
   });
 });
@@ -1554,7 +1638,7 @@ describe('ascending sort parameter', () => {
       stubMailboxes(client);
       const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
-      await client.getRecentEmails(10, 'inbox');
+      await client.getRecentEmails({ limit: 10, mailbox: 'inbox' });
 
       const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: false }]);
@@ -1564,7 +1648,7 @@ describe('ascending sort parameter', () => {
       stubMailboxes(client);
       const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
-      await client.getRecentEmails(10, 'inbox', true);
+      await client.getRecentEmails({ limit: 10, mailbox: 'inbox', ascending: true });
 
       const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: true }]);
@@ -1673,7 +1757,7 @@ describe('mailbox location (#10)', () => {
       ],
     }));
 
-    const result = await client.getRecentEmails(10, 'inbox');
+    const result = await client.getRecentEmails({ limit: 10, mailbox: 'inbox' });
     // Reuses getMailboxes — the request stays a 2-call batch, no appended Mailbox/get.
     assert.equal(callArguments(makeReq)[0].methodCalls.length, 2);
     assert.deepEqual((result.items[0] as any)._mailboxNames, ['Inbox']);

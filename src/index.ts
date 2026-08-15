@@ -324,13 +324,13 @@ function lenientBool(description: string): string {
 //
 // The set is SPLIT by what is true of a given tool, not by tool name: the base constants
 // say only what holds for any tool with a single `mailbox` scope parameter (today
-// list_emails and search_emails; get_recent_emails takes the same reference forms through
-// READ_MAILBOX_PARAM_DESC), and the SEARCH_-prefixed constants append the clauses that
-// exist only where the multi-mailbox scope arrays do — which is search_emails alone,
-// because list_emails deliberately does not offer them. A tool gaining the Trash/Spam
-// flags later consumes the base constants unchanged; do not fold a search-only clause
-// back into a base constant, or the base ones start describing parameters their other
-// consumers don't have.
+// list_emails, search_emails and get_recent_emails), and the SEARCH_-prefixed constants
+// append the clauses that exist only where the multi-mailbox scope arrays do — which is
+// search_emails alone, because list_emails and get_recent_emails deliberately do not offer
+// them. get_recent_emails is what that split was for: it took the Trash/Spam flags later
+// (#29) and consumed the base constants unchanged. Do not fold a search-only clause back
+// into a base constant, or the base ones start describing parameters their other consumers
+// don't have.
 const EXCLUDE_DRAFTS_DESC =
   lenientBool('Drafts are included by default; set true to omit them from results (and from the total count). (Note: get_thread differs on BOTH axes — it uses includeDrafts AND excludes drafts by default.)');
 // What "excluded" actually means, stated once and carried by both flags so they cannot
@@ -392,9 +392,9 @@ const MAILBOX_REF_FORMS =
   'A name shared by several mailboxes is rejected as ambiguous, listing their full paths — retry with one of those, or with the id. An unknown mailbox is rejected with the valid list. ' +
   'list_mailboxes returns each mailbox\'s path, and a path it returns can be pasted straight back into this parameter.';
 
-// True of every read tool that scopes by a single mailbox (list_emails, search_emails).
-// Anything specific to the multi-mailbox arrays belongs in SEARCH_MAILBOX_PARAM_DESC
-// below, not here — list_emails does not have them.
+// True of every read tool that scopes by a single mailbox (list_emails, search_emails,
+// get_recent_emails). Anything specific to the multi-mailbox arrays belongs in
+// SEARCH_MAILBOX_PARAM_DESC below, not here — the other two do not have them.
 const MAILBOX_PARAM_DESC =
   'Mailbox to scope to. ' + MAILBOX_REF_FORMS +
   ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion.';
@@ -428,9 +428,6 @@ const EXCLUDE_MAILBOXES_PARAM_DESC =
 // that picks a save destination without moving anything.
 const DRAFT_MAILBOX_PARAM_DESC =
   'Mailbox to SAVE the draft into (optional, defaults to Drafts). Does not set From or recipients. ' + MAILBOX_REF_FORMS;
-
-const READ_MAILBOX_PARAM_DESC =
-  'Mailbox to read (default: inbox). ' + MAILBOX_REF_FORMS;
 
 const STATS_MAILBOX_PARAM_DESC =
   'Mailbox to report on (optional, defaults to all mailboxes). ' + MAILBOX_REF_FORMS;
@@ -666,7 +663,7 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. get_recent_emails filters identically and differs only in size — it returns 10 by default and caps at 50, for a quick look; use this one to work through a folder. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1483,7 +1480,7 @@ const TOOLS = [
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'Get the newest emails across all mailboxes (or one, via mailbox) — the small, cheap read. NOT an arrivals feed: "all mailboxes" means every folder except Trash and Spam, so your own Sent copies, drafts and any custom folder come back alongside newly received mail. Narrow it with mailbox:"inbox" if you want delivered mail only, and excludeDrafts to drop drafts. Trash and Spam are excluded by default (set includeTrash/includeSpam to include them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' It filters exactly as list_emails does; the difference is size, not scope — this returns 10 by default and caps at 50, list_emails returns 20 and caps at 100, so reach for list_emails when you are working through a folder rather than taking a quick look. One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1495,12 +1492,23 @@ const TOOLS = [
             position: positionSchemaProperty(),
             mailbox: {
               type: 'string',
-              description: READ_MAILBOX_PARAM_DESC,
-              default: 'inbox',
+              description: MAILBOX_PARAM_DESC,
             },
             ascending: {
               type: ['boolean', 'string'],
               description: ASCENDING_DESC,
+            },
+            excludeDrafts: {
+              type: ['boolean', 'string'],
+              description: EXCLUDE_DRAFTS_DESC,
+            },
+            includeTrash: {
+              type: ['boolean', 'string'],
+              description: INCLUDE_TRASH_DESC,
+            },
+            includeSpam: {
+              type: ['boolean', 'string'],
+              description: INCLUDE_SPAM_DESC,
             },
             fields: fieldsSchemaProperty(),
             raw: {
@@ -2302,28 +2310,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_recent_emails': {
-        const { mailbox = 'inbox' } = args as any;
-        // clampLimit, not the client's bare Math.min: the schema advertises a string
-        // limit, and Math.min("abc", 50) is NaN, which JMAP serializes as
-        // `"limit": null` — a query with no bound at all. Same failure the other
-        // clamped handlers close; this was the one call site that still had it.
+        // No `= 'inbox'` default: this tool reads all mail and scopes only when the caller
+        // says so (#29). A blank or whitespace value is an omitted value all the way down.
+        const { mailbox } = args as any;
+        // clampLimit, and it is the ONLY clamp on this path — the client deliberately
+        // passes `limit` straight to JMAP. The schema advertises a string limit, and
+        // Math.min("abc", 50) is NaN, which JMAP serializes as `"limit": null` — a query
+        // with no bound at all.
         const limit = clampLimit((args as any).limit, 10, 50);
         // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
-        // silently reverse the sort order. Defaults to false (newest first).
+        // silently reverse the sort order. Defaults to false (newest first). The scope
+        // flags below coerce the same way.
+        //
+        // That each flag is read from the argument of its OWN name is asserted by a source
+        // scan in tool-schema.test.ts — a swap here type-checks and silently hides the
+        // wrong folder. What that scan does not reach is the `?? false` defaults and the
+        // note append below: they are only exercised by running the server, and this
+        // handler is a destructure-and-delegate, so it stays inline rather than being
+        // pulled behind an injected client (the extraction CLAUDE.md prescribes is for
+        // handlers that orchestrate). Accepted, not overlooked.
         const ascending = coerceBool((args as any).ascending) ?? false;
         // Same coercion for raw — see list_emails for why `!!` was wrong here.
         const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
-        const position = coercePosition((args as any).position) ?? 0;
+        const position = coercePosition((args as any).position);
         const client = initializeClient();
-        const result = await client.getRecentEmails(limit, mailbox, ascending, position);
+        const result = await client.getRecentEmails({
+          mailbox,
+          limit,
+          position,
+          ascending,
+          includeTrash: coerceBool((args as any).includeTrash) ?? false,
+          includeSpam: coerceBool((args as any).includeSpam) ?? false,
+          excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
+        });
+        // Append the exclusion note (if any) out of band, the same way list_emails does, so
+        // the JSON block stays parseable on both the raw and the simplified path.
+        const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
             {
               type: 'text',
-              text: raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields }),
+              text: body + buildExclusionNote(result.exclusion),
             },
           ],
         };
@@ -2846,9 +2876,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Get some recent emails to test with. clampLimit, not a bare Math.min/max:
         // a non-numeric limit used to reach getRecentEmails as NaN, which JMAP
-        // serializes as `"limit": null` — an unbounded metadata dump.
+        // serializes as `"limit": null` — an unbounded metadata dump. This call
+        // bypasses the get_recent_emails handler, so this IS the bound on this path
+        // (the client no longer clamps).
+        //
+        // `mailbox: 'inbox'` stays explicit. get_recent_emails now defaults to all mail,
+        // but this diagnostic wants ordinary delivered messages to mark read and pin, and
+        // an all-mail read would hand it drafts and sent copies to write to.
         const testLimit = clampLimit(limit, 3, 10);
-        const { items: emails } = await client.getRecentEmails(testLimit, 'inbox');
+        const { items: emails } = await client.getRecentEmails({ limit: testLimit, mailbox: 'inbox' });
 
         if (emails.length === 0) {
           return {

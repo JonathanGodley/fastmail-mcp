@@ -348,7 +348,7 @@ overlooked:
 ## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
 
 The read surface gained one `mailbox` param (id/role/name) resolved **exactly** across the
-read + single-mailbox-write tools, and `search_emails`/`list_emails` hide Trash and Spam by
+read + single-mailbox-write tools, and `search_emails`/`list_emails`/`get_recent_emails` hide Trash and Spam by
 default with a hidden-count note. Several residuals are accepted here, framed honestly rather
 than overclaimed:
 

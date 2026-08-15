@@ -1684,6 +1684,10 @@ export class JmapClient {
   // fragile). When no explicit `mailbox` is set, applies the same default Trash/Spam
   // exclusion + hidden-count as searchEmails. Its only structural filter is the
   // excludeDrafts keyword — isUnread/isPinned are NOT exposed on list_emails.
+  //
+  // Two tools run on this: list_emails, and get_recent_emails through getRecentEmails
+  // below, which delegates here rather than assembling its own batch. So a change to the
+  // filter or the exclusion rule here changes both.
   async getEmails(opts: {
     mailbox?: string;
     limit?: number;
@@ -1702,11 +1706,13 @@ export class JmapClient {
     const conds: any[] = [];
     if (opts.excludeDrafts) conds.push({ notKeyword: '$draft' });
 
-    // list_emails' only explicit scope is the scalar `mailbox` — it deliberately does not
-    // offer the multi-mailbox scope arrays, so this expression needs nothing beyond it.
-    // searchEmails has its OWN copy of this line (over `filters.*`) which additionally
-    // counts requiredMailboxes; the shared runFilteredQuery does not compute it, so the
-    // two must be changed together whenever what counts as an explicit scope changes.
+    // The scalar `mailbox` is the only explicit scope either tool on this method offers —
+    // neither list_emails nor get_recent_emails takes the multi-mailbox scope arrays, so
+    // this expression needs nothing beyond it. searchEmails has its OWN copy of this line
+    // (over `filters.*`) which additionally counts requiredMailboxes; the shared
+    // runFilteredQuery does not compute it, so the two must be changed together whenever
+    // what counts as an explicit scope changes. Two copies, not three: getRecentEmails
+    // inherits this one instead of carrying its own.
     const hasExplicitScope = !!resolvedMailboxId;
     const exclusion = computeExclusion(mailboxes, {
       includeTrash: opts.includeTrash,
@@ -3137,51 +3143,44 @@ export class JmapClient {
     return Array.isArray(email.messageId) ? email.messageId : [];
   }
 
-  async getRecentEmails(limit: number = 10, mailbox: string = 'inbox', ascending: boolean = false, position: number = 0): Promise<QueryResult> {
-    const session = await this.getSession();
-
-    // Resolve the target mailbox EXACTLY (id/role/name) — replaces the old substring
-    // match, so this stays consistent with the #12 sweep and carries no substring
-    // injection-steering primitive. A blank/whitespace mailbox falls back to the inbox
-    // default (matching the resolveMailboxId blank handling the swept tools use), rather
-    // than throwing. Throws InvalidInputError on a non-blank unknown mailbox.
-    const target = mailbox && mailbox.trim() ? mailbox : 'inbox';
-    const mailboxes = await this.getMailboxes();
-    const targetMailbox = resolveMailbox(mailboxes, target);
-
-    const emailGetParams: any = {
-      accountId: session.accountId,
-      '#ids': { resultOf: 'query', name: 'Email/query', path: '/ids' },
-    };
-
-    emailGetParams.properties = [...EMAIL_PROPERTIES_COMPACT];
-
-    const query: any = {
-      accountId: session.accountId,
-      filter: { inMailbox: targetMailbox.id },
-      sort: [{ property: 'receivedAt', isAscending: ascending }],
-      limit: Math.min(limit, 50),
-      calculateTotal: true
-    };
-    // Paging offset (#51), sent only when non-zero — 0 is the JMAP default, so
-    // position:0 and an omitted position are the same request. This tool caps `limit`
-    // at 50, so `position` is how a caller reads past the cap.
-    if (position > 0) query.position = position;
-
-    const request: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/query', query, 'query'],
-        ['Email/get', emailGetParams, 'emails']
-      ]
-    };
-
-    const response = await this.makeRequest(request);
-    const result = this.getQueryResult(response, 0, 1);
-    if (typeof result.position !== 'number') result.position = position;
-    // Reuse the mailbox list already fetched above to resolve names + roles — no extra methodCall.
-    attachMailboxInfo(result.items, buildMailboxInfoMap(mailboxes));
-    return result;
+  // The quick "what's new?" read. It reads all mail — no Inbox default — and runs exactly
+  // the query getEmails runs: the same mailbox scoping, the same default Trash/Spam
+  // exclusion and hidden-count note, the same keyword filter and paging (#29). The only
+  // thing that separates the two tools is the limit default and cap their handlers apply
+  // (10/50 here against list_emails' 20/100), and neither of those is a query difference.
+  //
+  // So this delegates instead of assembling a second batch. A private copy would have to
+  // repeat the `exclusionIntended` expression, and that expression already has to agree
+  // with computeExclusion's `hasExplicitScope` — two sites docs/conventions.md names
+  // explicitly and warns must be changed together. A third copy is a third way for them to
+  // fall out of step.
+  //
+  // A blank or whitespace `mailbox` is an omitted `mailbox`: resolveMailboxId reads both as
+  // "no mailbox filter", which is now all mail rather than the Inbox this used to fall back
+  // to.
+  //
+  // Neither the limit default nor the cap lives here — both belong to the handler's
+  // clampLimit(limit, 10, 50), which is also what the tool schema advertises. A second copy
+  // of either would be dead on every production path (no caller reaches this without a
+  // number) while still reading as authoritative, and two clamps can only ever disagree.
+  // What that leaves on this method is its NAME, the tool-to-method mapping, rather than
+  // any behaviour that differs from getEmails.
+  //
+  // The one thing single ownership costs is defence in depth: an unclamped caller would put
+  // `"limit": null` on the wire, which JMAP reads as no bound at all. That is held instead
+  // by a source-scan drift guard in tool-schema.test.ts asserting every call site of this
+  // method sits in a handler that clamps — today the get_recent_emails handler and
+  // test_bulk_operations, which passes clampLimit(limit, 3, 10).
+  async getRecentEmails(opts: {
+    mailbox?: string;
+    limit?: number;
+    position?: number;
+    ascending?: boolean;
+    includeTrash?: boolean;
+    includeSpam?: boolean;
+    excludeDrafts?: boolean;
+  } = {}): Promise<QueryResult> {
+    return this.getEmails(opts);
   }
 
   async markEmailRead(emailId: string, read: boolean = true): Promise<void> {
