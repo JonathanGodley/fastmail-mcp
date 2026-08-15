@@ -2628,6 +2628,27 @@ describe('updateDraft attachments', () => {
     attachments: [{ blobId: 'blob-att', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment', cid: null, partId: '3', size: 1234 }],
   };
 
+  // Every other carry test stubs the Email/get RESPONSE, so all of them stay green if
+  // someone drops a name from the REQUEST's properties list — the recreate would then
+  // silently rebuild the draft without whatever was dropped. This pins the request side.
+  it('asks the server for every property the faithful recreate carries', async () => {
+    const makeReq = mockUpdate(client, DRAFT_ONE_ATT);
+    await client.updateDraft('draft-1', { subject: 'New' });
+    const [method, params] = makeReq.mock.calls[0].arguments[0].methodCalls[0];
+    assert.equal(method, 'Email/get');
+    for (const prop of [
+      'attachments', 'inReplyTo', 'references', 'keywords', 'mailboxIds',
+      'header:X-Forwarded-Message-Id:asMessageIds',
+    ]) {
+      assert.ok(params.properties.includes(prop), `Email/get must request '${prop}'`);
+    }
+    // Attachment metadata rides on bodyProperties, not properties — a carried part needs
+    // its name/disposition, and the inline-image reject needs cid.
+    for (const prop of ['blobId', 'type', 'name', 'disposition', 'cid']) {
+      assert.ok(params.bodyProperties.includes(prop), `Email/get must request bodyProperty '${prop}'`);
+    }
+  });
+
   it('appends new parts, keeping carried attachments', async () => {
     const makeReq = mockUpdate(client, DRAFT_ONE_ATT);
     await client.updateDraft('draft-1', { attachments: [NEW_PART] });

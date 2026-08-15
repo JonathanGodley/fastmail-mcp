@@ -544,18 +544,18 @@ On `edit_draft`, `attachments` **appends** (existing attachments are kept). Use 
 ### Contact Tools
 
 - **list_contacts**: List all contacts. Returns simplified format by default.
-  - Parameters: `limit` (default: 50), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
-- **get_contact**: Get a specific contact by ID. Returns simplified format by default.
+  - Parameters: `limit` (default: 20, hard cap 100 — no paging), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+- **get_contact**: Get a specific contact by ID. Returns simplified format by default. Throws if the ID is not found.
   - Parameters: `contactId` (required), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **search_contacts**: Search contacts by name or email. Returns simplified format by default.
-  - Parameters: `query` (required), `limit` (default: 20), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+  - Parameters: `query` (required), `limit` (default: 20, hard cap 100 — no paging), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 
 ### Calendar Tools
 
 - **list_calendars**: List all calendars
 - **list_calendar_events**: List calendar events (core fields only — no participants for token efficiency)
-  - Parameters: `calendarId` (optional), `startDate` (optional, ISO 8601), `endDate` (optional, ISO 8601), `limit` (default: 50)
-- **get_calendar_event**: Get a specific calendar event by ID. Returns organizer and participants when available.
+  - Parameters: `calendarId` (optional), `startDate` (optional, ISO 8601), `endDate` (optional, ISO 8601), `limit` (default: 50, hard cap 500)
+- **get_calendar_event**: Get a specific calendar event by ID. Returns organizer and participants when available. Throws if the ID is not found.
   - Parameters: `eventId` (required)
 - **create_calendar_event**: Create a new calendar event. Supports date-only (e.g. `2026-04-01`) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs `end: "2026-04-02"`.
   - Parameters: `calendarId` (required), `title` (required), `description` (optional), `start` (required, ISO 8601 or date-only), `end` (required, ISO 8601 or date-only), `location` (optional), `participants` (optional array of `{email, name?}`)

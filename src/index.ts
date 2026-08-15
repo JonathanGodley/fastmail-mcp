@@ -1826,7 +1826,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_recent_emails': {
-        const { limit = 10, mailbox = 'inbox' } = args as any;
+        const { mailbox = 'inbox' } = args as any;
+        // clampLimit, not the client's bare Math.min: the schema advertises a string
+        // limit, and Math.min("abc", 50) is NaN, which JMAP serializes as
+        // `"limit": null` — a query with no bound at all. Same failure the other
+        // clamped handlers close; this was the one call site that still had it.
+        const limit = clampLimit((args as any).limit, 10, 50);
         // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
         // silently reverse the sort order. Defaults to false (newest first).
         const ascending = coerceBool((args as any).ascending) ?? false;
