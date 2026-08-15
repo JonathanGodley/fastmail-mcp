@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, redactBearerTokens, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -53,11 +53,6 @@ function findEnvValue(keys: string[]): { value?: string; key?: string; wasPlaceh
   return { value: undefined, key: undefined, wasPlaceholder: false };
 }
 
-function maskSecret(value: string): string {
-  if (value.length <= 6) return '***';
-  return `${value.slice(0, 4)}…${value.slice(-2)} (len ${value.length})`;
-}
-
 function getAuthConfig(): FastmailConfig {
   const tokenInfo = findEnvValue([
     'FASTMAIL_API_TOKEN',
@@ -72,6 +67,10 @@ function getAuthConfig(): FastmailConfig {
       'FASTMAIL_API_TOKEN environment variable is required'
     );
   }
+  // Register for value-based redaction so an exact token occurrence in any error
+  // string is scrubbed even when it doesn't match the `fmu…` token-shape pattern
+  // (self-hosted JMAP servers issue tokens of any shape).
+  registerSecret(apiToken);
 
   const baseInfo = findEnvValue([
     'FASTMAIL_BASE_URL',
@@ -83,9 +82,11 @@ function getAuthConfig(): FastmailConfig {
   // Opt-in for self-hosted JMAP servers. Required to use any base URL outside
   // the api.fastmail.com / www.fastmailusercontent.com allowlist (which already
   // covers Fastmail's regional hosts, e.g. phl.api.fastmail.com).
+  // Deliberately env-only: this kill switch is not exposed as a DXT user_config
+  // key, so it resolves a single name rather than the four-name fallback the
+  // configurable settings use.
   const unsafeInfo = findEnvValue([
     'FASTMAIL_ALLOW_UNSAFE_BASE_URL',
-    'USER_CONFIG_FASTMAIL_ALLOW_UNSAFE_BASE_URL',
   ]);
   const allowUnsafeBaseUrl = unsafeInfo.value === 'true' || unsafeInfo.value === '1';
 
@@ -125,6 +126,18 @@ function initializeCalDAVClient(): CalDAVCalendarClient | null {
   ]).value;
 
   if (!username || !password) return null;
+
+  // Register the CalDAV password for value-based redaction — a Basic-auth
+  // credential matches none of the token-shape patterns. The username is
+  // deliberately NOT registered: it is an email address, and exact-match
+  // scrubbing of it would mangle legitimate output (every message from or to
+  // that address). Note the scrubber ignores values under 8 characters, so a
+  // very short password is not covered either.
+  registerSecret(password);
+  // tsdav transmits and logs the Basic credential as bare base64 with no
+  // "Basic " prefix, which BASIC_PATTERN cannot match — register the encoded
+  // form as its own literal secret.
+  registerSecret(Buffer.from(`${username}:${password}`).toString('base64'));
 
   caldavClient = new CalDAVCalendarClient({ username, password });
   return caldavClient;
@@ -737,9 +750,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             limit: {
-              type: 'number',
-              description: 'Maximum number of contacts to return (default: 50)',
-              default: 50,
+              type: ['number', 'string'],
+              description: 'Maximum number of contacts to return (default: 20, max: 100). Hard cap, no paging — a larger value is silently reduced to 100 and there is no way to reach the rest.',
+              default: 20,
             },
             verbose: {
               type: 'boolean',
@@ -785,8 +798,8 @@ const TOOLS = [
               description: 'Search query string',
             },
             limit: {
-              type: 'number',
-              description: 'Maximum number of results (default: 20)',
+              type: ['number', 'string'],
+              description: 'Maximum number of results (default: 20, max: 100). Hard cap, no paging — a larger value is silently reduced to 100 and there is no way to reach the rest.',
               default: 20,
             },
             verbose: {
@@ -828,8 +841,8 @@ const TOOLS = [
               description: 'Filter events ending before this date (ISO 8601, e.g. 2026-03-30T00:00:00Z)',
             },
             limit: {
-              type: 'number',
-              description: 'Maximum number of events to return (default: 50)',
+              type: ['number', 'string'],
+              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging — narrow the window with startDate/endDate instead.',
               default: 50,
             },
           },
@@ -1322,7 +1335,7 @@ const TOOLS = [
       },
       {
         name: 'check_function_availability',
-        description: 'Check which MCP functions are available based on account permissions. Calendar tools run over CalDAV, so calendar is reported available when CalDAV credentials are configured, regardless of the JMAP calendar capability.',
+        description: 'Check which MCP functions are available based on account permissions. Calendar tools run over CalDAV, so calendar is reported available only when CalDAV credentials are configured, regardless of the JMAP calendar capability. Contacts is reported available only when the session has both the JMAP contacts capability and a primary account for it.',
         inputSchema: {
           type: 'object',
           properties: {},
@@ -1340,7 +1353,7 @@ const TOOLS = [
               default: true,
             },
             limit: {
-              type: 'number',
+              type: ['number', 'string'],
               description: 'Number of emails to test with (default: 3, max: 10)',
               default: 3,
             },
@@ -1562,9 +1575,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_contacts': {
-        const { limit = 50, verbose, raw } = args as any;
+        const { limit, verbose, raw } = args as any;
         const contactsClient = initializeContactsCalendarClient();
-        const result = await contactsClient.getContacts(limit);
+        // Hard cap: the contacts tools have no `position` param, so anything past
+        // the cap is unreachable. Paging for contacts is tracked as issue #94.
+        const result = await contactsClient.getContacts(clampLimit(limit, 20, 100));
         return {
           content: [
             {
@@ -1594,12 +1609,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_contacts': {
-        const { query, limit = 20, verbose, raw } = args as any;
+        const { query, limit, verbose, raw } = args as any;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
         const contactsClient = initializeContactsCalendarClient();
-        const result = await contactsClient.searchContacts(query, limit);
+        // Hard cap, same as list_contacts — no `position` param, so results past
+        // the cap are unreachable. Paging for contacts is tracked as issue #94.
+        const result = await contactsClient.searchContacts(query, clampLimit(limit, 20, 100));
         return {
           content: [
             {
@@ -1627,12 +1644,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_calendar_events': {
-        const { calendarId, limit = 50, startDate, endDate } = args as any;
+        const { calendarId, limit, startDate, endDate } = args as any;
         const davClient = initializeCalDAVClient();
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const events = await davClient.getCalendarEvents(calendarId, limit, startDate, endDate);
+        const events = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
         return { content: [{ type: 'text', text: JSON.stringify(events, null, 2) }] };
       }
 
@@ -2114,17 +2131,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const client = initializeClient();
         const session = await client.getSession();
 
-        // Calendar tools run on CalDAV, not JMAP (the JMAP calendar path is
-        // disabled). So calendar is available if EITHER the JMAP calendar
-        // capability is present OR CalDAV credentials are configured.
-        const jmapCalendar = !!session.capabilities['urn:ietf:params:jmap:calendars'];
+        // Every calendar tool runs over CalDAV — the JMAP calendar path is disabled
+        // and its client methods are gone. So availability is CalDAV configuration
+        // alone: reporting available off the JMAP calendar capability would promise
+        // tools that then throw "CalDAV not configured" on every call.
         const caldavConfigured = initializeCalDAVClient() !== null;
-        const calendarAvailable = jmapCalendar || caldavConfigured;
-        const calendarNote = jmapCalendar
-          ? 'Calendar is available (JMAP)'
-          : caldavConfigured
-            ? 'Calendar is available via CalDAV'
-            : 'Calendar access not available - set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD, or enable calendar scope in Fastmail account settings';
+        const calendarAvailable = caldavConfigured;
+        const calendarNote = caldavConfigured
+          ? 'Calendar is available via CalDAV'
+          : 'Calendar access not available - set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD (a Fastmail app password)';
+
+        // Contacts need BOTH the JMAP contacts capability and a contacts primary
+        // account on the session: every contacts method addresses the contacts
+        // account and throws when the session reports none, so the capability on
+        // its own would promise tools that cannot run.
+        const contactsCapability = !!session.capabilities['urn:ietf:params:jmap:contacts'];
+        const contactsAccount = !!session.primaryAccounts?.['urn:ietf:params:jmap:contacts'];
+        const contactsAvailable = contactsCapability && contactsAccount;
 
         const availability = {
           email: {
@@ -2142,12 +2165,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             functions: ['list_identities']
           },
           contacts: {
-            available: !!session.capabilities['urn:ietf:params:jmap:contacts'],
+            available: contactsAvailable,
             functions: ['list_contacts', 'get_contact', 'search_contacts'],
-            note: session.capabilities['urn:ietf:params:jmap:contacts'] ? 
-              'Contacts are available' : 
-              'Contacts access not available - may require enabling in Fastmail account settings',
-            enablementGuide: session.capabilities['urn:ietf:params:jmap:contacts'] ? null : {
+            note: contactsAvailable
+              ? 'Contacts are available'
+              : contactsCapability
+                ? 'Contacts access not available - this session reports the contacts capability but no primary account for it, so there is no account for contacts operations to address'
+                : 'Contacts access not available - may require enabling in Fastmail account settings',
+            enablementGuide: contactsAvailable ? null : {
               steps: [
                 '1. Log into Fastmail web interface',
                 '2. Go to Settings → Privacy & Security → Connected Apps & API tokens',
@@ -2163,13 +2188,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             note: calendarNote,
             enablementGuide: calendarAvailable ? null : {
               steps: [
-                'Option A (CalDAV): set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD (app password) — calendar tools run over CalDAV',
-                'Option B (JMAP scope): 1. Log into Fastmail web interface',
+                '1. Log into Fastmail web interface',
                 '2. Go to Settings → Privacy & Security → Connected Apps & API tokens',
-                '3. Check if calendar scope is enabled for your API token',
-                '4. If not available, you may need to upgrade your Fastmail plan or contact support'
+                '3. Create an app password with calendar (CalDAV) access',
+                '4. Set FASTMAIL_CALDAV_USERNAME (your Fastmail address) and FASTMAIL_CALDAV_PASSWORD (that app password), then restart the server'
               ],
-              documentation: 'https://www.fastmail.com/help/technical/jmap-api.html'
+              documentation: 'https://www.fastmail.com/help/technical/servernamesandports.html'
             }
           },
           capabilities: Object.keys(session.capabilities)
@@ -2186,15 +2210,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'test_bulk_operations': {
-        const { limit = 3 } = args as any;
+        const { limit } = args as any;
         // Coerce dryRun for lenient clients: a stringified "false" is otherwise truthy
         // and would silently keep the diagnostic in dry-run mode. Defaults to dry-run
         // (the safe, non-acting direction).
         const dryRun = coerceBool((args as any).dryRun) ?? true;
         const client = initializeClient();
-        
-        // Get some recent emails to test with
-        const testLimit = Math.min(Math.max(limit, 1), 10);
+
+        // Get some recent emails to test with. clampLimit, not a bare Math.min/max:
+        // a non-numeric limit used to reach getRecentEmails as NaN, which JMAP
+        // serializes as `"limit": null` — an unbounded metadata dump.
+        const testLimit = clampLimit(limit, 3, 10);
         const { items: emails } = await client.getRecentEmails(testLimit, 'inbox');
 
         if (emails.length === 0) {

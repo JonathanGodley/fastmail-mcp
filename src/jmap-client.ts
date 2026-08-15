@@ -4,7 +4,7 @@ import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, Path
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker } from './reply-quote.js';
 import { isSettableMessageId } from './forward-handler.js';
-import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
+import { writeFile, mkdir, realpath, stat, lstat, open, unlink } from 'fs/promises';
 import type { FileHandle } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
 import { homedir } from 'os';
@@ -119,6 +119,24 @@ export interface JmapSession {
   capabilities: Record<string, any>;
   downloadUrl?: string;
   uploadUrl?: string;
+  /**
+   * Per-capability primary account ids, keyed by capability URN. `accountId` above is
+   * the mail account; other capabilities (contacts in particular) can be a DIFFERENT
+   * account on the same session, so callers that touch a non-mail capability must read
+   * their own account id from here rather than reusing `accountId`.
+   */
+  primaryAccounts?: Record<string, string>;
+}
+
+/**
+ * An attachment resolved to the fields needed to reference or fetch its blob. `type` and
+ * `name` are defaulted at resolution time, so consumers never re-apply a fallback.
+ */
+export interface AttachmentInfo {
+  blobId: string;
+  type: string;
+  name: string;
+  size?: number;
 }
 
 export interface JmapRequest {
@@ -448,7 +466,15 @@ function matchesIdentity(identityEmail: string, address: string): boolean {
   if (identity === addr) return true;
   if (identity.startsWith('*@')) {
     const domain = identity.slice(1); // "@example.com"
-    return addr.endsWith(domain) && addr.indexOf('@') > 0;
+    // A wildcard identity is only honoured for a single well-formed addr-spec. Without
+    // this, a composite value like "a@evil.com,b@example.com" (or one carrying CR/LF or
+    // a quoted local part) satisfies the endsWith test and lands unparsed in the
+    // outgoing `from`/`mailFrom`, turning the "verified identity" check into a pass.
+    // Note the pattern admits a BARE addr-spec only — a "Name <a@b.com>" form is
+    // rejected on purpose, because the display name is supplied separately and is never
+    // part of the value matched here. Do not widen it to accept angle-addr shapes.
+    if (!/^[^\s@,;"]+@[^\s@,;"]+$/.test(addr)) return false;
+    return addr.endsWith(domain);
   }
   return false;
 }
@@ -630,10 +656,20 @@ export class JmapClient {
       throw new Error('Invalid session response: apiUrl missing');
     }
     validateFastmailUrl(sessionData.apiUrl, 'session.apiUrl', allowUnsafe);
-    if (typeof sessionData.downloadUrl === 'string') {
+    // Reject a present-but-non-string download/upload URL rather than storing it
+    // unvalidated: a `typeof === 'string'` guard around validation alone lets a
+    // non-string value skip the check and still be stored, so validate and store
+    // must not diverge.
+    if (sessionData.downloadUrl !== undefined) {
+      if (typeof sessionData.downloadUrl !== 'string') {
+        throw new Error('Invalid session response: downloadUrl is not a string');
+      }
       validateFastmailUrl(stripTemplate(sessionData.downloadUrl), 'session.downloadUrl', allowUnsafe);
     }
-    if (typeof sessionData.uploadUrl === 'string') {
+    if (sessionData.uploadUrl !== undefined) {
+      if (typeof sessionData.uploadUrl !== 'string') {
+        throw new Error('Invalid session response: uploadUrl is not a string');
+      }
       validateFastmailUrl(stripTemplate(sessionData.uploadUrl), 'session.uploadUrl', allowUnsafe);
     }
 
@@ -644,7 +680,10 @@ export class JmapClient {
         || Object.keys(sessionData.accounts)[0],
       capabilities: sessionData.capabilities,
       downloadUrl: sessionData.downloadUrl,
-      uploadUrl: sessionData.uploadUrl
+      uploadUrl: sessionData.uploadUrl,
+      // Carried whole so a non-mail capability (contacts) can resolve its own account
+      // id; `accountId` above only answers for mail.
+      primaryAccounts: sessionData.primaryAccounts
     };
 
     return this.session;
@@ -2166,7 +2205,19 @@ export class JmapClient {
     return email?.attachments || [];
   }
 
-  async downloadAttachment(emailId: string, attachmentId: string): Promise<string> {
+  /**
+   * Resolve an attachment reference on an email to its blob metadata. The reference may
+   * be a partId, a blobId, or a numeric array index into the email's attachments.
+   *
+   * This is the SINGLE attachment-resolution path in this client: every consumer (URL
+   * build, byte fetch, save-to-file) resolves through here exactly once and then passes
+   * the resolved info around, so a message's metadata and its bytes can never come from
+   * two different reads of the same email.
+   *
+   * Errors stay plain `Error` on purpose: `download_attachment` maps them to a generic
+   * InternalError so a bad emailId/attachmentId leaks no attachment metadata.
+   */
+  async getAttachmentInfo(emailId: string, attachmentId: string): Promise<AttachmentInfo> {
     const session = await this.getSession();
 
     // Get the email with full attachment details
@@ -2190,7 +2241,7 @@ export class JmapClient {
     }
 
     // Find attachment by partId or by index
-    let attachment = email.attachments?.find((att: any) => 
+    let attachment = email.attachments?.find((att: any) =>
       att.partId === attachmentId || att.blobId === attachmentId
     );
 
@@ -2201,25 +2252,49 @@ export class JmapClient {
         attachment = email.attachments?.[index];
       }
     }
-    
+
     if (!attachment) {
       throw new Error('Attachment not found.');
     }
 
-    // Get the download URL from session
+    return {
+      blobId: attachment.blobId,
+      type: attachment.type || 'application/octet-stream',
+      name: attachment.name || 'attachment',
+      size: attachment.size,
+    };
+  }
+
+  /**
+   * Build the blob download URL for an ALREADY-resolved attachment. Taking the resolved
+   * info rather than an (emailId, attachmentId) pair is what keeps resolution single:
+   * callers that also need the bytes or the metadata reuse the one resolution instead of
+   * issuing a second Email/get whose answer could differ.
+   */
+  private async downloadUrlFor(info: AttachmentInfo): Promise<string> {
+    const session = await this.getSession();
+
     const downloadUrl = session.downloadUrl;
     if (!downloadUrl) {
       throw new Error('Download capability not available in session');
     }
 
-    // Build download URL
     const url = downloadUrl
       .replace('{accountId}', session.accountId)
-      .replace('{blobId}', attachment.blobId)
-      .replace('{type}', encodeURIComponent(attachment.type || 'application/octet-stream'))
-      .replace('{name}', encodeURIComponent(attachment.name || 'attachment'));
+      .replace('{blobId}', info.blobId)
+      .replace('{type}', encodeURIComponent(info.type))
+      .replace('{name}', encodeURIComponent(info.name));
+
+    // Re-validate after substitution, before the URL is used to send the bearer token:
+    // the session-time check saw the template, and placeholder values could rewrite the
+    // origin. Belt-and-suspenders over that origin check.
+    validateFastmailUrl(url, 'downloadUrl', this.auth.getAllowUnsafe());
 
     return url;
+  }
+
+  async downloadAttachment(emailId: string, attachmentId: string): Promise<string> {
+    return this.downloadUrlFor(await this.getAttachmentInfo(emailId, attachmentId));
   }
 
   static readonly DEFAULT_DOWNLOADS_DIR = resolve(homedir(), 'Downloads', 'fastmail-mcp');
@@ -2391,7 +2466,19 @@ export class JmapClient {
       throw new Error('Upload capability not available in session');
     }
 
+    // Reject an over-limit payload before any network call — the server advertises its
+    // own ceiling in the core capability, so a doomed upload need not be sent at all.
+    const maxSize = session.capabilities?.['urn:ietf:params:jmap:core']?.maxSizeUpload;
+    if (typeof maxSize === 'number' && data.length > maxSize) {
+      throw new Error(`Attachment is ${data.length} bytes; the server's upload limit is ${maxSize} bytes`);
+    }
+
     const url = session.uploadUrl.replace('{accountId}', session.accountId);
+    // Re-validate after substitution, mirroring the download path: the session-time check
+    // saw the template, and the substituted value could rewrite the origin the bearer
+    // token is about to be sent to.
+    validateFastmailUrl(url, 'uploadUrl', this.auth.getAllowUnsafe());
+
     // POST the raw bytes — no JSON.stringify, unlike every other call here. The copy
     // constructor `new Uint8Array(data)` yields a concrete Uint8Array<ArrayBuffer> (not the
     // ArrayBufferLike-backed view a Buffer/`.subarray` carries), which IS assignable to
@@ -2403,6 +2490,9 @@ export class JmapClient {
         'Content-Type': contentType,
       },
       body: new Uint8Array(data),
+      // Same rationale as the download path: never follow a redirect on a token-bearing
+      // request — the token would be replayed to an unvalidated host.
+      redirect: 'error',
     });
 
     if (!response.ok) {
@@ -2495,22 +2585,53 @@ export class JmapClient {
     }
   }
 
-  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, downloadDir?: string): Promise<{ url: string; bytesWritten: number; savedPath: string }> {
-    const safePath = await JmapClient.safeWritePath(savePath, downloadDir);
-    const url = await this.downloadAttachment(emailId, attachmentId);
+  /**
+   * Fetch an attachment's bytes into memory, alongside the metadata they were resolved
+   * from. One resolution feeds both the URL and the returned name/type, so the bytes and
+   * the metadata describing them always come from the same read of the email.
+   */
+  async fetchAttachmentBuffer(emailId: string, attachmentId: string): Promise<{ buffer: Buffer; url: string } & AttachmentInfo> {
+    const info = await this.getAttachmentInfo(emailId, attachmentId);
+    const url = await this.downloadUrlFor(info);
 
     const response = await fetch(url, {
-      headers: { 'Authorization': this.auth.getAuthHeaders()['Authorization'] }
+      headers: { 'Authorization': this.auth.getAuthHeaders()['Authorization'] },
+      // Never follow a redirect on a token-bearing request: an allowlisted host that
+      // 3xx-redirects cross-origin would otherwise source the attachment body from an
+      // unvalidated host, with the bearer token replayed to it.
+      redirect: 'error',
     });
 
     if (!response.ok) {
       throw new Error(`Download failed: ${response.status} ${response.statusText}`);
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
+    return { buffer: Buffer.from(await response.arrayBuffer()), url, ...info };
+  }
 
+  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, downloadDir?: string): Promise<{ url: string; bytesWritten: number; savedPath: string }> {
+    // Check + create the parent directory before the (slow) network fetch, so the window
+    // in which a co-resident process could swap a checked directory for a symlink is the
+    // re-check below rather than the whole download.
+    await JmapClient.safeWritePath(savePath, downloadDir);
+    const { buffer, url } = await this.fetchAttachmentBuffer(emailId, attachmentId);
+
+    // Re-validate immediately before writing — the target may have been swapped for a
+    // symlink during the fetch — then write with O_EXCL so a symlink planted at the path
+    // is never followed. Overwriting a pre-existing regular file stays supported: on
+    // EEXIST we re-run the symlink-safe check (which refuses a symlink) and replace the
+    // plain file. The rewrite ALSO uses 'wx' — a default-flag rewrite would reopen the
+    // exact symlink window the unlink just created.
+    const safePath = await JmapClient.safeWritePath(savePath, downloadDir);
     await mkdir(dirname(safePath), { recursive: true });
-    await writeFile(safePath, buffer);
+    try {
+      await writeFile(safePath, buffer, { flag: 'wx' });
+    } catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e;
+      await JmapClient.safeWritePath(savePath, downloadDir); // refuses a symlink at the target
+      await unlink(safePath);
+      await writeFile(safePath, buffer, { flag: 'wx' });
+    }
 
     return { url, bytesWritten: buffer.length, savedPath: safePath };
   }

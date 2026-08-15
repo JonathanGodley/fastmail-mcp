@@ -2,6 +2,7 @@ import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   extractVEvent,
+  resolveDisplayName,
   parseICalValue,
   findValueBoundary,
   parseAllICalProperties,
@@ -11,6 +12,9 @@ import {
   parseCalendarObject,
   escapeICalText,
   unescapeICalText,
+  validateAndFormatICalDate,
+  parseICalDateAsUTC,
+  normalizeMasterVEventFirst,
   toICalUTC,
   foldICalLine,
   detectLineEnding,
@@ -23,6 +27,10 @@ import {
   quoteParamValue,
   CalDAVCalendarClient,
 } from './caldav-client.js';
+
+// requireNonEmpty / validateClearFields are owned by src/coerce.ts and covered
+// there (including the InvalidInputError class the calendar tools depend on for
+// their InvalidParams mapping), so they are not re-tested against this module.
 
 describe('extractVEvent', () => {
   it('extracts VEVENT block from iCalendar data', () => {
@@ -241,140 +249,6 @@ describe('parseCalendarObject', () => {
   });
 });
 
-describe('toICalUTC', () => {
-  it('converts timezone offset to UTC', () => {
-    assert.equal(toICalUTC('2026-04-07T18:45:00+10:00'), '20260407T084500Z');
-  });
-
-  it('converts negative timezone offset to UTC', () => {
-    assert.equal(toICalUTC('2026-04-07T08:45:00-05:00'), '20260407T134500Z');
-  });
-
-  it('handles UTC input (Z suffix)', () => {
-    assert.equal(toICalUTC('2026-04-07T08:45:00Z'), '20260407T084500Z');
-  });
-
-  it('preserves floating time (no offset) without converting to UTC', () => {
-    assert.equal(toICalUTC('2026-04-07T18:45:00'), '20260407T184500');
-  });
-
-  it('throws on invalid date input', () => {
-    assert.throws(() => toICalUTC('not-a-date'), /Invalid date: not-a-date/);
-  });
-
-  it('handles midnight boundary crossing', () => {
-    assert.equal(toICalUTC('2026-04-07T23:55:00+12:00'), '20260407T115500Z');
-  });
-});
-
-describe('foldICalLine', () => {
-  it('returns short lines unchanged', () => {
-    assert.equal(foldICalLine('SUMMARY:Short'), 'SUMMARY:Short');
-  });
-
-  it('folds lines longer than 75 octets', () => {
-    const long = 'DESCRIPTION:' + 'x'.repeat(80);
-    const folded = foldICalLine(long);
-    const lines = folded.split('\r\n');
-    assert.ok(Buffer.byteLength(lines[0], 'utf8') <= 75);
-    assert.ok(lines[1].startsWith(' '));
-  });
-
-  it('folds very long lines into multiple segments', () => {
-    const long = 'DESCRIPTION:' + 'y'.repeat(200);
-    const folded = foldICalLine(long);
-    const lines = folded.split('\r\n');
-    assert.ok(lines.length >= 3);
-    for (let i = 1; i < lines.length; i++) {
-      assert.ok(lines[i].startsWith(' '));
-    }
-  });
-
-  it('keeps every segment within 75 octets', () => {
-    const long = 'DESCRIPTION:' + 'z'.repeat(200);
-    const folded = foldICalLine(long);
-    const lines = folded.split('\r\n');
-    for (const line of lines) {
-      assert.ok(Buffer.byteLength(line, 'utf8') <= 75);
-    }
-  });
-
-  it('folds multi-byte characters without exceeding 75 octets', () => {
-    const long = 'LOCATION:' + '📍'.repeat(20);
-    const folded = foldICalLine(long);
-    const lines = folded.split('\r\n');
-    assert.ok(lines.length >= 2);
-    for (const line of lines) {
-      assert.ok(Buffer.byteLength(line, 'utf8') <= 75,
-        `Line exceeds 75 octets: ${Buffer.byteLength(line, 'utf8')} bytes`);
-    }
-  });
-});
-
-describe('unescapeICalText', () => {
-  it('unescapes literal \\n to newline', () => {
-    assert.equal(unescapeICalText('Line one\\nLine two'), 'Line one\nLine two');
-  });
-
-  it('unescapes commas', () => {
-    assert.equal(unescapeICalText('Room A\\, Building 1'), 'Room A, Building 1');
-  });
-
-  it('unescapes semicolons', () => {
-    assert.equal(unescapeICalText('a\\;b\\;c'), 'a;b;c');
-  });
-
-  it('unescapes backslashes', () => {
-    assert.equal(unescapeICalText('path\\\\to\\\\file'), 'path\\to\\file');
-  });
-
-  it('round-trips with escapeICalText', () => {
-    const original = 'Meet; discuss, plan\nPath\\to\\file';
-    assert.equal(unescapeICalText(escapeICalText(original)), original);
-  });
-
-  it('handles literal backslash followed by n (not a newline)', () => {
-    assert.equal(unescapeICalText('\\\\n'), '\\n');
-  });
-
-  it('handles literal backslash followed by comma', () => {
-    assert.equal(unescapeICalText('\\\\,'), '\\,');
-  });
-});
-
-describe('iCal create/parse round-trip', () => {
-  it('round-trips special characters through create and parse', () => {
-    const title = 'Meeting; discuss, plan';
-    const description = 'Line one\nLine two\nPath\\to\\file; note, important';
-    const location = 'Room A, Building 1; Floor 2';
-
-    const uid = 'test-roundtrip@fastmail-mcp';
-    const now = '20260407T000000Z';
-    const ical = [
-      'BEGIN:VCALENDAR',
-      'VERSION:2.0',
-      'PRODID:-//fastmail-mcp//CalDAV//EN',
-      'BEGIN:VEVENT',
-      `UID:${uid}`,
-      `DTSTAMP:${now}`,
-      `DTSTART:${toICalUTC('2026-04-07T18:45:00+10:00')}`,
-      `DTEND:${toICalUTC('2026-04-07T20:00:00+10:00')}`,
-      foldICalLine(`SUMMARY:${escapeICalText(title)}`),
-      foldICalLine(`DESCRIPTION:${escapeICalText(description)}`),
-      foldICalLine(`LOCATION:${escapeICalText(location)}`),
-      'END:VEVENT',
-      'END:VCALENDAR',
-    ].filter(Boolean).join('\r\n');
-
-    const event = parseCalendarObject({ data: ical, url: 'https://example.com/cal/test.ics' });
-    assert.equal(event.title, title);
-    assert.equal(event.description, description);
-    assert.equal(event.location, location);
-    assert.equal(event.start, '2026-04-07T08:45:00Z');
-    assert.equal(event.end, '2026-04-07T10:00:00Z');
-  });
-});
-
 describe('escapeICalText', () => {
   it('escapes backslashes', () => {
     assert.equal(escapeICalText('path\\to\\file'), 'path\\\\to\\\\file');
@@ -415,6 +289,76 @@ describe('escapeICalText', () => {
     assert.ok(!escaped.includes('\r'), 'escaped text must not contain literal carriage returns');
     // The entire payload is on one logical ICS line, so END:VEVENT can't terminate the block
     assert.ok(escaped.startsWith('Meeting\\n'), 'newlines should be escaped, not literal');
+  });
+});
+
+describe('unescapeICalText', () => {
+  it('unescapes newlines', () => {
+    assert.equal(unescapeICalText('line1\\nline2'), 'line1\nline2');
+    assert.equal(unescapeICalText('line1\\Nline2'), 'line1\nline2');
+  });
+
+  it('unescapes semicolons and commas', () => {
+    assert.equal(unescapeICalText('a\\;b\\;c'), 'a;b;c');
+    assert.equal(unescapeICalText('Room A\\, Building 1'), 'Room A, Building 1');
+  });
+
+  it('unescapes backslashes', () => {
+    assert.equal(unescapeICalText('path\\\\to\\\\file'), 'path\\to\\file');
+  });
+
+  it('decodes an escaped backslash followed by "n" as a literal backslash + n, not a newline', () => {
+    // "\\n" in iCal = an escaped backslash ("\\") followed by a literal "n".
+    // A chained-replace implementation corrupts this into "\<newline>".
+    assert.equal(unescapeICalText('\\\\n'), '\\n');
+    assert.equal(unescapeICalText('C:\\\\next'), 'C:\\next');
+  });
+
+  it('handles literal backslash followed by comma', () => {
+    assert.equal(unescapeICalText('\\\\,'), '\\,');
+  });
+
+  it('round-trips with escapeICalText', () => {
+    for (const original of ['plain', 'a;b,c', 'line1\nline2', 'back\\slash', 'C:\\next', 'mix\n;,\\end']) {
+      assert.equal(unescapeICalText(escapeICalText(original)), original);
+    }
+  });
+
+  it('leaves plain text unchanged', () => {
+    assert.equal(unescapeICalText('Team Standup'), 'Team Standup');
+  });
+});
+
+describe('iCal create/parse round-trip', () => {
+  it('round-trips special characters through create and parse', () => {
+    const title = 'Meeting; discuss, plan';
+    const description = 'Line one\nLine two\nPath\\to\\file; note, important';
+    const location = 'Room A, Building 1; Floor 2';
+
+    const uid = 'test-roundtrip@fastmail-mcp';
+    const now = '20260407T000000Z';
+    const ical = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//fastmail-mcp//CalDAV//EN',
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `DTSTAMP:${now}`,
+      `DTSTART:${toICalUTC('2026-04-07T18:45:00+10:00')}`,
+      `DTEND:${toICalUTC('2026-04-07T20:00:00+10:00')}`,
+      foldICalLine(`SUMMARY:${escapeICalText(title)}`),
+      foldICalLine(`DESCRIPTION:${escapeICalText(description)}`),
+      foldICalLine(`LOCATION:${escapeICalText(location)}`),
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].filter(Boolean).join('\r\n');
+
+    const event = parseCalendarObject({ data: ical, url: 'https://example.com/cal/test.ics' });
+    assert.equal(event.title, title);
+    assert.equal(event.description, description);
+    assert.equal(event.location, location);
+    assert.equal(event.start, '2026-04-07T08:45:00Z');
+    assert.equal(event.end, '2026-04-07T10:00:00Z');
   });
 });
 
@@ -483,6 +427,81 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
 
     const callArgs = mockDAVClient.fetchCalendarObjects.mock.calls[0].arguments[0];
     assert.equal(callArgs.timeRange, undefined);
+  });
+});
+
+describe('validateAndFormatICalDate', () => {
+  it('accepts and formats date-only', () => {
+    assert.equal(validateAndFormatICalDate('2026-04-18', 'start'), '20260418');
+  });
+
+  it('accepts and formats UTC datetime', () => {
+    assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00Z', 'start'), '20260418T100000Z');
+  });
+
+  it('accepts and normalizes positive offset to UTC', () => {
+    // 2026-04-18T10:00:00+02:00 = 2026-04-18T08:00:00Z
+    assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00+02:00', 'start'), '20260418T080000Z');
+  });
+
+  it('accepts and normalizes negative offset to UTC', () => {
+    // 2026-04-18T10:00:00-05:00 = 2026-04-18T15:00:00Z
+    assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00-05:00', 'start'), '20260418T150000Z');
+  });
+
+  it('accepts floating datetime (no zone)', () => {
+    assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00', 'start'), '20260418T100000');
+  });
+
+  it('rejects CRLF injection attempt', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('2026-04-18T10:00:00Z\r\nATTENDEE:mailto:attacker@example.com', 'start'),
+      /control characters/,
+    );
+  });
+
+  it('rejects bare LF injection attempt', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('2026-04-18T10:00:00Z\nATTENDEE:mailto:attacker@example.com', 'start'),
+      /control characters/,
+    );
+  });
+
+  it('rejects null byte', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('2026-04-18T10:00:00Z\0', 'start'),
+      /control characters/,
+    );
+  });
+
+  it('rejects malformed date', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('not-a-date', 'start'),
+      /must be ISO-8601/,
+    );
+  });
+
+  it('rejects extra trailing content', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('2026-04-18T10:00:00Z bonus', 'start'),
+      /must be ISO-8601/,
+    );
+  });
+
+  it('rejects non-string input', () => {
+    assert.throws(
+      () => validateAndFormatICalDate(undefined as any, 'start'),
+      /must be a string/,
+    );
+  });
+
+  it('throws with field name in error', () => {
+    try {
+      validateAndFormatICalDate('garbage', 'event.end');
+      assert.fail('should have thrown');
+    } catch (e) {
+      assert.match((e as Error).message, /event\.end/);
+    }
   });
 });
 
@@ -602,6 +621,60 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
     await assert.rejects(
       () => client.deleteCalendarEvent('nonexistent@fm'),
       /Calendar event not found: nonexistent@fm/
+    );
+  });
+});
+
+describe('CalDAVCalendarClient.getCalendarEventById', () => {
+  function createMockedClientWithObjects(calendarObjects: Array<{ data: string; url: string; etag?: string }>) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: 'Personal', url: '/cal/personal/' },
+      ]),
+      fetchCalendarObjects: mock.fn(async () => calendarObjects),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  it('returns the parsed event when the UID exists', async () => {
+    const ical = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:get1@fm',
+      'DTSTART:20260401T100000Z',
+      'SUMMARY:Findable',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client } = createMockedClientWithObjects([{ data: ical, url: '/cal/get1.ics', etag: '"etag1"' }]);
+
+    const event = await client.getCalendarEventById('get1@fm');
+    assert.equal(event.id, 'get1@fm');
+    assert.equal(event.title, 'Findable');
+  });
+
+  it('throws instead of returning null when the event does not exist', async () => {
+    const { client } = createMockedClientWithObjects([]);
+    await assert.rejects(
+      () => client.getCalendarEventById('nonexistent@fm'),
+      /Calendar event not found: nonexistent@fm/
+    );
+  });
+
+  it('throws InvalidInputError for a not-found id so the boundary maps it to InvalidParams', async () => {
+    // A wrong event id is caller-fixable, so it must not surface as InternalError
+    // ("server-side, a bare retry might work"). The message assertion above passes
+    // under either class; this one pins the class.
+    const { client } = createMockedClientWithObjects([]);
+    await assert.rejects(
+      () => client.getCalendarEventById('nonexistent@fm'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
     );
   });
 });
@@ -1045,6 +1118,50 @@ describe('removeAllICalProperties', () => {
   });
 });
 
+describe('foldICalLine', () => {
+  it('returns short lines unchanged', () => {
+    assert.equal(foldICalLine('SUMMARY:Short'), 'SUMMARY:Short');
+  });
+
+  it('folds lines longer than 75 octets', () => {
+    const long = 'DESCRIPTION:' + 'x'.repeat(80);
+    const folded = foldICalLine(long);
+    const lines = folded.split('\r\n');
+    assert.ok(Buffer.byteLength(lines[0], 'utf8') <= 75);
+    assert.ok(lines[1].startsWith(' '));
+  });
+
+  it('folds very long lines into multiple segments', () => {
+    const long = 'DESCRIPTION:' + 'y'.repeat(200);
+    const folded = foldICalLine(long);
+    const lines = folded.split('\r\n');
+    assert.ok(lines.length >= 3);
+    for (let i = 1; i < lines.length; i++) {
+      assert.ok(lines[i].startsWith(' '));
+    }
+  });
+
+  it('keeps every segment within 75 octets', () => {
+    const long = 'DESCRIPTION:' + 'z'.repeat(200);
+    const folded = foldICalLine(long);
+    const lines = folded.split('\r\n');
+    for (const line of lines) {
+      assert.ok(Buffer.byteLength(line, 'utf8') <= 75);
+    }
+  });
+
+  it('folds multi-byte characters without exceeding 75 octets', () => {
+    const long = 'LOCATION:' + '📍'.repeat(20);
+    const folded = foldICalLine(long);
+    const lines = folded.split('\r\n');
+    assert.ok(lines.length >= 2);
+    for (const line of lines) {
+      assert.ok(Buffer.byteLength(line, 'utf8') <= 75,
+        `Line exceeds 75 octets: ${Buffer.byteLength(line, 'utf8')} bytes`);
+    }
+  });
+});
+
 describe('foldICalLine with custom line ending', () => {
   it('uses LF when specified', () => {
     const long = 'DESCRIPTION:' + 'x'.repeat(80);
@@ -1202,6 +1319,28 @@ describe('quoteParamValue', () => {
     // Colon in result triggers DQUOTE quoting — that's correct
     assert.equal(quoteParamValue('Alice\r\nX-EVIL:payload'), '"Alice X-EVIL:payload"');
   });
+
+  it('strips the remaining control characters and the C1 range', () => {
+    assert.equal(quoteParamValue('Ali\x00ce\x07'), 'Alice');
+    assert.equal(quoteParamValue('Ali\x1Bce'), 'Alice');
+    assert.equal(quoteParamValue('Ali\x7Fce\x9B'), 'Alice');
+  });
+
+  it('strips the bidi overrides and isolates that would reorder the rendered name', () => {
+    assert.equal(quoteParamValue('\u202EAlice'), 'Alice');
+    assert.equal(quoteParamValue('Ali\u2066ce\u2069'), 'Alice');
+  });
+
+  it('keeps the plain left/right marks, which appear in real Arabic and Hebrew names', () => {
+    // LRM/RLM carry no nesting scope and cannot reorder the text around them,
+    // so stripping them would corrupt a legitimate name for no security gain.
+    assert.equal(quoteParamValue('\u05D3\u05D5\u05D3\u200E'), '\u05D3\u05D5\u05D3\u200E');
+    assert.equal(quoteParamValue('\u200F\u0645\u062D\u0645\u062F'), '\u200F\u0645\u062D\u0645\u062F');
+  });
+
+  it('keeps horizontal tab, which is legal in a quoted parameter value', () => {
+    assert.equal(quoteParamValue('Ali\tce'), 'Ali\tce');
+  });
 });
 
 describe('parseICalValue with CRLF and folded lines', () => {
@@ -1217,6 +1356,30 @@ describe('parseICalValue with CRLF and folded lines', () => {
 });
 
 describe('toICalUTC', () => {
+  it('converts timezone offset to UTC', () => {
+    assert.equal(toICalUTC('2026-04-07T18:45:00+10:00'), '20260407T084500Z');
+  });
+
+  it('converts negative timezone offset to UTC', () => {
+    assert.equal(toICalUTC('2026-04-07T08:45:00-05:00'), '20260407T134500Z');
+  });
+
+  it('handles UTC input (Z suffix)', () => {
+    assert.equal(toICalUTC('2026-04-07T08:45:00Z'), '20260407T084500Z');
+  });
+
+  it('preserves floating time (no offset) without converting to UTC', () => {
+    assert.equal(toICalUTC('2026-04-07T18:45:00'), '20260407T184500');
+  });
+
+  it('throws on invalid date input', () => {
+    assert.throws(() => toICalUTC('not-a-date'), /Invalid date: not-a-date/);
+  });
+
+  it('handles midnight boundary crossing', () => {
+    assert.equal(toICalUTC('2026-04-07T23:55:00+12:00'), '20260407T115500Z');
+  });
+
   it('throws on date-only input', () => {
     assert.throws(() => toICalUTC('2026-04-01'), /date-only input must be handled by caller/);
   });
@@ -1414,6 +1577,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
   it('empty title throws InvalidInputError so the index maps calendar input to InvalidParams (#41 collateral)', async () => {
     // The calendar tools share requireNonEmpty from coerce.ts, so the #41 reclassification
     // reaches them for free — pin it so it can't silently regress back to InternalError.
+    // The message-regex assertion above passes under either error class; this one is what
+    // actually holds the validators to coerce.ts rather than a local plain-Error copy.
     const ical = makeRichIcal('evtA@fm');
     const { client, mockDAVClient } = createMockedPatchClient([{ data: ical, url: '/cal/evtA.ics' }]);
     await assert.rejects(
@@ -1580,8 +1745,44 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       () => client.updateCalendarEvent('noorg2@fm', {
         participants: [{ email: 'alice@example.com' }],
       }),
-      /CalDAV username is not an email/
+      /Invalid participant email: not-an-email/
     );
+  });
+
+  it('rejects a CalDAV username that would inject into the ORGANIZER line', async () => {
+    // The update path validates the username with the same strict addr-spec check
+    // as the create path. A bare .includes('@') test would accept this value and
+    // emit the injected CRLF straight into the ORGANIZER line.
+    const noOrganizerIcal = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:noorg3@fm',
+      'DTSTART:20260401T100000Z',
+      'DTEND:20260401T110000Z',
+      'SUMMARY:Simple Event',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const objects = [{ data: noOrganizerIcal, url: '/cal/noorg3.ics' }];
+    const client = new CalDAVCalendarClient({
+      username: 'me@example.com\r\nX-EVIL:1',
+      password: 'test',
+    });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async () => objects),
+      updateCalendarObject: mock.fn(async () => ({})),
+    };
+    (client as any).client = mockDAVClient;
+
+    await assert.rejects(
+      () => client.updateCalendarEvent('noorg3@fm', {
+        participants: [{ email: 'alice@example.com' }],
+      }),
+      /Invalid participant email/
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
   });
 
   it('adds ORGANIZER when adding participants to event with no existing ORGANIZER', async () => {
@@ -2147,5 +2348,233 @@ describe('Recurring event: no orphans proceeds without confirmRecurring', () => 
     const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
     assert.ok(updatedData.includes('Modified Week 2')); // Exception preserved
     assert.ok(updatedData.includes('DTEND:20260406T120000Z')); // End updated
+  });
+});
+
+// ---------- v1.11.0 review fixes ----------
+
+describe('escapeICalText control-character hardening', () => {
+  it('escapes a bare CR as \\n instead of passing it through', () => {
+    assert.equal(escapeICalText('Standup\rATTENDEE:mailto:x@example.com'),
+      'Standup\\nATTENDEE:mailto:x@example.com');
+  });
+
+  it('still escapes CRLF and LF as \\n', () => {
+    assert.equal(escapeICalText('a\r\nb\nc'), 'a\\nb\\nc');
+  });
+
+  it('strips other control characters', () => {
+    assert.equal(escapeICalText('a\x00b\x08c\x7Fd'), 'abcd');
+  });
+
+  it('keeps horizontal tabs (legal in iCal TEXT)', () => {
+    assert.equal(escapeICalText('a\tb'), 'a\tb');
+  });
+});
+
+describe('parseICalDateAsUTC', () => {
+  it('interprets naive datetimes as UTC regardless of process TZ', () => {
+    const d = parseICalDateAsUTC('2026-03-20T09:30:00');
+    assert.equal(d.getTime(), Date.UTC(2026, 2, 20, 9, 30, 0));
+  });
+
+  it('handles explicit Z', () => {
+    assert.equal(parseICalDateAsUTC('2026-03-20T09:30:00Z').getTime(), Date.UTC(2026, 2, 20, 9, 30, 0));
+  });
+
+  it('handles offsets', () => {
+    assert.equal(parseICalDateAsUTC('2026-03-20T10:30:00+01:00').getTime(), Date.UTC(2026, 2, 20, 9, 30, 0));
+  });
+
+  it('handles date-only as UTC midnight', () => {
+    assert.equal(parseICalDateAsUTC('2026-03-20').getTime(), Date.UTC(2026, 2, 20));
+  });
+});
+
+describe('normalizeMasterVEventFirst', () => {
+  const exception = 'BEGIN:VEVENT\nUID:u1\nRECURRENCE-ID:20260327T093000Z\nDTSTART:20260327T110000Z\nSUMMARY:Moved instance\nEND:VEVENT';
+  const master = 'BEGIN:VEVENT\nUID:u1\nDTSTART:20260320T093000Z\nRRULE:FREQ=WEEKLY\nSUMMARY:Weekly\nEND:VEVENT';
+
+  it('moves the master VEVENT ahead of an exception-first ordering', () => {
+    const data = `BEGIN:VCALENDAR\n${exception}\n${master}\nEND:VCALENDAR`;
+    const out = normalizeMasterVEventFirst(data);
+    const firstVevent = out.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/)?.[0] || '';
+    assert.ok(/^RRULE/m.test(firstVevent), 'master (RRULE, no RECURRENCE-ID) should now be first');
+    assert.ok(out.includes('Moved instance'), 'exception must be preserved');
+  });
+
+  it('leaves master-first payloads untouched', () => {
+    const data = `BEGIN:VCALENDAR\n${master}\n${exception}\nEND:VCALENDAR`;
+    assert.equal(normalizeMasterVEventFirst(data), data);
+  });
+
+  it('leaves single-VEVENT payloads untouched', () => {
+    const data = `BEGIN:VCALENDAR\n${master}\nEND:VCALENDAR`;
+    assert.equal(normalizeMasterVEventFirst(data), data);
+  });
+});
+
+describe('replaceICalProperty insert position with VALARM', () => {
+  it('inserts a new property before the first sub-component, not after it', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'BEGIN:VALARM',
+      'TRIGGER:-PT15M',
+      'END:VALARM',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    const out = replaceICalProperty(data, 'DESCRIPTION', 'DESCRIPTION:hello');
+    const descIdx = out.indexOf('DESCRIPTION:hello');
+    const alarmIdx = out.indexOf('BEGIN:VALARM');
+    assert.ok(descIdx !== -1 && alarmIdx !== -1);
+    assert.ok(descIdx < alarmIdx, 'property must precede VALARM per RFC 5545 ABNF');
+  });
+});
+
+describe('removeOrphanedVTimezones quoted/folded references', () => {
+  it('keeps a VTIMEZONE referenced via a quoted TZID parameter', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:Custom/Zone',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART;TZID="Custom/Zone":20260320T093000',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    const out = removeOrphanedVTimezones(data);
+    assert.ok(out.includes('BEGIN:VTIMEZONE'), 'referenced VTIMEZONE must not be removed');
+  });
+
+  it('keeps a VTIMEZONE whose reference is split across a folded line', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:America/Argentina/ComodRivadavia',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART;TZID=America/Argentina/Comod',
+      ' Rivadavia:20260320T093000',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    const out = removeOrphanedVTimezones(data);
+    assert.ok(out.includes('BEGIN:VTIMEZONE'), 'folded reference must still count');
+  });
+
+  it('still removes a genuinely orphaned VTIMEZONE', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:Unused/Zone',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    const out = removeOrphanedVTimezones(data);
+    assert.ok(!out.includes('BEGIN:VTIMEZONE'));
+  });
+});
+
+// ---------- v1.11.1 security fixes ----------
+
+describe('updateCalendarEvent — rrule DoS guard', () => {
+  function mockClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async () => [{ data: icalData, url: '/cal/dos.ics' }]),
+      updateCalendarObject: mock.fn(async () => ({ status: 207 })),
+    };
+    return client;
+  }
+
+  it('does not hang on a sub-daily RRULE with a distant exception (falls through to no-prune)', async () => {
+    // FREQ=SECONDLY + an exception decades out would force billions of rrule
+    // iterations without the guard. With it, the update completes and the
+    // exception VEVENT is preserved (best-effort: nothing pruned).
+    const ical = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//t//EN',
+      'BEGIN:VEVENT', 'UID:dos@fm', 'DTSTAMP:20260101T000000Z',
+      'DTSTART:20260101T090000Z', 'DTEND:20260101T093000Z',
+      'RRULE:FREQ=SECONDLY;INTERVAL=1', 'SUMMARY:Rapid',
+      'END:VEVENT',
+      'BEGIN:VEVENT', 'UID:dos@fm', 'RECURRENCE-ID:20990101T090000Z',
+      'DTSTART:20990101T090000Z', 'DTEND:20990101T093000Z', 'SUMMARY:Far exception',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const client = mockClient(ical);
+    const started = Date.now();
+    await client.updateCalendarEvent('dos@fm', { start: '2026-01-01T10:00:00Z', confirmRecurring: true });
+    // Should return promptly, not spin. Generous bound to avoid flakiness.
+    assert.ok(Date.now() - started < 3000, 'guard should prevent unbounded rrule expansion');
+    const written = (client as any).client.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('Far exception'), 'exception must be preserved, not pruned');
+  });
+});
+
+describe('CalDAV write status checking (assertDavOk)', () => {
+  function mockClientWithStatus(status: number) {
+    const ical = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//t//EN',
+      'BEGIN:VEVENT', 'UID:s@fm', 'DTSTAMP:20260101T000000Z',
+      'DTSTART:20260101T090000Z', 'DTEND:20260101T093000Z', 'SUMMARY:S',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async () => [{ data: ical, url: '/cal/s.ics' }]),
+      updateCalendarObject: mock.fn(async () => ({ status })),
+      deleteCalendarObject: mock.fn(async () => ({ status })),
+    };
+    return client;
+  }
+
+  it('throws when the server returns a 4xx/5xx on update', async () => {
+    const client = mockClientWithStatus(500);
+    await assert.rejects(
+      () => client.updateCalendarEvent('s@fm', { title: 'X' }),
+      /Failed to update calendar event: server returned 500/,
+    );
+  });
+
+  it('throws when the server returns a 4xx on delete', async () => {
+    const client = mockClientWithStatus(403);
+    await assert.rejects(
+      () => client.deleteCalendarEvent('s@fm'),
+      /Failed to delete calendar event: server returned 403/,
+    );
+  });
+
+  it('succeeds on a 2xx status', async () => {
+    const client = mockClientWithStatus(204);
+    await client.updateCalendarEvent('s@fm', { title: 'X' });
+  });
+});
+
+describe('resolveDisplayName', () => {
+  it('uses the env value when it is a real string', () => {
+    assert.equal(resolveDisplayName('Jeremy G', 'fallback@example.com'), 'Jeremy G');
+  });
+  it('falls back when unset or blank', () => {
+    assert.equal(resolveDisplayName(undefined, 'fb'), 'fb');
+    assert.equal(resolveDisplayName('   ', 'fb'), 'fb');
+  });
+  it('falls back on an unresolved DXT config placeholder', () => {
+    assert.equal(resolveDisplayName('${user_config.fastmail_caldav_display_name}', 'fb'), 'fb');
   });
 });

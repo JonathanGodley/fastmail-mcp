@@ -4,6 +4,9 @@ import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_B
 import { InvalidInputError } from './coerce.js';
 import { buildExclusionNote } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
+import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // ---------- helpers ----------
 
@@ -2078,5 +2081,189 @@ describe('findEmailIdsByMessageId', () => {
     const makeReq = stubLookup(client, []);
     assert.deepEqual(await client.findEmailIdsByMessageId('  <>  '), []);
     assert.equal(makeReq.mock.calls.length, 0);
+  });
+});
+
+// ---------- total result count (calculateTotal / QueryResult) ----------
+
+// These pin the QueryResult contract itself: the query always asks the server to count
+// the full match set, the reported total rides alongside the fetched page, and an absent
+// server total leaves the key OFF rather than inventing a 0 (which would read as "no
+// matches"). An explicit mailbox is used throughout so the default Trash/Spam exclusion
+// and its extra count query stay out of the picture — those have their own coverage.
+describe('query total result count', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client);
+  });
+
+  it('getEmails requests calculateTotal on Email/query', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => queryResponse({}));
+
+    await client.getEmails({ mailbox: 'mb-inbox', limit: 5 });
+
+    assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls[0][1].calculateTotal, true);
+  });
+
+  it('surfaces the server-reported total alongside the items', async () => {
+    stubMakeRequest(client, queryResponse({
+      ids: ['e1'],
+      list: [{ id: 'e1', subject: 'Only one fetched' }],
+      total: 42,
+    }));
+
+    const result = await client.getEmails({ mailbox: 'mb-inbox', limit: 1 });
+    assert.equal(result.total, 42);
+    assert.equal(result.items.length, 1);
+  });
+
+  it('omits total when the server does not report one', async () => {
+    stubMakeRequest(client, queryResponse({ ids: ['e1'], list: [{ id: 'e1' }] }));
+
+    const result = await client.getEmails({ mailbox: 'mb-inbox', limit: 1 });
+    assert.equal('total' in result, false);
+    assert.equal(result.items.length, 1);
+  });
+});
+
+// ---------- attachment upload: token-bearing request discipline ----------
+
+describe('uploadBlob request discipline', () => {
+  // The upload host and the advertised ceiling both come from the session, so the stub
+  // carries a Fastmail-shaped uploadUrl (the post-substitution allowlist check rejects
+  // anything else) and a small maxSizeUpload.
+  const SESSION_WITH_UPLOAD = {
+    apiUrl: 'https://api.example.com/jmap/api/',
+    accountId: ACCOUNT_ID,
+    capabilities: { 'urn:ietf:params:jmap:core': { maxSizeUpload: 1024 } },
+    uploadUrl: 'https://api.fastmail.com/jmap/upload/{accountId}/',
+    downloadUrl: 'https://www.fastmailusercontent.com/jmap/download/{accountId}/{blobId}/{name}?type={type}',
+  };
+
+  function makeUploadClient(): JmapClient {
+    const auth = new FastmailAuth({ apiToken: 'fake-token' });
+    const client = new JmapClient(auth);
+    mock.method(client, 'getSession', async () => SESSION_WITH_UPLOAD);
+    return client;
+  }
+
+  it('POSTs to the substituted uploadUrl with Content-Type and refuses to follow redirects', async () => {
+    const client = makeUploadClient();
+    const fetchMock = mock.method(globalThis, 'fetch', async () => new Response(
+      JSON.stringify({ blobId: 'B1', type: 'text/plain', size: 5 }), { status: 200 },
+    ));
+    try {
+      const out = await client.uploadBlob(Buffer.from('hello'), 'text/plain');
+      assert.equal(out.blobId, 'B1');
+      const [url, opts] = fetchMock.mock.calls[0].arguments as [string, any];
+      assert.equal(url, `https://api.fastmail.com/jmap/upload/${ACCOUNT_ID}/`);
+      assert.equal(opts.method, 'POST');
+      assert.equal(opts.headers['Content-Type'], 'text/plain');
+      // The request carries the bearer token, so a 3xx must fail rather than replay it
+      // to whatever host the redirect names.
+      assert.equal(opts.redirect, 'error');
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it('rejects payloads above the advertised maxSizeUpload before any network call', async () => {
+    const client = makeUploadClient();
+    const fetchMock = mock.method(globalThis, 'fetch', async () => { throw new Error('should not fetch'); });
+    try {
+      await assert.rejects(
+        () => client.uploadBlob(Buffer.alloc(2048), 'application/octet-stream'),
+        /upload limit/,
+      );
+      assert.equal(fetchMock.mock.calls.length, 0);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+});
+
+// ---------- downloadAttachmentToFile: exclusive-create discipline ----------
+
+// downloadAttachmentToFile writes with O_EXCL ('wx') so a symlink planted at the target
+// during the download is never followed. Overwriting a plain file therefore takes the
+// EEXIST -> re-validate -> unlink -> rewrite path, and the REWRITE has to keep 'wx':
+// the unlink frees the name, so a default-flag rewrite would re-open exactly the symlink
+// window the exclusive first write closed. Only the flag actually passed to the second
+// write proves that, and it is invisible from the filesystem afterwards — so this loads a
+// private second copy of the client module with 'fs/promises' redirected to a recording
+// wrapper, and reads the flags off the recorded calls. The redirect is keyed on the
+// importing module's URL, so nothing else in the process sees it.
+const FS_RECORDER = 'data:text/javascript,' + encodeURIComponent(`
+export * from 'node:fs/promises';
+import { writeFile as realWriteFile } from 'node:fs/promises';
+export const writeFileCalls = [];
+export function writeFile(path, data, options) {
+  writeFileCalls.push({ path, options });
+  return realWriteFile(path, data, options);
+}
+`);
+
+describe('downloadAttachmentToFile write flags', () => {
+  it('uses an exclusive create on BOTH writes when replacing an existing file', async (t) => {
+    // Module hooks that can redirect a builtin arrived in Node 22.15; below that the
+    // flags are not observable and the case is reported as skipped rather than passing
+    // on nothing.
+    const nodeModule = await import('node:module') as any;
+    if (typeof nodeModule.registerHooks !== 'function') {
+      t.skip('module hooks (registerHooks) are not available on this Node version');
+      return;
+    }
+
+    const freshUrl = new URL('./jmap-client.ts?fs-recorder=1', import.meta.url).href;
+    const hooks = nodeModule.registerHooks({
+      resolve(specifier: string, context: any, nextResolve: any) {
+        if (
+          (specifier === 'fs/promises' || specifier === 'node:fs/promises') &&
+          String(context.parentURL).includes('fs-recorder=1')
+        ) {
+          return { url: FS_RECORDER, shortCircuit: true };
+        }
+        return nextResolve(specifier, context);
+      },
+    });
+
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-toctou-'));
+    try {
+      const fresh = await import(freshUrl) as any;
+      const recorder = await import(FS_RECORDER) as any;
+      recorder.writeFileCalls.length = 0;
+
+      const client = new fresh.JmapClient(new FastmailAuth({ apiToken: 'fake-token' }));
+      // The network half is not what is under test; the bytes just have to arrive.
+      mock.method(client, 'fetchAttachmentBuffer', async () => ({
+        buffer: Buffer.from('NEW BYTES'),
+        url: 'https://www.fastmailusercontent.com/jmap/download/acct/blob/report.txt',
+        name: 'report.txt',
+        type: 'text/plain',
+        blobId: 'blob-1',
+      }));
+      const guard = mock.method(fresh.JmapClient, 'safeWritePath');
+
+      // A pre-existing plain file at the target is what forces the EEXIST branch.
+      await fsWriteFile(join(root, 'report.txt'), 'OLD BYTES');
+      const result = await client.downloadAttachmentToFile('e1', 'a1', 'report.txt', root);
+
+      // Overwriting a plain file still works end to end.
+      assert.equal(await readFile(result.savedPath, 'utf8'), 'NEW BYTES');
+
+      const calls = recorder.writeFileCalls;
+      assert.equal(calls.length, 2, 'expected the exclusive write plus the post-unlink rewrite');
+      assert.deepEqual(calls[0].options, { flag: 'wx' }, 'first write must be an exclusive create');
+      assert.deepEqual(calls[1].options, { flag: 'wx' }, 'rewrite after the unlink must ALSO be an exclusive create');
+
+      // Three guard calls: before the fetch, immediately before the write, and again
+      // after EEXIST — the last one is what refuses a symlink planted at the target.
+      assert.equal(guard.mock.calls.length, 3);
+    } finally {
+      hooks.deregister();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

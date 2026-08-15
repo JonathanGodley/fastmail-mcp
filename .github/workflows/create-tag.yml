@@ -1,0 +1,48 @@
+name: Create Tag
+
+# Manual tag creation for release flows driven from environments whose git
+# credentials cannot push refs/tags (e.g. remote coding sessions where pushes
+# are scoped to a single work branch). The repo-scoped GITHUB_TOKEN can.
+#
+# Releases here are deliberately human-initiated: landing a version bump on main
+# publishes nothing on its own. "Build and Release DXT" runs on a pushed tag or a
+# manual dispatch, so tagging is the step that starts a release.
+#
+# One consequence worth knowing: a tag pushed with GITHUB_TOKEN does not itself
+# trigger another workflow (GitHub suppresses recursive workflow triggers), so
+# after this completes, dispatch "Build and Release DXT" on the new tag to publish.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create at the dispatched ref (e.g. v1.13.4-fork.1)"
+        required: true
+        type: string
+
+# Least privilege: pushing the tag is the only write.
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate and create tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # This repo's versions carry a fork suffix encoding the upstream base
+          # version they track (v1.13.4-fork.1), so accept that alongside plain vX.Y.Z.
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-fork\.[0-9]+)?$ ]] || { echo "tag '$TAG' is not vX.Y.Z or vX.Y.Z-fork.N" >&2; exit 1; }
+          if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
+            echo "tag $TAG already exists" >&2
+            exit 1
+          fi
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"

@@ -33,17 +33,48 @@ export class InvalidInputError extends Error {
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.
 
-// Defense-in-depth: scrub bearer-token-shaped substrings from any string that
+// Defense-in-depth: scrub credential-shaped substrings from any string that
 // might be reflected back to the MCP caller (e.g. a JMAP error message). This
 // is intentionally narrow — provider error messages are useful for the LLM to
 // recover from, so we don't want to over-sanitize.
 const BEARER_PATTERN = /Bearer\s+\S+/gi;
-const FASTMAIL_TOKEN_PATTERN = /fmu\d+-[A-Za-z0-9-]{20,}/g;
+// The CalDAV path authenticates with HTTP Basic, so a reflected header or a
+// tsdav error carries the base64 credential blob — redact that shape too.
+const BASIC_PATTERN = /Basic\s+[A-Za-z0-9+/=]+/gi;
+// Fastmail token shape. The charset is `[\w-]`, not `[A-Za-z0-9-]`: under the
+// narrower class an underscore inside the token ends the match early, and with
+// fewer than 20 characters before it the `{20,}` quantifier fails outright, so
+// the whole token would pass through in clear.
+const FASTMAIL_TOKEN_PATTERN = /fmu\d+-[\w-]{20,}/g;
+
+// Exact secret values registered at startup (API token, CalDAV password, and
+// self-hosted tokens carrying neither a `Bearer` prefix nor the `fmu` shape).
+// Value-based redaction catches the credentials the patterns above cannot see.
+// Populated by registerSecret(); never logged.
+const KNOWN_SECRETS = new Set<string>();
+
+// Register a literal secret value so redactBearerTokens scrubs any exact
+// occurrence of it. Values under 8 characters are ignored — an over-broad
+// match would mangle legitimate output for no security gain.
+export function registerSecret(value: string | undefined): void {
+  if (typeof value === 'string' && value.length >= 8) {
+    KNOWN_SECRETS.add(value);
+  }
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export function redactBearerTokens(input: string): string {
-  return input
+  let out = input
     .replace(BEARER_PATTERN, 'Bearer [REDACTED]')
+    .replace(BASIC_PATTERN, 'Basic [REDACTED]')
     .replace(FASTMAIL_TOKEN_PATTERN, 'fmu[REDACTED]');
+  for (const secret of KNOWN_SECRETS) {
+    out = out.replace(new RegExp(escapeRegExp(secret), 'g'), '[REDACTED]');
+  }
+  return out;
 }
 
 export function coerceStringArray(value: unknown): string[] | undefined {
@@ -238,6 +269,16 @@ export function coercePosition(value: unknown, paramName = 'position'): number |
 function echoPosition(value: unknown): string {
   const text = String(value);
   return text.length > POSITION_ECHO_LIMIT ? `${text.slice(0, POSITION_ECHO_LIMIT)}...` : text;
+}
+
+// Clamp a caller-supplied limit into [1, max], tolerating string and NaN input.
+// A lenient client may send "20", and a bare Number("abc") yields NaN — which
+// JMAP serializes as `"limit": null`, i.e. a query with no bound at all. The
+// `|| fallback` is therefore a guard against an unbounded result set, not a
+// nicety. Unlike the other coercers this never throws: a limit is a convenience
+// knob, and a caller who fat-fingers it wants results, not an error.
+export function clampLimit(value: unknown, fallback: number, max: number): number {
+  return Math.min(Math.max(Number(value) || fallback, 1), max);
 }
 
 function acceptedDateFormats(): string {

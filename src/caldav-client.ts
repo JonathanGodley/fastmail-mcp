@@ -6,8 +6,13 @@ import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
 // VEVENTs when start/end changes on a recurring event (matching Google Calendar
 // behavior). The rrule package has a single transitive dependency (tslib).
 import rruleLib from 'rrule';
-const { rrulestr } = rruleLib;
-import { requireNonEmpty, validateClearFields } from './coerce.js';
+const { rrulestr, RRule } = rruleLib;
+// requireNonEmpty/validateClearFields come from coerce.ts rather than being
+// defined here, so their rejections throw the tagged InvalidInputError and the
+// CallTool boundary maps them to InvalidParams. A plain Error would surface as
+// InternalError ("server bug"), which is wrong for caller-fixable input and
+// would tell the caller a bare retry might work. See docs/conventions.md.
+import { InvalidInputError, requireNonEmpty, validateClearFields } from './coerce.js';
 
 export interface CalDAVConfig {
   username: string;
@@ -48,6 +53,18 @@ export interface CalendarEvent {
  * Extract the VEVENT block from iCalendar data.
  * This avoids matching properties from VTIMEZONE or other components.
  */
+/**
+ * Resolve the ORGANIZER display name from a raw env value, falling back when
+ * it is unset, blank, or an unresolved DXT config placeholder like
+ * "${user_config.fastmail_caldav_display_name}" — a raw process.env read here
+ * would otherwise embed the literal placeholder into generated iCal.
+ */
+export function resolveDisplayName(raw: string | undefined, fallback: string): string {
+  const trimmed = raw?.trim();
+  if (!trimmed || /\$\{[^}]+\}/.test(trimmed)) return fallback;
+  return trimmed;
+}
+
 export function extractVEvent(data: string): string | null {
   const match = data.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/);
   return match ? match[0] : null;
@@ -336,9 +353,14 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
     const newLines = newLine !== null ? newLine.split(/\r?\n/) : [];
     lines.splice(foundIdx, foundEndIdx - foundIdx, ...newLines);
   } else if (newLine !== null) {
-    // Insert before END:VEVENT
+    // Insert before the first sub-component (e.g. VALARM) when present —
+    // RFC 5545 ABNF is `eventprop *alarmc`, so properties must precede alarms.
+    let insertAt = veventEnd;
+    for (let i = veventStart + 1; i < veventEnd; i++) {
+      if (lines[i].trim().startsWith('BEGIN:')) { insertAt = i; break; }
+    }
     const newLines = newLine.split(/\r?\n/);
-    lines.splice(veventEnd, 0, ...newLines);
+    lines.splice(insertAt, 0, ...newLines);
   }
 
   return lines.join(lineEnding);
@@ -479,13 +501,15 @@ export function removeOrphanedVTimezones(icalData: string): string {
     if (lines[i].trim() === 'END:VTIMEZONE') { inTz = false; continue; }
     if (!inTz) nonTzLines.push(lines[i]);
   }
-  const nonTzContent = nonTzLines.join('\n');
+  // Unfold before scanning so a reference split across a folded line isn't
+  // missed, and check both bare and quoted parameter forms.
+  const nonTzContent = nonTzLines.join('\n').replace(/\n[ \t]/g, '');
 
   // Check each VTIMEZONE for references
   const orphaned = tzBlocks.filter(tz => {
     if (!tz.tzid) return false;
-    // Check for ;TZID=<tzid> references in any property
-    return !nonTzContent.includes(`;TZID=${tz.tzid}`);
+    return !nonTzContent.includes(`;TZID=${tz.tzid}`) &&
+           !nonTzContent.includes(`;TZID="${tz.tzid}"`);
   });
 
   // Remove orphaned blocks in reverse order
@@ -536,8 +560,9 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
     if (!block.recurrenceId) return false; // master VEVENT — never remove
     const recIdFormatted = formatICalDate(block.recurrenceId);
     if (!recIdFormatted) return false;
-    // Compare as UTC ISO string — handles both date-only and datetime
-    const recDate = new Date(recIdFormatted);
+    // Compare in a fixed UTC frame — naive datetimes must not be interpreted
+    // in the process's local timezone (must match orphan-detection's frame).
+    const recDate = parseICalDateAsUTC(recIdFormatted);
     const recDateStr = recDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
     return orphanedDateStrings.includes(recDateStr);
   });
@@ -680,6 +705,12 @@ function addParticipantsToEvent(event: CalendarEvent, vevent: string): void {
 /**
  * Unescape an iCalendar text value (RFC 5545 §3.3.11).
  * Reverses escaping of newlines, semicolons, commas, and backslashes.
+ *
+ * Done in a single left-to-right pass so each escape is decoded exactly once.
+ * Chained .replace() calls re-scan the whole string and corrupt an escaped
+ * backslash that precedes an escapable char: e.g. "\\n" (an escaped backslash
+ * followed by a literal "n") would have its second "\n" turned into a newline,
+ * yielding "\<newline>" instead of the correct "\n".
  */
 export function unescapeICalText(value: string): string {
   return value.replace(/\\(\\|;|,|[nN])/g, (_, ch) => {
@@ -696,10 +727,62 @@ export function unescapeICalText(value: string): string {
  */
 export function escapeICalText(value: string): string {
   return value
+    // Normalize CRLF and BARE CR to LF first — a lone \r would otherwise pass
+    // through untouched and act as a line terminator for downstream parsers,
+    // reopening the property-injection class the date paths are guarded against.
+    .replace(/\r\n?/g, '\n')
+    // Strip remaining control characters (HTAB is legal in iCal TEXT; LF is
+    // escaped below).
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
-    .replace(/\r?\n/g, '\\n');
+    .replace(/\n/g, '\\n');
+}
+
+/**
+ * Validate and serialize a date/datetime value for use in DTSTART/DTEND.
+ * Accepts only:
+ *   - YYYY-MM-DD                       (date-only)
+ *   - YYYY-MM-DDTHH:MM:SS              (floating local)
+ *   - YYYY-MM-DDTHH:MM:SSZ             (UTC)
+ *   - YYYY-MM-DDTHH:MM:SS+HH:MM        (with offset, normalized to UTC)
+ * Rejects any control characters or unexpected content. Returns the ICS-safe
+ * serialized form (no `-` or `:`, with `Z` suffix for instants, or `YYYYMMDD`
+ * for date-only). Throws on invalid input.
+ */
+export function validateAndFormatICalDate(value: string, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${fieldName} must be a string`);
+  }
+  if (/[\x00-\x1F\x7F]/.test(value)) {
+    throw new Error(`${fieldName} contains control characters`);
+  }
+  const trimmed = value.trim();
+  // Date-only: 2026-04-18
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const d = new Date(trimmed + 'T00:00:00Z');
+    if (Number.isNaN(d.getTime())) throw new Error(`${fieldName} is not a valid date`);
+    return trimmed.replace(/-/g, '');
+  }
+  // Datetime forms: floating, UTC (Z), or with offset (+/-HH:MM, +/-HHMM, +/-HH)
+  const dtMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(Z|[+-]\d{2}:?\d{0,2})?$/.exec(trimmed);
+  if (!dtMatch) {
+    throw new Error(`${fieldName} must be ISO-8601 date or datetime (got: ${trimmed.slice(0, 60)})`);
+  }
+  const [, datePart, timePart, tz] = dtMatch;
+  const isoForParse = `${datePart}T${timePart}${tz || ''}`;
+  const d = new Date(isoForParse);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(`${fieldName} is not a valid datetime`);
+  }
+  if (!tz) {
+    // Floating: emit as-is without zone designator
+    return `${datePart.replace(/-/g, '')}T${timePart.replace(/:/g, '')}`;
+  }
+  // UTC or offset: normalize to UTC instant
+  const utc = d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  return utc;
 }
 
 /**
@@ -729,6 +812,19 @@ export function validateAttendeeEmail(email: string): void {
 export function quoteParamValue(value: string): string {
   // Strip newlines to prevent iCal property injection via CN values
   let cleaned = value.replace(/[\r\n]+/g, ' ');
+  // Then strip the rest of the control range, mirroring escapeICalText's strip
+  // for TEXT values. Parameter values reach here from model-supplied participant
+  // names, so the remaining C0 controls (HTAB excepted — it is WSP, legal in a
+  // quoted param value), DEL and the C1 range would otherwise be emitted raw
+  // into the ORGANIZER/ATTENDEE lines. The bidi OVERRIDE and ISOLATE characters
+  // go with them: they cannot terminate a line, but they reorder the rendered
+  // text of every downstream client, so a name can be made to display as a
+  // different address than the one it sits beside.
+  // U+200E/200F (LRM/RLM) are deliberately NOT stripped. Unlike the overrides
+  // they carry no nesting scope and cannot reorder text around themselves, and
+  // they occur legitimately in Arabic and Hebrew display names - stripping them
+  // would corrupt real participant names to close a far weaker vector.
+  cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, '');
   // Replace literal double quotes with single quotes
   cleaned = cleaned.replace(/"/g, "'");
   // Quote if contains comma, semicolon, colon, or if the original had double quotes
@@ -751,6 +847,15 @@ function formatDateTimeProperty(
   originalVevent: string | null,
   lineEnding: string
 ): { line: string; isDateOnly: boolean } {
+  // Same guard as validateAndFormatICalDate (v1.9.3): reject control characters
+  // outright so a hostile value can never reach the property-serialization paths.
+  if (typeof value !== 'string') {
+    throw new Error(`${propName} must be a string`);
+  }
+  if (/[\x00-\x1F\x7F]/.test(value)) {
+    throw new Error(`${propName} contains control characters`);
+  }
+
   // Date-only
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const d = new Date(value);
@@ -768,7 +873,7 @@ function formatDateTimeProperty(
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
-        const tzMatch = rawLines[0].match(/;TZID=([^;:]+)/);
+        const tzMatch = rawLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
         if (tzMatch) {
           return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding), isDateOnly: false };
         }
@@ -777,7 +882,7 @@ function formatDateTimeProperty(
       if (propName === 'DTEND') {
         const startLines = parseAllICalProperties(originalVevent, 'DTSTART');
         if (startLines.length > 0) {
-          const tzMatch = startLines[0].match(/;TZID=([^;:]+)/);
+          const tzMatch = startLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
           if (tzMatch) {
             return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding), isDateOnly: false };
           }
@@ -829,6 +934,64 @@ function nextDay(dateStr: string): string {
   const d = new Date(dateStr);
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Parse an ISO-ish date/datetime string in a fixed UTC frame.
+ * Naive datetimes ("2026-03-20T09:30:00") are interpreted as UTC — matching
+ * rrule's naive-as-UTC convention — instead of the process's local timezone,
+ * which `new Date(...)` would use. Without this, orphaned-exception detection
+ * compares RECURRENCE-IDs and RRULE occurrences in two different timezone
+ * frames whenever TZ != UTC, flagging valid exceptions as orphans.
+ */
+export function parseICalDateAsUTC(iso: string): Date {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return new Date(iso + 'T00:00:00Z');
+  if (/Z$|[+-]\d{2}:?\d{2}$/.test(iso)) return new Date(iso);
+  return new Date(iso + 'Z');
+}
+
+/**
+ * Reorder VEVENT blocks so the master (no RECURRENCE-ID) comes first.
+ * RFC 5545/4791 do not guarantee component ordering — a resource authored by
+ * a third-party client may list an overridden instance before the master.
+ * All in-place patch helpers target the first VEVENT, so without this
+ * normalization an exception-first payload would have its exception patched
+ * (and the recurring-event guard skipped) instead of the master.
+ */
+export function normalizeMasterVEventFirst(icalData: string): string {
+  const vevents = icalData.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g) || [];
+  if (vevents.length < 2) return icalData;
+  const first = vevents[0];
+  if (!first || !/^RECURRENCE-ID[;:]/m.test(first)) return icalData;
+  const master = vevents.find(v => !/^RECURRENCE-ID[;:]/m.test(v));
+  if (!master) return icalData;
+  // Swap the two blocks. Function replacements avoid `$`-pattern expansion.
+  const SENTINEL = '\u0000MASTER-VEVENT\u0000';
+  let out = icalData.replace(master, () => SENTINEL);
+  out = out.replace(first, () => master);
+  out = out.replace(SENTINEL, () => first);
+  return out;
+}
+
+/**
+ * Assert a tsdav write (create/update/delete calendar object) actually succeeded.
+ * tsdav returns the raw Response(s) without throwing on 4xx/5xx, so without this
+ * a server-side rejection would be reported to the caller as success. Accepts a
+ * single Response or an array; treats a missing status as success (older tsdav
+ * shapes) but fails loudly on any status outside 2xx.
+ */
+function assertDavOk(resp: unknown, action: string): void {
+  const responses = Array.isArray(resp) ? resp : [resp];
+  for (const r of responses) {
+    const status = (r as any)?.status;
+    const ok = (r as any)?.ok;
+    if (typeof status === 'number' && (status < 200 || status >= 300)) {
+      throw new Error(`Failed to ${action}: server returned ${status}${(r as any)?.statusText ? ' ' + (r as any).statusText : ''}`);
+    }
+    if (ok === false) {
+      throw new Error(`Failed to ${action}: server rejected the request`);
+    }
+  }
 }
 
 export class CalDAVCalendarClient {
@@ -938,9 +1101,18 @@ export class CalDAVCalendarClient {
     return null;
   }
 
-  async getCalendarEventById(eventId: string): Promise<CalendarEvent | null> {
+  async getCalendarEventById(eventId: string): Promise<CalendarEvent> {
     const obj = await this.findCalendarObjectByUID(eventId);
-    return obj ? parseCalendarObject(obj, { includeParticipants: true }) : null;
+    // Throw rather than return null so the MCP tool surfaces a real not-found
+    // error — matches updateCalendarEvent/deleteCalendarEvent below. A null
+    // here used to reach callers as a successful "null" tool response.
+    // InvalidInputError, not a plain Error: a wrong event id is caller-fixable,
+    // so it must reach the boundary as InvalidParams ("re-form the call") rather
+    // than InternalError ("server-side, a bare retry might work").
+    if (!obj) {
+      throw new InvalidInputError(`Calendar event not found: ${eventId}`);
+    }
+    return parseCalendarObject(obj, { includeParticipants: true });
   }
 
   async createCalendarEvent(event: {
@@ -1007,12 +1179,12 @@ export class CalDAVCalendarClient {
         validateAttendeeEmail(p.email);
       }
 
-      // ORGANIZER required when ATTENDEEs present
+      // ORGANIZER required when ATTENDEEs present. Validate the username as a
+      // strict addr-spec (rejects ; , : CR LF etc.) so it can't corrupt or inject
+      // into the ORGANIZER line when embedded below.
       const caldavUsername = this.config.username;
-      if (!caldavUsername.includes('@')) {
-        throw new Error('Cannot add participants: CalDAV username is not an email address, required for ORGANIZER');
-      }
-      const displayName = process.env.FASTMAIL_CALDAV_DISPLAY_NAME || caldavUsername;
+      validateAttendeeEmail(caldavUsername);
+      const displayName = resolveDisplayName(process.env.FASTMAIL_CALDAV_DISPLAY_NAME, caldavUsername);
       const cnPart = `;CN=${quoteParamValue(displayName)}`;
       icalLines.push(foldICalLine(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
 
@@ -1029,11 +1201,12 @@ export class CalDAVCalendarClient {
     // Trailing CRLF per RFC 5545 §3.1
     const ical = icalLines.join('\r\n') + '\r\n';
 
-    await client.createCalendarObject({
+    const createResp = await client.createCalendarObject({
       calendar: targetCal,
       filename: `${uid}.ics`,
       iCalString: ical,
     });
+    assertDavOk(createResp, 'create calendar event');
 
     return uid;
   }
@@ -1079,14 +1252,18 @@ export class CalDAVCalendarClient {
     const lineEnding = detectLineEnding(obj.data);
     const fold = (line: string) => foldICalLine(line, lineEnding);
 
+    // All patch helpers target the FIRST VEVENT — make sure that's the master,
+    // not an overridden instance (component order is not guaranteed by RFC).
+    const normalizedData = normalizeMasterVEventFirst(obj.data);
+
     // Capture original VEVENT before any patching for reads
-    const originalVevent = extractVEvent(obj.data);
+    const originalVevent = extractVEvent(normalizedData);
     if (!originalVevent) {
       throw new Error('Cannot update event: no VEVENT block found');
     }
 
     const existingUid = parseICalValue(originalVevent, 'UID') || eventId;
-    let data = obj.data;
+    let data = normalizedData;
 
     // --- Recurring event guard ---
     const hasRRule = /^RRULE[;:]/m.test(originalVevent);
@@ -1113,7 +1290,18 @@ export class CalDAVCalendarClient {
               dtStartForRrule = newStartRaw.replace(/[-:]/g, '').replace(/Z$/, '');
             }
             const rruleString = `RRULE:${rruleLine}\nDTSTART:${dtStartForRrule}`;
-            const rule = rrulestr(rruleString, { forceset: false });
+            const rule = rrulestr(rruleString, { forceset: false }) as InstanceType<typeof RRule>;
+
+            // DoS guard: rule.between() iterates every occurrence from DTSTART up
+            // to the window. A hostile sub-daily frequency (FREQ=SECONDLY/MINUTELY/
+            // HOURLY) on an event whose exception RECURRENCE-ID is far from DTSTART
+            // forces astronomically many iterations. Calendar events can be authored
+            // by third parties (invitations), so skip selective pruning for sub-daily
+            // rules and fall through to the best-effort path (no deletion).
+            const freq = (rule as any).options?.freq;
+            if (typeof freq === 'number' && freq >= RRule.HOURLY) {
+              throw new Error('skip-pruning: sub-daily recurrence frequency');
+            }
 
             const orphanedDates: Date[] = [];
             const validDates: Date[] = [];
@@ -1122,7 +1310,10 @@ export class CalDAVCalendarClient {
               if (!recIdRaw) continue;
               const recIdFormatted = formatICalDate(recIdRaw);
               if (!recIdFormatted) continue;
-              const recDate = new Date(recIdFormatted);
+              // Parse naive datetimes as UTC to match rrule's naive-as-UTC
+              // convention — new Date() would use the process's local TZ and
+              // flag every valid exception as an orphan when TZ != UTC.
+              const recDate = parseICalDateAsUTC(recIdFormatted);
               // Check if this recurrence-id still matches an occurrence
               const matches = rule.between(
                 new Date(recDate.getTime() - 1000),
@@ -1243,10 +1434,12 @@ export class CalDAVCalendarClient {
       // Add ORGANIZER if absent and participants are being added (RFC 5545 §3.8.4.1)
       if (fields.participants.length > 0 && !/^ORGANIZER[;:]/m.test(extractVEvent(data) || '')) {
         const caldavUsername = this.config.username;
-        if (!caldavUsername.includes('@')) {
-          throw new Error('Cannot add participants: CalDAV username is not an email address, required for ORGANIZER');
-        }
-        const displayName = process.env.FASTMAIL_CALDAV_DISPLAY_NAME || caldavUsername;
+        // Same strict addr-spec check the create path applies. A bare
+        // .includes('@') admits ; , : CR LF, which would corrupt or inject into
+        // the ORGANIZER line built below — the two paths emit the identical line
+        // from the identical value, so they validate it identically.
+        validateAttendeeEmail(caldavUsername);
+        const displayName = resolveDisplayName(process.env.FASTMAIL_CALDAV_DISPLAY_NAME, caldavUsername);
         const cnPart = displayName ? `;CN=${quoteParamValue(displayName)}` : '';
         data = replaceICalProperty(data, 'ORGANIZER', fold(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
       }
@@ -1273,7 +1466,8 @@ export class CalDAVCalendarClient {
     }
 
     obj.data = data;
-    await client.updateCalendarObject({ calendarObject: obj });
+    const updateResp = await client.updateCalendarObject({ calendarObject: obj });
+    assertDavOk(updateResp, 'update calendar event');
 
     return existingUid;
   }
@@ -1285,6 +1479,7 @@ export class CalDAVCalendarClient {
       throw new Error(`Calendar event not found: ${eventId}`);
     }
 
-    await client.deleteCalendarObject({ calendarObject: obj });
+    const deleteResp = await client.deleteCalendarObject({ calendarObject: obj });
+    assertDavOk(deleteResp, 'delete calendar event');
   }
 }

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, coerceUtcDate, redactBearerTokens, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -214,6 +214,35 @@ describe('coercePosition (#51)', () => {
   });
 });
 
+describe('clampLimit', () => {
+  it('returns a value already inside the bounds unchanged', () => {
+    assert.equal(clampLimit(5, 3, 10), 5);
+  });
+
+  it('accepts a stringified number from a lenient client', () => {
+    assert.equal(clampLimit('7', 3, 10), 7);
+  });
+
+  it('falls back on non-numeric input rather than passing NaN through', () => {
+    // A NaN limit reaches the JMAP query as `"limit": null`, which the server
+    // reads as no limit at all - an unbounded result set.
+    assert.equal(clampLimit('abc', 3, 10), 3);
+    assert.equal(clampLimit(undefined, 3, 10), 3);
+    assert.equal(clampLimit(null, 3, 10), 3);
+    assert.equal(clampLimit({}, 3, 10), 3);
+  });
+
+  it('falls back on zero and lifts negatives to 1', () => {
+    assert.equal(clampLimit(0, 3, 10), 3);
+    assert.equal(clampLimit(-4, 3, 10), 1);
+  });
+
+  it('clamps above the maximum, including a stringified oversize value', () => {
+    assert.equal(clampLimit(1000, 3, 10), 10);
+    assert.equal(clampLimit('1000', 3, 10), 10);
+  });
+});
+
 describe('coerceUtcDate (#70)', () => {
   it('returns undefined for undefined/null (no date bound)', () => {
     assert.equal(coerceUtcDate(undefined, 'after'), undefined);
@@ -357,11 +386,12 @@ describe('redactBearerTokens', () => {
   });
 
   it('redacts Fastmail token shape (fmu...)', () => {
+    // Synthetic value — matches the fmuN-<hex>-<hex>-N-<hex> shape only, never a real token.
     const out = redactBearerTokens(
-      'Failed: token fmu1-3b1e4048-036f4f86690cd04d8d05105a369ee30b-0-dbfc727af72d5e3e27dd324675869337 invalid'
+      'Failed: token fmu0-00000000-1111111111111111111111111111111a-0-2222222222222222222222222222222b invalid' // allowlist-secret (synthetic)
     );
     assert.match(out, /fmu\[REDACTED\]/);
-    assert.ok(!out.includes('fmu1-3b1e'));
+    assert.ok(!out.includes('fmu0-0000'));
   });
 
   it('does not redact unrelated text', () => {
@@ -376,6 +406,31 @@ describe('redactBearerTokens', () => {
 
   it('handles empty string', () => {
     assert.equal(redactBearerTokens(''), '');
+  });
+
+  it('redacts Basic auth credentials (CalDAV path)', () => {
+    const out = redactBearerTokens('401 on Authorization: Basic dXNlcjpwYXNzd29yZA== failed'); // allowlist-secret (synthetic base64 of "user:password")
+    assert.match(out, /Basic \[REDACTED\]/);
+    assert.ok(!out.includes('dXNlcjpwYXNz'));
+  });
+
+  it('redacts a Fastmail token containing an underscore fully (no tail leak)', () => {
+    const out = redactBearerTokens('token fmu9-abcd1234-aaaaaaaaaaaaaaaaaaaa_bbbbbbbbbb invalid'); // allowlist-secret (synthetic)
+    assert.match(out, /fmu\[REDACTED\]/);
+    assert.ok(!out.includes('bbbbbbbbbb'), 'the post-underscore tail must not survive');
+  });
+
+  it('redacts an exact registered secret value even without a recognizable shape', () => {
+    registerSecret('sk-pla1n-cr3dential-with-no-prefix');
+    const out = redactBearerTokens('self-hosted auth failed for sk-pla1n-cr3dential-with-no-prefix here');
+    assert.ok(!out.includes('sk-pla1n-cr3dential'));
+    assert.match(out, /\[REDACTED\]/);
+  });
+
+  it('registerSecret ignores short/empty values (avoids over-broad matches)', () => {
+    registerSecret('abc');
+    registerSecret('');
+    assert.equal(redactBearerTokens('the word abc should survive'), 'the word abc should survive');
   });
 });
 

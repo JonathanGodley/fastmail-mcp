@@ -238,6 +238,33 @@ describe('createDraft', () => {
     );
   });
 
+  // 8e. Composite/injection from-string rejected even though it ends in the wildcard domain
+  it('rejects a composite from address against a wildcard identity', async () => {
+    const wildcardIdentity = { id: 'id-wild', email: '*@example.com', mayDelete: true };
+    mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Hi', from: 'attacker@evil.com,me@example.com' }),
+      (err: Error) => {
+        assert.match(err.message, /not verified/i);
+        return true;
+      },
+    );
+  });
+
+  it('rejects a from address with CR/LF against a wildcard identity', async () => {
+    const wildcardIdentity = { id: 'id-wild', email: '*@example.com', mayDelete: true };
+    mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Hi', from: 'a@example.com\r\nBCC:x@example.com' }),
+      (err: Error) => {
+        assert.match(err.message, /not verified/i);
+        return true;
+      },
+    );
+  });
+
   // 9. Provided mailbox (id/role/name) resolved against the mailbox list
   it('saves into the provided mailbox, resolved against the mailbox list', async () => {
     mock.method(client, 'getMailboxes', async () => [
@@ -2240,7 +2267,7 @@ describe('updateDraft wildcard identity', () => {
 // ---------- version sync ----------
 
 describe('version sync', () => {
-  it('package.json, manifest.json, and index.ts all have the same version', async () => {
+  it('package.json, manifest.json, index.ts, and package-lock.json all have the same version', async () => {
     const { readFileSync } = await import('fs');
     const { resolve: r } = await import('path');
     const root = r(import.meta.dirname, '..');
@@ -2248,12 +2275,17 @@ describe('version sync', () => {
     const pkg = JSON.parse(readFileSync(r(root, 'package.json'), 'utf8'));
     const manifest = JSON.parse(readFileSync(r(root, 'manifest.json'), 'utf8'));
     const indexSrc = readFileSync(r(root, 'src', 'index.ts'), 'utf8');
+    const lock = JSON.parse(readFileSync(r(root, 'package-lock.json'), 'utf8'));
 
     const indexMatch = indexSrc.match(/version:\s*'([^']+)'/);
     assert.ok(indexMatch, 'Could not find version string in index.ts');
 
     assert.equal(pkg.version, manifest.version, 'package.json and manifest.json versions must match');
     assert.equal(pkg.version, indexMatch[1], 'package.json and index.ts versions must match');
+    // The lockfile carries the version in two places (root and the "" package
+    // entry); a bump that misses either would ship a mismatched .dxt.
+    assert.equal(pkg.version, lock.version, 'package.json and package-lock.json versions must match');
+    assert.equal(pkg.version, lock.packages['']?.version, 'package.json and package-lock.json root package versions must match');
   });
 });
 
@@ -2267,7 +2299,7 @@ describe('uploadBlob', () => {
       apiUrl: 'https://api.example.com/jmap/api/',
       accountId: ACCOUNT_ID,
       capabilities: {},
-      uploadUrl: 'https://up.example.com/upload/{accountId}/',
+      uploadUrl: 'https://api.fastmail.com/jmap/upload/{accountId}/',
     }));
     return client;
   }
@@ -2282,7 +2314,7 @@ describe('uploadBlob', () => {
 
     const result = await client.uploadBlob(Buffer.from([1, 2, 3]), 'application/pdf');
 
-    assert.equal(captured.url, `https://up.example.com/upload/${ACCOUNT_ID}/`);
+    assert.equal(captured.url, `https://api.fastmail.com/jmap/upload/${ACCOUNT_ID}/`);
     assert.equal(captured.init.method, 'POST');
     assert.equal(captured.init.headers['Content-Type'], 'application/pdf');
     assert.notEqual(captured.init.headers['Content-Type'], 'application/json');
@@ -2433,7 +2465,7 @@ describe('uploadAttachments', () => {
       apiUrl: 'https://api.example.com/jmap/api/',
       accountId: ACCOUNT_ID,
       capabilities: {},
-      uploadUrl: 'https://up.example.com/upload/{accountId}/',
+      uploadUrl: 'https://api.fastmail.com/jmap/upload/{accountId}/',
     }));
     return client;
   }

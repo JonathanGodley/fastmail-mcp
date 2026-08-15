@@ -1,8 +1,10 @@
 node_modules/
 dist/
+bun.lock
 *.log
 .env
 .env.local
+.env.*
 .DS_Store
 *.tsbuildinfo
 coverage/
@@ -21,3 +23,9 @@ test-live*.js
 # staleness-prone) output. The generator script is the durable artifact.
 docs/official-mcp-tools.json
 docs/official-mcp-surface.md
+
+# Local agent/config state that may hold credentials — never commit.
+settings.local.json
+# Local secret/PII denylist (personal domains/addresses) — never commit.
+.secret-scan-local.txt
+
