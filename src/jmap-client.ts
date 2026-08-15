@@ -4,6 +4,7 @@ import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, Path
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker } from './reply-quote.js';
 import { isSettableMessageId } from './forward-handler.js';
+import { buildUnionParts, cidKey, describePart, sanitizeDownloadFilename } from './inline-images.js';
 import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
 import type { FileHandle } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
@@ -256,7 +257,104 @@ const MESSAGE_ID_LOOKUP_LIMIT = 50;
 // `disposition`/`cid` are load-bearing for forward_email's inline-image handling:
 // without them every attachments[] part reads as disposition-less and the
 // true-inline (cid) drop predicate can never fire (#30).
+//
+// `type` is load-bearing the same way for the part listing (#13): buildUnionParts
+// classifies a body-list part by its media type, and a part with no type is read as
+// body text. Dropping `type` from a property set used on an attachment-fetching path
+// would therefore empty the body-embedded half of the listing SILENTLY — every
+// embedded image simply absent, with no error. Do not trim this list per-call.
 export const EMAIL_BODY_PROPERTIES = ['partId', 'blobId', 'type', 'size', 'name', 'disposition', 'cid'] as const;
+
+// What get_email_attachments needs to answer honestly in both of its modes.
+// `attachments` is the full part listing (the union of the JMAP attachments array and
+// the media parts routed into the body lists) and is the basis every download index
+// counts from. `rawAttachments` is the untouched JMAP array, which the tool's `raw`
+// mode returns — a SET escape (#13).
+//
+// `omittedFromRaw` is what that mode withholds, counted by MEMBERSHIP rather than by
+// subtracting lengths. The two agree on every real message, but a length difference is
+// not the withheld set: two attachments sharing a blobId, or a null entry in the array,
+// make the arithmetic under-report and silently suppress the disclosure the count
+// exists to produce.
+export interface EmailAttachmentsResult {
+  attachments: any[];
+  rawAttachments: any[];
+  omittedFromRaw: number;
+}
+
+/**
+ * Resolve a download_attachment `attachmentId` against a message's part listing.
+ *
+ * Four input forms, in this fixed order: partId, blobId, `cid:<value>`, then a plain
+ * entry number. The order is load-bearing rather than arbitrary — Fastmail's partIds
+ * ARE digit strings, so resolving digits as an index first would make "1" ambiguous
+ * between "the part whose partId is 1" and "the second entry". A part always wins.
+ *
+ * Malformed INPUT throws InvalidInputError, which download_attachment lets through to
+ * the caller; a well-formed reference that simply matches nothing returns undefined
+ * and becomes the tool's generic not-found, which deliberately reveals no mailbox
+ * metadata. That input-vs-existence split is documented in docs/conventions.md.
+ */
+function resolveAttachmentRef(parts: any[], attachmentId: string): any {
+  const byPartId = parts.find((p: any) => p?.partId === attachmentId);
+  if (byPartId) return byPartId;
+
+  // First match, deliberately NOT rejected when several parts share the blobId. Blobs
+  // are content-addressed, so sharing one means the parts ARE the same bytes — the
+  // common case being one image both attached and embedded. The download is identical
+  // whichever is picked; only the declared filename differs. That is why the
+  // reject-on-ambiguity rule below belongs to the cid form, where two parts sharing a
+  // Content-ID are genuinely different content.
+  const byBlobId = parts.find((p: any) => p?.blobId === attachmentId);
+  if (byBlobId) return byBlobId;
+
+  if (/^cid:/i.test(attachmentId)) {
+    // First occurrence only: `cid:cid:x` names the Content-ID "cid:x". A Content-ID may
+    // legitimately begin with "cid:", and stripping repeatedly would make it unreachable.
+    const literal = attachmentId.slice('cid:'.length);
+    if (!literal) {
+      throw new InvalidInputError(
+        'attachmentId "cid:" names no Content-ID. Pass cid:<value> using the cid from ' +
+        'get_email, or the part\'s blobId or partId from get_email_attachments.'
+      );
+    }
+    // LITERAL first, decoded only as a fallback. The handle round-trips from get_email's
+    // verbatim `cid` echo, so decoding first would break pasting back a cid that really
+    // does contain a percent escape. Ambiguity WITHIN a stage is rejected, never guessed.
+    const ambiguous = () => new InvalidInputError(
+      `attachmentId "cid:${describePart(literal)}" matches more than one part. ` +
+      'Pass the part\'s blobId or partId from get_email_attachments instead.'
+    );
+    const literalMatches = parts.filter((p: any) => p?.cid === literal);
+    if (literalMatches.length > 1) throw ambiguous();
+    if (literalMatches.length === 1) return literalMatches[0];
+
+    const decoded = cidKey(attachmentId);
+    if (decoded !== literal) {
+      const decodedMatches = parts.filter((p: any) => p?.cid === decoded);
+      if (decodedMatches.length > 1) throw ambiguous();
+      if (decodedMatches.length === 1) return decodedMatches[0];
+    }
+    return undefined;
+  }
+
+  if (/^\d+$/.test(attachmentId)) {
+    return parts[Number(attachmentId)];
+  }
+
+  // Anything parseInt would have swallowed as a number ("3a", "-1", "1.5") used to
+  // index the list silently, so a typo downloaded the wrong file. It is now an input
+  // error rather than a wrong answer.
+  if (!Number.isNaN(Number.parseInt(attachmentId, 10))) {
+    throw new InvalidInputError(
+      `attachmentId "${describePart(attachmentId)}" is not a usable attachment reference. ` +
+      'Pass a partId or blobId from get_email_attachments, cid:<value> for an embedded ' +
+      'image, or a plain entry number (0, 1, 2, ...) counting from the start of that listing.'
+    );
+  }
+
+  return undefined;
+}
 
 // A compact fingerprint of the draft an edit replaced, echoed back so a caller that
 // edited from a stale copy sees immediately what it overwrote (#65). Body sizes are the
@@ -2220,7 +2318,7 @@ export class JmapClient {
     }
   }
 
-  async getEmailAttachments(emailId: string): Promise<any[]> {
+  async getEmailAttachments(emailId: string): Promise<EmailAttachmentsResult> {
     const session = await this.getSession();
 
     const request: JmapRequest = {
@@ -2229,7 +2327,11 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['attachments'],
+          // The body lists are fetched alongside `attachments` because an embedded
+          // image is routed into them rather than into `attachments` on some MIME
+          // shapes (RFC 8621 §4.1.4) — without them this tool reports nothing for a
+          // message that visibly shows a picture (#13).
+          properties: ['attachments', 'textBody', 'htmlBody'],
           // Pinned explicitly (was previously the RFC 8621 §4.4 server default, which
           // already includes disposition/cid) so this tool's ability to distinguish
           // inline parts never rides on an implicit default.
@@ -2240,21 +2342,34 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     const email = this.getListResult(response, 0)[0];
-    return email?.attachments || [];
+    const attachments = buildUnionParts(email).map((u) => u.part);
+    const rawAttachments = email?.attachments || [];
+    // buildUnionParts yields the server's own part objects, so identity is an exact
+    // membership test for "this part is not in the JMAP attachments array".
+    const inRaw = new Set<any>(rawAttachments);
+    return {
+      attachments,
+      rawAttachments,
+      omittedFromRaw: attachments.filter((part) => !inRaw.has(part)).length,
+    };
   }
 
   async downloadAttachment(emailId: string, attachmentId: string): Promise<string> {
     const session = await this.getSession();
 
-    // Get the email with full attachment details
+    // Both body lists are fetched as well as `attachments`: an embedded image is
+    // routed into them on some MIME shapes, and without them it is not downloadable
+    // at all (#13). `bodyValues` used to be requested here and was never read — the
+    // request never set fetchTextBodyValues/fetchHTMLBodyValues, so it returned
+    // nothing; it is dropped rather than carried as an inert property.
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['attachments', 'bodyValues'],
-          bodyProperties: ['partId', 'blobId', 'size', 'name', 'type']
+          properties: ['attachments', 'textBody', 'htmlBody'],
+          bodyProperties: [...EMAIL_BODY_PROPERTIES],
         }, 'getEmail']
       ]
     };
@@ -2266,21 +2381,18 @@ export class JmapClient {
       throw new Error('Email not found');
     }
 
-    // Find attachment by partId or by index
-    let attachment = email.attachments?.find((att: any) => 
-      att.partId === attachmentId || att.blobId === attachmentId
-    );
+    const parts = buildUnionParts(email).map((u) => u.part);
+    const attachment = resolveAttachmentRef(parts, attachmentId);
 
-    // If not found, try by array index
-    if (!attachment) {
-      const index = parseInt(attachmentId, 10);
-      if (!isNaN(index)) {
-        attachment = email.attachments?.[index];
-      }
-    }
-    
     if (!attachment) {
       throw new Error('Attachment not found.');
+    }
+
+    if (!attachment.blobId) {
+      throw new InvalidInputError(
+        'That part has no downloadable content: it carries no blobId. ' +
+        'Pick a part from get_email_attachments that has one.'
+      );
     }
 
     // Get the download URL from session
@@ -2289,12 +2401,14 @@ export class JmapClient {
       throw new Error('Download capability not available in session');
     }
 
-    // Build download URL
+    // Build download URL. The declared filename comes from the part's sender-supplied
+    // name, so it goes through the shared sanitizer first — a receiving client may use
+    // it as a save name.
     const url = downloadUrl
       .replace('{accountId}', session.accountId)
       .replace('{blobId}', attachment.blobId)
       .replace('{type}', encodeURIComponent(attachment.type || 'application/octet-stream'))
-      .replace('{name}', encodeURIComponent(attachment.name || 'attachment'));
+      .replace('{name}', encodeURIComponent(sanitizeDownloadFilename(attachment.name)));
 
     return url;
   }

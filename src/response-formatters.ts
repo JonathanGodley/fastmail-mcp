@@ -178,6 +178,40 @@ export function buildExclusionNote(exclusion?: QueryResult['exclusion']): string
   return notes.length ? `\n\n${notes.join('\n')}` : '';
 }
 
+// Disclose what get_email_attachments' `raw` mode withheld. That mode returns the JMAP
+// attachments array alone, which omits the parts the server routed into the body lists
+// instead — and a bare array is indistinguishable from a complete listing, so the
+// withheld count is stated rather than left to be noticed (#13).
+//
+// Returns null when nothing was withheld: silence is the "this is the whole listing"
+// signal, the same discipline as the Trash/Spam note. The handler emits this as its own
+// content item, never appended to the JSON, which must stay parseable.
+export function buildOmittedPartsNote(omittedCount: number): string | null {
+  if (!(omittedCount > 0)) return null;
+  return `${omittedCount} body-embedded part(s) omitted (raw lists the JMAP attachments array only; omit raw to include them).`;
+}
+
+// The whole response body of get_email_attachments, both modes, so the branch is
+// exercised by the test suite rather than only by a live call (#13).
+//
+// The first content item is ALWAYS the JSON array and nothing else, in either mode: a
+// caller parses it directly, so the withheld-count note rides as a separate item and is
+// never concatenated onto the JSON string.
+export function buildAttachmentListContent(
+  result: { attachments: any[]; rawAttachments: any[]; omittedFromRaw: number },
+  raw: boolean,
+): Array<{ type: 'text'; text: string }> {
+  if (!raw) {
+    return [{ type: 'text', text: JSON.stringify(result.attachments, null, 2) }];
+  }
+  const content: Array<{ type: 'text'; text: string }> = [
+    { type: 'text', text: JSON.stringify(result.rawAttachments, null, 2) },
+  ];
+  const note = buildOmittedPartsNote(result.omittedFromRaw);
+  if (note) content.push({ type: 'text', text: note });
+  return content;
+}
+
 export function simplifyMailbox(raw: any, options?: { verbose?: boolean }): any {
   const result: any = {
     id: raw.id,

@@ -866,3 +866,117 @@ describe('simplifyEmail — stripQuoted (#73)', () => {
     assert.equal(result.quotedStripSkipped, 'no non-empty plain-text body to strip');
   });
 });
+
+describe('simplifyEmail — embedded image parts (#13)', () => {
+  const textPart = { partId: '1', type: 'text/plain', size: 12 };
+  const htmlPart = { partId: '2', type: 'text/html', size: 30 };
+  const logo = {
+    partId: '3', type: 'image/png', size: 4096, blobId: 'blob-logo', cid: 'logo@example.com',
+  };
+
+  it('lists a body-routed image that the JMAP attachments array omits', () => {
+    // The shape where an embedded image is routed into the body lists instead: without
+    // the union the message reports no parts at all despite visibly showing a picture.
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [],
+      attachments: [],
+      textBody: [textPart, logo],
+      htmlBody: [htmlPart, logo],
+    });
+    assert.equal(result.attachments!.length, 1);
+    assert.equal(result.attachments![0].blobId, 'blob-logo');
+    assert.equal(result.attachments![0].isInline, true);
+    assert.equal(result.attachments![0].cid, 'logo@example.com');
+  });
+
+  it('derives isInline from the sender disposition when the part sits in attachments', () => {
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [],
+      attachments: [{ partId: '3', type: 'image/png', size: 10, blobId: 'b', disposition: 'inline', cid: 'c1' }],
+      textBody: [textPart],
+    });
+    assert.equal(result.attachments![0].isInline, true);
+    assert.equal(result.attachments![0].cid, 'c1');
+  });
+
+  it('omits isInline rather than emitting false for an ordinary attachment', () => {
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [],
+      attachments: [{ partId: '4', type: 'application/pdf', size: 10, blobId: 'b', name: 'a.pdf', disposition: 'attachment' }],
+    });
+    assert.equal('isInline' in result.attachments![0], false);
+  });
+
+  it('omits cid rather than emitting an empty one', () => {
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [],
+      attachments: [{ partId: '4', type: 'application/pdf', size: 10, blobId: 'b', cid: '' }],
+    });
+    assert.equal('cid' in result.attachments![0], false);
+  });
+
+  it('emits the cid VERBATIM, however long or odd', () => {
+    // The value has to compare equal to the body reference and to download_attachment's
+    // handle, so it is data in a JSON field and is never shortened or rewritten.
+    const cid = `${'z'.repeat(300)}@host`;
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [],
+      attachments: [{ partId: '4', type: 'image/png', size: 1, blobId: 'b', cid }],
+    });
+    assert.equal(result.attachments![0].cid, cid);
+  });
+
+  it('lists a part once when it is both attached and body-routed', () => {
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [],
+      attachments: [logo],
+      textBody: [textPart, logo],
+      htmlBody: [htmlPart, logo],
+    });
+    assert.equal(result.attachments!.length, 1);
+    assert.equal(result.attachments![0].isInline, true);
+  });
+
+  it('never lists the rendered body parts as attachments', () => {
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [],
+      attachments: [],
+      textBody: [textPart],
+      htmlBody: [htmlPart],
+    });
+    assert.equal(result.attachments, undefined);
+  });
+
+  it('leaves compact list/search results untouched — no attachments property fetched', () => {
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [], hasAttachment: false,
+      textBody: [textPart, logo],
+    });
+    assert.equal(result.attachments, undefined);
+    assert.equal(result.hasAttachment, undefined);
+  });
+
+  it('can list parts on a message the server reports as hasAttachment:false', () => {
+    // Fastmail's heuristic filters small decorative images out of hasAttachment; the
+    // listing is the ground truth and is allowed to disagree.
+    const result = simplifyEmail({
+      id: 'e1', subject: 's', from: [], hasAttachment: false,
+      attachments: [],
+      htmlBody: [htmlPart, logo],
+    });
+    assert.equal(result.hasAttachment, undefined);
+    assert.equal(result.attachments!.length, 1);
+  });
+
+  it('writes nothing back onto the raw email', () => {
+    const raw: any = {
+      id: 'e1', subject: 's', from: [],
+      attachments: [],
+      htmlBody: [htmlPart, logo],
+    };
+    const before = JSON.stringify(raw);
+    simplifyEmail(raw);
+    assert.equal(JSON.stringify(raw), before);
+    assert.deepEqual(raw.attachments, []);
+  });
+});

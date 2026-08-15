@@ -107,6 +107,33 @@ on purpose, so it does not leak attachment metadata (see `docs/security-model.md
 bad id is `InvalidParams` on `get_email`/`get_thread` but `InternalError` on
 `download_attachment` — an accepted, documented asymmetry.
 
+**Inside that carve-out, one further line: INPUT-FORM errors vs EXISTENCE errors.** The
+generic message exists to avoid confirming what a mailbox contains. That reasoning covers
+"this reference matched nothing" and nothing else — it does not cover "this reference is
+not a shape this tool accepts", which is answerable from the caller's own string. So
+`attachmentId` splits:
+
+- **Input-form failures** — a bare `cid:` with no value, a number with junk in it (`3a`,
+  `-1`, `1.5`) — throw `InvalidInputError` and reach the caller intact, naming what to
+  pass instead. They quote back only the caller's own input (through `describePart`, so
+  a hostile value cannot overrun the sentence) and never enumerate blobIds or names.
+- **Two more throw `InvalidInputError` on a weaker justification, stated honestly:** a
+  `cid:` value matching more than one part, and a resolved part carrying no blobId.
+  Neither is answerable from the caller's string alone — both depend on message content,
+  so each is a narrow existence oracle (it confirms that a reference resolves, and in the
+  first case that at least two parts share that Content-ID). They are classified as input
+  errors anyway because the alternative is worse: a generic failure on a reference that
+  DOES resolve leaves the caller retrying a request that can never succeed, with no way
+  to learn that a different reference form is required. Neither message reveals a blobId,
+  a filename, or a count.
+- **Existence failures** — a well-formed reference that simply matches nothing — stay a
+  plain `Error` and collapse to the generic "Attachment download failed" message.
+
+Mechanically, `download_attachment`'s local catch **re-throws** `InvalidInputError`
+rather than mapping it there, so the top-level branch applies the `InvalidParams` mapping
+*with* `redactBearerTokens`. A verbatim local re-throw would skip redaction the way the
+`PathAccessError` route does, and unlike path messages these echo caller input.
+
 The JMAP set-error reason itself is surfaced (not just the code): every throwing
 `Email/set` failure routes its `SetError` through `describeSetError` in
 `src/jmap-client.ts` so the server's `type`/`description` reaches the caller, and bulk
@@ -139,6 +166,18 @@ leading-underscore name, and read it in the simplifier via `addIf` (so it is omi
 absent). Do not thread it through function signatures, and do not make it enumerable — it
 would leak into raw output.
 
+**The same "beside, never onto" rule covers values that are DERIVED rather than
+resolved.** The attachment listing is the union of a message's JMAP `attachments` array
+and the media parts the server routed into `textBody`/`htmlBody` (`buildUnionParts` in
+`src/inline-images.ts`), and the `isInline` flag is derived from that routing. None of it
+is written back to the raw email: the union is computed inside the simplifier from
+properties that are already on the object, and the part objects it yields are the
+server's own, never copies. A `raw: true` response therefore stays exactly what the
+server sent — the same guarantee the non-enumerable route gives, reached without needing
+a carrier property at all. Reach for the non-enumerable attachment only when the value
+cannot be derived where it is read (a mailbox name needs a second JMAP call; a union of
+lists already in hand does not).
+
 **A flag that only a simplified response can honour is REJECTED with `raw`, not ignored.**
 `stripQuoted` (#73) rewrites the simplified `bodyText`; there is no honest way to apply it
 to a pure-JMAP payload, and silently dropping it would leave a caller believing a response
@@ -148,6 +187,18 @@ the unknown-parameter guard: a parameter that quietly does nothing produces conf
 answers. Contrast `includeBodies` (#74), which is a *fetch*-level knob — it changes the
 `Email/get` property set, so `raw` faithfully returns the richer JMAP object and the two
 compose fine.
+
+**A third kind: `raw` as a SET escape.** `get_email_attachments` already emits raw JMAP
+part objects, so its `raw` has no shape to escape. What it escapes is the *set*: it
+returns the JMAP `attachments` array alone, dropping the parts the server routed into the
+body lists. Neither rule above fits — there is nothing to reject (the flag is honourable)
+and nothing to enrich (the entries are already raw). The rule that does apply is
+never-silent: a bare array is indistinguishable from a complete listing, so the withheld
+count is stated. It ships as a SECOND content item rather than being appended to the JSON
+string, because the JSON staying parseable is the entire point of the flag — the same
+reasoning that keeps the Trash/Spam note outside the JSON block on the list tools. The
+tool's description says so too, and adds that download entry numbers always count from
+the full listing, so a `raw` listing is never an index basis.
 
 ## Output width is the caller's to narrow (`fields`)
 
@@ -303,6 +354,73 @@ what Fastmail's own UI shows.
 sub-256px image that IS content (a small but meaningful figure) reads as false. Both are
 inherent to any heuristic; the mitigations are `bodyTextSize` (an agent can see there is
 body to read regardless) and `get_email`/`get_email_attachments` for ground truth.
+
+**Ground truth now includes embedded images, and the divergence is expected.** The part
+listing is the union of the JMAP `attachments` array and the media parts routed into the
+body lists, so a message reporting `hasAttachment: false` can list an inline logo. That
+is the two fields answering different questions, not a bug — do NOT "reconcile" them by
+deriving the flag from the listing, which is precisely the declined derivation above.
+The consequence worth stating in consumer docs (and stated in the tool descriptions) is
+that the **search filter** inherits the heuristic: RFC 8621 §4.4.1 defines
+`hasAttachment` as a direct comparison against this property, so `hasAttachment: true`
+filters embedded-image-only mail OUT. There is no server-side filter for embedded
+images; narrow with other filters, then read parts with `get_email`.
+
+## Two cid consumers, two staging orders — by provenance
+
+A `cid:` value reaches this server from two directions, and the two are deliberately
+staged differently. Do not "unify" them.
+
+- **A reference in HTML** (`<img src="cid:...">`) is a URL, so per RFC 2392 its value is
+  percent-encoded. It must be DECODED FIRST and the decoded key compared against part
+  Content-IDs. `cidKey` (`src/inline-images.ts`) is that key function. *No consumer of
+  this direction has shipped yet* — matching body references to parts arrives with the
+  quote-carry work; today `cidKey`'s only production caller is the download path below,
+  as its fallback. The rule is recorded here now because the two directions share the
+  helper and the staging is the thing that must not be unified.
+- **`download_attachment`'s `cid:<value>` parameter** is a handle that round-tripped from
+  `get_email`'s output, where the `cid` is echoed VERBATIM. It is therefore compared
+  LITERALLY first, and only falls back to the same `cidKey` decode when the literal
+  matched nothing. Decoding first would break pasting back a Content-ID that genuinely
+  contains a percent escape: `cid:%78` would silently resolve to the part whose id is
+  `x`. The two consumers share the helper; what differs is which comparison runs first.
+
+Both sides share one rule: only the REFERENCE is ever decoded. A part's own `cid` is a
+Content-ID, not a URL, and is compared literally on both paths — decoding it too would
+let a reference spelled `x` resolve to a part whose id really is `%78`. Within the `cid`
+form, ambiguity is rejected rather than resolved by falling through to the next stage:
+two parts sharing a Content-ID are genuinely different content, so picking one would be
+a guess. That rule is specific to `cid` — the `blobId` form takes the first match on
+purpose, because blobs are content-addressed and parts sharing one ARE the same bytes.
+
+## Index tightening: `download_attachment`'s entry-number form
+
+`attachmentId` originally accepted anything `parseInt` would swallow as an array index.
+That was leniency in the wrong place, and the decision has been REVERSED: the form is now
+`/^\d+$/`, and a value like `3a`, `-1` or `1.5` is rejected instead of indexing.
+
+**The decline history matters, because the reasoning changed rather than the taste.**
+Lenient value coercion (the section at the top of this file) exists so a client that
+stringifies `20` into `"20"` still works — the coercion recovers the caller's evident
+intent. `parseInt("3a")` does not recover an intent; it invents one, and the result is a
+silently wrong file, downloaded successfully, with no error to notice. That is the same
+failure mode the unknown-parameter guard exists to prevent.
+
+Two further reasons specific to this parameter, both new since the original decision:
+
+- The reference space now has four forms sharing one string field. A permissive numeric
+  reading makes a mistyped `partId` or `cid` land on an unrelated entry rather than fail.
+- Digit strings are ambiguous here on purpose: Fastmail partIds ARE digit strings, so a
+  digit resolves as a partId FIRST and only falls through to the entry-number form when
+  no part claims it. Precedence like that is only safe when the fallback form is exact.
+
+Entry numbers stay supported (they are the cheapest reference for a one-shot download)
+but they are positional. Adding embedded images to the listing did NOT re-base the
+existing ones: the union emits the JMAP `attachments` array first, in server order, and
+appends body-routed parts after it, so indices into the old listing still mean what they
+did. They remain unstable in general — any change to what the message or the server
+reports moves them — which is why the tool description says to prefer a
+`partId`/`blobId`/`cid` for any reference that will be reused.
 
 ## Draft provenance: how a draft names the message it came from
 

@@ -36,6 +36,35 @@ as opt-in capability, not a default:
   The attach dir is resolved independently, via the same env-alias key set as the
   download dir.
 
+### Filenames derived from message content
+
+`download_attachment` builds a download URL whose `{name}` slot declares a filename, and
+that name comes from the part's **sender-supplied** `name` — attacker-controlled on any
+received message, and a value a receiving client may reuse as a save name. It goes
+through `sanitizeDownloadFilename` (`src/inline-images.ts`) first: control and format
+characters are stripped (a bidi override such as U+202E can otherwise make `exe.txt`
+render as `txt.exe`), path separators and the Windows drive/ADS colon become underscores,
+leading dots are dropped along with any whitespace shielding them (so ` .hidden` cannot
+smuggle a dotfile name past the strip), the length is capped by code point so a surrogate
+pair is never split, and a Windows device name gains an underscore on its stem (`CON.png`
+→ `CON_.png`) — including one padded with the trailing spaces and dots Win32 strips before
+it matches device names, so `CON .png` is defused too. A name that sanitizes to nothing
+becomes `attachment`, so the value is never an empty path segment.
+
+This is deliberately stricter than `forward_email`'s `sanitizeEmlFilename`, which applies
+a similar character treatment but lets device names through: that helper always appends
+`.eml`, which neutralizes them, and its output is a name a *remote* recipient's client
+saves. This one is a name a local client may write, so the inherited posture does not
+transfer. That helper also still trims after dropping leading dots, so whitespace can
+shield one there; its unconditional `.eml` suffix means the result is a named file either
+way, and changing it would alter what forwarded mail declares on the wire. The two are
+kept as separate functions for exactly these divergences.
+
+The guarantee stops at the name. The **path** an attachment is written to is never
+derived from message content — `download_attachment` writes only where the caller's
+`path` says, under the confinement rules above, and there is no "save with the sender's
+filename" default. That is what keeps a hostile `name` from being a path decision at all.
+
 ## The read-shaped `safeReadPath` (built, issue #1)
 
 The attachment-send feature reads a local file and emails it out, so it needs a

@@ -299,3 +299,53 @@ describe('readThread — hidden drafts', () => {
     assert.doesNotMatch(text, /hidden/);
   });
 });
+
+describe('readThread — embedded image parts (#13)', () => {
+  // The Apple Mail shape: the image is routed into the body lists and is absent from
+  // the JMAP attachments array, so reading that array alone reports nothing.
+  const EMBEDDED_IMAGE = {
+    partId: 'i-1',
+    blobId: 'blob-logo',
+    type: 'image/png',
+    size: 4096,
+    name: 'logo.png',
+    cid: 'logo@example.com',
+  };
+
+  function makeEmbeddedImageEmail(id: string) {
+    return makeEmail(id, 'message with an embedded image', {
+      attachments: [],
+      textBody: [{ partId: `t-${id}`, type: 'text/plain' }, EMBEDDED_IMAGE],
+      htmlBody: [{ partId: `h-${id}`, type: 'text/html' }, EMBEDDED_IMAGE],
+    });
+  }
+
+  it('lists a body-embedded image on a thread message read with bodies', async () => {
+    const { client } = makeClient([makeEmbeddedImageEmail('e1')]);
+    const messages = parseMessages(await readThread({ threadId: 't1', includeBodies: true }, client));
+    const entries = messages[0].attachments;
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].blobId, 'blob-logo');
+    assert.equal(entries[0].isInline, true);
+    // The Content-ID is carried verbatim so it can be matched to the body's cid: ref.
+    assert.equal(entries[0].cid, 'logo@example.com');
+  });
+
+  it('lists the same image once, not once per body list it was routed into', async () => {
+    const { client } = makeClient([makeEmbeddedImageEmail('e1')]);
+    const messages = parseMessages(await readThread({ threadId: 't1', includeBodies: true }, client));
+    assert.equal(messages[0].attachments.length, 1);
+  });
+
+  it('never lists the text or html body parts themselves as attachments', async () => {
+    const { client } = makeClient([makeEmbeddedImageEmail('e1')]);
+    const messages = parseMessages(await readThread({ threadId: 't1', includeBodies: true }, client));
+    assert.deepEqual(messages[0].attachments.map((a: any) => a.blobId), ['blob-logo']);
+  });
+
+  it('leaves the raw thread path as the server sent it', async () => {
+    const { client } = makeClient([makeEmbeddedImageEmail('e1')]);
+    const emails = JSON.parse(await readThread({ threadId: 't1', raw: true }, client));
+    assert.deepEqual(emails[0].attachments, []);
+  });
+});

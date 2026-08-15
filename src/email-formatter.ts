@@ -1,4 +1,5 @@
 import { stripQuotedText } from './quote-strip.js';
+import { buildUnionParts } from './inline-images.js';
 
 // Reason string for `quotedStripSkipped`. Fixed wording so a client can match on it.
 // "non-empty" is load-bearing: extractBody yields nothing both for a message with no
@@ -62,12 +63,23 @@ export interface SimplifiedEmail {
   blobId?: string;
   size?: number;
   keywords?: Record<string, boolean>;
+  // The message's parts: the JMAP `attachments` array plus the media parts the server
+  // routed into the body lists (see buildUnionParts). Present only on the read paths
+  // that fetch `attachments` — list/search results carry `hasAttachment` instead.
   attachments?: Array<{
     partId?: string;
     name?: string;
     contentType: string;
     size: number;
     blobId: string;
+    // The part is displayed inside the message body rather than merely attached —
+    // either the server routed it into a body list, or the sender marked it inline.
+    // Omitted when false. SENDER-DECLARED, like `name` and `contentType`: it says what
+    // the message claims about the part, never that the part is safe to skip (#13).
+    isInline?: true;
+    // The part's Content-ID, verbatim: what a `cid:` reference in the HTML body points
+    // at. Omitted when the part has none.
+    cid?: string;
   }>;
 }
 
@@ -290,7 +302,12 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   addIf(result, 'unresolvedMailboxIds', raw._unresolvedMailboxIds);
   addIf(result, 'preview', raw.preview);
   addIf(result, 'listUnsubscribe', raw['header:List-Unsubscribe:asURLs']);
-  // hasAttachment is redundant when attachments array is present
+  // hasAttachment is redundant once a part listing is present, so it is suppressed
+  // whenever the read fetched `attachments` at all (an empty array counts — the listing
+  // is authoritative, and "no parts" is the answer). The two are NOT interchangeable:
+  // hasAttachment is a server heuristic that deliberately answers "is this content or
+  // decoration" (docs/conventions.md), so a message whose only image is embedded in its
+  // body can report false and still list a part here. That is the point of the listing.
   if (!raw.attachments) {
     addFlag(result, 'hasAttachment', !!raw.hasAttachment);
   }
@@ -359,14 +376,32 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
     }
   }
 
-  const attachments = (raw.attachments ?? []).map((a: any) => {
+  // The part listing is the UNION of the JMAP `attachments` array and the media parts
+  // the server routed into `textBody`/`htmlBody` — for some MIME shapes an embedded
+  // image lands only in the body lists, so `attachments` alone can report nothing for
+  // a message that visibly shows a picture (#13). buildUnionParts is gated on
+  // `attachments` being fetched, so compact list/search results are untouched.
+  //
+  // Computed BESIDE the raw email, never onto it: `raw` is handed back untouched by
+  // every `raw: true` path, so nothing derived here may be written back to it.
+  const attachments = buildUnionParts(raw).map(({ part, inBodyList }) => {
     const att: Record<string, any> = {
-      contentType: a.type ?? 'application/octet-stream',
-      size: a.size ?? 0,
-      blobId: a.blobId,
+      contentType: part.type ?? 'application/octet-stream',
+      size: part.size ?? 0,
+      blobId: part.blobId,
     };
-    if (a.partId) att.partId = a.partId;
-    if (a.name) att.name = a.name;
+    if (part.partId) att.partId = part.partId;
+    if (part.name) att.name = part.name;
+    // Two independent grounds, per RFC 8621 §4.1.4: the routing itself, and the
+    // sender's own Content-Disposition. Neither is available on the other's shapes,
+    // so both are needed for the flag to mean the same thing on every message.
+    if (inBodyList || String(part.disposition ?? '').trim().toLowerCase() === 'inline') {
+      att.isInline = true;
+    }
+    // Verbatim and untruncated: the value has to compare equal to the `cid:` reference
+    // in the body and to download_attachment's `cid:` handle, so it is data in a JSON
+    // field, not prose. (Prose that echoes a cid renders it through describePart.)
+    if (part.cid) att.cid = part.cid;
     return att;
   });
   addIf(result, 'attachments', attachments);
