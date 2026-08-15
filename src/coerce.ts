@@ -17,11 +17,14 @@ export class PathAccessError extends Error {
 // element that isn't a real id). Thrown from jmap-client.ts (which stays free of
 // MCP SDK types); the index boundary maps every InvalidInputError to
 // McpError(InvalidParams), mirroring PathAccessError. instanceof is the
-// discriminator. Unlike the PathAccessError branch, the index mapping runs this
-// message through redactBearerTokens — these messages can reflect caller input
-// and mailbox names, so redaction is cheap defense-in-depth against a
-// token-shaped echo (it is NOT what makes the reflected-input oracle acceptable;
-// see docs/security-model.md).
+// discriminator. Like every other branch of that catch — the McpError rethrow, the
+// PathAccessError mapping and the generic InternalError wrap — the message goes
+// through redactBearerTokens. Redaction there is unconditional and has no exemptions,
+// which is what lets the audit ("no unredacted error text reaches tool output") be a
+// grep anyone can run instead of a claim resting on a per-error-class exemption list.
+// These messages in particular reflect caller input and mailbox names, so a
+// token-shaped echo is a real shape to scrub (it is NOT what makes the reflected-input
+// oracle acceptable; see docs/security-model.md).
 export class InvalidInputError extends Error {
   constructor(message: string) {
     super(message);

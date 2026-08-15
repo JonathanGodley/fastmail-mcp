@@ -258,3 +258,63 @@ hosts — `phl.www.fastmail.com` is still rejected.
 `FASTMAIL_ALLOW_UNSAFE_BASE_URL` stays what it is: an opt-in for self-hosted JMAP servers that
 drops host checking wholesale. It is not the answer to a regional Fastmail host, and using it
 for that would disable the check for every URL in the session response.
+
+## Credential logging is suppressed at the source (`DEBUG` and tsdav)
+
+**Operator-visible behaviour: setting `DEBUG` no longer produces any tsdav output.** Every
+other package's `DEBUG` logging is untouched, including under `DEBUG=*`. This is deliberate
+and is not a knob.
+
+tsdav (the CalDAV client) logs the HTTP Basic credential as bare base64 the moment `DEBUG`
+is on:
+
+```
+tsdav:authHelper Basic auth token generated: <base64 of username:password>
+```
+
+That write goes straight to stderr from inside the library. It never passes through the
+CallTool boundary in `src/index.ts`, so the redaction that covers every error egress
+(`redactBearerTokens`, see `src/coerce.ts`) cannot reach it. Nothing downstream can scrub
+it either, because the operator's own terminal or log collector is the destination.
+Suppressing the logger at the source is the only control.
+
+### The mechanism that actually ships
+
+`src/index.ts` calls, at module scope:
+
+```ts
+createDebug.enable([process.env.DEBUG, '-tsdav*'].filter(Boolean).join(','));
+```
+
+Four things about that line are load-bearing, each established by running it:
+
+- **Deleting `process.env.DEBUG` at startup cannot work.** The `debug` package reads the
+  environment once, during its own module initialisation, and every logger created after
+  that is enabled or not from the snapshot. Under ESM the whole import graph is evaluated
+  before any importing module's body runs, so the chain `index.ts` -> `caldav-client.ts`
+  -> `tsdav` -> `debug` has already initialised, and tsdav's loggers already exist, by the
+  time the first statement in `index.ts` executes. There is no point early enough to win
+  that race by editing the environment. `enable()` works because each logger's `enabled`
+  getter recomputes from `createDebug.namespaces`, which `enable()` rewrites in place, so
+  it applies to loggers that were created before the call.
+- **The skip is `-tsdav*`, with no colon.** `-tsdav:*` matches only colon-prefixed
+  children, which would leave a logger named bare `tsdav`, or a future `tsdavFoo`, still
+  live. The bare glob covers every namespace the installed version creates
+  (`tsdav:account`, `tsdav:addressBook`, `tsdav:authHelper`, `tsdav:calendar`,
+  `tsdav:collection`, `tsdav:request`) and any sibling a later release adds.
+- **The operator's own `DEBUG` is composed with, not replaced.** Skip entries beat enable
+  entries, so `DEBUG=*` and `DEBUG=tsdav:*` are both suppressed for tsdav while
+  `DEBUG=other:*` keeps logging normally. Only `DEBUG` gates the package; `NODE_DEBUG` is
+  not consulted.
+- **The control is instance-local.** It reaches only the `debug` module instance tsdav
+  resolves. `package.json` therefore depends on `debug` at the exact version tsdav pins
+  (`4.4.3`), so npm keeps one hoisted copy. A diverging range would let npm nest
+  `node_modules/tsdav/node_modules/debug`, and the suppression would silently stop
+  applying with no other symptom.
+
+`src/built-server.test.ts` holds this down against the real library rather than a mock: a
+control case asserts the credential *does* leak from a bare tsdav call under `DEBUG=*` (so
+the suppression test cannot go vacuous the day tsdav stops logging it), a paired case
+asserts it does not once the built server has loaded, and two further cases assert that
+tsdav resolves the same `debug` copy and that the skip glob covers every namespace the
+installed build actually creates.

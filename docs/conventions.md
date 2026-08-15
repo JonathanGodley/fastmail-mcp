@@ -35,13 +35,51 @@ non-string body, an entirely HTML-escaped `htmlBody`, and a CDATA-wrapped body a
 by `assertBodyInputs` (`src/body-format.ts`) rather than repaired, because unescaping or
 unwrapping would guess at what the caller meant to send. See `docs/email-bodies.md`.
 
+### Coercing is only half of it: the schema has to declare the lenient shape
+
+A handler that runs `coerceBool` on a parameter the schema declares as `type: 'boolean'`
+has written unreachable code. A client that validates arguments against the advertised
+`inputSchema` rejects `"true"` before dispatch, so the coercion never sees it, and the
+leniency exists only for clients that skip validation. Both halves are required, and they
+live next to each other:
+
+- **Schema**: `type: ['boolean', 'string']`, with the description wrapped in
+  `lenientBool()` (`src/index.ts`), which appends the note that `"true"`/`"false"` are
+  accepted. The prose earns its place on top of the widened type: `["boolean","string"]`
+  says a string is accepted but not *which* strings, and `coerceBool` recognises only
+  those two spellings. Anything else returns `undefined` and falls to the parameter's
+  default rather than erroring, so a caller guessing `"1"` or `"yes"` would silently get
+  the default.
+- **Handler**: `coerceBool(...) ?? <default>`, never `!!`. Under `!!` the string `"false"`
+  is truthy, which inverts the flag. That was a live bug on `raw` and `verbose` across
+  nearly every read tool: `raw: "false"` returned untransformed JMAP to a caller that had
+  explicitly asked for the simplified shape, and on `get_email` it also made
+  `assertStripQuotedNotRaw` reject a legitimate `stripQuoted` read.
+
+`src/tool-schema.test.ts` enforces both halves against the source: it fails on any tool
+parameter declared `type: 'boolean'`, and on any bare `!!` read of a boolean parameter in a
+handler file. It reads `src/index.ts` as text rather than spawning the built server and
+calling `tools/list`, because `npm test` runs `tsx` over `src/` and never builds first, so
+a guard reading a stale `dist/` would miss exactly the newly added tool it exists to catch.
+`tsc` does not rewrite string literals, so the source and the shipped schema cannot
+disagree here.
+
+The same reasoning applies to the array coercions, but those schemas are still narrow
+(`type: 'array'` on `clearFields`, `emailIds`, `mailboxIds` and the recipient lists) even
+though `coerceStringArray` runs behind them. That is unfinished work rather than a
+decision, and no guard covers it.
+
 ### Verifying coercion
 
 The normal MCP tool harness validates the declared `inputSchema` before the call
 reaches the handler, so it will reject the malformed inputs these coercions are meant to
-accept. To verify coercion you must drive a raw JSON-RPC request against the built
-server (`dist/index.js`) with `FASTMAIL_API_TOKEN` set, bypassing the schema-validating
-harness. (See the `verify-lenient-client-coercion` note in project memory.)
+accept. That now holds only for the parameters whose schema has *not* been widened: a
+compliant client can send a stringified boolean, because every boolean declares
+`['boolean', 'string']`. For the rest you must drive a raw JSON-RPC request against the
+built server (`dist/index.js`) with `FASTMAIL_API_TOKEN` set, bypassing the
+schema-validating harness. `scripts/mcp-harness.mjs` is that client; its `list()` (also
+`node scripts/mcp-harness.mjs --list`) dumps the advertised schemas and needs no
+credentials. (See the `verify-lenient-client-coercion` note in project memory.)
 
 ## Strict parameter keys (the complement to lenient values)
 
@@ -106,6 +144,22 @@ classification is a property of the shared helpers, not of email specifically.
 on purpose, so it does not leak attachment metadata (see `docs/security-model.md`). So a
 bad id is `InvalidParams` on `get_email`/`get_thread` but `InternalError` on
 `download_attachment` — an accepted, documented asymmetry.
+
+**Redaction at that boundary is unconditional.** Every branch of the CallTool catch runs
+its message through `redactBearerTokens`: the `McpError` rethrow (redacted in place, since
+rebuilding would double the SDK's `MCP error <code>: ` prefix), the `PathAccessError` and
+`InvalidInputError` mappings, and the generic `InternalError` wrap. There is no exemption
+list, which is the point: the audit "no unredacted error text reaches tool output" stays a
+grep anyone can run instead of a claim that has to be re-argued per error class. Only
+`.message` is scrubbed; `McpError.data` is deliberately left alone, because nothing here
+populates it and it is arbitrary JSON a string-shaped scrubber cannot walk.
+
+Server text that reaches the caller on a *successful* result gets no help from that catch,
+so it redacts at its own render site. `orphanedOldDraftReason` is the one such field today
+(`formatEditDraftResult` in `src/response-formatters.ts`, holding a server or exception
+message when an `edit_draft` replacement could not be moved to Trash). It is redacted where
+it is rendered rather than where it is assigned, because the render site is single and the
+assignment sites are not.
 
 The JMAP set-error reason itself is surfaced (not just the code): every throwing
 `Email/set` failure routes its `SetError` through `describeSetError` in

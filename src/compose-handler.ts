@@ -1,5 +1,5 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceAttachments } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs } from './body-format.js';
 import type { AttachmentPart } from './jmap-client.js';
@@ -56,8 +56,15 @@ export async function composeDraft(
   const a = args ?? {};
   assertBodyInputs(a);
 
-  const { from, mailbox, subject, textBody, htmlBody, inReplyTo, references } = a;
+  const { from, mailbox, subject, textBody, htmlBody } = a;
   const { to, cc, bcc, replyTo } = coerceRecipients(a);
+
+  // The threading headers are string[] to createDraft, which maps over them. A lenient
+  // client can send either as a bare or JSON-encoded string, which would reach JMAP as a
+  // per-character header list (or crash the map). coerceStringArray, matching how the
+  // recipient lists above are handled. (#54)
+  const inReplyTo = coerceStringArray(a.inReplyTo);
+  const references = coerceStringArray(a.references);
 
   // Coerce attachments BEFORE the contentless guard so an attachment-only draft
   // (a legitimate "stash this file" artifact, consistent with edit_draft accepting

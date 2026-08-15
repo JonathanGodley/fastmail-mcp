@@ -142,3 +142,42 @@ describe('composeDraft — malformed bodies are rejected before the draft is cre
     assert.equal(calls.draft.htmlBody, '<pre>&lt;p&gt;paragraph&lt;/p&gt;</pre>');
   });
 });
+
+// Coercing a helper correctly is only half the guarantee — the other half is that the
+// handler actually routes the parameter through it. These cover the threading headers on
+// the create_draft path, where an uncoerced string would reach JMAP as a per-character
+// header list instead of one Message-ID.
+describe('composeDraft — threading-header coercion', () => {
+  async function draftWith(args: object): Promise<any> {
+    const { client, calls } = spyClient();
+    await composeDraft({ subject: 'threading probe', ...args }, client, undefined);
+    return calls.draft;
+  }
+
+  it('leaves a real array untouched', async () => {
+    const params = await draftWith({ inReplyTo: ['<a@example.com>'], references: ['<a@example.com>'] });
+    assert.deepEqual(params.inReplyTo, ['<a@example.com>']);
+    assert.deepEqual(params.references, ['<a@example.com>']);
+  });
+
+  it('wraps a bare single Message-ID string in an array', async () => {
+    const params = await draftWith({ inReplyTo: '<a@example.com>' });
+    assert.deepEqual(params.inReplyTo, ['<a@example.com>']);
+  });
+
+  it('parses a JSON-stringified array', async () => {
+    const params = await draftWith({ references: '["<a@example.com>", "<b@example.com>"]' });
+    assert.deepEqual(params.references, ['<a@example.com>', '<b@example.com>']);
+  });
+
+  it('splits a comma-separated string', async () => {
+    const params = await draftWith({ references: '<a@example.com>, <b@example.com>' });
+    assert.deepEqual(params.references, ['<a@example.com>', '<b@example.com>']);
+  });
+
+  it('leaves both headers undefined when neither is supplied', async () => {
+    const params = await draftWith({});
+    assert.equal(params.inReplyTo, undefined);
+    assert.equal(params.references, undefined);
+  });
+});

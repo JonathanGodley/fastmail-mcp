@@ -83,9 +83,11 @@ function rawBodyBytes(emails: any[]): Array<{ id: string; bytes: number }> {
 
 export async function readThread(args: any, client: ThreadClient): Promise<string> {
   const { threadId } = args ?? {};
-  // `raw` keeps the plain truthiness test the other read tools use; the new flags follow
-  // the lenient-value convention (a stringified "true"/"false" is accepted).
-  const raw = !!args?.raw;
+  // Every flag here follows the lenient-value convention (a stringified "true"/"false" is
+  // accepted), `raw` included. Under the old `!!` test, raw:"false" was truthy: the caller
+  // got untransformed JMAP after explicitly asking for the simplified shape, and
+  // assertStripQuotedNotRaw below rejected an otherwise valid stripQuoted read. (#54)
+  const raw = coerceBool(args?.raw) ?? false;
   const includeDrafts = coerceBool(args?.includeDrafts) ?? false;
   const includeBodies = coerceBool(args?.includeBodies) ?? false;
   const stripQuoted = coerceBool(args?.stripQuoted) ?? false;

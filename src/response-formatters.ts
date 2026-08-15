@@ -1,5 +1,6 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
+import { redactBearerTokens } from './coerce.js';
 import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 
@@ -105,9 +106,15 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
 // copy contained — the last one so a caller that edited from a stale copy can see at once
 // that it overwrote something it didn't know about, and restore it from Trash (#65).
 export function formatEditDraftResult(result: UpdateDraftResult): string {
+  // orphanedOldDraftReason is server/exception text that becomes tool output on a
+  // RETURNED result, so the CallTool catch — which redacts every error egress — never
+  // sees it. Redaction therefore has to happen here. Deliberately at the render site
+  // rather than at the four places jmap-client.ts assigns the field: this is the single
+  // point the value can reach a caller, so a fifth assignment site added later is
+  // covered without anyone remembering to redact it.
   const disposal = result.trashedOldDraftId
     ? `The previous draft (id ${result.trashedOldDraftId}) was moved to Trash, where it stays recoverable until Trash is emptied or auto-purged.`
-    : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be moved to Trash (${result.orphanedOldDraftReason ?? 'reason unknown'}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
+    : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be moved to Trash (${redactBearerTokens(result.orphanedOldDraftReason ?? 'reason unknown')}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
   const fingerprint = formatReplacedDraft(result.replacedDraft);
   const replaced = fingerprint
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`

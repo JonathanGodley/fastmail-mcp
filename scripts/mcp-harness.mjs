@@ -164,6 +164,13 @@ export function createClient({ env } = {}) {
       notify('notifications/initialized', {});
       return result;
     },
+    // The advertised tool surface: names, descriptions and inputSchema exactly as a
+    // client receives them. Needs no credentials and reaches no account — the server
+    // answers tools/list before any Fastmail request — so it is the safe first call
+    // when checking what the built server actually declares.
+    list() {
+      return send('tools/list', {});
+    },
     // NOTE: call() is generic and CAN mutate the account (send_draft, delete_email,
     // bulk_* …). The copy-paste default below is the read-only one on purpose —
     // pick the tool name deliberately.
@@ -190,6 +197,7 @@ if (INVOKED_DIRECTLY) {
     // Intentionally prints only the var NAME, never a value.
     console.log('Usage: FASTMAIL_API_TOKEN=… node scripts/mcp-harness.mjs <tool> [jsonArgs]');
     console.log('Example (read-only): FASTMAIL_API_TOKEN=… node scripts/mcp-harness.mjs list_mailboxes');
+    console.log('Dump the advertised tool surface (no account access): node scripts/mcp-harness.mjs --list');
     console.log('Build first: npm run build');
     process.exit(0);
   }
@@ -205,7 +213,9 @@ if (INVOKED_DIRECTLY) {
   const client = createClient({ env: process.env });
   try {
     await client.init();
-    const result = await client.call(toolName, args);
+    // --list dumps the schemas rather than invoking a tool; it needs no token, so it
+    // works against a server started with no credentials configured.
+    const result = toolName === '--list' ? await client.list() : await client.call(toolName, args);
     console.log(JSON.stringify(result, null, 2));
   } catch (err) {
     // Print only the message — never the token, env, or request body — and exit

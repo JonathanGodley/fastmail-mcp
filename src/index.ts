@@ -22,6 +22,33 @@ import { composeDraft } from './compose-handler.js';
 import { assertBodyInputs } from './body-format.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { readThread } from './thread-handler.js';
+import createDebug from 'debug';
+
+// Silence tsdav's debug logging. tsdav logs the HTTP Basic credential as bare base64
+// ("tsdav:authHelper Basic auth token generated: <base64 of user:password>") whenever
+// DEBUG is set, straight to stderr — it never passes through this file's redaction
+// boundary, so redactBearerTokens cannot help. Suppressing the namespaces is the only
+// control. Each detail below was established by running it; re-establish before changing:
+//
+//   * The skip is `-tsdav*` with NO colon. `-tsdav:*` matches only colon-prefixed
+//     children, so a logger created as bare `tsdav` — or a future `tsdavFoo` — would
+//     still log. The bare glob covers every current namespace (tsdav:account,
+//     tsdav:addressBook, tsdav:authHelper, tsdav:calendar, tsdav:collection,
+//     tsdav:request) and any sibling a future release adds.
+//   * Deleting process.env.DEBUG here does NOT work: the `debug` package snapshots the
+//     environment once at its own module init, and under ESM the whole import chain
+//     (caldav-client -> tsdav -> debug) evaluates before this module's body runs. This
+//     call works instead because each logger's `enabled` getter recomputes from
+//     createDebug.namespaces, which enable() rewrites.
+//   * Composing with the operator's own DEBUG preserves their logging for every other
+//     package; skip entries beat enables, so `DEBUG=*` and `DEBUG=tsdav:*` are both
+//     suppressed for tsdav while `other:*` still logs.
+//   * Only DEBUG gates the package; NODE_DEBUG is not consulted.
+//   * The control is instance-local — it reaches only the `debug` module instance tsdav
+//     resolves. package.json therefore depends on `debug` at the exact version tsdav
+//     pins, so npm keeps one hoisted copy; a diverging range would let npm nest
+//     node_modules/tsdav/node_modules/debug and silently revert this.
+createDebug.enable([process.env.DEBUG, '-tsdav*'].filter(Boolean).join(','));
 
 const server = new Server(
   {
@@ -214,15 +241,43 @@ function getTimezone(): string | undefined {
   ]).value;
 }
 
+// Appended to every boolean whose handler runs coerceBool. The schema declares
+// `type: ['boolean', 'string']` alongside it, so a validating client can actually send
+// the string form; declaring the pair together keeps the advertised type and the runtime
+// coercion from drifting apart. A narrow `type: 'boolean'` makes the coercion
+// unreachable, which is the failure this note exists to prevent. (#54)
+//
+// The prose earns its bytes on top of the widened type: `["boolean","string"]` says a
+// string is accepted but not WHICH strings, and coerceBool recognises only "true"/"false"
+// — anything else falls back to the parameter's default rather than erroring, so a caller
+// guessing "1" or "yes" would get the default with no signal.
+const LENIENT_BOOL_DESC =
+  ' Also accepts the strings "true"/"false", for clients that stringify booleans.';
+
+// Wrap a boolean parameter's description with the note above. Adds sentence-ending
+// punctuation first when the description lacks it, so the two clauses don't run
+// together — the descriptions here are not uniformly punctuated.
+function lenientBool(description: string): string {
+  // Look past a trailing bracket before deciding: "...by default.)" is already stopped,
+  // while "...(default: true)" is not.
+  const needsStop = !/[.!?]$/.test(description.trimEnd().replace(/[)\]]+$/, ''));
+  return description + (needsStop ? '.' : '') + LENIENT_BOOL_DESC;
+}
+
 // Shared scope-control descriptions for the read tools (search_emails + list_emails),
 // defined once so the per-flag strings and the reliability-contract clause stay in sync
 // between the two tools rather than drifting as hand-copied strings.
 const EXCLUDE_DRAFTS_DESC =
-  'Drafts are included by default; set true to omit them from results (and from the total count). (Note: get_thread differs on BOTH axes — it uses includeDrafts AND excludes drafts by default.)';
+  lenientBool('Drafts are included by default; set true to omit them from results (and from the total count). (Note: get_thread differs on BOTH axes — it uses includeDrafts AND excludes drafts by default.)');
 const INCLUDE_TRASH_DESC =
-  'Trash is excluded by default; set true to also include Trash in the results.';
+  lenientBool('Trash is excluded by default; set true to also include Trash in the results.');
 const INCLUDE_SPAM_DESC =
-  'The Spam/Junk folder is excluded by default; set true to also include it in the results.';
+  lenientBool('The Spam/Junk folder is excluded by default; set true to also include it in the results.');
+
+// `ascending`, declared identically on the three list/search tools (list_emails,
+// search_emails, get_recent_emails) so their sort contract can't drift.
+const ASCENDING_DESC =
+  lenientBool('Sort oldest first instead of newest first (default: false).');
 
 // The reliability contract that makes silence trustworthy. Lead with the no-note
 // guarantee as its own sentence (a skimming model must hit "no note => trustworthy"
@@ -323,12 +378,12 @@ const TOOLS = [
           type: 'object',
           properties: {
             verbose: {
-              type: 'boolean',
-              description: 'Include extra mailbox fields (sortOrder, isSubscribed, myRights). Not needed for most tasks.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Include extra mailbox fields (sortOrder, isSubscribed, myRights). Not needed for most tasks.'),
             },
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
         },
@@ -350,25 +405,25 @@ const TOOLS = [
             },
             position: positionSchemaProperty(),
             ascending: {
-              type: 'boolean',
-              description: 'Sort oldest first instead of newest first (default: false)',
+              type: ['boolean', 'string'],
+              description: ASCENDING_DESC,
             },
             excludeDrafts: {
-              type: 'boolean',
+              type: ['boolean', 'string'],
               description: EXCLUDE_DRAFTS_DESC,
             },
             includeTrash: {
-              type: 'boolean',
+              type: ['boolean', 'string'],
               description: INCLUDE_TRASH_DESC,
             },
             includeSpam: {
-              type: 'boolean',
+              type: ['boolean', 'string'],
               description: INCLUDE_SPAM_DESC,
             },
             fields: fieldsSchemaProperty(),
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
         },
@@ -384,17 +439,17 @@ const TOOLS = [
               description: 'ID of the email to retrieve',
             },
             verbose: {
-              type: 'boolean',
-              description: 'Include HTML body in response. WARNING: can produce very large responses (50K+ chars) for marketing/rich emails. Only use when HTML content is specifically needed.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Include HTML body in response. WARNING: can produce very large responses (50K+ chars) for marketing/rich emails. Only use when HTML content is specifically needed.'),
             },
             fields: fieldsSchemaProperty(),
             stripQuoted: {
-              type: 'boolean',
-              description: STRIP_QUOTED_DESC,
+              type: ['boolean', 'string'],
+              description: lenientBool(STRIP_QUOTED_DESC),
             },
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
           required: ['emailId'],
@@ -443,7 +498,7 @@ const TOOLS = [
             },
             quoteOriginal: {
               type: ['boolean', 'string'],
-              description: 'Append the original message as an attributed quote (default true). Set false to omit it.',
+              description: lenientBool('Append the original message as an attributed quote (default true). Set false to omit it.'),
             },
             replyTo: {
               type: 'array',
@@ -500,11 +555,11 @@ const TOOLS = [
             },
             includeOriginalAttachments: {
               type: ['boolean', 'string'],
-              description: "Carry the original message's attachments on the forward (default true; all-or-none — to drop individual ones, save the default draft and use edit_draft's removeAttachments). Embedded inline (cid:) images are never carried by an inline forward; use asAttachment for those. Ignored when asAttachment is set — the .eml already embeds every original attachment.",
+              description: lenientBool("Carry the original message's attachments on the forward (default true; all-or-none — to drop individual ones, save the default draft and use edit_draft's removeAttachments). Embedded inline (cid:) images are never carried by an inline forward; use asAttachment for those. Ignored when asAttachment is set — the .eml already embeds every original attachment."),
             },
             asAttachment: {
               type: ['boolean', 'string'],
-              description: 'Instead of reproducing the original inline, attach the entire original as a raw .eml file (message/rfc822): lossless, including embedded inline images; supersedes includeOriginalAttachments. NOTE: the raw message carries its full transport headers (Received chain, authentication results) and — when forwarding a message from Sent — any Bcc recipients (see docs/security-model.md), which an inline forward would not expose.',
+              description: lenientBool('Instead of reproducing the original inline, attach the entire original as a raw .eml file (message/rfc822): lossless, including embedded inline images; supersedes includeOriginalAttachments. NOTE: the raw message carries its full transport headers (Received chain, authentication results) and — when forwarding a message from Sent — any Bcc recipients (see docs/security-model.md), which an inline forward would not expose.'),
             },
             replyTo: {
               type: 'array',
@@ -623,7 +678,7 @@ const TOOLS = [
             },
             noQuote: {
               type: ['boolean', 'string'],
-              description: "Set true to DISCARD the quoted original (reply draft) or the forwarded-message block (forward draft) when editing the body, instead of keeping it via originalEmailId. On a forward draft this also clears the forward marking (the recorded X-Forwarded-Message-Id), so later edits aren't re-challenged and send_draft will not mark the original forwarded — this applies on ANY edit that passes it, including a metadata-only edit or an asAttachment forward's note edit (the deliberate way to de-forward such a draft). Deliberate-discard escape; without it a quote-dropping body edit is rejected. Cannot be combined with originalEmailId.",
+              description: lenientBool("Set true to DISCARD the quoted original (reply draft) or the forwarded-message block (forward draft) when editing the body, instead of keeping it via originalEmailId. On a forward draft this also clears the forward marking (the recorded X-Forwarded-Message-Id), so later edits aren't re-challenged and send_draft will not mark the original forwarded — this applies on ANY edit that passes it, including a metadata-only edit or an asAttachment forward's note edit (the deliberate way to de-forward such a draft). Deliberate-discard escape; without it a quote-dropping body edit is rejected. Cannot be combined with originalEmailId."),
             },
             replyTo: {
               type: 'array',
@@ -690,16 +745,16 @@ const TOOLS = [
               description: 'Filter by subject',
             },
             hasAttachment: {
-              type: 'boolean',
-              description: 'Filter emails with attachments',
+              type: ['boolean', 'string'],
+              description: lenientBool('Filter emails with attachments'),
             },
             isUnread: {
-              type: 'boolean',
-              description: 'true = only unread; false = only read',
+              type: ['boolean', 'string'],
+              description: lenientBool('true = only unread; false = only read'),
             },
             isPinned: {
-              type: 'boolean',
-              description: 'true = only pinned/flagged; false = only un-pinned',
+              type: ['boolean', 'string'],
+              description: lenientBool('true = only pinned/flagged; false = only un-pinned'),
             },
             mailbox: {
               type: 'string',
@@ -720,25 +775,25 @@ const TOOLS = [
             },
             position: positionSchemaProperty(),
             ascending: {
-              type: 'boolean',
-              description: 'Sort oldest first instead of newest first (default: false)',
+              type: ['boolean', 'string'],
+              description: ASCENDING_DESC,
             },
             excludeDrafts: {
-              type: 'boolean',
+              type: ['boolean', 'string'],
               description: EXCLUDE_DRAFTS_DESC,
             },
             includeTrash: {
-              type: 'boolean',
+              type: ['boolean', 'string'],
               description: INCLUDE_TRASH_DESC,
             },
             includeSpam: {
-              type: 'boolean',
+              type: ['boolean', 'string'],
               description: INCLUDE_SPAM_DESC,
             },
             fields: fieldsSchemaProperty(),
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
         },
@@ -755,12 +810,12 @@ const TOOLS = [
               default: 20,
             },
             verbose: {
-              type: 'boolean',
-              description: 'Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.'),
             },
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
         },
@@ -776,12 +831,12 @@ const TOOLS = [
               description: 'ID of the contact to retrieve',
             },
             verbose: {
-              type: 'boolean',
-              description: 'Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.'),
             },
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
           required: ['contactId'],
@@ -803,12 +858,12 @@ const TOOLS = [
               default: 20,
             },
             verbose: {
-              type: 'boolean',
-              description: 'Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.'),
             },
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
           required: ['query'],
@@ -956,8 +1011,8 @@ const TOOLS = [
               description: 'Property names to delete from the event. Allowed: description, location. Cannot also pass the same field as a value.',
             },
             confirmRecurring: {
-              type: 'boolean',
-              description: 'Required when changing start/end on a recurring event with exceptions. Acknowledges that orphaned exception overrides will be removed.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Required when changing start/end on a recurring event with exceptions. Acknowledges that orphaned exception overrides will be removed.'),
             },
           },
           required: ['eventId'],
@@ -984,12 +1039,12 @@ const TOOLS = [
           type: 'object',
           properties: {
             verbose: {
-              type: 'boolean',
-              description: 'Include extra identity fields (SMTP config, verification state). Not needed for most tasks.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Include extra identity fields (SMTP config, verification state). Not needed for most tasks.'),
             },
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
         },
@@ -1012,13 +1067,13 @@ const TOOLS = [
               default: 'inbox',
             },
             ascending: {
-              type: 'boolean',
-              description: 'Sort oldest first instead of newest first (default: false)',
+              type: ['boolean', 'string'],
+              description: ASCENDING_DESC,
             },
             fields: fieldsSchemaProperty(),
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
         },
@@ -1034,8 +1089,8 @@ const TOOLS = [
               description: 'ID of the email to mark',
             },
             read: {
-              type: 'boolean',
-              description: 'true to mark as read, false to mark as unread',
+              type: ['boolean', 'string'],
+              description: lenientBool('true to mark as read, false to mark as unread'),
               default: true,
             },
           },
@@ -1053,8 +1108,8 @@ const TOOLS = [
               description: 'ID of the email to pin/unpin',
             },
             pinned: {
-              type: 'boolean',
-              description: 'true to pin, false to unpin',
+              type: ['boolean', 'string'],
+              description: lenientBool('true to pin, false to unpin'),
               default: true,
             },
           },
@@ -1178,21 +1233,21 @@ const TOOLS = [
               description: 'ID of the thread/conversation',
             },
             includeDrafts: {
-              type: 'boolean',
-              description: 'Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.'),
             },
             includeBodies: {
-              type: 'boolean',
-              description: 'Return each message\'s plain-text body (bodyText) alongside its metadata, turning an N-message conversation read into one call. HTML bodies are never returned here (that is where the size risk lives) — a message with no plain-text part is flagged bodyTextUnavailable:true, fetch that one with get_email verbose=true. Hidden drafts are excluded before bodies are read, so an in-progress reply never lands in a transcription. The combined bodies are capped at 100000 bytes: over that the call fails with a message naming the largest messages and telling you to add stripQuoted=true or fetch them individually, rather than silently truncating a body.',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return each message\'s plain-text body (bodyText) alongside its metadata, turning an N-message conversation read into one call. HTML bodies are never returned here (that is where the size risk lives) — a message with no plain-text part is flagged bodyTextUnavailable:true, fetch that one with get_email verbose=true. Hidden drafts are excluded before bodies are read, so an in-progress reply never lands in a transcription. The combined bodies are capped at 100000 bytes: over that the call fails with a message naming the largest messages and telling you to add stripQuoted=true or fetch them individually, rather than silently truncating a body.'),
             },
             stripQuoted: {
-              type: 'boolean',
-              description: 'Requires includeBodies. Strips quoted history from every returned body, so the response is each message\'s new text only — the shape most read-a-conversation tasks want. ' + STRIP_QUOTED_DESC,
+              type: ['boolean', 'string'],
+              description: lenientBool('Requires includeBodies. Strips quoted history from every returned body, so the response is each message\'s new text only — the shape most read-a-conversation tasks want. ' + STRIP_QUOTED_DESC),
             },
             fields: fieldsSchemaProperty(),
             raw: {
-              type: 'boolean',
-              description: 'Return original JMAP response instead of simplified format',
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
           required: ['threadId'],
@@ -1231,8 +1286,8 @@ const TOOLS = [
               description: 'Array of email IDs to mark',
             },
             read: {
-              type: 'boolean',
-              description: 'true to mark as read, false as unread',
+              type: ['boolean', 'string'],
+              description: lenientBool('true to mark as read, false as unread'),
               default: true,
             },
           },
@@ -1251,8 +1306,8 @@ const TOOLS = [
               description: 'Array of email IDs to pin/unpin',
             },
             pinned: {
-              type: 'boolean',
-              description: 'true to pin, false to unpin',
+              type: ['boolean', 'string'],
+              description: lenientBool('true to pin, false to unpin'),
               default: true,
             },
           },
@@ -1348,8 +1403,8 @@ const TOOLS = [
           type: 'object',
           properties: {
             dryRun: {
-              type: 'boolean',
-              description: 'If true, only shows what would be done without making changes (default: true)',
+              type: ['boolean', 'string'],
+              description: lenientBool('If true, only shows what would be done without making changes (default: true)'),
               default: true,
             },
             limit: {
@@ -1392,9 +1447,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     switch (name) {
       case 'list_mailboxes': {
-        const { verbose, raw } = args as any;
+        // raw and verbose take coerceBool like every other flag on this server, not `!!`.
+        // A lenient client's stringified "false" is truthy, so `!!` on raw:"false" returned
+        // untransformed JMAP to a caller that had explicitly asked for the simplified shape
+        // — a silent response-format flip, and raw/verbose sit on nearly every read tool.
+        // Both default to false, which is what `!!undefined` already produced, so the
+        // default shape is unchanged. An unrecognised value ("1", "yes") now lands on that
+        // default instead of flipping the format. Repeated per handler rather than hoisted:
+        // each read tool destructures its own args, and the surrounding code differs. (#54)
+        const raw = coerceBool((args as any).raw) ?? false;
+        const verbose = coerceBool((args as any).verbose) ?? false;
         const mailboxes = await client.getMailboxes();
-        const output = raw ? mailboxes : mailboxes.map(m => simplifyMailbox(m, { verbose: !!verbose }));
+        const output = raw ? mailboxes : mailboxes.map(m => simplifyMailbox(m, { verbose }));
         return {
           content: [
             {
@@ -1406,9 +1470,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_emails': {
-        const { mailbox, limit, ascending, raw } = args as any;
+        const { mailbox, limit } = args as any;
+        // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
+        // silently reverse the sort order. Defaults to false (newest first), matching the
+        // documented default. Sits alongside the scope flags below, which coerce the same way.
+        const ascending = coerceBool((args as any).ascending) ?? false;
+        // Same coercion for raw — see list_mailboxes for why `!!` was wrong here.
+        const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
-        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
         const position = coercePosition((args as any).position);
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
@@ -1416,7 +1486,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           mailbox,
           limit: validLimit,
           position,
-          ascending: !!ascending,
+          ascending,
           includeTrash: coerceBool((args as any).includeTrash) ?? false,
           includeSpam: coerceBool((args as any).includeSpam) ?? false,
           excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
@@ -1435,21 +1505,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_email': {
-        const { emailId, verbose, raw, stripQuoted } = args as any;
+        const { emailId, stripQuoted } = args as any;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
+        // Same coercion as list_mailboxes for both flags. It matters most here: `!!` on
+        // verbose:"false" pulled the HTML body into the response, and `!!` on raw:"false"
+        // ALSO made assertStripQuotedNotRaw reject a legitimate stripQuoted read.
+        const raw = coerceBool((args as any).raw) ?? false;
+        const verbose = coerceBool((args as any).verbose) ?? false;
         // Validated before the fetch so a typo'd field name costs no round trip.
         // Selecting bodyHtml implies verbose's includeHtml: without that, projecting a
         // field the simplifier never emitted would return {} — the trap the parameter
         // exists to avoid (#69).
-        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        const fields = parseEmailFields((args as any).fields, { raw });
         // Rejected before the fetch: raw is unmodified JMAP, so honouring stripQuoted
         // there would be impossible and ignoring it would be silent (#73).
         const strip = coerceBool(stripQuoted) ?? false;
-        assertStripQuotedNotRaw(strip, !!raw);
+        assertStripQuotedNotRaw(strip, raw);
         const email = await client.getEmailById(emailId);
-        const simplified = simplifyEmail(email, { includeHtml: !!verbose || wantsHtmlBody(fields), stripQuoted: strip });
+        const simplified = simplifyEmail(email, { includeHtml: verbose || wantsHtmlBody(fields), stripQuoted: strip });
         return {
           content: [
             {
@@ -1575,7 +1650,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_contacts': {
-        const { limit, verbose, raw } = args as any;
+        const { limit } = args as any;
+        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        const raw = coerceBool((args as any).raw) ?? false;
+        const verbose = coerceBool((args as any).verbose) ?? false;
         const contactsClient = initializeContactsCalendarClient();
         // Hard cap: the contacts tools have no `position` param, so anything past
         // the cap is unreachable. Paging for contacts is tracked as issue #94.
@@ -1584,20 +1662,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose: !!verbose }),
+              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose }),
             },
           ],
         };
       }
 
       case 'get_contact': {
-        const { contactId, verbose, raw } = args as any;
+        const { contactId } = args as any;
+        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        const raw = coerceBool((args as any).raw) ?? false;
+        const verbose = coerceBool((args as any).verbose) ?? false;
         if (!contactId) {
           throw new McpError(ErrorCode.InvalidParams, 'contactId is required');
         }
         const contactsClient = initializeContactsCalendarClient();
         const contact = await contactsClient.getContactById(contactId);
-        const output = raw ? contact : simplifyContact(contact, { verbose: !!verbose });
+        const output = raw ? contact : simplifyContact(contact, { verbose });
         return {
           content: [
             {
@@ -1609,7 +1690,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_contacts': {
-        const { query, limit, verbose, raw } = args as any;
+        const { query, limit } = args as any;
+        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        const raw = coerceBool((args as any).raw) ?? false;
+        const verbose = coerceBool((args as any).verbose) ?? false;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
@@ -1621,7 +1705,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose: !!verbose }),
+              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose }),
             },
           ],
         };
@@ -1682,7 +1766,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'update_calendar_event': {
-        const { eventId, title, description, start, end, location, participants, clearFields, confirmRecurring } = args as any;
+        const { eventId, title, description, start, end, location, participants } = args as any;
+        // Same lenient-client reason as edit_draft's clearFields: a stringified array
+        // ('["location"]') would fail the Array.isArray test below, so the call would be
+        // rejected as "no field to update" while the caller had named one — and if some
+        // other field carried the update, the clear would be dropped silently on the way
+        // to updateCalendarEvent. Coerce once and pass the coerced value on. (#54)
+        const clearFields = coerceStringArray((args as any).clearFields);
+        // Coerce for lenient clients, and default to false. updateCalendarEvent tests this
+        // with a bare truthiness check, so an unconverted string "false" would read as true
+        // — which both skips the confirmation prompt AND authorizes pruning the orphaned
+        // recurrence exceptions the prompt exists to warn about. A non-bool like "garbage"
+        // yields undefined and so falls to false, never to the destructive direction.
+        const confirmRecurring = coerceBool((args as any).confirmRecurring) ?? false;
         if (!eventId) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
@@ -1713,10 +1809,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_identities': {
-        const { verbose, raw } = args as any;
+        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        const raw = coerceBool((args as any).raw) ?? false;
+        const verbose = coerceBool((args as any).verbose) ?? false;
         const client = initializeClient();
         const identities = await client.getIdentities();
-        const output = raw ? identities : identities.map(i => simplifyIdentity(i, { verbose: !!verbose }));
+        const output = raw ? identities : identities.map(i => simplifyIdentity(i, { verbose }));
         return {
           content: [
             {
@@ -1728,13 +1826,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_recent_emails': {
-        const { limit = 10, mailbox = 'inbox', ascending, raw } = args as any;
+        const { limit = 10, mailbox = 'inbox' } = args as any;
+        // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
+        // silently reverse the sort order. Defaults to false (newest first).
+        const ascending = coerceBool((args as any).ascending) ?? false;
+        // Same coercion for raw — see list_mailboxes for why `!!` was wrong here.
+        const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
-        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
         const position = coercePosition((args as any).position) ?? 0;
         const client = initializeClient();
-        const result = await client.getRecentEmails(limit, mailbox, !!ascending, position);
+        const result = await client.getRecentEmails(limit, mailbox, ascending, position);
         return {
           content: [
             {
@@ -1905,9 +2008,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } catch (error) {
           // Let path-confinement rejections through so the caller sees why their path was
           // rejected. PathAccessError is the tagged discriminator (the path guards no
-          // longer prefix "Save path", so a substring match would miss them).
+          // longer prefix "Save path", so a substring match would miss them). Redacted
+          // like every other error egress — this branch returns caller-reflected path text
+          // and short-circuits the top-level catch, so it has to do its own redaction for
+          // the no-exemptions audit to hold.
           if (error instanceof PathAccessError) {
-            throw new McpError(ErrorCode.InvalidParams, error.message);
+            throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
           }
           // Sanitize other errors to avoid leaking attachment metadata. This branch is
           // retained deliberately: redactBearerTokens at the top level would not suppress
@@ -1921,9 +2027,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_emails': {
-        const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit, ascending, raw } = args as any;
+        const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit } = args as any;
+        // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
+        // silently reverse the sort order. Defaults to false (newest first), matching the
+        // three-valued coerceBool the other flags on this call already use.
+        const ascending = coerceBool((args as any).ascending) ?? false;
+        // Same coercion for raw — see list_mailboxes for why `!!` was wrong here.
+        const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
-        const fields = parseEmailFields((args as any).fields, { raw: !!raw });
+        const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
         const position = coercePosition((args as any).position);
         const client = initializeClient();
@@ -1934,7 +2046,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isUnread: coerceBool(isUnread),
           isPinned: coerceBool(isPinned),
           mailbox, after, before, limit: validLimit, position,
-          ascending: !!ascending,
+          ascending,
           excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
           includeTrash: coerceBool((args as any).includeTrash) ?? false,
           includeSpam: coerceBool((args as any).includeSpam) ?? false,
@@ -1971,7 +2083,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         } catch (error) {
           // Re-raise the tagged caller-input errors BARE so the top-level catch applies
-          // its InvalidParams mapping (with redaction for InvalidInputError) — otherwise
+          // its InvalidParams mapping (both tagged branches there redact) — otherwise
           // this local catch would collapse them to InternalError. getThread throws
           // InvalidInputError on a not-found threadId (a bad id is caller-fixable input);
           // PathAccessError is re-raised too for parity with download_attachment, though
@@ -2316,7 +2428,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
   } catch (error) {
+    // EVERY branch below runs its message through redactBearerTokens, with no exemption.
+    // This is the single choke point where error text becomes tool output, so making the
+    // rule unconditional is what makes the audit — "no unredacted error text reaches tool
+    // output" — a grep anyone can run and verify, rather than a claim resting on an
+    // exemption list that has to be re-argued (and kept accurate) per error class. Each
+    // exemption costs one function call to remove and one reader-hour to justify, so
+    // there are none.
     if (error instanceof McpError) {
+      // Redact in place rather than rebuilding: McpError's constructor prefixes the
+      // message with "MCP error <code>: ", so re-wrapping an already-wrapped message
+      // would double the prefix. Mutating preserves the code, the data, and any McpError
+      // subclass identity the SDK constructed.
+      // Only `.message` is redacted; `.data` is deliberately left alone. Nothing in this
+      // codebase ever populates it, so redacting it would guard a channel that carries
+      // nothing — and `.data` is arbitrary JSON, which a string-shaped scrubber cannot
+      // walk without either flattening structure or recursing over untyped values.
+      // Revisit if anything here starts setting it.
+      error.message = redactBearerTokens(error.message);
       throw error;
     }
     // The four compose handlers (reply_email/forward_email/create_draft/edit_draft) have no
@@ -2325,14 +2454,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // generic InternalError wrap below. (download_attachment maps its own PathAccessError
     // locally and never reaches here.)
     if (error instanceof PathAccessError) {
-      throw new McpError(ErrorCode.InvalidParams, error.message);
+      throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
     }
     // A semantically-invalid caller input (unresolvable mailbox, label id that is
-    // really a name). Map to InvalidParams like PathAccessError above, but DO run it
-    // through redactBearerTokens — unlike PathAccessError these messages reflect
-    // caller input and mailbox names, so token-shaped redaction is cheap insurance.
-    // This branch is placed after the PathAccessError branch and before the generic
-    // wrap so an InvalidInputError can't fall through to InternalError.
+    // really a name). Map to InvalidParams like PathAccessError above. Placed after the
+    // PathAccessError branch and before the generic wrap so an InvalidInputError can't
+    // fall through to InternalError.
     if (error instanceof InvalidInputError) {
       throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
     }
