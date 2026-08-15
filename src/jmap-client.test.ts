@@ -1151,6 +1151,38 @@ describe('updateDraft', () => {
     textBody: [], htmlBody: [], bodyValues: {},
   };
 
+  // An original whose whole body is an embedded image. Quotable — because the image can be
+  // carried into the rebuilt quote — but only into an html body; there is no plain-text form
+  // of a picture, so a text-only edit still finds nothing to restore.
+  const IMAGE_ONLY_ORIGINAL = {
+    id: 'orig-image',
+    messageId: ['orig-msg@example.com'],
+    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
+    sentAt: '2026-06-15T03:29:02Z',
+    subject: 'Hello',
+    textBody: [],
+    htmlBody: [{ partId: 'oh', type: 'text/html' }],
+    bodyValues: { oh: { value: '<div><img src="cid:pic-1"></div>' } },
+    attachments: [{ partId: '2', blobId: 'blob-pic', type: 'image/png', size: 90, name: 'pic.png', disposition: 'inline', cid: 'pic-1' }],
+  };
+
+  // An original whose body points two images at paths only its own sender's origin could
+  // resolve. A quote is re-sent from a different message, so those references cannot come
+  // with it — the quote ships without them, and the count is what says so.
+  const RELATIVE_IMAGE_ORIGINAL = {
+    id: 'orig-relative',
+    messageId: ['orig-msg@example.com'],
+    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
+    sentAt: '2026-06-15T03:29:02Z',
+    subject: 'Hello',
+    textBody: [],
+    htmlBody: [{ partId: 'oh', type: 'text/html' }],
+    bodyValues: {
+      oh: { value: '<div>ORIGINAL HTML BODY<img src="/logo.png"><img src="//cdn.example.com/a.png"></div>' },
+    },
+    attachments: [],
+  };
+
   // Dispatch Email/get BY ID — the chosen draft fixture for the draft id, the original fixture
   // for 'orig-1'. A single-fixture mock would make the regenerate test quote the DRAFT as its
   // own original and prove nothing, so id-dispatch is mandatory here. 'orig-missing' → notFound
@@ -1164,6 +1196,8 @@ describe('updateDraft', () => {
         const id = params.ids?.[0];
         if (id === 'orig-1') return { methodResponses: [['Email/get', { list: [ORIGINAL_FOR_REPLY] }, 'email']] };
         if (id === 'orig-empty') return { methodResponses: [['Email/get', { list: [NONQUOTABLE_ORIGINAL] }, 'email']] };
+        if (id === 'orig-image') return { methodResponses: [['Email/get', { list: [IMAGE_ONLY_ORIGINAL] }, 'email']] };
+        if (id === 'orig-relative') return { methodResponses: [['Email/get', { list: [RELATIVE_IMAGE_ORIGINAL] }, 'email']] };
         if (id === 'orig-missing') return { methodResponses: [['Email/get', { list: [], notFound: ['orig-missing'] }, 'email']] };
         return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
       }
@@ -1274,6 +1308,59 @@ describe('updateDraft', () => {
     await assert.rejects(
       () => client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-empty' }),
       /has no quotable content.*noQuote/s,
+    );
+  });
+
+  it('keeps the quote of an original whose only content is an embedded image', async () => {
+    // Such a message used to count as having nothing to quote, so this keep was refused. The
+    // image is now carried into the rebuilt quote, which makes it real content.
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-image' });
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
+    assert.match(draft.bodyValues.html.value, /<img src="cid:ii-[0-9a-f]{32}@inline\.invalid"/);
+    // The image itself rides the rebuilt draft under that same identifier.
+    assert.equal(draft.attachments.some((a: any) => a.blobId === 'blob-pic' && a.disposition === 'inline'), true);
+  });
+
+  // A keep names an original this draft may never have quoted before, so the rebuilt quote can
+  // lose an image for the first time here. That loss gets the same sentence a fresh reply gets.
+  it('says how many images the rebuilt quote dropped for a reference form it cannot carry', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
+    const result = await client.updateDraft(
+      'draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-relative' },
+    );
+    assert.deepEqual(result.notes, [
+      '2 image(s) in the quoted message used a reference form this server cannot carry into' +
+      ' a quote and were dropped; the rest of the quote was kept.',
+    ]);
+  });
+
+  it('reports the same loss again on the next edit that rebuilds the same quote', async () => {
+    // Each edit rebuilds the quote from the original, so each edit loses them again. Repeating
+    // the disclosure is correct: the alternative is an edit that drops images and says nothing.
+    mockReplyUpdate(client, DUAL_REPLY);
+    const args = { htmlBody: '<p>edited twice</p>', originalEmailId: 'orig-relative' };
+    const first = await client.updateDraft('draft-1', args);
+    const second = await client.updateDraft('draft-1', args);
+    assert.deepEqual(second.notes, first.notes);
+  });
+
+  it('says nothing of the sort when the rebuilt quote carries every reference it found', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
+    const result = await client.updateDraft(
+      'draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-image' },
+    );
+    assert.equal(
+      (result.notes ?? []).some((n) => /reference form/.test(n)), false,
+    );
+  });
+
+  it('still refuses a TEXT-only keep of an image-only original — a picture has no plain-text quote', async () => {
+    mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: 'my edited reply', originalEmailId: 'orig-image' }),
+      /has no quotable content.*images.*plain-text body.*noQuote/s,
     );
   });
 

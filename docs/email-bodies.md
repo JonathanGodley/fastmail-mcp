@@ -249,16 +249,26 @@ bypassable in the same class as the superseded new-body scan (a caller who drops
 quote but includes a different/edited quote-shaped block would be silently accepted as
 "kept"). Requiring `originalEmailId` is the accepted price of having no bypass.
 
-**Keep path with a non-quotable original (loud-fail, not data-loss).** On the keep path the
-quote is *rebuilt from the named original*. If `originalEmailId` names a message with no
-quotable content (attachment-only / calendar-only / cid-image-only), `buildReplyBodies` returns
-the body unquoted — so a keep request would yield a quote-less body. The guard checks for a
-restored marker and rejects with an actionable error instead ("…has no quotable content… use
-noQuote…"). This is **reachable only by naming the wrong/empty original**: a draft naming its
-own original can't hit it, because a quote exists only if that original was quotable and JMAP
-message content is immutable. It loses no caller input (the new body is preserved) — it just
-turns a confusing quote-less result into a loud one. A UX safeguard on a self-inconsistent
-request, not a data-loss fix.
+**Keep path where nothing quotable reaches the written body (loud-fail, not data-loss).** On
+the keep path the quote is *rebuilt from the named original*. If nothing quotable lands in any
+body the edit writes, `buildReplyBodies` returns that body unquoted — so a keep request would
+yield a quote-less body. The guard checks for a restored marker and rejects with an actionable
+error instead ("…has no quotable content… use noQuote…"). Two routes reach it, and they are
+worth telling apart:
+
+- **The named message has nothing to quote at all** — attachment-only, calendar-only, or a
+  body of embedded images whose parts the draft can no longer carry. Reachable only by naming
+  the wrong/empty original: a draft naming its own original can't hit it, because a quote
+  exists only if that original was quotable and JMAP message content is immutable.
+- **The edit wrote only a plain-text body for an original whose content is images.** A
+  picture has no plain-text form, so there is nothing to quote on that side even though the
+  html quote would have carried it. The repair is to write `htmlBody` as well. Note this case
+  did not exist before embedded-image carry: a cid-image-only original used to be
+  unquotable outright, so it fell into the first route.
+
+Either way it loses no caller input (the new body is preserved) — it just turns a confusing
+quote-less result into a loud one. A UX safeguard on a self-inconsistent request, not a
+data-loss fix.
 
 **Recognition residual (accepted) — the widest edge.** If a stored quote is in a shape the
 markers don't recognize, `draftHasQuote` is false and the edit isn't flagged → a silent drop
@@ -420,8 +430,16 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   html only when the original has quotable html; a text-only original yields a TEXT
   forward — the "never fabricate HTML from plain text" rule above holds for the tool's
   own default choice. An attachment-only original gets the header block alone. The
-  reproduced html runs through the same `sanitizeForQuote` floor as reply quotes
-  (script/style/handlers stripped, real http(s) images kept, `cid:` images dropped).
+  reproduced html runs through the same sanitiser floor as reply quotes
+  (script/style/handlers stripped, real http(s) images kept).
+- **Quotability now includes embedded images**, which shifts that default. An original
+  whose body is nothing but `<img src="cid:…">` used to have no quotable html — the
+  sanitiser dropped every image, leaving a visually empty string — so a note-less forward of
+  one fell through to the TEXT branch and reproduced nothing at all. Such a message is
+  quotable when at least one of its references would really embed (resolves to exactly one
+  part, declared an image, carrying a blob), so a note-less forward of it now emits HTML and
+  shows the picture. The flip is deliberate: the default should reproduce the message, and
+  for that message the only faithful reproduction is html.
 - **Threading:** no In-Reply-To/References — a forward starts a new conversation
   (mainstream-client convention, confirmed by the official client). Instead the original's
   Message-ID is recorded as `X-Forwarded-Message-Id` (Thunderbird prior art; **Fastmail's
@@ -476,7 +494,7 @@ above). The remaining gap is a foreign forward draft with **neither** the header
 nor a recognized dashed/div-cite shape — the guard is inert there, same accepted posture
 (and same README surfacing) as the reply guard's foreign-quote residual. One structural
 sub-case: Gmail's forward *html* cannot be marker-recognized at all — its wrapper is
-class+text-keyed, and `hasForwardMarker` must key only on markup `sanitizeForQuote` strips
+class+text-keyed, and `hasForwardMarker` must key only on markup the quote sanitiser strips
 from embedded content (attribute-based), or pasted/quoted forwards would false-trip it.
 Gmail's *text* dashed line IS recognized.
 

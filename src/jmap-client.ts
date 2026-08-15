@@ -1664,6 +1664,12 @@ export class JmapClient {
     // handed to them. They rewrite; they never mint.
     let mintedParts: MintedInlinePart[] = [];
     let quoteImageMappings: CidMapping[] = [];
+    // Images the rebuilt quote had to drop because of HOW the original referenced them (a
+    // relative or protocol-relative src, which resolves against an origin this draft does not
+    // have). Only the builder's rewriting pass can see them, so it reports the count back and
+    // this carries it to the note ledger below — a first-time keep of a DIFFERENT original is
+    // a first-time loss, and it would otherwise happen in silence.
+    let droppedUnsupportedQuoteImages = 0;
     let rebuiltQuote = false;
     // How the surrounding refusal or note names the block being kept or dropped.
     let keepNoun = 'the quote';
@@ -1746,20 +1752,24 @@ export class JmapClient {
               });
           if (wroteHtml) updates.htmlBody = rebuilt.htmlBody;
           if (wroteText) updates.textBody = rebuilt.textBody;
+          droppedUnsupportedQuoteImages = rebuilt.quoteImages?.droppedUnsupportedImages ?? 0;
           if (guardVariant === 'reply') {
-            // Loud-fail a self-inconsistent keep request: the caller asked to KEEP via
-            // originalEmailId, but the named message has no quotable content (attachment-only /
-            // calendar-only / cid-image-only), so buildReplyBodies passed the body through
-            // unquoted. This is reachable only by naming the WRONG/empty original — a draft naming
-            // its own original can't hit it (a quote exists only if that original was quotable, and
-            // JMAP message content is immutable). It loses no caller input (the new body is kept);
-            // it just turns a confusing quote-less result into an actionable error instead of a
-            // silent one. The `||` accepts the edit if ANY written format kept a marker, so a
-            // partially-quotable original still keeps.
+            // Loud-fail a keep request that produced no quote: the caller asked to KEEP via
+            // originalEmailId, but nothing quotable reached any body this edit wrote, so the
+            // builder passed the body through unquoted. Two routes reach it. The named message
+            // may have no quotable content at all — attachment-only, calendar-only, or a body
+            // of embedded images this draft no longer carries the parts for (a message whose
+            // content IS its images is quotable while the images can be shown, and stops being
+            // so when they cannot). Or the edit wrote only a plain-text body for an original
+            // whose content is images: an image has no plain-text form, so there is nothing to
+            // quote there even when the html quote would have carried it. It loses no caller
+            // input (the new body is kept); it just turns a confusing quote-less result into an
+            // actionable error instead of a silent one. The `||` accepts the edit if ANY
+            // written format kept a marker, so a partially-quotable original still keeps.
             const restored = (wroteHtml && hasQuoteMarker(updates.htmlBody))
               || (wroteText && hasTextQuoteMarker(updates.textBody));
             if (!restored) {
-              throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' has no quotable content (e.g. an attachment-only or calendar-only message), so the quote can't be restored. Check the id, or use noQuote to drop the quote deliberately.`);
+              throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' has no quotable content for the body/bodies this edit wrote, so the quote can't be restored. Either the message has nothing to quote (an attachment-only or calendar-only message), or its content is images and this edit wrote only a plain-text body — images cannot be quoted as text. Check the id, write htmlBody as well, or use noQuote to drop the quote deliberately.`);
             }
           }
           // Forward variant: no restored-check — buildForwardBodies always emits at least
@@ -1940,6 +1950,7 @@ export class JmapClient {
       : null;
 
     const ledger = new InlineNoteLedger();
+    ledger.countRefs('droppedUnsupportedImages', droppedUnsupportedQuoteImages);
     const carriedParts: AttachmentPart[] = [];
     if (reconciled) {
       reconciled.parts.forEach(({ part, action }, index) => {

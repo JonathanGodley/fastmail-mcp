@@ -110,6 +110,28 @@ them a broad probe — acceptable as an explicit operator choice).
 These are the honest limits of a path guard; the opt-in gate and confinement are the
 primary defense, not a claim that exfiltration is impossible once enabled.
 
+Two more residuals of a different kind, recorded here so the whole accepted set reads in one
+place. Both belong to the embedded-image carry (#13), which moves message parts outward
+without reading a byte off disk, so no path guard is in play at all:
+
+- **No count or size cap on carried images.** A quote or forwarded block carries every
+  image the body it reproduces displays. There is no ceiling on how many, and none on how
+  large: the parts are re-referenced by `blobId` rather than uploaded, so
+  `MAX_ATTACHMENT_BYTES` — which caps only local reads — never applies (same footing as the
+  `forward_email` carry sizes above). Fastmail's own message-size limit is the only bound,
+  and an oversized send fails loudly server-side. Not capped because a cap would silently
+  mangle the one thing the feature exists to preserve, and because the caller already chose
+  to quote or forward that specific message.
+- **SVG is carried inline like any other image.** A part the sender declared `image/svg+xml`
+  and the body displays is carried into the composed message. SVG is a scriptable document
+  format, so this re-sends attacker-authored markup under the user's own From — the quote
+  sanitizer governs the *quoting* html this server writes, never the bytes of a part it
+  carries by reference. It is worth stating that reply carry makes this **default-on for
+  every reply to a message that displays an SVG**: no flag turns it on, and only
+  `quoteOriginal: false` turns it off. Accepted because the receiving client, not this
+  server, decides whether to render an SVG attachment, and because singling the type out
+  would be a content filter this server does not otherwise attempt.
+
 ### edit_draft attachment model
 
 `edit_draft` carries the existing attachments across the immutable-email recreate and then
@@ -212,11 +234,21 @@ the wording rather than pointing the caller at a parameter that cannot work on t
 ## `originalEmailId` is an in-account read-and-embed primitive (accepted residual)
 
 `reply_email`, `forward_email`, and `edit_draft`'s keep path all take an `originalEmailId`
-and fetch that message's body and embed it (sanitized via `sanitizeForQuote`) into
+and fetch that message's body and embed it (sanitized — see the quote sanitizer below) into
 a draft the caller may then send. Stated plainly: this lets a caller move one message's
 content into outgoing mail addressed to arbitrary recipients under the user's own `From`. A
 prompt-injected agent could use it to exfiltrate the content of any message in the account by
 quoting it into a reply it sends to an attacker-chosen address.
+
+**The reply path now moves BYTES, not only text (#13).** Before embedded-image support, a
+reply carried zero parts of the original — the quote was text and markup, and an embedded
+image was simply lost. It now carries the image parts the quoted body displays, re-referenced
+from the account's own blob store, so a reply can put binary content in front of recipients
+that the caller never attached and this server never read off disk. `FASTMAIL_ATTACH_DIR`
+does not gate it: that opt-in governs reading local files, and nothing local is read here.
+This is a genuine widening of the primitive above and is called out as its own line rather
+than folded into it. The escape is `quoteOriginal: false`, which drops the whole quote; both
+`reply_email`'s description and its `quoteOriginal` parameter say so.
 
 The id is **trusted and unscoped within the connected account** — it may name *any* message,
 deliberately, so a caller can correct a draft built against the wrong original. It is **never
@@ -226,11 +258,56 @@ reach** (the fetch is scoped to `session.accountId`).
 
 This introduces **no new capability class** versus the already-shipped `reply_email`, which
 quotes any `originalEmailId` the same way; `edit_draft`'s keep path just reuses it. The
-embedded html is run through `sanitizeForQuote` (script/style/handlers/unscoped attributes
+embedded html is run through the quote sanitizer (script/style/handlers/unscoped attributes
 stripped, schemes pinned) — a safety floor for re-sending under the user's `From`, not a
 privacy control. Documented here as an accepted residual: the mitigation for misuse is the
 same opt-in/authorization posture that governs sending mail at all, not a restriction on which
 in-account message may be quoted.
+
+### What a quote or forwarded block carries, and under what identity (#13)
+
+**The bound on what is carried, in full.** A part is carried into a body this server composes
+when the body it is reproducing references it with a `cid:` image reference AND the part
+declares itself `image/*`. That is the entire filter. The content type is *sender-declared*
+metadata, exactly like a filename: nothing is sniffed, nothing verifies the declaration, and
+a sender who labels an arbitrary file `image/png` gets it carried. There is no size bound and
+no count bound (see the residual above for why). On `forward_email` the carry happens even
+with `includeOriginalAttachments: false`, because a referenced image is body content rather
+than an attached file, and a forward missing it reproduces a message with a hole in it —
+short of not forwarding the message at all, there is no way to reproduce the body and leave
+those images behind. A part that is referenced but *not* declared an image is not force-
+carried; it falls to the ordinary attachment set the flag governs.
+
+**Identity is a keyless shape, deliberately.** Each carried part is attached under a
+Content-ID this server mints: `ii-<32 hex>@inline.invalid`, a 128-bit CSPRNG label under a
+domain RFC 2606 reserves as permanently unresolvable. "Is this a part I manage?" is answered
+by testing that shape and nothing else — there is no signature and no server secret. Signing
+it would fail in the dangerous direction: rotating or losing the key would reclassify every
+previously-managed part as foreign, and a body edit that should have *removed* an image would
+start *sending* it. The shape check fails the safe way instead. Any change to how the
+identifier is built must change the `ii-` prefix, so old and new forms stay distinguishable.
+
+**The foreign-part walk that residual buys.** A message this server did not compose can carry
+a part whose Content-ID coincidentally — or deliberately — matches that shape. The odds of an
+accident are 2^-128; a forger has to try. When such a draft is later rebuilt (an `edit_draft`
+that rewrites or clears the body), the classifier treats that part as server-managed, so an
+unreferenced one is **deleted rather than degraded to an attachment**. What a forger achieves
+is therefore the removal of their own content from a draft, and the bytes survive in Trash
+(#65) either way. Accepted at those odds, with the walk written out here so the next reader
+does not have to rederive why the safe direction is the deleting one. The same reasoning is
+why a foreign Content-ID of that shape is **never carried verbatim**: parts pooled onto a
+forward have their Content-ID stripped entirely, so a planted identifier cannot ride into a
+message this server composed.
+
+**Sender-supplied strings in this server's prose.** Content-IDs, filenames and content types
+all appear in the notes and refusals these paths emit, and all three are attacker-controlled
+on received mail. They are rendered as *quoted data*: control and format characters (which
+can reorder or hide surrounding text), line and paragraph separators, and the double quote
+that would close the quoted span are removed, space runs collapse, and the value is capped by
+code point with an explicit ellipsis. Every call site wraps the result in double quotes, so
+hostile text reads as data and never as the server speaking. The one exception is deliberate:
+a Content-ID that passes the authorable vet is echoed raw inside a copy-and-paste repair
+clause, which is safe by construction — that vet admits only `[A-Za-z0-9._-]`.
 
 Transmission also **writes two keyword flags** (`$answered`+`$seen`, or
 `$forwarded`+`$seen`) after a send succeeds (#52/#54, #30, #60). The compose surface is

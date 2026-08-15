@@ -1,7 +1,7 @@
-import sanitizeHtml from 'sanitize-html';
 import { htmlToText, isBlank } from './body-format.js';
 import { formatAddress, formatReplyDate } from './email-formatter.js';
-import { sanitizeQuoteHtml } from './inline-images.js';
+import { buildCidMap, resolveCidRefs, sanitizeQuoteHtml } from './inline-images.js';
+import type { CidMapping, CidPart, MintedInlinePart } from './inline-images.js';
 
 // Build the reply bodies (caller's new text + an attributed, top-posted quote of the
 // original), matching the Fastmail web client with a portable quote-bar. createDraft adds
@@ -32,45 +32,126 @@ function stripSentinels(s: string): string {
   return s.replace(/\n?\[body truncated\]/g, '').replace(/\n?\[encoding issues detected\]/g, '');
 }
 
-// Sanitize an original's html for the HTML reply quote. Allow formatting tags; drop
-// script/style/handlers/wrappers and ALL unscoped attributes (no global '*' key, so
-// style=/class=/on*= are removed — style is the classic CSS-exfil/mXSS vector); pin
-// schemes; and DROP an <img> whose src isn't a usable http(s) URL (cid:/data: get
-// scheme-stripped to an empty src, which we remove entirely so the quote never carries a
-// broken-image placeholder). This is purely a safety floor — we re-send under the user's
-// From — matching what mainstream clients emit; it is not a tracker-pixel filter.
+// Both quote builders sanitize the original's html through the shared two-pass sanitizer in
+// src/inline-images.ts. Its safety floor is the same one this file has always applied —
+// formatting tags kept, script/style/handlers and ALL unscoped attributes dropped (no global
+// '*' key; style is the classic CSS-exfil/mXSS vector), schemes pinned, and any <img> whose
+// src did not survive removed entirely so a quote never shows a broken-image placeholder.
+// The floor is what makes it safe to re-send someone else's markup under the user's own
+// From; it is not a tracker-pixel filter.
 //
-// A cidMap turns this into the mapping pass instead: each embedded-image reference the map
-// resolves is rewritten to the Content-ID the caller is attaching, so the quote displays the
-// image rather than losing it. Callers that pass no map (every compose path today) get the
-// shipped behaviour byte for byte — the two sanitizers apply the same tag/attribute floor,
-// and the map-less configuration admits no cid scheme at all.
-function sanitizeForQuote(html: string, cidMap?: Map<string, string>): string {
-  if (cidMap) return sanitizeQuoteHtml(html, { mode: 'map', cidMap }).html;
-  return sanitizeHtml(html, {
-    allowedTags: [
-      'p', 'div', 'span', 'br', 'b', 'i', 'strong', 'em', 'u', 'a', 'ul', 'ol', 'li',
-      'blockquote', 'pre', 'code', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-      'table', 'thead', 'tbody', 'tr', 'td', 'th', 'img',
-    ],
-    allowedAttributes: { a: ['href'], img: ['src', 'alt'] },
-    allowedSchemes: ['http', 'https', 'mailto'],
-    allowProtocolRelative: false,
-    exclusiveFilter: (frame) => frame.tag === 'img' && !frame.attribs.src,
-  });
-}
+// What the two passes add is WHICH embedded images the quote can show:
+//
+//   collect — reports the references the original's body makes and rewrites nothing. Its
+//             html is exactly what the sanitizer alone would emit (no cid scheme is
+//             admitted), so it is the input the quotability check reads.
+//   map     — rewrites each reference that resolved to a part into the Content-ID this
+//             draft attaches for it, so the quote displays the image instead of losing it.
+//
+// The passes run in that order for a reason: minting an identifier commits this call to
+// attaching a part, and a part nothing references is a stray file on the finished message.
+// So pass one decides whether an html quote ships at all, and pass two runs only on a branch
+// that really ships one.
 
 // "Quotable" = the sanitized html has real visible content: non-empty text OR a surviving
-// (http/https) <img>. Content-based, NOT a string trim: a cid:-image-only original
-// sanitizes to e.g. <div></div> (non-empty as a string, visually empty), which must NOT
-// count as quotable or we'd emit an orphan "On … wrote:" over an empty blockquote.
-// Placeholder-suppressed on purpose: this reads the SANITIZED html, where an embedded image
-// that was not mapped has already been dropped. A placeholder here would count an image the
-// quote does not carry as quotable content, and produce an attribution line over a quote
-// that shows nothing.
+// <img>. Content-based, NOT a string trim: an original whose only content is an embedded
+// image sanitizes in COLLECT mode to e.g. <div></div> (non-empty as a string, visually
+// empty), which must not count on its own or we would emit an orphan "On … wrote:" over an
+// empty blockquote. Such an original becomes quotable through the separate resolvability
+// test below — because a reference that resolves to a carriable part is content the quote
+// really will show. Placeholder-suppressed on purpose: this reads sanitized html, where an
+// image that was not mapped has already been dropped, and a placeholder would count an image
+// the quote does not carry as quotable content.
 function isQuotable(sanitized: string): boolean {
   if (!isBlank(htmlToText(sanitized, 'suppress'))) return true;
   return /<img\b[^>]*\bsrc\s*=/i.test(sanitized);
+}
+
+/**
+ * What a compose path gives a quote builder so it can resolve the original's embedded images
+ * itself.
+ *
+ * Present on the compose paths, where no draft exists yet and the builder owns both passes.
+ * Absent on the edit path, which resolves references against the draft's own surviving parts
+ * before calling in and passes the finished `cidMap` instead — there the builder only
+ * rewrites, and never mints.
+ */
+export interface QuoteImageInput {
+  /** The original's parts (the gated union). Their Content-IDs are compared literally. */
+  sourceParts: CidPart[];
+  /** Injected so callers' tests are deterministic. */
+  mint?: () => string;
+}
+
+/** What the builder decided about the original's embedded images. */
+export interface QuoteImageOutcome {
+  /**
+   * Parts to attach so the quote can display them, each under a freshly minted Content-ID.
+   * Empty whenever no html quote ships — a text-only branch mints nothing.
+   */
+  minted: MintedInlinePart[];
+  /** One entry per reference the quote embeds, carrying the part it came from. */
+  mappings: CidMapping[];
+  /** Distinct parts the references resolved to, in first-reference order. */
+  resolvedParts: CidPart[];
+  /** References that matched no part at all. Counted separately from parts, never summed. */
+  unresolvedRefs: string[];
+  /** `data:`-URI images in the original's body, which are not carried. */
+  droppedDataImages: number;
+  /**
+   * Images the shipped quote dropped because their src was neither an embedded-image
+   * reference nor an http(s) URL (a relative path, a protocol-relative URL, an exotic
+   * scheme). Non-zero only on a branch that actually rewrote the quote's html.
+   */
+  droppedUnsupportedImages: number;
+  /** Whether a quote reproducing the original's own html ships. */
+  htmlQuoteShips: boolean;
+}
+
+const NO_QUOTE_IMAGES: QuoteImageOutcome = {
+  minted: [], mappings: [], resolvedParts: [], unresolvedRefs: [],
+  droppedDataImages: 0, droppedUnsupportedImages: 0, htmlQuoteShips: false,
+};
+
+/** An outcome that carried nothing. Exported as the fallback for a caller that always asks. */
+export function emptyQuoteImages(): QuoteImageOutcome {
+  return { ...NO_QUOTE_IMAGES, minted: [], mappings: [], resolvedParts: [], unresolvedRefs: [] };
+}
+
+/**
+ * Pass one over an original's html: what it references, what those references resolve to,
+ * and whether the html is worth quoting at all.
+ *
+ * `quotable` is the disjunct that makes an image-only original quotable: either the html has
+ * visible content of its own, or at least one of its references would really embed. The
+ * second half deliberately tests EMBEDDABILITY rather than mere resolution — a reference
+ * whose Content-ID names two parts, or whose part has no blob, cannot be carried, so counting
+ * it would produce an attribution over a quote showing nothing and leave the shortfall
+ * sentence describing a quote that never shipped.
+ */
+function collectQuoteRefs(
+  origHtml: string,
+  images: QuoteImageInput | undefined,
+  cidMap: Map<string, string> | undefined,
+): { html: string; refs: string[]; droppedDataImages: number; quotable: boolean; resolvedParts: CidPart[]; unresolvedRefs: string[] } {
+  if (!origHtml) {
+    return { html: '', refs: [], droppedDataImages: 0, quotable: false, resolvedParts: [], unresolvedRefs: [] };
+  }
+  const collected = sanitizeQuoteHtml(origHtml, { mode: 'collect' });
+  const resolution = images ? resolveCidRefs(collected.refs, images.sourceParts ?? []) : null;
+  // On the edit path the resolution already happened elsewhere: the map holds exactly the
+  // references that resolved to a carriable part, so membership answers the same question.
+  const resolvesSomething = resolution
+    ? resolution.embeddableRefs.length > 0
+    : collected.refs.some((r) => cidMap?.has(r) === true);
+  return {
+    html: collected.html,
+    refs: collected.refs,
+    droppedDataImages: collected.droppedDataImages,
+    quotable: isQuotable(collected.html) || resolvesSomething,
+    resolvedParts: resolution?.resolvedParts ?? [],
+    unresolvedRefs: resolution?.unresolvedRefs ?? [],
+  };
 }
 
 // Plain text → escaped html block with <br> line breaks (for quoting a text-only original).
@@ -159,33 +240,54 @@ export function buildReplyBodies(input: {
   htmlBody?: string;        // caller's new html
   quoteOriginal: boolean;
   timezone?: string;
-  // Embedded-image reference -> the Content-ID the rebuilt quote should emit for it. Omitted
-  // on every compose path (no draft exists yet to resolve references against), in which case
-  // the quote is built exactly as it always was.
+  // Embedded-image reference -> the Content-ID the rebuilt quote should emit for it. The
+  // EDIT path's channel: it resolved the references against the draft's own surviving parts
+  // and hands the finished map in, so this builder only rewrites.
   cidMap?: Map<string, string>;
-}): { textBody?: string; htmlBody?: string } {
-  const { original, textBody, htmlBody, quoteOriginal, timezone, cidMap } = input;
+  // The COMPOSE path's channel: no draft exists yet, so the builder runs both passes itself
+  // and reports what it decided on `quoteImages` in the result.
+  quoteImages?: QuoteImageInput;
+}): { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } {
+  const { original, textBody, htmlBody, quoteOriginal, timezone, cidMap, quoteImages } = input;
 
   // Return only the formats the caller supplied (createDraft adds the text fallback later).
-  const passthrough = () => ({
+  // The outcome rides along only for a caller that asked this builder to resolve images, so
+  // the result shape is unchanged for every other caller.
+  const passthrough = (images: QuoteImageOutcome = emptyQuoteImages()) => ({
     ...(textBody !== undefined && { textBody }),
     ...(htmlBody !== undefined && { htmlBody }),
+    ...(quoteImages && { quoteImages: images }),
   });
 
+  // quoteOriginal:false drops the whole quote, and with it every image the quote would have
+  // carried. There is no quote-text-without-images setting: the images ARE the quoted body.
   if (!quoteOriginal) return passthrough();
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
-  // Determine quotable content (content-based, not raw presence).
-  const sanitizedHtml = origHtml ? sanitizeForQuote(origHtml, cidMap) : '';
-  const htmlQuotable = sanitizedHtml ? isQuotable(sanitizedHtml) : false;
+  // PASS 1 — collect. Decides quotable content (content-based, not raw presence) and, for a
+  // compose path, which references resolve. Nothing is minted here.
+  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
 
-  // No quotable original (attachment-only / cid-image-only / ICS-only): skip the quote AND
-  // the attribution — no orphan "On … wrote:" over an empty quote.
-  if (!htmlQuotable && !textQuotable) return passthrough();
+  const carriedNothing = (): QuoteImageOutcome => ({
+    minted: [],
+    mappings: [],
+    resolvedParts: collected.resolvedParts,
+    unresolvedRefs: collected.unresolvedRefs,
+    droppedDataImages: collected.droppedDataImages,
+    // No html quote ships on this branch, so nothing was rewritten and nothing dropped.
+    droppedUnsupportedImages: 0,
+    htmlQuoteShips: false,
+  });
+
+  // No quotable original (attachment-only / ICS-only, or an image-only original whose images
+  // cannot be carried): skip the quote AND the attribution — no orphan "On … wrote:" over an
+  // empty quote. Whatever the references pointed at is reported as dropped by the caller.
+  if (!htmlQuotable && !textQuotable) return passthrough(carriedNothing());
 
   // Attribution in LOCAL time; the date is omitted (never "Invalid Date") when the original
   // has no usable sentAt/receivedAt, and the line drops the leading "On " + comma in that case.
@@ -194,13 +296,29 @@ export function buildReplyBodies(input: {
   const date = formatReplyDate(original?.sentAt ?? original?.receivedAt, timezone);
   const attribution = date ? `On ${date}, ${name} wrote:` : `${name} wrote:`;
 
-  const out: { textBody?: string; htmlBody?: string } = {};
+  const out: { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } = {};
 
-  // Whether this reply ships an html quote at all — the text side's image policy turns on
-  // it. When it does, an embedded image the quote carries is something the reader can look
-  // at, so the text alternative may say an image is there; when it does not, nothing carries
-  // the image and a placeholder would describe an absent thing.
-  const htmlQuoteShips = htmlBody !== undefined;
+  // Whether a quote reproducing the original's own html ships. Two things turn on it: only
+  // such a quote can display an embedded image, and the text side's image policy follows —
+  // when one ships, an image the quote carries is something the reader can look at, so the
+  // text alternative may say an image is there; when none does, a placeholder would describe
+  // an absent thing.
+  const htmlQuoteShips = htmlBody !== undefined && htmlQuotable;
+
+  // PASS 2 — map. Runs ONLY on a branch that ships an html quote, so an identifier is minted
+  // only when a body exists to reference it.
+  const resolved = htmlQuoteShips && quoteImages
+    ? buildCidMap({
+        refs: collected.refs,
+        sourceParts: quoteImages.sourceParts ?? [],
+        ...(quoteImages.mint && { mint: quoteImages.mint }),
+      })
+    : null;
+  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const mapped = htmlQuotable && quoteMap
+    ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
+    : null;
+  const sanitizedHtml = htmlQuotable ? (mapped ? mapped.html : collected.html) : '';
 
   if (textBody !== undefined) {
     // text quote source: the original's text, else a readable conversion of its html. The
@@ -209,15 +327,41 @@ export function buildReplyBodies(input: {
     // original, embedded images or not, because the quote floor drops tags that carry text.
     const textSource = pick(
       origText,
-      htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', cidMap),
+      htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', quoteMap),
     );
-    out.textBody = `${textBody ?? ''}\n\n${attribution}\n${quoteText(textSource)}`;
+    // A blank source gets no attribution and no quote. An "On … wrote:" over an empty "> "
+    // line describes a quote that is not there, and it would arm this server's own text
+    // quote marker, so the next edit of the draft would be challenged over a quote it has
+    // never had. (The forward builder has always had this gate; the reply builder gains it.)
+    out.textBody = isBlank(textSource)
+      ? textBody
+      : `${textBody ?? ''}\n\n${attribution}\n${quoteText(textSource)}`;
   }
 
   if (htmlBody !== undefined) {
     // rich quote: prefer the sanitized html; else a text-only original → escaped block.
     const htmlSource = htmlQuotable ? sanitizedHtml : textToHtmlBlock(origText);
     out.htmlBody = `${htmlBody ?? ''}<div><br></div><div>${escapeHtml(attribution)}</div>${QUOTE_OPEN}${htmlSource}</blockquote>`;
+  }
+
+  // Read off the pass that produced the html actually shipped: only that pass drops a
+  // reference form it cannot carry, and only when its output is what ships.
+  const droppedUnsupportedImages = htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0;
+
+  // Reported when the caller asked about the original's images, and ALSO whenever there is a
+  // loss only this pass can see. The edit path supplies a Content-ID map rather than parts —
+  // it resolved its own images already — so it asks for no outcome; without this second arm
+  // its quote could drop an image and say nothing.
+  if (quoteImages || droppedUnsupportedImages > 0) {
+    out.quoteImages = {
+      minted: resolved?.minted ?? [],
+      mappings: resolved?.mappings ?? [],
+      resolvedParts: collected.resolvedParts,
+      unresolvedRefs: collected.unresolvedRefs,
+      droppedDataImages: collected.droppedDataImages,
+      droppedUnsupportedImages,
+      htmlQuoteShips,
+    };
   }
 
   return out;
@@ -232,7 +376,7 @@ export function buildReplyBodies(input: {
 // line, then From/To/Cc/Subject/Date header lines (Cc only when present), then
 // the original below a blank line. The HTML wrapper is the platform's own
 // <div type="cite">. Reply markers are <blockquote>-anchored (hasQuoteMarker),
-// so the two marker families are disjoint by tag name, and sanitizeForQuote
+// so the two marker families are disjoint by tag name, and the quote sanitizer
 // strips type= from embedded divs, so a forward quoted inside a reply (or
 // pasted sanitized forward HTML) can't false-trip hasForwardMarker.
 const FORWARD_MARKER_LINE = '----- Original message -----';
@@ -277,16 +421,22 @@ export function buildForwardBodies(input: {
   original: any;      // raw JMAP email from getEmailById (body lists + bodyValues + addresses)
   textBody?: string;  // caller's note, placed above the block
   htmlBody?: string;
-  // See buildReplyBodies: absent on every compose path, supplied by edit_draft's rebuild.
+  // See buildReplyBodies: the edit path's rewrite-only channel.
   cidMap?: Map<string, string>;
-}): { textBody?: string; htmlBody?: string } {
-  const { original, textBody, htmlBody, cidMap } = input;
+  // See buildReplyBodies: the compose path's channel, where this builder runs both passes.
+  quoteImages?: QuoteImageInput;
+}): { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } {
+  const { original, textBody, htmlBody, cidMap, quoteImages } = input;
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
-  const sanitizedHtml = origHtml ? sanitizeForQuote(origHtml, cidMap) : '';
-  const htmlQuotable = sanitizedHtml ? isQuotable(sanitizedHtml) : false;
+
+  // PASS 1 — collect (see buildReplyBodies). An original whose body is nothing but embedded
+  // images becomes quotable here, which is also what flips this tool's no-caller-body default
+  // from a text forward to an html one for such a message.
+  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
 
   const lines = forwardHeaderLines(original);
@@ -300,10 +450,25 @@ export function buildForwardBodies(input: {
   // Which formats this forward emits is decided at the bottom of this function; the text
   // side's image policy needs the html half of that decision up front, for the same reason
   // the reply builder does — a placeholder must not describe an image no format carries.
-  const htmlBlockShips = htmlBody !== undefined || (textBody === undefined && htmlQuotable);
+  const htmlQuoteShips = htmlQuotable && (htmlBody !== undefined || textBody === undefined);
+
+  // PASS 2 — map, on a branch that ships the original's html and nowhere else.
+  const resolved = htmlQuoteShips && quoteImages
+    ? buildCidMap({
+        refs: collected.refs,
+        sourceParts: quoteImages.sourceParts ?? [],
+        ...(quoteImages.mint && { mint: quoteImages.mint }),
+      })
+    : null;
+  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const mapped = htmlQuotable && quoteMap
+    ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
+    : null;
+  const sanitizedHtml = htmlQuotable ? (mapped ? mapped.html : collected.html) : '';
+
   const textSource = pick(
     origText,
-    htmlToText(origHtml, htmlBlockShips ? 'resolve' : 'suppress', cidMap),
+    htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', quoteMap),
   );
   const htmlSource = htmlQuotable ? sanitizedHtml : (textQuotable ? textToHtmlBlock(origText) : '');
 
@@ -325,19 +490,34 @@ export function buildForwardBodies(input: {
   //     html; a text-only original yields a TEXT forward (the body model's
   //     "never fabricate HTML from plain text" holds for the tool's own
   //     default choice — see docs/email-bodies.md).
-  const out: { textBody?: string; htmlBody?: string } = {};
+  const out: { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } = {};
   if (htmlBody !== undefined) out.htmlBody = composeHtml(htmlBody);
   if (textBody !== undefined) out.textBody = composeText(textBody);
   if (htmlBody === undefined && textBody === undefined) {
     if (htmlQuotable) out.htmlBody = composeHtml(undefined);
     else out.textBody = composeText(undefined);
   }
+  // Only the rewriting pass drops a reference form it cannot carry, and only its output
+  // ships an html forwarded block. Reported on the same two arms as the reply builder's —
+  // see the comment there for why a loss is reported even when nothing asked.
+  const droppedUnsupportedImages = htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0;
+  if (quoteImages || droppedUnsupportedImages > 0) {
+    out.quoteImages = {
+      minted: resolved?.minted ?? [],
+      mappings: resolved?.mappings ?? [],
+      resolvedParts: collected.resolvedParts,
+      unresolvedRefs: collected.unresolvedRefs,
+      droppedDataImages: collected.droppedDataImages,
+      droppedUnsupportedImages,
+      htmlQuoteShips,
+    };
+  }
   return out;
 }
 
 // True if html carries a forwarded-message wrapper: a <div type="cite"> — the
 // canonical Fastmail forward wrapper, which buildForwardBodies also emits.
-// Attribute-keyed ONLY, never text-keyed: sanitizeForQuote strips type= from
+// Attribute-keyed ONLY, never text-keyed: the quote sanitizer strips type= from
 // embedded content, so a reply quoting a forward (or pasted sanitized forward
 // HTML) loses the attribute and cannot false-trip this. Disjoint from
 // hasQuoteMarker by tag name (div vs blockquote) — the official Fastmail client

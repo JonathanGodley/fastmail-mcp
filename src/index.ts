@@ -382,6 +382,21 @@ const UNION_SCOPE_DESC =
 const INLINE_PAIR_DESC =
   'Attachment entries carry two extra keys for embedded images. isInline:true means EITHER the server routed the part into the message body OR the sender marked it Content-Disposition: inline — so it covers body-displayed images, and also an ordinary file the sender merely labelled inline. `cid` is that part\'s Content-ID: the value a cid: reference in the HTML body points at, and the handle download_attachment accepts as cid:<value>; a part the body actually references has one. Both keys are omitted when they do not apply (isInline never appears as false). Both are SENDER-DECLARED metadata, exactly like `name` and `contentType`: a sender chooses whether a part is marked inline and what it is called, so isInline is a rendering hint, never a reason to treat a part as harmless or to skip inspecting it.';
 
+// Shared verbatim by every tool that shows a caller a Content-ID this server manages
+// (get_email and get_email_attachments both emit `cid` values, and a quoted image's is one
+// of these), so the warning cannot appear on one read and be missing from the other. It
+// matters because the value looks perfectly stable in a single response: it survives edits,
+// and only a dropped-and-re-added quote regenerates it. The compose tools reject an authored
+// reference to one outright; this is why. (#13)
+const MINTED_CID_NONDURABILITY =
+  'Server-managed identifiers for quoted images are reused across edits but regenerated when the quote is dropped and re-added — never author references to them.';
+
+// The bound on what a quoted or forwarded body pulls along with it, shared verbatim by
+// reply_email and forward_email. Stated on both because it is a bytes-out disclosure and
+// the two tools differ only in the escape hatch they offer, never in the bound itself (#13).
+const CARRIED_IMAGE_BOUND_DESC =
+  'What is carried is bounded only by this: a part is carried when the body references it AND the sender declared it an image (image/*). The content type is sender-declared metadata — nothing is sniffed and nothing verifies the claim — and there is no size limit and no count limit, because the parts are re-referenced by blob rather than uploaded.';
+
 // Shared verbatim by the compact list/search reads (list_emails, search_emails,
 // get_recent_emails) and by get_thread's default mode, which fetch no attachment parts
 // at all. Without this, hasAttachment:false reads as "no images" — and Fastmail's
@@ -462,7 +477,7 @@ const TOOLS = [
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + MINTED_CID_NONDURABILITY + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -489,7 +504,7 @@ const TOOLS = [
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address. You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; requires FASTMAIL_ATTACH_DIR).',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and is re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE QUOTE by default, and are re-sent to this reply\'s recipients — so a reply can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' The only way to send none of it is quoteOriginal=false, which omits the whole quote; there is no setting for quote text without its images. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the reply ships an HTML body — a text-only reply drops them, and the result says how many. You can also embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one does require FASTMAIL_ATTACH_DIR).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -522,15 +537,15 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Must be a plain string: a body wrapped in a CDATA section is rejected.',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. NOTE: a reply with no htmlBody quotes the original as plain text, which cannot show the images the original displayed — they are dropped, and the result says how many. Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. In that derivation an image contributes its alt text; an embedded (cid:) image with no alt contributes \"[image]\", so a picture-only message still has a readable text part, while a remote image with no alt contributes nothing. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. In that derivation an image contributes its alt text; an embedded (cid:) image with no alt contributes \"[image]\", so a picture-only message still has a readable text part, while a remote image with no alt contributes nothing. Supplying it is also what lets the quote show the images the original displayed. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
             },
             quoteOriginal: {
               type: ['boolean', 'string'],
-              description: lenientBool('Append the original message as an attributed quote (default true). Set false to omit it.'),
+              description: lenientBool('Append the original message as an attributed quote (default true). Set false to omit it — the WHOLE quote, its images included. There is no option for quote text without the images the original displayed: those images are the quoted body, and carrying them is what makes the quote show what the sender wrote. So false is also the only way to stop this reply re-sending them to its recipients (see the tool description for what is carried).'),
             },
             replyTo: {
               type: 'array',
@@ -544,7 +559,7 @@ const TOOLS = [
       },
       {
         name: 'forward_email',
-        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'. You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; requires FASTMAIL_ATTACH_DIR).',
+        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default (includeOriginalAttachments). Images the original\'s body DISPLAYED are carried too, and are carried even when includeOriginalAttachments is false, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it. ' + CARRIED_IMAGE_BOUND_DESC + ' Short of not forwarding the message, there is no way to reproduce the body and leave those images behind. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. An image the block cannot display — a text-only forward, or a reference this server could not resolve to exactly one image part — rides as a regular attachment instead (subject to includeOriginalAttachments), and the result says so; asAttachment is the lossless alternative. The subject defaults to \'Fwd: <original subject>\'. You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one does require FASTMAIL_ATTACH_DIR).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -579,7 +594,7 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Optional note placed ABOVE the forwarded-message block, in plain text — the original is reproduced below it automatically; omit for a bare FYI forward. NOTE: a text-only note produces a PLAIN-TEXT forward (the original\'s HTML formatting is reduced to text) — use htmlBody, or both, to preserve its formatting. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.) Must be a plain string: a note wrapped in a CDATA section is rejected.',
+              description: 'Optional note placed ABOVE the forwarded-message block, in plain text — the original is reproduced below it automatically; omit for a bare FYI forward. NOTE: a text-only note produces a PLAIN-TEXT forward (the original\'s HTML formatting is reduced to text, and the images its body displayed cannot be shown — they ride as regular attachments instead, or are left behind when includeOriginalAttachments is false) — use htmlBody, or both, to preserve its formatting and its images. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.) Must be a plain string: a note wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
@@ -587,7 +602,7 @@ const TOOLS = [
             },
             includeOriginalAttachments: {
               type: ['boolean', 'string'],
-              description: lenientBool("Carry the original message's attachments on the forward (default true; all-or-none — to drop individual ones, save the default draft and use edit_draft's removeAttachments). Embedded inline (cid:) images are never carried by an inline forward; use asAttachment for those. Ignored when asAttachment is set — the .eml already embeds every original attachment."),
+              description: lenientBool("Carry the original message's attached FILES on the forward (default true; all-or-none — to drop individual ones, save the default draft and use edit_draft's removeAttachments). This flag does not govern the images the original's body displayed: those are body content and are carried either way (see the tool description for the bound on that). What it does govern, besides the ordinary files, is an image the forwarded block could not display — that one rides as a regular attachment when this is true, and is left behind when it is false. Ignored when asAttachment is set — the .eml already embeds every original attachment."),
             },
             asAttachment: {
               type: ['boolean', 'string'],
@@ -1220,7 +1235,7 @@ const TOOLS = [
       },
       {
         name: 'get_email_attachments',
-        description: 'List an email\'s parts, as raw JMAP part objects (partId, blobId, type, size, name, disposition, cid) rather than the simplified shape the read tools return. ' + UNION_SCOPE_DESC + ' A body-embedded part usually reports disposition:null rather than "inline", and nothing in this raw listing tells it apart from a genuinely attached file — the derived isInline flag lives only in get_email (and get_thread with includeBodies), so cross-check there before acting on an entry, e.g. before handing its blobId to edit_draft removeAttachments, which would strip an image the body still displays. This listing is also what download_attachment counts from: its first entry is attachmentId "0".',
+        description: 'List an email\'s parts, as raw JMAP part objects (partId, blobId, type, size, name, disposition, cid) rather than the simplified shape the read tools return. ' + UNION_SCOPE_DESC + ' A body-embedded part usually reports disposition:null rather than "inline", and nothing in this raw listing tells it apart from a genuinely attached file — the derived isInline flag lives only in get_email (and get_thread with includeBodies), so cross-check there before acting on an entry, e.g. before handing its blobId to edit_draft removeAttachments, which would strip an image the body still displays. ' + MINTED_CID_NONDURABILITY + ' This listing is also what download_attachment counts from: its first entry is attachmentId "0".',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1586,10 +1601,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // composeForward so it is unit-testable with a mock client; this handler just
         // maps the result to the response text.
         const result = await composeForward(args, client, getAttachDir());
-        const inlineNote = result.droppedInlineImages
-          ? ` ${result.droppedInlineImages} embedded image(s) were not carried — use asAttachment for full fidelity.`
-          : '';
-        const text = `Forward draft saved successfully (Email ID: ${result.emailId}).${inlineNote} Use send_draft to transmit it. Subject: ${result.subject}${formatInlineNotes(result.notes)}`;
+        const text = `Forward draft saved successfully (Email ID: ${result.emailId}). Use send_draft to transmit it. Subject: ${result.subject}${formatInlineNotes(result.notes)}`;
         return { content: [{ type: 'text', text }] };
       }
 

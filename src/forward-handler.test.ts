@@ -254,6 +254,10 @@ describe('sanitizeEmlFilename', () => {
   });
 });
 
+// A fixed stand-in for a minted Content-ID, so the assertions read as values rather than
+// as patterns. Real mints come from the CSPRNG; the shape is pinned in inline-images.test.ts.
+const MINT = 'ii-00000000000000000000000000000001@inline.invalid';
+
 describe('buildForwardParams — attachment carry', () => {
   const inlinePng = { partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'pic.png', disposition: 'inline', cid: 'img-1' };
   const inlineNoCid = { partId: '5', blobId: 'blob-odd', type: 'application/zip', size: 10, name: 'odd.zip', disposition: 'inline', cid: null };
@@ -264,32 +268,136 @@ describe('buildForwardParams — attachment carry', () => {
       { blobId: 'blob-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' },
     ]);
   });
-  it('drops true-inline (cid) parts and counts them in droppedInlineImages', () => {
-    const orig = makeOriginal({ attachments: [makeOriginal().attachments[0], inlinePng] });
-    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.example'] }, orig);
-    assert.equal(droppedInlineImages, 1);
-    assert.deepEqual(forwardParams.attachments!.map((a) => a.blobId), ['blob-doc']);
+  // An original whose html displays the embedded image, so the forwarded block can carry it.
+  const referencing = (over: any = {}) => makeOriginal({
+    bodyValues: { t: { value: 'original text' }, h: { value: '<p>hi <img src="cid:img-1"></p>' } },
+    ...over,
   });
-  it("normalizes inline-WITHOUT-cid to disposition 'attachment' (kept, not counted; keeps the draft editable)", () => {
+
+  it('carries a body-referenced image under a minted identifier and points the block at it', () => {
+    const orig = referencing({ attachments: [inlinePng] });
+    const { forwardParams, quoteImages, carry } = buildForwardParams({ to: ['x@y.example'] }, orig, undefined, () => MINT);
+    assert.deepEqual(forwardParams.attachments, [
+      { blobId: 'blob-png', type: 'image/png', name: 'pic.png', cid: MINT, disposition: 'inline' },
+    ]);
+    assert.match(forwardParams.htmlBody!, new RegExp(`src="cid:${MINT}"`));
+    assert.equal(quoteImages.minted.length, 1);
+    assert.deepEqual(carry, { pooled: [], attached: [], notIncluded: [] });
+  });
+  it('pools an inline image the body never references, with its Content-ID stripped', () => {
+    const orig = makeOriginal({ attachments: [makeOriginal().attachments[0], inlinePng] });
+    const { forwardParams, carry } = buildForwardParams({ to: ['x@y.example'] }, orig);
+    assert.deepEqual(forwardParams.attachments, [
+      { blobId: 'blob-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' },
+      { blobId: 'blob-png', type: 'image/png', name: 'pic.png', disposition: 'attachment' },
+    ]);
+    assert.deepEqual(carry.pooled.map((p: any) => p.blobId), ['blob-png']);
+    assert.deepEqual(carry.attached.map((p: any) => p.blobId), ['blob-doc']);
+  });
+  // A part carrying NO disposition, listed only under attachments, is the ordinary shape a
+  // body-embedded image arrives in — so what makes it body content is the body referencing
+  // it, not its metadata.
+  it('pools a referenced image the block could not display, even with no disposition on it', () => {
+    const twins = [
+      { partId: '7', blobId: 'blob-a', type: 'image/png', size: 20, name: 'a.png', cid: 'a@x' },
+      { partId: '8', blobId: 'blob-b', type: 'image/png', size: 30, name: 'b.png', cid: 'a@x' },
+    ];
+    const orig = makeOriginal({
+      bodyValues: { t: { value: 'original text' }, h: { value: '<p>hi <img src="cid:a@x"></p>' } },
+      attachments: twins,
+    });
+    const { quoteImages, carry } = buildForwardParams({ to: ['x@y.example'] }, orig, undefined, () => MINT);
+    // The Content-ID names two parts, so nothing can be embedded under it.
+    assert.deepEqual(quoteImages.minted, []);
+    assert.deepEqual(carry.pooled.map((p: any) => p.blobId), ['blob-a', 'blob-b']);
+    assert.deepEqual(carry.attached, []);
+  });
+  it('never carries a foreign Content-ID of the shape this server mints', () => {
+    const forged = { partId: '9', blobId: 'blob-forged', type: 'image/png', name: 'f.png', disposition: 'inline', cid: 'ii-0123456789abcdef0123456789abcdef@inline.invalid' };
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal({ attachments: [forged] }));
+    assert.deepEqual(forwardParams.attachments, [
+      { blobId: 'blob-forged', type: 'image/png', name: 'f.png', disposition: 'attachment' },
+    ]);
+  });
+  it("normalizes inline-WITHOUT-cid to disposition 'attachment' (keeps the draft editable)", () => {
     const orig = makeOriginal({ attachments: [inlineNoCid] });
-    const { forwardParams, droppedInlineImages } = buildForwardParams({ to: ['x@y.example'] }, orig);
-    assert.equal(droppedInlineImages, 0);
+    const { forwardParams, carry } = buildForwardParams({ to: ['x@y.example'] }, orig);
     assert.deepEqual(forwardParams.attachments, [
       { blobId: 'blob-odd', type: 'application/zip', name: 'odd.zip', disposition: 'attachment' },
     ]);
+    // Marked inline but with no Content-ID, so nothing could have displayed it: an ordinary
+    // file riding along, not a media part the block failed to show.
+    assert.deepEqual(carry.pooled, []);
+    assert.deepEqual(carry.attached.map((p: any) => p.blobId), ['blob-odd']);
   });
-  it('includeOriginalAttachments:false drops the carry but still counts inline drops (the body strips their <img> either way)', () => {
-    const orig = makeOriginal({ attachments: [makeOriginal().attachments[0], inlinePng] });
-    const { forwardParams, droppedInlineImages } = buildForwardParams(
-      { to: ['x@y.example'], includeOriginalAttachments: false }, orig,
+  it('carries the body-referenced image even with includeOriginalAttachments:false, and leaves the files behind', () => {
+    const orig = referencing({ attachments: [makeOriginal().attachments[0], inlinePng] });
+    const { forwardParams, carry } = buildForwardParams(
+      { to: ['x@y.example'], includeOriginalAttachments: false }, orig, undefined, () => MINT,
+    );
+    assert.deepEqual(forwardParams.attachments!.map((a) => a.blobId), ['blob-png']);
+    assert.equal(forwardParams.attachments![0].cid, MINT);
+    assert.deepEqual(carry.notIncluded.map((p: any) => p.blobId), ['blob-doc']);
+  });
+  // The force-carry is bounded to parts the sender declared an image. A body can point an
+  // <img> at anything; the bound is what stops a reference dragging an arbitrary file past
+  // includeOriginalAttachments:false.
+  it('does not force-carry a referenced part the sender did not declare an image', () => {
+    const doc = { partId: '7', blobId: 'blob-doc2', type: 'application/pdf', name: 'sneaky.pdf', disposition: 'inline', cid: 'img-1' };
+    const orig = referencing({ attachments: [doc] });
+    const { forwardParams, carry } = buildForwardParams(
+      { to: ['x@y.example'], includeOriginalAttachments: false }, orig, undefined, () => MINT,
     );
     assert.equal(forwardParams.attachments, undefined);
-    assert.equal(droppedInlineImages, 1);
+    assert.deepEqual(carry.notIncluded.map((p: any) => p.blobId), ['blob-doc2']);
   });
-  it('asAttachment: droppedInlineImages is ABSENT even for an inline-bearing original (the .eml embeds them losslessly)', () => {
-    const orig = makeOriginal({ attachments: [inlinePng] });
-    const { droppedInlineImages } = buildForwardParams({ to: ['x@y.example'], asAttachment: true }, orig);
-    assert.equal(droppedInlineImages, undefined);
+  it('unions in an embedded image the server routed into a body list rather than attachments', () => {
+    const orig = referencing({
+      attachments: [],
+      htmlBody: [{ partId: 'h', type: 'text/html' }, inlinePng],
+    });
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, orig, undefined, () => MINT);
+    assert.deepEqual(forwardParams.attachments!.map((a) => a.blobId), ['blob-png']);
+  });
+  it('omits attachments entirely when the original carries none', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, makeOriginal({ attachments: [] }));
+    assert.equal(forwardParams.attachments, undefined);
+  });
+  it('a text-only forward mints nothing and pools the image instead', () => {
+    const orig = referencing({ attachments: [inlinePng] });
+    const { forwardParams, quoteImages, carry } = buildForwardParams(
+      { to: ['x@y.example'], textBody: 'see below' }, orig, undefined, () => MINT,
+    );
+    assert.equal(forwardParams.htmlBody, undefined);
+    assert.deepEqual(quoteImages.minted, []);
+    assert.equal(quoteImages.htmlQuoteShips, false);
+    assert.deepEqual(carry.pooled.map((p: any) => p.blobId), ['blob-png']);
+  });
+  it('an original whose only content is an embedded image forwards as html, not text', () => {
+    const orig = makeOriginal({
+      textBody: [],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<div><img src="cid:img-1"></div>' } },
+      attachments: [inlinePng],
+    });
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, orig, undefined, () => MINT);
+    assert.equal(forwardParams.textBody, undefined);
+    assert.match(forwardParams.htmlBody!, new RegExp(`src="cid:${MINT}"`));
+  });
+  it('carries an SVG the body displays, like any other embedded image', () => {
+    const svg = { partId: '6', blobId: 'blob-svg', type: 'image/svg+xml', name: 'logo.svg', disposition: 'inline', cid: 'img-1' };
+    const orig = referencing({ attachments: [svg] });
+    const { forwardParams } = buildForwardParams({ to: ['x@y.example'] }, orig, undefined, () => MINT);
+    assert.deepEqual(forwardParams.attachments, [
+      { blobId: 'blob-svg', type: 'image/svg+xml', name: 'logo.svg', cid: MINT, disposition: 'inline' },
+    ]);
+  });
+  it('asAttachment carries only the .eml and resolves no images (the .eml embeds them losslessly)', () => {
+    const orig = referencing({ attachments: [inlinePng] });
+    const { forwardParams, quoteImages, carry } = buildForwardParams({ to: ['x@y.example'], asAttachment: true }, orig);
+    assert.deepEqual(forwardParams.attachments!.map((a) => a.blobId), ['blob-orig-raw']);
+    assert.deepEqual(quoteImages.minted, []);
+    assert.deepEqual(carry, { pooled: [], attached: [], notIncluded: [] });
   });
 });
 
@@ -306,6 +414,23 @@ describe('composeForward — draft-only orchestration', () => {
       uploadAttachments: async (specs, dir, options) => { calls.upload = { specs, dir, options }; return uploadResult; },
       createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
       ...over,
+    };
+    return { client, calls };
+  }
+
+  // A client whose confirmation read returns a draft echoing back exactly what the create
+  // call attached — which is what a real saved draft holds, and the only way a test can
+  // assert on the Content-IDs the forwarded block mints (they are random in production).
+  function echoingClient(original: any) {
+    const calls: any = { gets: [] as string[] };
+    const client: ForwardClient = {
+      getEmailById: async (id) => {
+        calls.gets.push(id);
+        if (id !== 'draft-7') return original;
+        return { id, attachments: (calls.draft?.attachments ?? []).map((a: any) => ({ ...a, size: 1024 })) };
+      },
+      uploadAttachments: async (specs, dir, options) => { calls.upload = { specs, dir, options }; return UPLOADED; },
+      createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
     };
     return { client, calls };
   }
@@ -351,11 +476,96 @@ describe('composeForward — draft-only orchestration', () => {
     assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-orig-raw', 'up-1']);
     assert.equal(calls.draft.attachments[0].type, 'message/rfc822');
   });
-  it('surfaces droppedInlineImages in the result', async () => {
-    const inline = { partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'p.png', disposition: 'inline', cid: 'img-1' };
-    const { client } = spyClient({ getEmailById: async () => makeOriginal({ attachments: [inline] }) });
+  const inlinePng = { partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'p.png', disposition: 'inline', cid: 'img-1' };
+  const referencingOriginal = (over: any = {}) => makeOriginal({
+    bodyValues: { t: { value: 'original text' }, h: { value: '<p>hi <img src="cid:img-1"></p>' } },
+    attachments: [inlinePng],
+    ...over,
+  });
+
+  it('reports the images the forwarded block embeds, with their total size', async () => {
+    const { client } = echoingClient(referencingOriginal());
     const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
-    assert.equal(d.droppedInlineImages, 1);
+    assert.deepEqual(d.notes, ['This draft embeds 1 image(s) from the original (1 KB).']);
+  });
+  it('re-reads the saved draft for a forward whose only images come from the original', async () => {
+    const { client, calls } = echoingClient(referencingOriginal());
+    await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    assert.deepEqual(calls.gets, ['o1', 'draft-7']);
+  });
+  it('says so when a carried image is not on the saved draft', async () => {
+    const { client } = spyClient({
+      // The read-back finds a draft with none of the parts this call attached.
+      getEmailById: async (id) => (id === 'draft-7' ? { id, attachments: [] } : referencingOriginal()),
+    });
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    assert.deepEqual(d.notes, [
+      'This draft embeds 1 image(s) from the original (1 KB).',
+      '1 embedded image(s) this call attached were not found on the saved draft.' +
+      ' Open the draft to check how it renders.',
+    ]);
+  });
+  it('says plainly when a media part could not be embedded and rode along as a file', async () => {
+    const { client } = spyClient({ getEmailById: async () => makeOriginal({ attachments: [inlinePng] }) });
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    assert.deepEqual(d.notes, [
+      '1 media part(s) could not be embedded and were attached as regular attachments: "p.png"' +
+      ' — re-run with asAttachment: true for full fidelity, then delete this draft.',
+    ]);
+  });
+  it('says a referenced image rode along as a file even when the part declared no disposition', async () => {
+    const twins = [
+      { partId: '7', blobId: 'blob-a', type: 'image/png', size: 20, name: 'a.png', cid: 'a@x' },
+      { partId: '8', blobId: 'blob-b', type: 'image/png', size: 30, name: 'b.png', cid: 'a@x' },
+    ];
+    const { client } = spyClient({
+      getEmailById: async () => makeOriginal({
+        bodyValues: { t: { value: 'original text' }, h: { value: '<p>hi <img src="cid:a@x"></p>' } },
+        attachments: twins,
+      }),
+    });
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    assert.deepEqual(d.notes, [
+      '2 media part(s) could not be embedded and were attached as regular attachments:' +
+      ' "a.png", "b.png" — re-run with asAttachment: true for full fidelity, then delete this draft.',
+    ]);
+  });
+  it('reports a reference in the original that matched no part', async () => {
+    const { client } = spyClient({
+      getEmailById: async () => referencingOriginal({ attachments: [] }),
+    });
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    assert.deepEqual(d.notes, [
+      "1 image reference(s) in the original's body had no matching part; nothing was carried for them.",
+    ]);
+  });
+  it('counts only the EXCLUDED files in the flag note, and says the embedded images were kept anyway', async () => {
+    const withFile = referencingOriginal({
+      attachments: [inlinePng, { partId: '3', blobId: 'blob-doc', type: 'application/pdf', size: 1234, name: 'doc.pdf', disposition: 'attachment' }],
+    });
+    const { client } = echoingClient(withFile);
+    const d = await composeForward(
+      { originalEmailId: 'o1', to: ['x@y.example'], includeOriginalAttachments: false }, client, undefined,
+    );
+    assert.deepEqual(d.notes, [
+      'This draft embeds 1 image(s) from the original (1 KB).',
+      '1 attachment(s), including 0 image(s), were not included because includeOriginalAttachments is false.' +
+      ' Body-embedded images were still carried — they are part of the message body.',
+    ]);
+  });
+  it('omits the carried-anyway sentence when the forward embedded nothing', async () => {
+    const { client } = spyClient({ getEmailById: async () => makeOriginal() });
+    const d = await composeForward(
+      { originalEmailId: 'o1', to: ['x@y.example'], includeOriginalAttachments: false }, client, undefined,
+    );
+    assert.deepEqual(d.notes, [
+      '1 attachment(s), including 0 image(s), were not included because includeOriginalAttachments is false.',
+    ]);
+  });
+  it('an ordinary forward of a message with a plain attachment says nothing at all', async () => {
+    const { client } = spyClient();
+    const d = await composeForward({ originalEmailId: 'o1', to: ['x@y.example'] }, client, undefined);
+    assert.equal(d.notes, undefined);
   });
   it('does not call uploadAttachments when no new attachments are given', async () => {
     let uploadCalled = false;

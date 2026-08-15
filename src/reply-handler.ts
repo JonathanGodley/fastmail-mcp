@@ -3,12 +3,16 @@ import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
-import { buildReplyBodies } from './reply-quote.js';
+import { buildReplyBodies, emptyQuoteImages } from './reply-quote.js';
+import type { QuoteImageOutcome } from './reply-quote.js';
 import { formatAddress } from './email-formatter.js';
 import {
-  DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, reportAuthoredInlineImages,
+  DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, recordQuoteImages,
+  reportAuthoredInlineImages,
 } from './compose-inline.js';
 import type { AuthoredInlineContext, AuthoredInlinePlan } from './compose-inline.js';
+import { buildUnionParts, checkInlineClosure } from './inline-images.js';
+import { InlineNoteLedger } from './inline-notes.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // Parameters passed to createDraft for a reply (matches its input shape).
@@ -45,11 +49,21 @@ export interface ReplyParams {
 // (see AuthoredInlineContext for why they are passed in rather than read from args). The
 // specs are used for validation only — the uploaded parts are threaded onto the result by
 // the orchestration, which owns the I/O.
+//
+// `mint` is injected only so tests are deterministic; production leaves it unset and the
+// quote builder draws from the CSPRNG.
 export function buildReplyParams(
   args: any,
   originalEmail: any,
   inline: AuthoredInlineContext = DEFAULT_INLINE_CONTEXT,
-): { quoteOriginal: boolean; replyParams: ReplyParams; inlinePlan: AuthoredInlinePlan } {
+  mint?: () => string,
+): {
+  quoteOriginal: boolean;
+  replyParams: ReplyParams;
+  inlinePlan: AuthoredInlinePlan;
+  /** What the quote did with the original's embedded images (#13). */
+  quoteImages: QuoteImageOutcome;
+} {
   const a = args ?? {};
   // Validate the caller's own bodies FIRST — before the quote is appended below. Once the
   // quoted original is merged in, a malformed new message is masked by it: the quote
@@ -101,11 +115,27 @@ export function buildReplyParams(
     surface: 'note',
   });
 
-  const quoted = buildReplyBodies({ original: originalEmail, textBody, htmlBody, quoteOriginal });
+  // The quote resolves the original's embedded images against the original's OWN parts (the
+  // gated union — an embedded image lands in a body list rather than in `attachments` for
+  // some MIME shapes, so `attachments` alone would miss it). Carrying them is the default:
+  // the images are part of the quoted body, and a quote that silently loses them shows the
+  // recipient a conversation the sender never had. quoteOriginal: false drops the whole
+  // quote, images included; there is no setting for quote text without its images.
+  const quoted = buildReplyBodies({
+    original: originalEmail,
+    textBody,
+    htmlBody,
+    quoteOriginal,
+    quoteImages: {
+      sourceParts: buildUnionParts(originalEmail).map((u) => u.part),
+      ...(mint && { mint }),
+    },
+  });
 
   return {
     quoteOriginal,
     inlinePlan,
+    quoteImages: quoted.quoteImages ?? emptyQuoteImages(),
     replyParams: {
       to,
       cc,
@@ -174,25 +204,50 @@ export async function composeReply(
   assertBodyInputs(args ?? {});
   const specs = coerceAttachments(args?.attachments);
 
-  const { replyParams, inlinePlan } = buildReplyParams(args, originalEmail, {
+  const { replyParams, inlinePlan, quoteImages } = buildReplyParams(args, originalEmail, {
     specs,
     attachmentsEnabled: !!attachDir,
   });
 
   // Upload attachments (if any) after the pure builder, then thread the parts into
   // the draft.
-  if (specs?.length) {
-    replyParams.attachments = await client.uploadAttachments(specs, attachDir, {
-      inlineCids: inlinePlan.inlineCids,
-    });
-  }
+  const uploaded = specs?.length
+    ? await client.uploadAttachments(specs, attachDir, { inlineCids: inlinePlan.inlineCids })
+    : undefined;
+
+  // The images the quote carries are APPENDED to the caller's own files, never assigned over
+  // them: a reply that attaches a file and quotes a message with an embedded image ships
+  // both. They ride even when this server cannot read files off disk at all — a carried
+  // image re-references a blob the account already holds, so it needs no attachments
+  // directory. The field stays unset when there is nothing to carry, so an ordinary reply's
+  // parameters are unchanged.
+  const ledger = new InlineNoteLedger();
+  const carry = recordQuoteImages(ledger, quoteImages, 'reply');
+  const attachments = [...(uploaded ?? []), ...carry.minted];
+  if (attachments.length > 0) replyParams.attachments = attachments;
+
+  // Checked BEFORE the draft is saved: a message that references an image it does not carry,
+  // or carries one nothing references, is this server's own assembly error, and it is worth
+  // more to refuse than to leave the caller a broken draft.
+  checkInlineClosure({
+    htmlBodies: [replyParams.htmlBody],
+    finalPartCids: attachments.map((part) => part.cid),
+    attachedMintedCids: carry.mintedCids,
+  });
 
   const emailId = await client.createDraft(replyParams);
-  const notes = await reportAuthoredInlineImages({
-    uploaded: replyParams.attachments,
-    plan: inlinePlan,
-    emailId,
-    readBack: (id) => client.getEmailById(id),
-  });
+  const notes = [
+    ...ledger.emit({ surface: 'reply', ...(carry.resolvedPartCount !== undefined && { resolvedPartCount: carry.resolvedPartCount }) }),
+    ...await reportAuthoredInlineImages({
+      // The caller's own uploads only: the quote's minted parts are reported by the ledger
+      // above, and passing them here as well would count each embed twice. Their identifiers
+      // still go in, so the confirmation read covers what the quote carries.
+      uploaded,
+      mintedCids: carry.mintedCids,
+      plan: inlinePlan,
+      emailId,
+      readBack: (id) => client.getEmailById(id),
+    }),
+  ];
   return { subject: replyParams.subject, emailId, ...(notes.length > 0 && { notes }) };
 }

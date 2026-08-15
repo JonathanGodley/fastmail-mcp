@@ -3,11 +3,16 @@ import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { isBlank, assertBodyInputs } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
-import { buildForwardBodies } from './reply-quote.js';
+import { buildForwardBodies, emptyQuoteImages } from './reply-quote.js';
+import type { QuoteImageOutcome } from './reply-quote.js';
 import {
-  DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, reportAuthoredInlineImages,
+  DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, recordQuoteImages,
+  reportAuthoredInlineImages,
 } from './compose-inline.js';
 import type { AuthoredInlineContext, AuthoredInlinePlan } from './compose-inline.js';
+import { buildUnionParts, checkInlineClosure, isImageType } from './inline-images.js';
+import type { CidPart } from './inline-images.js';
+import { InlineNoteLedger } from './inline-notes.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // Parameters passed to createDraft for a forward (matches its input shape).
@@ -75,12 +80,35 @@ export function sanitizeEmlFilename(subject: string | null | undefined): string 
 // The carry whitelist for re-referencing an existing part on a new Email — the same
 // field set edit_draft's carry uses: caller-meaningful fields only, never the
 // server-set partId/size.
+//
+// The original's Content-ID is deliberately NOT carried. Every part that reaches this
+// function rides the forward as a regular attachment, so nothing in the new message
+// references it: the forwarded block's own image references are rewritten to the
+// identifiers this server mints for the parts it embeds, and a part that could not be
+// embedded is not referenced at all. Carrying the identifier anyway would be wrong twice
+// over — it would claim an identity no body uses, and an identifier of this server's own
+// shape arriving on someone else's message would then be classified as server-managed and
+// removed from a later edit under an explanation that does not apply to it. Disposition is
+// normalized here for the same reason: some clients mark ordinary attachments inline, and
+// an inline marking with no body behind it misdescribes what the draft carries.
 function carryPart(a: any): AttachmentPart {
   const part: AttachmentPart = { blobId: a.blobId, type: a.type };
   if (a.name != null) part.name = a.name;
-  if (a.disposition != null) part.disposition = a.disposition;
-  if (a.cid != null) part.cid = a.cid;
+  if (a.disposition != null) part.disposition = a.disposition === 'inline' ? 'attachment' : a.disposition;
   return part;
+}
+
+/** What became of the original's parts, beyond the ones the forwarded block embeds. */
+export interface ForwardCarry {
+  // Media the forwarded block could not display, riding along as regular attachments
+  // instead. Reported loudly: the reader sees a file where the original showed an image,
+  // and asAttachment is the lossless alternative.
+  pooled: CidPart[];
+  // The original's ordinary files, carried as they were. Counted, but unremarkable.
+  attached: CidPart[];
+  // Parts left behind because includeOriginalAttachments is false. Never includes the
+  // images the block embeds — those are body content and are carried regardless.
+  notIncluded: CidPart[];
 }
 
 export interface BuiltForward {
@@ -89,13 +117,23 @@ export interface BuiltForward {
   // What the caller's own note asks this server to embed, and whether the forward will
   // actually be able to display it (#13).
   inlinePlan: AuthoredInlinePlan;
-  // Count of the original's true-inline (cid-referenced) image parts NOT carried by
-  // an inline forward — the loud runtime degrade for the inline-image gap. Computed
-  // from the SOURCE message regardless of includeOriginalAttachments (the body's
-  // cid <img>s are stripped by the sanitizer either way). Absent on asAttachment
-  // forwards: the .eml embeds those parts losslessly, nothing is dropped.
-  droppedInlineImages?: number;
+  // What the forwarded block did with the images the original's body displayed (#13).
+  quoteImages: QuoteImageOutcome;
+  // What became of every other part of the original.
+  carry: ForwardCarry;
 }
+
+// Whether a part is CONTENT of the original's body rather than a file attached to it.
+// Two signals, either of which is enough: the server routed the part into a body list
+// (RFC 8621 §4.1.4, which is where an embedded image lands for some MIME shapes), or the
+// part declares itself inline and carries a Content-ID for a body to reference. A part
+// matching neither is an ordinary attachment. The distinction decides which sentence a
+// carried part gets: body content that could not be displayed is a visible loss, an
+// ordinary file riding along is not.
+function isBodyMedia(entry: { part: any; inBodyList: boolean }): boolean {
+  return entry.inBodyList || (entry.part?.disposition === 'inline' && !!entry.part?.cid);
+}
+
 
 // Assemble the forward parameters from the caller's args and the already-fetched
 // original email. Pure (no I/O) so the forward_email orchestration is unit-testable:
@@ -107,10 +145,14 @@ export interface BuiltForward {
 //
 // `inline` carries the caller's already-coerced attachments for the embedded-image checks
 // (see AuthoredInlineContext for why they are passed in rather than read from args).
+//
+// `mint` is injected only so tests are deterministic; production leaves it unset and the
+// forwarded-block builder draws from the CSPRNG.
 export function buildForwardParams(
   args: any,
   originalEmail: any,
   inline: AuthoredInlineContext = DEFAULT_INLINE_CONTEXT,
+  mint?: () => string,
 ): BuiltForward {
   const a = args ?? {};
   // Validate the caller's note FIRST — before the forwarded-message block is assembled
@@ -174,14 +216,14 @@ export function buildForwardParams(
     params.sourceEmailId = originalEmail.id;
   }
 
-  // A part without a blobId can't be re-referenced on a new Email at all (JMAP carry
-  // works by blobId), so it is skipped without a count — unlike the inline drop below,
-  // there is no alternative to point the caller at, and RFC 8621 attachments are
-  // blob-backed, so the case is essentially theoretical.
-  const sourceAttachments: any[] = Array.isArray(originalEmail?.attachments)
-    ? originalEmail.attachments.filter((p: any) => p && p.blobId)
-    : [];
-  const isTrueInline = (p: any) => p.disposition === 'inline' && p.cid;
+  // The part set is the GATED union of the original's `attachments` and the media parts
+  // the server routed into its body lists — `attachments` alone is not a complete listing
+  // (RFC 8621 §4.1.4), and a message whose only images are embedded can list nothing there
+  // at all. A part without a blobId can't be re-referenced on a new Email (JMAP carry
+  // works by blobId), so it is skipped without a count: there is no alternative to point
+  // the caller at, and RFC 8621 attachments are blob-backed, so the case is theoretical.
+  const sourceParts = buildUnionParts(originalEmail).filter((u) => u.part?.blobId);
+  const emptyCarry = (): ForwardCarry => ({ pooled: [], attached: [], notIncluded: [] });
 
   if (asAttachment) {
     // Lossless form: the Email's own blobId is the raw RFC 5322 message; attach it
@@ -205,33 +247,60 @@ export function buildForwardParams(
       name: sanitizeEmlFilename(originalEmail?.subject),
       disposition: 'attachment',
     }];
-    return { asAttachment, forwardParams: params, inlinePlan };
+    return {
+      asAttachment,
+      forwardParams: params,
+      inlinePlan,
+      quoteImages: emptyQuoteImages(),
+      carry: emptyCarry(),
+    };
   }
 
-  // Inline forward: reproduce the original under the forwarded-message block.
-  const bodies = buildForwardBodies({ original: originalEmail, textBody, htmlBody });
+  // Inline forward: reproduce the original under the forwarded-message block, resolving the
+  // images its body displayed against the original's own parts.
+  const bodies = buildForwardBodies({
+    original: originalEmail,
+    textBody,
+    htmlBody,
+    quoteImages: { sourceParts: sourceParts.map((u) => u.part), ...(mint && { mint }) },
+  });
   params.textBody = bodies.textBody;
   params.htmlBody = bodies.htmlBody;
+  const quoteImages = bodies.quoteImages ?? emptyQuoteImages();
 
-  // True-inline (cid) image parts are NOT carried — their <img> references are
-  // stripped from the forwarded html by the sanitizer, so carrying the bytes would
-  // attach orphans. Counted so the degrade is loud; asAttachment is the lossless
-  // alternative. Parts marked inline WITHOUT a cid are content (some clients mark
-  // regular attachments inline); carry them normalized to disposition:'attachment',
-  // since nothing can reference a part with no Content-ID and an inline marking no
-  // body backs would misdescribe what the draft carries.
-  const droppedInlineImages = sourceAttachments.filter(isTrueInline).length;
-  if (includeOriginalAttachments) {
-    params.attachments = sourceAttachments
-      .filter((p) => !isTrueInline(p))
-      .map((p) => {
-        const part = carryPart(p);
-        if (part.disposition === 'inline') part.disposition = 'attachment';
-        return part;
-      });
+  // An image the forwarded block displays is BODY CONTENT, so it is carried whatever
+  // includeOriginalAttachments says: leaving it behind would forward a body with a hole in
+  // it, and the flag is about the original's FILES. Everything else goes to the pool — the
+  // regular-attachment carry set the flag really governs — including an image the block
+  // referenced but could not display, which is a part with nothing to reference it.
+  const embedded = new Set(quoteImages.mappings.map((m) => m.source));
+  // A part the body REFERENCED is body content by definition, whatever its metadata says.
+  // The reference is the stronger signal and the one to pool on: a part routed only into
+  // `attachments`, with its disposition omitted, is the usual shape for an embedded image,
+  // so judging it by disposition alone would file a part the reader sees as a missing
+  // picture as an ordinary file — and the pooled sentence is the only one that would have
+  // mentioned it.
+  const referenced = new Set(quoteImages.resolvedParts);
+  const carry = emptyCarry();
+  const carried: AttachmentPart[] = [];
+  for (const entry of sourceParts) {
+    if (embedded.has(entry.part)) continue;
+    if (!includeOriginalAttachments) {
+      carry.notIncluded.push(entry.part);
+      continue;
+    }
+    carried.push(carryPart(entry.part));
+    if (referenced.has(entry.part) || isBodyMedia(entry)) carry.pooled.push(entry.part);
+    else carry.attached.push(entry.part);
   }
 
-  return { asAttachment, forwardParams: params, droppedInlineImages, inlinePlan };
+  // The minted parts ride last and unconditionally. Kept out of `carried` on purpose: a
+  // part this call created to make the block display is not one of the original's files,
+  // and merging the two would make the flag's promise unreadable.
+  const attachments = [...carried, ...quoteImages.minted];
+  if (attachments.length > 0) params.attachments = attachments;
+
+  return { asAttachment, forwardParams: params, inlinePlan, quoteImages, carry };
 }
 
 // The minimal client surface composeForward needs; JmapClient satisfies it
@@ -250,7 +319,6 @@ export interface ForwardClient {
 export interface ComposeForwardResult {
   subject: string;
   emailId: string;
-  droppedInlineImages?: number; // see BuiltForward
   /** What the draft ended up embedding, or could not (#13). Absent when there is nothing to say. */
   notes?: string[];
 }
@@ -283,7 +351,7 @@ export async function composeForward(
   assertBodyInputs(args ?? {});
   const specs = coerceAttachments(args?.attachments);
 
-  const { forwardParams, droppedInlineImages, inlinePlan } = buildForwardParams(
+  const { forwardParams, inlinePlan, quoteImages, carry } = buildForwardParams(
     args,
     originalEmail,
     { specs, attachmentsEnabled: !!attachDir },
@@ -297,17 +365,48 @@ export async function composeForward(
     forwardParams.attachments = [...(forwardParams.attachments ?? []), ...uploaded];
   }
 
-  const emailId = await client.createDraft(forwardParams);
-  const notes = await reportAuthoredInlineImages({
-    uploaded,
-    plan: inlinePlan,
-    emailId,
-    readBack: (id) => client.getEmailById(id),
+  // Checked BEFORE the draft is saved, for the reason composeReply gives: an assembled
+  // message that references an image it does not carry is this server's own error.
+  checkInlineClosure({
+    htmlBodies: [forwardParams.htmlBody],
+    finalPartCids: (forwardParams.attachments ?? []).map((part) => part.cid),
+    attachedMintedCids: quoteImages.minted.map((part) => part.cid),
   });
+
+  const ledger = new InlineNoteLedger();
+  recordQuoteImages(ledger, quoteImages, 'forward');
+  // Keyed by identity within this call: the union has already deduped the parts, and a
+  // forward can legitimately carry two files that differ only in their bytes.
+  carry.pooled.forEach((part, i) => {
+    ledger.record({
+      key: `pool:${i}`, outcome: 'pooled', name: part.name, isImage: isImageType(part.type),
+    });
+  });
+  carry.attached.forEach((part, i) => {
+    ledger.record({ key: `carry:${i}`, outcome: 'attached', name: part.name });
+  });
+  carry.notIncluded.forEach((part, i) => {
+    ledger.record({
+      key: `excluded:${i}`, outcome: 'notIncluded', name: part.name, isImage: isImageType(part.type),
+    });
+  });
+
+  const emailId = await client.createDraft(forwardParams);
+  const notes = [
+    ...ledger.emit({ surface: 'forward' }),
+    ...await reportAuthoredInlineImages({
+      // Caller uploads only (the forwarded block's own parts are on the ledger above), but
+      // their identifiers go in so the confirmation read covers them too.
+      uploaded,
+      mintedCids: quoteImages.minted.map((part) => part.cid),
+      plan: inlinePlan,
+      emailId,
+      readBack: (id) => client.getEmailById(id),
+    }),
+  ];
   return {
     subject: forwardParams.subject,
     emailId,
-    droppedInlineImages,
     ...(notes.length > 0 && { notes }),
   };
 }

@@ -173,11 +173,36 @@ export function noteDroppedQuoteImages(count: number): string {
   return `${count} image(s) from the quoted message were dropped and are not part of this draft.`;
 }
 
+/*
+ * WORDING CONSTRAINT for the two sentences below, and any that join them.
+ *
+ * Both render on a forward as well as a reply, and both say "the quoted message" there —
+ * which reads correctly for a forwarded block, and is what the sibling drop sentences
+ * already say. Do NOT give one member of the family a caller-supplied noun while the others
+ * keep the fixed wording: the inconsistency between two sentences that can appear in the
+ * SAME result is worse than the slight imprecision either one carries alone. If the noun is
+ * ever parameterised, parameterise the whole family in one change.
+ */
+
 /** Images the quoted message carried as data URIs, which this server does not support. */
 export function noteDroppedDataImages(count: number): string {
   return (
     `${count} data:-URI image(s) in the quoted message were dropped (not supported); ` +
     'the rest of the quote was kept.'
+  );
+}
+
+/**
+ * Images the quote could not carry because of HOW they were referenced — a relative or
+ * scheme-less path, a protocol-relative URL, an exotic scheme. Distinct from a data: URI
+ * (which is content this server declines to re-encode) and from an unmatched embedded-image
+ * reference (which named a part that was not there): here the reference form itself is one
+ * a quote cannot carry, since it resolves against an origin the new message does not have.
+ */
+export function noteDroppedUnsupportedImages(count: number): string {
+  return (
+    `${count} image(s) in the quoted message used a reference form this server cannot carry ` +
+    'into a quote and were dropped; the rest of the quote was kept.'
   );
 }
 
@@ -492,7 +517,7 @@ export interface PartRecord {
 }
 
 /** Reference-level losses, which count references rather than parts. */
-export type RefCounter = 'unresolvedRefs' | 'droppedDataImages';
+export type RefCounter = 'unresolvedRefs' | 'droppedDataImages' | 'droppedUnsupportedImages';
 
 export interface NoteTally {
   embedded: number;
@@ -507,6 +532,7 @@ export interface NoteTally {
   attached: number;
   unresolvedRefs: number;
   droppedDataImages: number;
+  droppedUnsupportedImages: number;
 }
 
 /**
@@ -523,6 +549,7 @@ export class InlineNoteLedger {
   private readonly refCounts: Record<RefCounter, number> = {
     unresolvedRefs: 0,
     droppedDataImages: 0,
+    droppedUnsupportedImages: 0,
   };
 
   /** Record what happened to a part. A later record for the same key replaces the earlier. */
@@ -550,6 +577,7 @@ export class InlineNoteLedger {
       attached: 0,
       unresolvedRefs: this.refCounts.unresolvedRefs,
       droppedDataImages: this.refCounts.droppedDataImages,
+      droppedUnsupportedImages: this.refCounts.droppedUnsupportedImages,
     };
     for (const record of this.parts.values()) {
       const bytes = typeof record.bytes === 'number' && record.bytes > 0 ? record.bytes : 0;
@@ -587,6 +615,12 @@ export interface InlineNoteContext {
   /**
    * How many distinct parts the body's references resolved to — the denominator a partial
    * embed reports against. Defaults to the embedded count, i.e. no shortfall.
+   *
+   * CALLER CONTRACT: never pass a count that includes a part this same call also recorded
+   * as removed, dropped or pooled. The shortfall this produces already speaks for every
+   * resolved part that did not embed, so a part counted here AND given its own outcome is
+   * reported twice — one lost image read as two. Leave it undefined on a branch that
+   * accounts for those parts individually.
    */
   resolvedPartCount?: number;
   /** Names the block a removal emptied, in the wording the surrounding edit uses. */
@@ -661,6 +695,10 @@ export function emitInlineNotes(tally: NoteTally, context: InlineNoteContext): s
   if (tally.dropped > 0) notes.push(noteDroppedQuoteImages(tally.dropped));
 
   if (tally.droppedDataImages > 0) notes.push(noteDroppedDataImages(tally.droppedDataImages));
+
+  if (tally.droppedUnsupportedImages > 0) {
+    notes.push(noteDroppedUnsupportedImages(tally.droppedUnsupportedImages));
+  }
 
   if (context.clearedAttachmentCount) {
     notes.push(

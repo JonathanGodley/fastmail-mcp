@@ -17,6 +17,7 @@ import {
   launderUrlValue,
   mintCid,
   reconcileInlineParts,
+  resolveCidRefs,
   sanitizeDownloadFilename,
   sanitizeQuoteHtml,
   stripCidSpelling,
@@ -700,6 +701,30 @@ describe('sanitizeQuoteHtml, mapping pass', () => {
     assert.equal(sanitizeQuoteHtml('<img>', { mode: 'map', cidMap }).html, '');
   });
 
+  it('counts each dropped reference form, so no image disappears silently', () => {
+    for (const src of ['/logo.png', 'logo.png', '//cdn.example.com/logo.png', 'ftp://a/b']) {
+      const out = sanitizeQuoteHtml(`<img src="${src}">`, { mode: 'map', cidMap });
+      assert.equal(out.droppedUnsupportedImages, 1, src);
+      // Not confused with the two losses that have their own sentences.
+      assert.equal(out.droppedDataImages, 0, src);
+      assert.equal(out.droppedCidImages, 0, src);
+    }
+  });
+
+  it('counts no loss for an image that never named a source', () => {
+    for (const tag of ['<img>', '<img src="">', '<img src="  ">']) {
+      assert.equal(sanitizeQuoteHtml(tag, { mode: 'map', cidMap }).droppedUnsupportedImages, 0, tag);
+    }
+  });
+
+  it('the collecting pass counts none of them: it drops nothing on its own', () => {
+    const out = sanitizeQuoteHtml(
+      '<img src="/logo.png"><img src="//cdn.example.com/a.png"><img src="ftp://a/b">',
+      { mode: 'collect' },
+    );
+    assert.equal(out.droppedUnsupportedImages, 0);
+  });
+
   it('drops an unknown or dangerous scheme', () => {
     for (const src of ['javascript:alert(1)', 'vbscript:x', 'file:///etc/passwd', 'ftp://a/b']) {
       assert.equal(sanitizeQuoteHtml(`<img src="${src}">`, { mode: 'map', cidMap }).html, '', src);
@@ -870,6 +895,52 @@ describe('extractCidRefs', () => {
   });
 });
 
+describe('resolveCidRefs', () => {
+  const logo = { cid: 'logo', blobId: 'B1', type: 'image/png', name: 'logo.png', size: 100 };
+  const icon = { cid: 'icon', blobId: 'B2', type: 'image/gif', name: 'icon.gif', size: 50 };
+
+  it('reports the distinct references in first-seen order', () => {
+    const out = resolveCidRefs(['logo', 'icon', 'logo'], [logo, icon]);
+    assert.deepEqual(out.distinctRefs, ['logo', 'icon']);
+  });
+
+  it('matches a Content-ID literally, never by a decoded form', () => {
+    const out = resolveCidRefs(['x'], [{ cid: '%78', blobId: 'B1', type: 'image/png' }]);
+    assert.deepEqual(out.unresolvedRefs, ['x']);
+    assert.deepEqual(out.resolvedParts, []);
+  });
+
+  it('counts a reference that embeds separately from one that merely resolves', () => {
+    const noBlob = { cid: 'logo', type: 'image/png' };
+    const out = resolveCidRefs(['logo', 'icon', 'gone'], [noBlob, icon]);
+    assert.deepEqual(out.resolvedParts, [noBlob, icon]);
+    assert.deepEqual(out.unresolvedRefs, ['gone']);
+    // Only `icon` could really be carried, so only it makes an image-only body quotable.
+    assert.deepEqual(out.embeddableRefs, ['icon']);
+  });
+
+  it('treats a shared Content-ID as embeddable by nothing, and resolves to every colliding part', () => {
+    const one = { cid: 'dup', blobId: 'B1', type: 'image/png' };
+    const two = { cid: 'dup', blobId: 'B2', type: 'image/png' };
+    const out = resolveCidRefs(['dup'], [one, two]);
+    assert.deepEqual([...out.ambiguousCids], ['dup']);
+    assert.deepEqual(out.resolvedParts, [one, two]);
+    assert.deepEqual(out.embeddableRefs, []);
+  });
+
+  it('ignores a part with no Content-ID at all', () => {
+    const out = resolveCidRefs(['logo'], [{ blobId: 'B9', type: 'image/png' }, logo]);
+    assert.deepEqual(out.resolvedParts, [logo]);
+  });
+
+  it('handles empty inputs', () => {
+    const out = resolveCidRefs([], []);
+    assert.deepEqual(out.distinctRefs, []);
+    assert.deepEqual(out.resolvedParts, []);
+    assert.deepEqual(out.embeddableRefs, []);
+  });
+});
+
 describe('buildCidMap', () => {
   const logoPart = { cid: 'logo', blobId: 'B1', type: 'image/png', name: 'logo.png', size: 100 };
   const iconPart = { cid: 'icon', blobId: 'B2', type: 'image/gif', name: 'icon.gif', size: 50 };
@@ -1027,9 +1098,11 @@ describe('buildCidMap', () => {
     const out = buildCidMap({ refs: ['dup'], sourceParts: [one, two], mint: sequentialMint() });
     assert.equal(out.cidMap.size, 0);
     assert.deepEqual(out.minted, []);
-    assert.deepEqual(out.unembeddableParts, [one]);
+    // BOTH colliding parts, not just the first: the reader loses two images, and a report
+    // naming one of them would understate what the collision cost.
+    assert.deepEqual(out.unembeddableParts, [one, two]);
     assert.deepEqual(out.unresolvedRefs, []);
-    assert.equal(out.resolvedPartCount, 1);
+    assert.equal(out.resolvedPartCount, 2);
   });
 
   it('treats a part with no blob as unusable, since it cannot be re-referenced', () => {
@@ -1057,11 +1130,32 @@ describe('buildCidMap', () => {
     assert.notEqual(out.minted[0] as any, logoPart as any);
   });
 
-  it('omits a name a part does not have and falls back to a generic content type', () => {
-    const bare = { cid: 'bare', blobId: 'B7' };
+  it('omits a name a part does not have', () => {
+    const bare = { cid: 'bare', blobId: 'B7', type: 'image/png' };
     const out = buildCidMap({ refs: ['bare'], sourceParts: [bare], mint: sequentialMint() });
     assert.deepEqual(out.minted, [
-      { blobId: 'B7', type: 'application/octet-stream', cid: MINT_0, disposition: 'inline' },
+      { blobId: 'B7', type: 'image/png', cid: MINT_0, disposition: 'inline' },
+    ]);
+  });
+
+  it('carries only what the sender declared an image, whatever the <img> claims', () => {
+    const notAnImage = { cid: 'doc', blobId: 'B8', type: 'application/pdf', name: 'doc.pdf' };
+    const typeless = { cid: 'bare', blobId: 'B9' };
+    const out = buildCidMap({
+      refs: ['doc', 'bare'], sourceParts: [notAnImage, typeless], mint: sequentialMint(),
+    });
+    assert.deepEqual(out.minted, []);
+    // Resolved, so never reported as a reference that matched nothing — the parts are there,
+    // they are just not ones this server pulls into a body it composes.
+    assert.deepEqual(out.unresolvedRefs, []);
+    assert.deepEqual(out.unembeddableParts, [notAnImage, typeless]);
+  });
+
+  it('ignores content-type parameters and case when deciding a part is an image', () => {
+    const odd = { cid: 'logo', blobId: 'B1', type: 'IMAGE/PNG; name=x' };
+    const out = buildCidMap({ refs: ['logo'], sourceParts: [odd], mint: sequentialMint() });
+    assert.deepEqual(out.minted, [
+      { blobId: 'B1', type: 'IMAGE/PNG; name=x', cid: MINT_0, disposition: 'inline' },
     ]);
   });
 

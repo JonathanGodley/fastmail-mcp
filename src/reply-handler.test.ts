@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildReplyParams, composeReply } from './reply-handler.js';
 import type { ReplyClient } from './reply-handler.js';
+import { hasTextQuoteMarker } from './reply-quote.js';
 import { InvalidInputError } from './coerce.js';
 
 // A raw-JMAP-shaped original (as getEmailById returns it).
@@ -364,5 +365,261 @@ describe('buildReplyParams — recorded source instance', () => {
       makeOriginal(),
     );
     assert.equal(replyParams.sourceEmailId, undefined);
+  });
+});
+
+// A fixed stand-in for a minted Content-ID, so the assertions read as values rather than as
+// patterns. Real mints come from the CSPRNG; the shape is pinned in inline-images.test.ts.
+const MINT = 'ii-00000000000000000000000000000001@inline.invalid';
+
+// An original whose html displays an embedded image the message really carries.
+const inlinePng = {
+  partId: '4', blobId: 'blob-png', type: 'image/png', size: 70, name: 'pic.png',
+  disposition: 'inline', cid: 'img-1',
+};
+function withInlineImage(over: any = {}) {
+  return makeOriginal({
+    bodyValues: { t: { value: 'original text' }, h: { value: '<p>hi <img src="cid:img-1"></p>' } },
+    attachments: [inlinePng],
+    ...over,
+  });
+}
+
+describe('buildReplyParams — images the quote carries', () => {
+  it('carries a quoted image under a minted identifier and points the quote at it', () => {
+    const { replyParams, quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'my reply', htmlBody: '<p>my reply</p>' },
+      withInlineImage(), undefined, () => MINT,
+    );
+    assert.deepEqual(quoteImages.minted, [
+      { blobId: 'blob-png', type: 'image/png', name: 'pic.png', cid: MINT, disposition: 'inline' },
+    ]);
+    assert.match(replyParams.htmlBody!, new RegExp(`src="cid:${MINT}"`));
+    assert.equal(quoteImages.htmlQuoteShips, true);
+    // The builder is pure: threading the parts onto the draft is the orchestration's job.
+    assert.equal(replyParams.attachments, undefined);
+  });
+
+  it('carries nothing when the whole quote is dropped', () => {
+    const { replyParams, quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', htmlBody: '<p>my reply</p>', quoteOriginal: false },
+      withInlineImage(), undefined, () => MINT,
+    );
+    assert.deepEqual(quoteImages.minted, []);
+    assert.equal(replyParams.htmlBody, '<p>my reply</p>');
+  });
+
+  it('mints nothing for a text-only reply, and reports what the quote lost', () => {
+    const { replyParams, quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'my reply' },
+      withInlineImage(), undefined, () => MINT,
+    );
+    assert.deepEqual(quoteImages.minted, []);
+    assert.equal(quoteImages.htmlQuoteShips, false);
+    assert.deepEqual(quoteImages.resolvedParts, [inlinePng]);
+    assert.match(replyParams.textBody!, /On .*wrote:\n> original text/);
+  });
+
+  it('quotes an image-only original, which has no text of its own to quote', () => {
+    const original = withInlineImage({
+      textBody: [],
+      bodyValues: { h: { value: '<div><img src="cid:img-1"></div>' } },
+    });
+    const { replyParams, quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', htmlBody: '<p>my reply</p>' },
+      original, undefined, () => MINT,
+    );
+    assert.match(replyParams.htmlBody!, new RegExp(`src="cid:${MINT}"`));
+    assert.match(replyParams.htmlBody!, /wrote:/);
+    assert.equal(quoteImages.minted.length, 1);
+  });
+
+  // The phantom-quote row: an image-only original whose sole reference resolves to nothing
+  // has no content to quote at all, so the reply must not open an attribution over an empty
+  // blockquote.
+  it('skips the quote entirely when an image-only original references a part it does not carry', () => {
+    const original = withInlineImage({
+      textBody: [],
+      bodyValues: { h: { value: '<div><img src="cid:gone"></div>' } },
+      attachments: [],
+    });
+    const { replyParams, quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', htmlBody: '<p>my reply</p>' },
+      original, undefined, () => MINT,
+    );
+    assert.equal(replyParams.htmlBody, '<p>my reply</p>');
+    assert.doesNotMatch(replyParams.htmlBody!, /wrote:/);
+    assert.deepEqual(quoteImages.unresolvedRefs, ['gone']);
+    assert.deepEqual(quoteImages.minted, []);
+  });
+
+  // The same original, but with an image it CAN carry and a reply that ships no html. The
+  // quote has nothing to put in the plain-text alternative, so an attribution there would
+  // describe a quote that is not present — and would arm this server's own text quote
+  // marker, so the next edit of the draft would be challenged over a quote it never had.
+  it('a text-only reply to an image-only original gets no attribution and no armed marker', () => {
+    const original = withInlineImage({
+      textBody: [],
+      bodyValues: { h: { value: '<div><img src="cid:img-1"></div>' } },
+    });
+    const { replyParams, quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'my reply' },
+      original, undefined, () => MINT,
+    );
+    assert.equal(replyParams.textBody, 'my reply');
+    assert.equal(hasTextQuoteMarker(replyParams.textBody), false);
+    assert.deepEqual(quoteImages.minted, []);
+    assert.deepEqual(quoteImages.resolvedParts, [inlinePng]);
+  });
+
+  it('carries an SVG the original displayed, like any other embedded image', () => {
+    const svg = { ...inlinePng, blobId: 'blob-svg', type: 'image/svg+xml', name: 'logo.svg' };
+    const { quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', htmlBody: '<p>my reply</p>' },
+      withInlineImage({ attachments: [svg] }), undefined, () => MINT,
+    );
+    assert.deepEqual(quoteImages.minted, [
+      { blobId: 'blob-svg', type: 'image/svg+xml', name: 'logo.svg', cid: MINT, disposition: 'inline' },
+    ]);
+  });
+
+  it('carries neither of two parts that share one Content-ID, and counts both as lost', () => {
+    const twin = { ...inlinePng, partId: '5', blobId: 'blob-png-2', name: 'pic2.png' };
+    const { replyParams, quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', htmlBody: '<p>my reply</p>' },
+      withInlineImage({ attachments: [inlinePng, twin] }), undefined, () => MINT,
+    );
+    assert.deepEqual(quoteImages.minted, []);
+    assert.equal(quoteImages.resolvedParts.length, 2);
+    // Resolved, so never also counted as a reference that matched nothing.
+    assert.deepEqual(quoteImages.unresolvedRefs, []);
+    assert.doesNotMatch(replyParams.htmlBody!, /<img/);
+  });
+
+  it('counts a data:-URI image in the quoted body without carrying it', () => {
+    const original = withInlineImage({
+      bodyValues: { t: { value: 'original text' }, h: { value: '<p>hi <img src="data:image/png;base64,AAA="></p>' } },
+      attachments: [],
+    });
+    const { quoteImages } = buildReplyParams(
+      { originalEmailId: 'e1', htmlBody: '<p>my reply</p>' },
+      original, undefined, () => MINT,
+    );
+    assert.equal(quoteImages.droppedDataImages, 1);
+    assert.deepEqual(quoteImages.minted, []);
+  });
+});
+
+describe('composeReply — threading the quote images onto the draft', () => {
+  // The confirmation read returns a draft echoing back exactly what the create call
+  // attached, which is what a real saved draft holds — and the only way a test can assert
+  // on the Content-IDs the quote mints, since production mints them at random.
+  function imageClient(original: any = withInlineImage(), uploadResult: any[] = []) {
+    const calls: any = {};
+    const client: ReplyClient = {
+      getEmailById: async (id) => {
+        calls.gets = [...(calls.gets ?? []), id];
+        if (id !== 'draft-9') return original;
+        return { id, attachments: (calls.draft?.attachments ?? []).map((a: any) => ({ ...a, size: 1024 })) };
+      },
+      uploadAttachments: async () => uploadResult,
+      createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
+    };
+    return { client, calls };
+  }
+
+  it("appends the quote images BEHIND the caller's own files rather than replacing them", async () => {
+    const uploaded = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
+    const { client, calls } = imageClient(withInlineImage(), uploaded);
+    await composeReply(
+      { originalEmailId: 'o1', htmlBody: '<p>hi</p>', attachments: [{ path: 'a.pdf' }] },
+      client, '/attach/root',
+    );
+    assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['up-1', 'blob-png']);
+    assert.equal(calls.draft.attachments[1].disposition, 'inline');
+  });
+
+  it('carries the quoted image even with no attachments directory configured', async () => {
+    const { client, calls } = imageClient();
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.deepEqual(calls.draft.attachments.map((a: any) => a.blobId), ['blob-png']);
+    assert.deepEqual(r.notes, ['This draft embeds 1 image(s) from the quoted message (1 KB).']);
+  });
+
+  it('re-reads the saved draft for a reply whose only images come from the quote', async () => {
+    const { client, calls } = imageClient();
+    await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.deepEqual(calls.gets, ['o1', 'draft-9']);
+  });
+
+  it('says so when an image the quote carries is not on the saved draft', async () => {
+    const calls: any = {};
+    const client: ReplyClient = {
+      // The read-back finds a draft with none of the parts this call attached.
+      getEmailById: async (id) => (id === 'draft-9' ? { id, attachments: [] } : withInlineImage()),
+      uploadAttachments: async () => [],
+      createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
+    };
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.deepEqual(r.notes, [
+      'This draft embeds 1 image(s) from the quoted message (1 KB).',
+      '1 embedded image(s) this call attached were not found on the saved draft.' +
+      ' Open the draft to check how it renders.',
+    ]);
+  });
+
+  it('does not re-read the draft for a reply that carries no images at all', async () => {
+    const { client, calls } = imageClient(makeOriginal());
+    await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.deepEqual(calls.gets, ['o1']);
+  });
+
+  it('leaves attachments unset when the reply carries nothing', async () => {
+    const { client, calls } = imageClient(makeOriginal());
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.equal('attachments' in calls.draft, false);
+    assert.equal(r.notes, undefined);
+  });
+
+  it('says plainly that a text-only reply dropped the images the original displayed', async () => {
+    const { client } = imageClient();
+    const r = await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined);
+    assert.deepEqual(r.notes, [
+      '1 image(s) from the quoted message were dropped and are not part of this draft.',
+    ]);
+  });
+
+  it('reports a shortfall when the quote could not carry everything it referenced', async () => {
+    const twin = { ...inlinePng, partId: '5', blobId: 'blob-png-2', name: 'pic2.png' };
+    const { client } = imageClient(withInlineImage({ attachments: [inlinePng, twin] }));
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.deepEqual(r.notes, [
+      'Embedded 0 of 2 image part(s) referenced by the quote (0 KB embedded); ' +
+      '2 could not be embedded and are not part of this draft.',
+    ]);
+  });
+
+  // A quote is re-sent from a different message, so an image referenced by a path relative to
+  // the original's own origin cannot come with it. The quote still ships; the loss is said.
+  it('says how many images the quote dropped for a reference form it cannot carry', async () => {
+    const orig = withInlineImage({
+      bodyValues: {
+        t: { value: 'original text' },
+        h: { value: '<p><img src="cid:img-1"><img src="/logo.png"><img src="//cdn.example.com/a.png"></p>' },
+      },
+    });
+    const { client } = imageClient(orig);
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.deepEqual(r.notes, [
+      'This draft embeds 1 image(s) from the quoted message (1 KB).',
+      '2 image(s) in the quoted message used a reference form this server cannot carry into' +
+      ' a quote and were dropped; the rest of the quote was kept.',
+    ]);
+  });
+
+  it('reports a reference in the quoted body that matched no part', async () => {
+    const { client } = imageClient(withInlineImage({ attachments: [] }));
+    const r = await composeReply({ originalEmailId: 'o1', htmlBody: '<p>hi</p>' }, client, undefined);
+    assert.deepEqual(r.notes, ['1 reference(s) matched no part and were skipped.']);
   });
 });
