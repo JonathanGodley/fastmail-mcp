@@ -27,6 +27,19 @@ import {
   quoteParamValue,
   CalDAVCalendarClient,
 } from './caldav-client.js';
+import type { DAVClient } from 'tsdav';
+import { callArguments } from './testing/mock-calls.js';
+
+// The mocked DAVClient methods below declare these parameter lists rather than
+// taking no arguments. A `mock.fn(async () => …)` stub records its arguments as an
+// empty tuple, so every assertion about what the client sent tsdav would be reading
+// an element the type system knows cannot exist; taking the shapes from tsdav's own
+// signatures also means a tsdav upgrade that changes a request shape shows up here
+// instead of in a passing test asserting against the old one.
+type FetchObjectsParams = Parameters<DAVClient['fetchCalendarObjects']>[0];
+type UpdateObjectParams = Parameters<DAVClient['updateCalendarObject']>[0];
+type CreateObjectParams = Parameters<DAVClient['createCalendarObject']>[0];
+type DeleteObjectParams = Parameters<DAVClient['deleteCalendarObject']>[0];
 
 // requireNonEmpty / validateClearFields are owned by src/coerce.ts and covered
 // there (including the InvalidInputError class the calendar tools depend on for
@@ -48,6 +61,10 @@ describe('extractVEvent', () => {
     ].join('\n');
 
     const vevent = extractVEvent(ical);
+    // Extraction returns null when it finds no VEVENT, and every assertion below
+    // reads the block: say so here, so a regression that stops finding the block at
+    // all reports that instead of a null dereference.
+    assert.ok(vevent, 'expected a VEVENT block to be extracted');
     assert.ok(vevent.includes('SUMMARY:Test Event'));
     assert.ok(vevent.includes('DTSTART;TZID=Europe/Rome:20260320T083000'));
     assert.ok(!vevent.includes('VTIMEZONE'));
@@ -77,6 +94,7 @@ describe('extractVEvent', () => {
     ].join('\n');
 
     const vevent = extractVEvent(ical);
+    assert.ok(vevent, 'expected a VEVENT block to be extracted');
     // Should only have the VEVENT DTSTART, not the VTIMEZONE one
     const dtstartMatches = vevent.match(/DTSTART/g);
     assert.equal(dtstartMatches?.length, 1);
@@ -383,7 +401,7 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      fetchCalendarObjects: mock.fn(async () => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -411,7 +429,7 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
     const { client, mockDAVClient } = createMockedClient(objects);
     await client.getCalendarEvents(undefined, 50, '2026-03-25T00:00:00Z', '2026-03-26T00:00:00Z');
 
-    const callArgs = mockDAVClient.fetchCalendarObjects.mock.calls[0].arguments[0];
+    const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.deepEqual(callArgs.timeRange, {
       start: '2026-03-25T00:00:00Z',
       end: '2026-03-26T00:00:00Z',
@@ -425,7 +443,7 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
     const { client, mockDAVClient } = createMockedClient(objects);
     await client.getCalendarEvents(undefined, 50);
 
-    const callArgs = mockDAVClient.fetchCalendarObjects.mock.calls[0].arguments[0];
+    const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.equal(callArgs.timeRange, undefined);
   });
 });
@@ -555,9 +573,9 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      fetchCalendarObjects: mock.fn(async () => calendarObjects),
-      updateCalendarObject: mock.fn(async () => ({})),
-      deleteCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -572,7 +590,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
 
     assert.equal(result, 'evt1@fm');
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
-    const updatedObj = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject;
+    const updatedObj = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject;
     assert.ok(updatedObj.data.includes('SUMMARY:New Title'));
     assert.ok(updatedObj.data.includes('DESCRIPTION:My description'));
     assert.ok(updatedObj.data.includes('LOCATION:Room A'));
@@ -590,7 +608,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
       end: '2026-04-02T15:00:00Z',
     });
 
-    const updatedObj = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject;
+    const updatedObj = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject;
     assert.ok(updatedObj.data.includes('DTSTART:20260402T140000Z'));
     assert.ok(updatedObj.data.includes('DTEND:20260402T150000Z'));
     assert.ok(updatedObj.data.includes('SUMMARY:Meeting'));
@@ -641,8 +659,8 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      fetchCalendarObjects: mock.fn(async () => calendarObjects),
-      deleteCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -664,7 +682,7 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
     await client.deleteCalendarEvent('del1@fm');
 
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 1);
-    const deletedObj = mockDAVClient.deleteCalendarObject.mock.calls[0].arguments[0].calendarObject;
+    const deletedObj = callArguments(mockDAVClient.deleteCalendarObject)[0].calendarObject;
     assert.equal(deletedObj.url, '/cal/del1.ics');
   });
 
@@ -699,7 +717,7 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      fetchCalendarObjects: mock.fn(async () => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1488,8 +1506,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      fetchCalendarObjects: mock.fn(async () => calendarObjects),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1502,7 +1520,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt1@fm', { title: 'New Title' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SUMMARY:New Title'));
     // Preserved properties
     assert.ok(updatedData.includes('ATTENDEE;CN=Alice'));
@@ -1521,7 +1539,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt2@fm', { title: 'New Title' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     // Original DTSTART with TZID should be preserved exactly
     assert.ok(updatedData.includes('DTSTART;TZID=Europe/Rome:20260401T100000'));
   });
@@ -1533,7 +1551,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt3@fm', { location: 'New Room' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:3')); // Was 2, now 3
   });
 
@@ -1544,7 +1562,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt4@fm', { title: 'New Title' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:2')); // Unchanged
   });
 
@@ -1568,7 +1586,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     // test is about.
     await client.updateCalendarEvent('solo@fm', { start: '2026-04-01T10:30:00Z' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:0'));
   });
 
@@ -1588,7 +1606,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('dur@fm', { end: '2026-04-01T13:00:00Z' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DTEND:20260401T130000Z'));
     assert.ok(!updatedData.includes('DURATION'));
   });
@@ -1609,7 +1627,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('dur2@fm', { start: '2026-04-02T10:00:00Z' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DURATION:PT2H'));
   });
 
@@ -1620,7 +1638,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt5@fm', { participants: [] });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(!updatedData.includes('ATTENDEE'));
     // An ORGANIZER with no ATTENDEEs is a malformed scheduling VEVENT, so it is stripped too.
     assert.ok(!updatedData.includes('ORGANIZER'));
@@ -1667,7 +1685,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evtB@fm', { participants: [{ email: 'carol@example.com' }] });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SUMMARY:Original Title'));
     assert.ok(updatedData.includes('DESCRIPTION:Original description'));
     assert.ok(updatedData.includes('LOCATION:Room A'));
@@ -1680,7 +1698,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evtC@fm', { clearFields: ['location'] });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(!updatedData.includes('LOCATION:'));
     // Other content untouched
     assert.ok(updatedData.includes('SUMMARY:Original Title'));
@@ -1718,7 +1736,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt6@fm', { end: '2026-04-01T12:00:00' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DTEND;TZID=Europe/Rome:20260401T120000'));
   });
 
@@ -1739,7 +1757,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('allday@fm', { start: '2026-04-05' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DTSTART;VALUE=DATE:20260405'));
   });
 
@@ -1806,8 +1824,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => objects),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
 
@@ -1841,8 +1859,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => objects),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
 
@@ -1873,7 +1891,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       participants: [{ email: 'alice@example.com', name: 'Alice' }],
     });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('ORGANIZER'));
     assert.ok(updatedData.includes('mailto:test@fastmail.com'));
     assert.ok(updatedData.includes('ATTENDEE'));
@@ -1886,7 +1904,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evtdesc@fm', { description: 'New description' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DESCRIPTION:New description'));
     assert.ok(updatedData.includes('SUMMARY:Original Title')); // Other fields preserved
   });
@@ -1898,7 +1916,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt7@fm', { title: 'X' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('LAST-MODIFIED:'));
     // DTSTAMP should be updated (not the original)
     assert.ok(!updatedData.includes('DTSTAMP:20260401T000000Z'));
@@ -1911,7 +1929,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await client.updateCalendarEvent('evt8@fm', { title: 'X' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('PRODID:-//Google Inc//Google Calendar//EN'));
   });
 });
@@ -1955,8 +1973,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      fetchCalendarObjects: mock.fn(async () => objects),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1974,7 +1992,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
     });
 
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DTSTART:20260407T100000Z'));
   });
 
@@ -2006,7 +2024,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
     });
 
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SUMMARY:Weekly Meeting')); // Master preserved
     assert.ok(updatedData.includes('DTSTART:20260407T100000Z')); // Start updated
   });
@@ -2044,7 +2062,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
       confirmRecurring: true,
     });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SUMMARY:Weekly Meeting')); // Master preserved
     // April 14 (Tuesday) should be kept — matches new weekly Tuesday schedule
     assert.ok(updatedData.includes('Exception Tue Week 2'));
@@ -2062,7 +2080,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
     await client.updateCalendarEvent('recur@fm', { title: 'New Title' });
 
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SUMMARY:New Title'));
     assert.ok(updatedData.includes('Exception Week 2')); // Exception preserved
   });
@@ -2076,7 +2094,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      createCalendarObject: mock.fn(async () => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2095,7 +2113,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       ],
     });
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes(':mailto:me@fastmail.com'), 'ORGANIZER should have mailto URI');
     assert.ok(/ORGANIZER;CN=.+:mailto:me@fastmail.com/.test(ical), 'ORGANIZER should have CN parameter');
     assert.ok(ical.includes('ATTENDEE;CN=Alice:mailto:alice@example.com'));
@@ -2148,7 +2166,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async () => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
     };
     await assert.rejects(
       () => client.createCalendarEvent({
@@ -2175,7 +2193,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       end: '2026-04-07T15:00:00Z',
     });
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(!ical.includes('ATTENDEE'));
     assert.ok(!ical.includes('ORGANIZER'));
   });
@@ -2190,7 +2208,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       participants: [{ email: 'alice@example.com' }],
     });
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(!ical.includes('RSVP'));
   });
 
@@ -2218,7 +2236,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       participants: [{ email: 'alice@example.com', name: 'Doe, Alice' }],
     });
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     // Should use DQUOTE quoting: CN="Doe, Alice"
     assert.ok(ical.includes('CN="Doe, Alice"'));
     // Should NOT use backslash escaping: CN=Doe\, Alice
@@ -2234,7 +2252,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       end: '2026-04-08',
     });
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes('DTSTART;VALUE=DATE:20260407'));
     assert.ok(ical.includes('DTEND;VALUE=DATE:20260408'));
   });
@@ -2261,7 +2279,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       end: '2026-04-07T15:00:00Z',
     });
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.endsWith('\r\n'));
   });
 });
@@ -2365,8 +2383,8 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      fetchCalendarObjects: mock.fn(async () => calendarObjects),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2379,7 +2397,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
     // Same day as the untouched DTEND (Europe/Rome 11:00) and before it.
     await client.updateCalendarEvent('seqstart@fm', { start: '2026-04-01T10:30:00' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:3'));
   });
 
@@ -2389,7 +2407,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
 
     await client.updateCalendarEvent('seqend@fm', { end: '2026-04-01T12:00:00' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:3'));
   });
 
@@ -2401,7 +2419,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
       participants: [{ email: 'new@example.com', name: 'New' }],
     });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:3'));
   });
 
@@ -2420,7 +2438,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
 
     await client.updateCalendarEvent('durtz@fm', { end: '2026-04-01T13:00:00' });
 
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     // Should fall back to DTSTART's TZID since there was no DTEND
     assert.ok(updatedData.includes('DTEND;TZID=Europe/Rome:20260401T130000'));
   });
@@ -2478,8 +2496,8 @@ describe('Recurring event: no orphans proceeds without confirmRecurring', () => 
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => objects),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
 
@@ -2487,7 +2505,7 @@ describe('Recurring event: no orphans proceeds without confirmRecurring', () => 
     await client.updateCalendarEvent('noorphan@fm', { end: '2026-04-06T12:00:00Z' });
 
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
-    const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('Modified Week 2')); // Exception preserved
     assert.ok(updatedData.includes('DTEND:20260406T120000Z')); // End updated
   });
@@ -2633,13 +2651,14 @@ describe('removeOrphanedVTimezones quoted/folded references', () => {
 describe('updateCalendarEvent — rrule DoS guard', () => {
   function mockClient(icalData: string) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
-    (client as any).client = {
+    const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => [{ data: icalData, url: '/cal/dos.ics' }]),
-      updateCalendarObject: mock.fn(async () => ({ status: 207 })),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/dos.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 207 })),
     };
-    return client;
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
   }
 
   it('does not hang on a sub-daily RRULE with a distant exception (falls through to no-prune)', async () => {
@@ -2657,14 +2676,14 @@ describe('updateCalendarEvent — rrule DoS guard', () => {
       'END:VEVENT',
       'END:VCALENDAR',
     ].join('\r\n');
-    const client = mockClient(ical);
+    const { client, mockDAVClient } = mockClient(ical);
     const started = Date.now();
     // Stays before the untouched DTEND (20260101T093000Z); the guard under test
     // is the rrule expansion bound, not the start/end ordering rule.
     await client.updateCalendarEvent('dos@fm', { start: '2026-01-01T09:10:00Z', confirmRecurring: true });
     // Should return promptly, not spin. Generous bound to avoid flakiness.
     assert.ok(Date.now() - started < 3000, 'guard should prevent unbounded rrule expansion');
-    const written = (client as any).client.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('Far exception'), 'exception must be preserved, not pruned');
   });
 });
@@ -2681,9 +2700,9 @@ describe('CalDAV write status checking (assertDavOk)', () => {
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => [{ data: ical, url: '/cal/s.ics' }]),
-      updateCalendarObject: mock.fn(async () => ({ status })),
-      deleteCalendarObject: mock.fn(async () => ({ status })),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status })),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status })),
     };
     return client;
   }
@@ -2737,7 +2756,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async () => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2773,8 +2792,8 @@ describe('ORGANIZER display name comes from the client config', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => [{ data: NO_ORGANIZER_ICAL, url: '/cal/noorg-cn.ics' }]),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: NO_ORGANIZER_ICAL, url: '/cal/noorg-cn.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2790,7 +2809,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     const { client, mockDAVClient } = mockedCreateClient('Jeremy G');
     await createWithParticipant(client);
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes('ORGANIZER;CN=Jeremy G:mailto:me@fastmail.com'), ical);
   });
 
@@ -2798,7 +2817,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     const { client, mockDAVClient } = mockedCreateClient();
     await createWithParticipant(client);
 
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), ical);
   });
 
@@ -2807,7 +2826,7 @@ describe('ORGANIZER display name comes from the client config', () => {
       const { client, mockDAVClient } = mockedCreateClient(configured);
       await createWithParticipant(client);
 
-      const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+      const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
       assert.ok(ical.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), ical);
     }
   });
@@ -2816,7 +2835,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     const { client, mockDAVClient } = mockedPatchClient('Jeremy G');
     await addParticipant(client);
 
-    const data = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(data.includes('ORGANIZER;CN=Jeremy G:mailto:me@fastmail.com'), data);
   });
 
@@ -2824,7 +2843,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     const { client, mockDAVClient } = mockedPatchClient();
     await addParticipant(client);
 
-    const data = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(data.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), data);
   });
 });
@@ -2837,7 +2856,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async () => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2938,7 +2957,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
   it('accepts an all-day event (both date-only, exclusive end)', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await create(client, '2026-03-20', '2026-03-21');
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes('DTSTART;VALUE=DATE:20260320'));
     assert.ok(ical.includes('DTEND;VALUE=DATE:20260321'));
   });
@@ -2946,7 +2965,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
   it('accepts a both-UTC event', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await create(client, '2026-03-20T08:30:00Z', '2026-03-20T09:30:00Z');
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes('DTSTART:20260320T083000Z'));
     assert.ok(ical.includes('DTEND:20260320T093000Z'));
   });
@@ -2954,7 +2973,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
   it('accepts a both-floating event', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await create(client, '2026-03-20T08:30:00', '2026-03-20T09:30:00');
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes('DTSTART:20260320T083000'));
     assert.ok(ical.includes('DTEND:20260320T093000'));
   });
@@ -2973,7 +2992,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async () => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3028,7 +3047,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
   it('keeps a padded date-only value an all-day event rather than an instant', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await create(client, ' 2026-03-20 ', ' 2026-03-21 ');
-    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
     assert.ok(ical.includes('DTSTART;VALUE=DATE:20260320'), ical);
     assert.ok(ical.includes('DTEND;VALUE=DATE:20260321'), ical);
   });
@@ -3040,8 +3059,8 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => [{ data: icalData, url: '/cal/e.ics' }]),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3195,7 +3214,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   it('accepts a start alone that stays before the stored end (same frame)', async () => {
     const { client, mockDAVClient } = mockClient(UTC_EVENT);
     await client.updateCalendarEvent('utc@fm', { start: '2026-03-20T09:00:00Z' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTSTART:20260320T090000Z'));
     assert.ok(written.includes('DTEND:20260320T093000Z'));
   });
@@ -3203,14 +3222,14 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   it('accepts an end alone that stays after the stored start (same frame)', async () => {
     const { client, mockDAVClient } = mockClient(FLOATING_EVENT);
     await client.updateCalendarEvent('flt@fm', { end: '2026-03-20T10:30:00' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTEND:20260320T103000'));
   });
 
   it('accepts a date-only start alone that stays before the stored date-only end', async () => {
     const { client, mockDAVClient } = mockClient(ALLDAY_EVENT);
     await client.updateCalendarEvent('day@fm', { start: '2026-03-22' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTSTART;VALUE=DATE:20260322'));
     assert.ok(written.includes('DTEND;VALUE=DATE:20260325'));
   });
@@ -3218,7 +3237,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   it('accepts a floating start on a TZID-bearing event, keeping the stored timezone', async () => {
     const { client, mockDAVClient } = mockClient(ZONED_EVENT);
     await client.updateCalendarEvent('tz@fm', { start: '2026-03-20T09:00:00' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTSTART;TZID=Europe/Rome:20260320T090000'));
     assert.ok(written.includes('DTEND;TZID=Europe/Rome:20260320T093000'));
   });
@@ -3226,7 +3245,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   it('accepts a floating end on a TZID-bearing event, keeping the stored timezone', async () => {
     const { client, mockDAVClient } = mockClient(ZONED_EVENT);
     await client.updateCalendarEvent('tz@fm', { end: '2026-03-20T11:00:00' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTEND;TZID=Europe/Rome:20260320T110000'));
   });
 
@@ -3249,7 +3268,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     );
     const { client, mockDAVClient } = mockClient(flight);
     await client.updateCalendarEvent('fly@fm', { start: '2026-03-20T11:00:00' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTSTART;TZID=Europe/Rome:20260320T110000'));
   });
 
@@ -3266,7 +3285,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     ].join('\r\n');
     const { client, mockDAVClient } = mockClient(durationEvent);
     await client.updateCalendarEvent('dur3@fm', { start: '2026-03-25T08:30:00Z' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTSTART:20260325T083000Z'));
     assert.ok(written.includes('DURATION:PT1H'));
   });
@@ -3277,7 +3296,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     const broken = stored('bad@fm', 'DTSTART:20260320T093000', 'DTEND:20260320T093000Z');
     const { client, mockDAVClient } = mockClient(broken);
     await client.updateCalendarEvent('bad@fm', { title: 'Renamed' });
-    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('SUMMARY:Renamed'));
   });
 });
@@ -3303,8 +3322,8 @@ describe('recurring-exception confirmation is a caller-fixable rejection', () =>
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      fetchCalendarObjects: mock.fn(async () => [{ data: ical, url: '/cal/conf.ics' }]),
-      updateCalendarObject: mock.fn(async () => ({})),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/conf.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
     };
 
     await assert.rejects(

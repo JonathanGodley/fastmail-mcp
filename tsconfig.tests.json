@@ -1,0 +1,22 @@
+{
+  // The build config (tsconfig.json) excludes src/**/*.test.ts, and the test
+  // runner is tsx, which strips types without checking them — so without this
+  // config nothing typechecks the test files at all. Run it with
+  // `npm run typecheck:tests`; CI runs it on every push and pull request so it
+  // cannot rot back into that state.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Type-checking only. Emitting is the build config's job, and the
+    // declaration/sourceMap settings inherited from it have no meaning here.
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  // Everything under src/, tests included — a test's types are only meaningful
+  // against the sources it imports, so both are checked in one pass.
+  "include": ["src/**/*"],
+  // Every file under src/ is checked. NOTHING BELONGS HERE BUT node_modules AND
+  // dist: naming a source or test file to make the check pass would leave a green
+  // gate that proves less than the file it stopped covering. Fix the errors instead.
+  "exclude": ["node_modules", "dist"]
+}

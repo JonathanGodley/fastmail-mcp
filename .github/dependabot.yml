@@ -28,3 +28,22 @@ updates:
       # that don't exist on the oldest supported Node.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+
+      # debug is pinned to an exact version on purpose, and the pin is a
+      # security control rather than a stability one. The CalDAV library tsdav
+      # logs its HTTP Basic credential as bare base64 whenever DEBUG is set, and
+      # src/index.ts suppresses that by calling debug's enable(). That
+      # suppression is instance-local: it only reaches the debug module instance
+      # tsdav itself resolves. tsdav depends on debug at an exact version, so
+      # matching that version is what makes npm hoist a single shared copy.
+      # Any bump that diverges from tsdav's pin - patch included - lets npm
+      # nest a second copy under node_modules/tsdav/node_modules/debug, and the
+      # suppression silently stops working while the build and the whole test
+      # suite still pass. All three update types are ignored for that reason.
+      # To move this pin, first check what version tsdav depends on and move it
+      # to match, in the same change.
+      - dependency-name: "debug"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"

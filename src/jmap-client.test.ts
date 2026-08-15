@@ -3,10 +3,28 @@ import assert from 'node:assert/strict';
 import { homedir } from 'os';
 import { resolve, join, basename, sep } from 'path';
 import { JmapClient } from './jmap-client.js';
+import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 import { InvalidInputError } from './coerce.js';
+import { callArguments, findCallArguments } from './testing/mock-calls.js';
 
 // ---------- helpers ----------
+
+/**
+ * Install a stub over the client's single outbound seam and hand back the mock.
+ *
+ * The implementation parameter is declared with the request even where a caller's
+ * stub ignores it. node:test types the mock it returns from the real method AND the
+ * implementation, so an implementation taking no arguments records its arguments as
+ * a union with the empty tuple — and every assertion that reads the request back is
+ * then reading something the compiler must treat as possibly undefined.
+ */
+function stubRequests(client: JmapClient, impl: (request: JmapRequest) => Promise<any>) {
+  return mock.method(client, 'makeRequest', impl);
+}
+
+/** A mock installed over `makeRequest`, as the read helpers below see it. */
+type RequestMock = ReturnType<typeof stubRequests>;
 
 const ACCOUNT_ID = 'acct-123';
 const IDENTITY = { id: 'id-1', name: 'Test User', email: 'me@example.com', mayDelete: false };
@@ -31,7 +49,7 @@ function makeClient(): JmapClient {
 }
 
 function stubMakeRequest(client: JmapClient, response: any) {
-  mock.method(client, 'makeRequest', async () => response);
+  stubRequests(client, async () => response);
 }
 
 // ---------- tests ----------
@@ -126,7 +144,7 @@ describe('createDraft', () => {
 
   // 2. Correct JMAP request structure
   it('sends correct JMAP request structure', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-1' } } }, 'createDraft'],
       ],
@@ -135,7 +153,7 @@ describe('createDraft', () => {
     await client.createDraft({ subject: 'Test', textBody: 'body' });
 
     assert.equal(makeReq.mock.calls.length, 1);
-    const request = makeReq.mock.calls[0].arguments[0];
+    const request = callArguments(makeReq)[0];
 
     // capabilities
     assert.deepEqual(request.using, [
@@ -240,7 +258,7 @@ describe('createDraft', () => {
     const altIdentity = { id: 'id-2', name: 'Alias User', email: 'alias@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [IDENTITY, altIdentity]);
 
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-7' } } }, 'createDraft'],
       ],
@@ -248,7 +266,7 @@ describe('createDraft', () => {
 
     await client.createDraft({ subject: 'Hi', from: 'alias@example.com' });
 
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.from, [{ name: 'Alias User', email: 'alias@example.com' }]);
   });
 
@@ -268,7 +286,7 @@ describe('createDraft', () => {
     const wildcardIdentity = { id: 'id-wild', name: 'Wild User', email: '*@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
 
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-wild' } } }, 'createDraft'],
       ],
@@ -276,7 +294,7 @@ describe('createDraft', () => {
 
     await client.createDraft({ subject: 'Hi', from: 'work@example.com' });
 
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.from, [{ name: 'Wild User', email: 'work@example.com' }]);
   });
 
@@ -342,7 +360,7 @@ describe('createDraft', () => {
       { id: 'mb-custom', name: 'Project X', role: null },
     ]);
 
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-9' } } }, 'createDraft'],
       ],
@@ -351,7 +369,7 @@ describe('createDraft', () => {
     // Resolve by name -> the custom mailbox's id.
     await client.createDraft({ subject: 'Custom', mailbox: 'Project X' });
 
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.equal(emailObj.mailboxIds['mb-custom'], true);
   });
 
@@ -373,7 +391,7 @@ describe('createDraft', () => {
 
   // 10. HTML body constructed correctly
   it('derives a text/plain fallback for an html-only draft', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-10' } } }, 'createDraft'],
       ],
@@ -381,7 +399,7 @@ describe('createDraft', () => {
 
     await client.createDraft({ subject: 'Rich', htmlBody: '<p>Hello</p>' });
 
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.htmlBody, [{ partId: 'html', type: 'text/html' }]);
     // The fallback is auto-generated as a readable text/plain alternative from the html.
     assert.deepEqual(emailObj.textBody, [{ partId: 'text', type: 'text/plain' }]);
@@ -435,7 +453,7 @@ const MAILBOXES_WITH_TRASH = [
 // Returns the makeRequest mock.
 function mockUpdate(client: JmapClient, fixture: any, mailboxes: any[] = MAILBOXES_WITH_TRASH) {
   mock.method(client, 'getMailboxes', async () => mailboxes);
-  return mock.method(client, 'makeRequest', async (req: any) => {
+  return stubRequests(client, async (req: any) => {
     const [method, params] = req.methodCalls[0];
     if (method === 'Email/get') {
       return { methodResponses: [['Email/get', { list: [fixture] }, 'getEmail']] };
@@ -449,8 +467,8 @@ function mockUpdate(client: JmapClient, fixture: any, mailboxes: any[] = MAILBOX
 }
 
 // Pull the recreated draft object out of the create (second overall) call.
-function draftFromCall(makeReq: ReturnType<typeof mock.method>) {
-  return makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+function draftFromCall(makeReq: RequestMock) {
+  return callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
 }
 
 describe('updateDraft', () => {
@@ -470,12 +488,12 @@ describe('updateDraft', () => {
 
     // Three calls: Email/get, a create-ONLY Email/set, then the Trash move.
     assert.equal(makeReq.mock.calls.length, 3);
-    const createCall = makeReq.mock.calls[1].arguments[0].methodCalls[0];
+    const createCall = callArguments(makeReq, 1)[0].methodCalls[0];
     assert.equal(createCall[0], 'Email/set');
     assert.equal(createCall[1].destroy, undefined); // create call must NOT also destroy
     assert.equal(createCall[1].update, undefined);  // nor touch the old draft
     assert.equal(createCall[1].create.draft.subject, 'New Subject');
-    const disposeCall = makeReq.mock.calls[2].arguments[0].methodCalls[0];
+    const disposeCall = callArguments(makeReq, 2)[0].methodCalls[0];
     assert.equal(disposeCall[0], 'Email/set');
     assert.equal(disposeCall[1].create, undefined); // dispose call must NOT also create
   });
@@ -488,7 +506,7 @@ describe('updateDraft', () => {
     const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
     assert.equal(result.trashedOldDraftId, 'draft-1');
 
-    const disposeParams = makeReq.mock.calls[2].arguments[0].methodCalls[0][1];
+    const disposeParams = callArguments(makeReq, 2)[0].methodCalls[0][1];
     // mailboxIds only: keywords (incl. $draft) are left untouched, so the trashed copy is
     // still a draft and can be moved back to Drafts.
     assert.deepEqual(disposeParams.update, { 'draft-1': { mailboxIds: { 'mb-trash': true } } });
@@ -508,7 +526,7 @@ describe('updateDraft', () => {
 
     const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
     assert.equal(result.trashedOldDraftId, 'draft-1');
-    const disposeParams = makeReq.mock.calls[2].arguments[0].methodCalls[0][1];
+    const disposeParams = callArguments(makeReq, 2)[0].methodCalls[0][1];
     assert.deepEqual(disposeParams.update, { 'draft-1': { mailboxIds: { 'mb-trash': true } } });
   });
 
@@ -526,7 +544,7 @@ describe('updateDraft', () => {
 
   it('on a failed Trash move (notUpdated): surfaces the orphan + reason, does NOT throw', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
@@ -546,7 +564,7 @@ describe('updateDraft', () => {
 
   it('when the server reports the move in neither updated nor notUpdated: orphaned, not assumed trashed', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
@@ -568,7 +586,7 @@ describe('updateDraft', () => {
 
   it('treats a null entry in updated as a successful move (JMAP allows id -> null)', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
@@ -586,7 +604,7 @@ describe('updateDraft', () => {
 
   it('when the mailbox lookup throws: surfaces the orphan + reason, does NOT throw', async () => {
     mock.method(client, 'getMailboxes', async () => { throw new Error('network down'); });
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
@@ -632,7 +650,7 @@ describe('updateDraft', () => {
   });
 
   it('merges fields — preserves existing values for unspecified fields', async () => {
-    mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
       }
@@ -642,15 +660,14 @@ describe('updateDraft', () => {
     await client.updateDraft('draft-1', { subject: 'Updated' });
 
     // The create call should keep existing to address
-    const makeReq = client.makeRequest as ReturnType<typeof mock.method>;
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.to, [{ email: 'bob@example.com' }]);
     assert.equal(emailObj.subject, 'Updated');
   });
 
   it('rejects non-draft email', async () => {
     const nonDraft = { ...EXISTING_DRAFT, keywords: { $seen: true } };
-    mock.method(client, 'makeRequest', async () => ({
+    stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [nonDraft] }, 'getEmail']],
     }));
 
@@ -664,7 +681,7 @@ describe('updateDraft', () => {
   });
 
   it('throws when email not found', async () => {
-    mock.method(client, 'makeRequest', async () => ({
+    stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [] }, 'getEmail']],
     }));
 
@@ -678,7 +695,7 @@ describe('updateDraft', () => {
   });
 
   it('throws on JMAP error during the create call', async () => {
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
       }
@@ -706,7 +723,7 @@ describe('updateDraft', () => {
       htmlBody: [{ partId: '1', type: 'text/plain' }], // server aliases the one part into both lists
       bodyValues: { '1': { value: 'Plain only' } },
     };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [aliasedDraft] }, 'getEmail']] };
       }
@@ -715,7 +732,7 @@ describe('updateDraft', () => {
 
     await client.updateDraft('draft-1', { subject: 'New subject' });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.equal(emailObj.htmlBody, undefined);
     assert.deepEqual(emailObj.bodyValues, { text: { value: 'Plain only' } });
   });
@@ -727,7 +744,7 @@ describe('updateDraft', () => {
       htmlBody: [{ partId: '2', type: 'text/html' }],
       bodyValues: { '1': { value: 'The text' }, '2': { value: '<p>The html</p>' } },
     };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [dualDraft] }, 'getEmail']] };
       }
@@ -736,7 +753,7 @@ describe('updateDraft', () => {
 
     await client.updateDraft('draft-1', { subject: 'New subject' });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.bodyValues, {
       text: { value: 'The text' },
       html: { value: '<p>The html</p>' },
@@ -1113,7 +1130,7 @@ describe('updateDraft', () => {
 
   it('on create failure: throws, disposes of nothing, leaves the old draft untouched', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
@@ -1129,12 +1146,12 @@ describe('updateDraft', () => {
     );
     // Exactly 2 calls: Email/get + the failed create. The old draft must NEVER be moved.
     assert.equal(makeReq.mock.calls.length, 2);
-    assert.ok(makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create);
+    assert.ok(callArguments(makeReq, 1)[0].methodCalls[0][1].create);
   });
 
   it('on a transport error while disposing (after a good create): returns orphan warning, does NOT throw', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
@@ -1278,9 +1295,13 @@ describe('updateDraft', () => {
 
   // Find the create call by predicate — the regenerate path inserts a second Email/get, so
   // the create is no longer at a fixed index.
-  function createdDraft(makeReq: ReturnType<typeof mock.method>) {
-    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
-    return call!.arguments[0].methodCalls[0][1].create.draft;
+  function createdDraft(makeReq: RequestMock) {
+    const [request] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][1].create,
+      'creating the replacement draft',
+    );
+    return request.methodCalls[0][1].create.draft;
   }
 
   // -- dual-body reply draft --
@@ -1637,7 +1658,7 @@ describe('sendDraft', () => {
   });
 
   it('returns submission ID on success', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']] };
       }
@@ -1648,7 +1669,7 @@ describe('sendDraft', () => {
     assert.equal(submissionId, 'sub-1');
 
     // Verify submission call structure
-    const submitCall = makeReq.mock.calls[1].arguments[0];
+    const submitCall = callArguments(makeReq, 1)[0];
     assert.equal(submitCall.methodCalls[0][0], 'EmailSubmission/set');
     assert.equal(submitCall.methodCalls[0][1].create.submission.emailId, 'draft-1');
     assert.equal(submitCall.methodCalls[0][1].create.submission.identityId, IDENTITY.id);
@@ -1664,7 +1685,7 @@ describe('sendDraft', () => {
   // field — including bcc, which appears in the SMTP envelope but not the headers.
   it('includes bcc recipients in the envelope rcptTo', async () => {
     const withBcc = { ...SENDABLE_DRAFT, bcc: [{ email: 'hidden@example.com' }] };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [withBcc] }, 'getEmail']] };
       }
@@ -1673,7 +1694,7 @@ describe('sendDraft', () => {
 
     await client.sendDraft('draft-1');
 
-    const rcptTo = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.submission.envelope.rcptTo;
+    const rcptTo = callArguments(makeReq, 1)[0].methodCalls[0][1].create.submission.envelope.rcptTo;
     assert.deepEqual(rcptTo, [
       { email: 'bob@example.com' },
       { email: 'cc@example.com' },
@@ -1689,7 +1710,7 @@ describe('sendDraft', () => {
         { partId: '4', blobId: 'blob-doc', type: 'application/pdf', name: 'doc.pdf', cid: null, disposition: 'attachment', size: 9999 },
       ],
     };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [withImage] }, 'getEmail']] };
       }
@@ -1699,13 +1720,13 @@ describe('sendDraft', () => {
     const outcome = await client.sendDraft('draft-1');
     assert.deepEqual(outcome.notes, ['Sent with 1 embedded image(s) (2 KB).']);
     // The receipt needs the part listing, so the pre-send read must ask for it.
-    const getParams = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    const getParams = callArguments(makeReq)[0].methodCalls[0][1];
     assert.ok(getParams.properties.includes('attachments'));
     for (const p of ['disposition', 'cid', 'name']) assert.ok(getParams.bodyProperties.includes(p));
   });
 
   it('says nothing about images on a message that carried none', async () => {
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']] };
       }
@@ -1717,7 +1738,7 @@ describe('sendDraft', () => {
 
   it('rejects non-draft email', async () => {
     const nonDraft = { ...SENDABLE_DRAFT, keywords: { $seen: true } };
-    mock.method(client, 'makeRequest', async () => ({
+    stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [nonDraft] }, 'getEmail']],
     }));
 
@@ -1732,7 +1753,7 @@ describe('sendDraft', () => {
 
   it('rejects draft with no recipients', async () => {
     const noRecipients = { ...SENDABLE_DRAFT, to: [], cc: [], bcc: [] };
-    mock.method(client, 'makeRequest', async () => ({
+    stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [noRecipients] }, 'getEmail']],
     }));
 
@@ -1750,7 +1771,7 @@ describe('sendDraft', () => {
   // created externally, or one whose from was edited after the sending identity was removed).
   it('rejects a draft whose from address matches no sending identity', async () => {
     const foreignFrom = { ...SENDABLE_DRAFT, from: [{ email: 'stranger@other.com' }] };
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [foreignFrom] }, 'getEmail']],
     }));
 
@@ -1767,7 +1788,7 @@ describe('sendDraft', () => {
   });
 
   it('throws when email not found', async () => {
-    mock.method(client, 'makeRequest', async () => ({
+    stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [] }, 'getEmail']],
     }));
 
@@ -1781,7 +1802,7 @@ describe('sendDraft', () => {
   });
 
   it('throws on JMAP submission error', async () => {
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']] };
       }
@@ -1808,7 +1829,7 @@ describe('sendDraft', () => {
       htmlBody: [{ partId: '2', type: 'text/html' }],
       bodyValues: { '1': { value: 'Real text' }, '2': { value: '' } },
     };
-    mock.method(client, 'makeRequest', async () => ({
+    stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [emptyHtml] }, 'getEmail']],
     }));
 
@@ -1825,7 +1846,7 @@ describe('sendDraft', () => {
       htmlBody: [{ partId: '2', type: 'text/html' }],
       bodyValues: { '1': { value: '   ' }, '2': { value: '<p>Real html</p>' } },
     };
-    mock.method(client, 'makeRequest', async () => ({
+    stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [emptyText] }, 'getEmail']],
     }));
 
@@ -1842,7 +1863,7 @@ describe('sendDraft', () => {
       htmlBody: [{ partId: '2', type: 'text/html' }],
       bodyValues: { '1': { value: 'Real text' }, '2': { value: '<p>Real html</p>' } },
     };
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [dual] }, 'getEmail']] };
       }
@@ -1859,7 +1880,7 @@ describe('sendDraft', () => {
       htmlBody: [{ partId: '1', type: 'text/plain' }], // server aliases the one part into both lists
       bodyValues: { '1': { value: 'Real text' } },
     };
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [textOnly] }, 'getEmail']] };
       }
@@ -1876,7 +1897,7 @@ describe('sendDraft', () => {
       htmlBody: [{ partId: '2', type: 'text/html' }],
       bodyValues: { '2': { value: '<div><img src="https://x/banner.jpg"></div>' } },
     };
-    mock.method(client, 'makeRequest', async (req: any) => {
+    stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [htmlOnly] }, 'getEmail']] };
       }
@@ -1990,14 +2011,14 @@ describe('searchEmails', () => {
   });
 
   it('excludeDrafts adds a notKeyword $draft condition (AND-wrapped with the query)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/query', { ids: [], total: 0 }, 'query'],
         ['Email/get', { list: [] }, 'emails'],
       ],
     }));
     await client.searchEmails({ query: 'quarterly', limit: 10, excludeDrafts: true });
-    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     // text in the base, $draft as its own keyword condition, AND-wrapped.
     assert.equal(filter.operator, 'AND');
     assert.ok(filter.conditions.some((c: any) => c.text === 'quarterly'));
@@ -2005,14 +2026,14 @@ describe('searchEmails', () => {
   });
 
   it('includes drafts by default (no notKeyword; flat text filter)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/query', { ids: [], total: 0 }, 'query'],
         ['Email/get', { list: [] }, 'emails'],
       ],
     }));
     await client.searchEmails({ query: 'quarterly', limit: 10 });
-    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     assert.equal(filter.text, 'quarterly');
     assert.equal(filter.notKeyword, undefined);
   });
@@ -2020,20 +2041,20 @@ describe('searchEmails', () => {
   // The JMAP filter takes a UTCDate; a bare date reaches the server as invalidArguments
   // unless it is expanded first (#70).
   it('normalises date-only and offset date bounds into the JMAP UTCDate shape', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/query', { ids: [], total: 0 }, 'query'],
         ['Email/get', { list: [] }, 'emails'],
       ],
     }));
     await client.searchEmails({ after: '2026-07-20', before: '2026-07-25T09:00:00+02:00', limit: 10 });
-    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     assert.equal(filter.after, '2026-07-20T00:00:00Z');
     assert.equal(filter.before, '2026-07-25T07:00:00Z');
   });
 
   it('rejects an unparseable date bound before making any request', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({ methodResponses: [] }));
+    const makeReq = stubRequests(client, async () => ({ methodResponses: [] }));
     await assert.rejects(
       () => client.searchEmails({ before: 'yesterday' }),
       (err: Error) => {
@@ -2285,18 +2306,18 @@ describe('recipient name parsing', () => {
   });
 
   it('createDraft parses "Name <email>" recipients into { name, email }', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/set', { created: { draft: { id: 'd-1' } } }, 'createDraft']],
     }));
 
     await client.createDraft({ subject: 'Hi', to: ['Alice <a@x.example>'] });
 
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.example' }]);
   });
 
   it('updateDraft parses "Name <email>" recipients into { name, email }', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
       }
@@ -2305,7 +2326,7 @@ describe('recipient name parsing', () => {
 
     await client.updateDraft('draft-1', { to: ['Alice <a@x.example>'] });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.to, [{ name: 'Alice', email: 'a@x.example' }]);
   });
 
@@ -2321,7 +2342,7 @@ describe('createDraft replyTo', () => {
   });
 
   it('includes replyTo in created email object when provided', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { created: { draft: { id: 'email-draft' } } }, 'createDraft'],
       ],
@@ -2332,7 +2353,7 @@ describe('createDraft replyTo', () => {
       replyTo: ['noreply@example.com'],
     });
 
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.replyTo, [{ email: 'noreply@example.com' }]);
   });
 });
@@ -2352,7 +2373,7 @@ describe('updateDraft replyTo', () => {
       replyTo: [{ email: 'old-reply@example.com' }],
     };
 
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [existingWithReplyTo] }, 'getEmail']] };
       }
@@ -2361,7 +2382,7 @@ describe('updateDraft replyTo', () => {
 
     await client.updateDraft('draft-1', { replyTo: ['new-reply@example.com'] });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.replyTo, [{ email: 'new-reply@example.com' }]);
   });
 
@@ -2371,7 +2392,7 @@ describe('updateDraft replyTo', () => {
       replyTo: [{ email: 'keep-me@example.com' }],
     };
 
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [existingWithReplyTo] }, 'getEmail']] };
       }
@@ -2380,7 +2401,7 @@ describe('updateDraft replyTo', () => {
 
     await client.updateDraft('draft-1', { subject: 'Updated subject only' });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.replyTo, [{ email: 'keep-me@example.com' }]);
   });
 });
@@ -2400,7 +2421,7 @@ describe('sendDraft wildcard identity', () => {
 
   it('matches wildcard identity when draft has concrete from address', async () => {
     const wildcardDraft = { ...SENDABLE_DRAFT, from: [{ email: 'work@example.com' }] };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [wildcardDraft] }, 'getEmail']] };
       }
@@ -2410,7 +2431,7 @@ describe('sendDraft wildcard identity', () => {
     const { submissionId } = await client.sendDraft('draft-1');
     assert.equal(submissionId, 'sub-1');
 
-    const submitCall = makeReq.mock.calls[1].arguments[0];
+    const submitCall = callArguments(makeReq, 1)[0];
     assert.equal(submitCall.methodCalls[0][1].create.submission.identityId, WILDCARD_IDENTITY.id);
     assert.deepEqual(submitCall.methodCalls[0][1].create.submission.envelope.mailFrom, { email: 'work@example.com' });
   });
@@ -2426,7 +2447,7 @@ describe('updateDraft wildcard identity', () => {
 
   it('uses concrete from address when updating with wildcard identity', async () => {
     const existingWild = { ...EXISTING_DRAFT, from: [{ email: 'old@example.com' }] };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [existingWild] }, 'getEmail']] };
       }
@@ -2435,13 +2456,13 @@ describe('updateDraft wildcard identity', () => {
 
     await client.updateDraft('draft-1', { from: 'new@example.com' });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'new@example.com' }]);
   });
 
   it('preserves concrete from when updating without changing from', async () => {
     const existingWild = { ...EXISTING_DRAFT, from: [{ email: 'work@example.com' }] };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       if (req.methodCalls[0][0] === 'Email/get') {
         return { methodResponses: [['Email/get', { list: [existingWild] }, 'getEmail']] };
       }
@@ -2450,7 +2471,7 @@ describe('updateDraft wildcard identity', () => {
 
     await client.updateDraft('draft-1', { subject: 'Changed subject only' });
 
-    const emailObj = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
   });
 });
@@ -2816,24 +2837,24 @@ describe('uploadAttachments', () => {
 describe('attachments on create', () => {
   it('createDraft places attachment parts in the email object (reply draft branch)', async () => {
     const client = makeClient();
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/set', { created: { draft: { id: 'email-42' } } }, 'createDraft']],
     }));
     const part = { blobId: 'b2', type: 'image/png', name: 'p.png', disposition: 'attachment' };
     await client.createDraft({ subject: 'Hello', attachments: [part] });
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.attachments, [part]);
   });
 
   it('createDraft accepts an attachment-only draft (no to/subject/body) — attachments count as content', async () => {
     const client = makeClient();
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/set', { created: { draft: { id: 'email-43' } } }, 'createDraft']],
     }));
     const part = { blobId: 'b3', type: 'application/pdf', name: 'only.pdf', disposition: 'attachment' };
     const id = await client.createDraft({ attachments: [part] }); // must NOT throw the contentless guard
     assert.equal(id, 'email-43');
-    assert.deepEqual(makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft.attachments, [part]);
+    assert.deepEqual(callArguments(makeReq)[0].methodCalls[0][1].create.draft.attachments, [part]);
   });
 
   it('createDraft still rejects a truly empty draft (no fields, no attachments)', async () => {
@@ -2870,7 +2891,7 @@ describe('updateDraft attachments', () => {
   it('asks the server for every property the faithful recreate carries', async () => {
     const makeReq = mockUpdate(client, DRAFT_ONE_ATT);
     await client.updateDraft('draft-1', { subject: 'New' });
-    const [method, params] = makeReq.mock.calls[0].arguments[0].methodCalls[0];
+    const [method, params] = callArguments(makeReq)[0].methodCalls[0];
     assert.equal(method, 'Email/get');
     for (const prop of [
       'attachments', 'inReplyTo', 'references', 'keywords', 'mailboxIds',
@@ -3027,9 +3048,13 @@ describe('updateDraft embedded images (#13)', () => {
     });
   }
 
-  function createdDraft(makeReq: ReturnType<typeof mock.method>) {
-    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
-    return call!.arguments[0].methodCalls[0][1].create.draft;
+  function createdDraft(makeReq: RequestMock) {
+    const [request] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][1].create,
+      'creating the replacement draft',
+    );
+    return request.methodCalls[0][1].create.draft;
   }
 
   // ---- what the draft carries survives an edit that isn't about it ----
@@ -3457,9 +3482,13 @@ describe('updateDraft quote rebuild with embedded images (#13)', () => {
     });
   }
 
-  function createdDraft(makeReq: ReturnType<typeof mock.method>) {
-    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
-    return call!.arguments[0].methodCalls[0][1].create.draft;
+  function createdDraft(makeReq: RequestMock) {
+    const [request] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][1].create,
+      'creating the replacement draft',
+    );
+    return request.methodCalls[0][1].create.draft;
   }
 
   it('keeps the identifier a stored quote image already has', async () => {
@@ -3687,15 +3716,19 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     });
   }
 
-  function createdDraftObj(makeReq: any) {
-    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
-    return call!.arguments[0].methodCalls[0][1].create.draft;
+  function createdDraftObj(makeReq: RequestMock) {
+    const [request] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][1].create,
+      'creating the replacement draft',
+    );
+    return request.methodCalls[0][1].create.draft;
   }
 
   it('fetches the forward-marking header with the draft (the guard reads it)', async () => {
     const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
     await client.updateDraft('fdraft-1', { subject: 'X' });
-    const getProps = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].properties;
+    const getProps = callArguments(makeReq)[0].methodCalls[0][1].properties;
     assert.ok(getProps.includes(FWD_HEADER_PROP));
   });
 
@@ -3929,7 +3962,7 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     // recreate must carry orig-2's Message-ID — a stale carry would make the guard's
     // advertised recovery rebuild the block for the wrong message on a later edit.
     const ORIG2 = { ...ORIGINAL_FOR_FORWARD, id: 'orig-2', messageId: ['corrected-mid@example.com'] };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         const id = params.ids?.[0];
@@ -3953,7 +3986,7 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
 
   it('keep naming an original with NO settable Message-ID keeps the existing carry (stale beats stripped)', async () => {
     const ORIG_NOMID = { ...ORIGINAL_FOR_FORWARD, id: 'orig-nomid', messageId: undefined };
-    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+    const makeReq = stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
         const id = params.ids?.[0];
@@ -4046,20 +4079,20 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
   }
 
   it('createDraft stamps the header from sourceEmailId', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/set', { created: { draft: { id: 'email-1' } } }, 'createDraft']],
     }));
     await client.createDraft({ subject: 'Re: x', sourceEmailId: 'orig-1' });
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.equal(emailObj[SRC_PROP], 'orig-1');
   });
 
   it('createDraft treats a non-JMAP-id sourceEmailId as absent (vetted, never fails the create)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/set', { created: { draft: { id: 'email-1' } } }, 'createDraft']],
     }));
     await client.createDraft({ subject: 'Re: x', sourceEmailId: 'not a jmap id!' });
-    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.equal(emailObj[SRC_PROP], undefined);
   });
 

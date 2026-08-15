@@ -14,5 +14,9 @@
     "types": ["node"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+  // src/testing/ holds test-only support code. It is excluded here for the same
+  // reason the .test.ts files are: it is not part of the shipped server and must
+  // not land in dist/. tsconfig.tests.json declares its own exclude list, so both
+  // are still typechecked by `npm run typecheck:tests`.
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/testing/**"]
 }

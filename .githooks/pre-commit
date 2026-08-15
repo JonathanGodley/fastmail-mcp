@@ -4,8 +4,10 @@
 set -euo pipefail
 
 if ! command -v node >/dev/null 2>&1; then
-  echo "pre-commit: node not found; skipping secret scan" >&2
-  exit 0
+  echo "pre-commit: node not found, so the secret scan cannot run." >&2
+  echo "  Install node (this project needs it to build and test anyway), or" >&2
+  echo "  bypass this commit deliberately with: git commit --no-verify" >&2
+  exit 1
 fi
 
 node scripts/scan-secrets.mjs --staged

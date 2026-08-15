@@ -47,5 +47,12 @@ jobs:
             exit 1
           fi
 
+      # The build config excludes src/**/*.test.ts and the runner is tsx, which
+      # strips types without checking them — so the test files are typechecked
+      # by nothing unless this step runs. Config and deferral list live in
+      # tsconfig.tests.json.
+      - name: Typecheck the test files
+        run: npm run typecheck:tests
+
       - name: Test
         run: npm test

@@ -31,6 +31,7 @@ import {
   rejectReservedCidRef,
   rejectUnrecreatableCid,
 } from './inline-notes.js';
+import type { NoteTally } from './inline-notes.js';
 
 const KB214 = 214 * 1024;
 const MB1_4 = Math.round(1.4 * 1024 * 1024);
@@ -455,10 +456,12 @@ describe('InlineNoteLedger', () => {
     ledger.record({ key: 'B1', outcome: 'embedded', bytes: 1024 });
     ledger.countRefs('unresolvedRefs', 2);
     ledger.countRefs('droppedDataImages');
+    ledger.countRefs('droppedUnsupportedImages', 3);
     const tally = ledger.tally();
     assert.equal(tally.embedded, 1);
     assert.equal(tally.unresolvedRefs, 2);
     assert.equal(tally.droppedDataImages, 1);
+    assert.equal(tally.droppedUnsupportedImages, 3);
   });
 
   it('ignores a non-positive reference count', () => {
@@ -492,11 +495,15 @@ describe('InlineNoteLedger', () => {
 });
 
 describe('emitInlineNotes', () => {
-  const tally = (over: Record<string, unknown> = {}) => ({
+  // Typed as NoteTally in both directions on purpose: a counter added to the tally
+  // has to be defaulted here, in one place, and a typo in an override is rejected
+  // rather than silently ignored. Without that, a new counter reads as 0 in every
+  // case below and the note it drives goes untested.
+  const tally = (over: Partial<NoteTally> = {}): NoteTally => ({
     embedded: 0,
     embeddedBytes: 0,
     pooled: 0,
-    pooledNames: [] as (string | null | undefined)[],
+    pooledNames: [],
     degraded: 0,
     notIncluded: 0,
     notIncludedImages: 0,
@@ -505,6 +512,7 @@ describe('emitInlineNotes', () => {
     attached: 0,
     unresolvedRefs: 0,
     droppedDataImages: 0,
+    droppedUnsupportedImages: 0,
     ...over,
   });
 
@@ -593,6 +601,7 @@ describe('emitInlineNotes', () => {
         degraded: 1,
         dropped: 1,
         droppedDataImages: 1,
+        droppedUnsupportedImages: 1,
       }),
       { surface: 'forward', keepNoun: 'the forwarded block' },
     );
@@ -608,7 +617,23 @@ describe('emitInlineNotes', () => {
       '1 image(s) from the quoted message were dropped and are not part of this draft.',
       '1 data:-URI image(s) in the quoted message were dropped (not supported); ' +
       'the rest of the quote was kept.',
+      '1 image(s) in the quoted message used a reference form this server cannot carry ' +
+      'into a quote and were dropped; the rest of the quote was kept.',
     ]);
+  });
+
+  it('reports an image dropped for the form of its reference apart from a data: URI', () => {
+    // Two different losses with two different causes: a data: URI is content this
+    // server declines to re-encode, an unsupported reference form named a location
+    // the new message has no origin to resolve against. One sentence for both would
+    // tell the reader the wrong thing about what to do next.
+    assert.deepEqual(
+      emitInlineNotes(tally({ droppedUnsupportedImages: 2 }), { surface: 'reply' }),
+      [
+        '2 image(s) in the quoted message used a reference form this server cannot carry ' +
+        'into a quote and were dropped; the rest of the quote was kept.',
+      ],
+    );
   });
 
   it('defaults the removal note to the quote when no block was named', () => {

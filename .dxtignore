@@ -34,6 +34,7 @@
 /.dxtignore
 /.mcp.json
 /tsconfig.json
+/tsconfig.tests.json
 /coverage/
 .env
 .env.*

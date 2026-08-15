@@ -1,7 +1,9 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { ContactsCalendarClient } from './contacts-calendar.js';
+import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
+import { callArguments, findCallArguments } from './testing/mock-calls.js';
 
 // ---------- helpers ----------
 
@@ -24,8 +26,12 @@ function makeClient(opts: { contactsPrimary?: boolean } = { contactsPrimary: tru
   return client;
 }
 
+// The parameter is declared even though the stub ignores it: node:test types the
+// returned mock from BOTH the real method and the implementation, so an
+// implementation taking no arguments makes the recorded arguments a union with the
+// empty tuple, and every read of the request goes back to being possibly undefined.
 function stubMakeRequest(client: ContactsCalendarClient, response: any) {
-  return mock.method(client, 'makeRequest', async () => response);
+  return mock.method(client, 'makeRequest', async (_request: JmapRequest) => response);
 }
 
 function queryAndGetResponse(list: any[]) {
@@ -57,7 +63,7 @@ describe('contacts reads', () => {
   it('addresses the contacts account from getContacts', async () => {
     const makeReq = stubMakeRequest(client, queryAndGetResponse([{ id: 'C1' }]));
     await client.getContacts(10);
-    const [query, get] = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const [query, get] = callArguments(makeReq)[0].methodCalls;
     assert.equal(query[1].accountId, CONTACTS_ACCOUNT);
     assert.equal(get[1].accountId, CONTACTS_ACCOUNT);
   });
@@ -65,7 +71,7 @@ describe('contacts reads', () => {
   it('addresses the contacts account from searchContacts', async () => {
     const makeReq = stubMakeRequest(client, queryAndGetResponse([{ id: 'C1' }]));
     await client.searchContacts('ada', 10);
-    const [query, get] = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const [query, get] = callArguments(makeReq)[0].methodCalls;
     assert.equal(query[1].accountId, CONTACTS_ACCOUNT);
     assert.equal(get[1].accountId, CONTACTS_ACCOUNT);
   });
@@ -75,7 +81,7 @@ describe('contacts reads', () => {
       methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'contact']],
     });
     await client.getContactById('C1');
-    assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls[0][1].accountId, CONTACTS_ACCOUNT);
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].accountId, CONTACTS_ACCOUNT);
   });
 
   it('throws from every reader when no contacts primary exists', async () => {
@@ -175,7 +181,7 @@ describe('createContact', () => {
     });
 
     assert.equal(id, 'C1');
-    const [method, params] = makeReq.mock.calls[0].arguments[0].methodCalls[0];
+    const [method, params] = callArguments(makeReq)[0].methodCalls[0];
     assert.equal(method, 'ContactCard/set');
     assert.equal(params.accountId, CONTACTS_ACCOUNT);
     const card = params.create.newContact;
@@ -219,7 +225,7 @@ describe('createContact', () => {
       ],
     });
     await client.createContact({ name: { full: 'Booked' }, addressBookId: 'ab-1' });
-    const card = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.newContact;
+    const card = callArguments(makeReq)[0].methodCalls[0][1].create.newContact;
     assert.deepEqual(card.addressBookIds, { 'ab-1': true });
   });
 
@@ -275,8 +281,12 @@ describe('updateContact', () => {
 
     await client.updateContact('C1', { emails: [{ address: 'new@example.com' }] });
 
-    const setCall = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][0] === 'ContactCard/set');
-    const update = setCall.arguments[0].methodCalls[0][1].update.C1;
+    const [setRequest] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][0] === 'ContactCard/set',
+      'issuing ContactCard/set',
+    );
+    const update = setRequest.methodCalls[0][1].update.C1;
     assert.deepEqual(update, { emails: { e0: { address: 'new@example.com' } } });
   });
 
@@ -288,8 +298,12 @@ describe('updateContact', () => {
       return { methodResponses: [['ContactCard/set', { updated: { C1: null } }, 'u']] };
     });
     await client.updateContact('C1', { notes: 'x', expectState: 'state-42' });
-    const setCall = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][0] === 'ContactCard/set');
-    assert.equal(setCall.arguments[0].methodCalls[0][1].ifInState, 'state-42');
+    const [setRequest] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][0] === 'ContactCard/set',
+      'issuing ContactCard/set',
+    );
+    assert.equal(setRequest.methodCalls[0][1].ifInState, 'state-42');
   });
 
   it('throws not-found before attempting the update', async () => {
@@ -380,7 +394,7 @@ describe('deleteContact', () => {
       ],
     });
     await client.deleteContact('C1');
-    assert.deepEqual(makeReq.mock.calls[0].arguments[0].methodCalls[0][1].destroy, ['C1']);
+    assert.deepEqual(callArguments(makeReq)[0].methodCalls[0][1].destroy, ['C1']);
   });
 
   it('maps notFound destroy errors to the not-found convention', async () => {
@@ -442,6 +456,6 @@ describe('deleteContact', () => {
       ],
     });
     await client.deleteContact('C1', 'state-7');
-    assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls[0][1].ifInState, 'state-7');
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].ifInState, 'state-7');
   });
 });

@@ -1,6 +1,8 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion, readSourceReferences, fillUrlTemplate } from './jmap-client.js';
+import type { JmapRequest } from './jmap-client.js';
+import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { buildExclusionNote } from './response-formatters.js';
@@ -36,8 +38,21 @@ function makeClient(): JmapClient {
   return client;
 }
 
+/**
+ * Install a stub over the client's single outbound seam and hand back the mock.
+ *
+ * The implementation parameter is declared with the request even where a caller's
+ * stub ignores it. node:test types the mock it returns from the real method AND the
+ * implementation, so an implementation taking no arguments records its arguments as
+ * a union with the empty tuple — and every assertion that reads the request back is
+ * then reading something the compiler must treat as possibly undefined.
+ */
+function stubRequests(client: JmapClient, impl: (request: JmapRequest) => Promise<any>) {
+  return mock.method(client, 'makeRequest', impl);
+}
+
 function stubMakeRequest(client: JmapClient, response: any) {
-  mock.method(client, 'makeRequest', async () => response);
+  stubRequests(client, async () => response);
 }
 
 function stubMailboxes(client: JmapClient, mailboxes: any[] = DEFAULT_MAILBOXES) {
@@ -147,7 +162,7 @@ describe('getRecentEmails', () => {
 
   it('falls back to inbox for a blank mailbox (does not throw)', async () => {
     stubMailboxes(client);
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/query', { ids: [] }, 'query'],
         ['Email/get', { list: [] }, 'emails'],
@@ -155,7 +170,7 @@ describe('getRecentEmails', () => {
     }));
 
     await client.getRecentEmails(5, '   ');
-    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     assert.equal(filter.inMailbox, 'mb-inbox');
   });
 });
@@ -171,14 +186,14 @@ describe('getEmails', () => {
 
   it('returns emails scoped to an explicit mailbox (no exclusion, no count query)', async () => {
     stubMailboxes(client);
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1', subject: 'Filtered' }], total: 1 }),
     );
 
     const result = await client.getEmails({ mailbox: 'mb-inbox', limit: 5 });
     assert.equal(result.items.length, 1);
 
-    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const batch = callArguments(makeReq)[0].methodCalls;
     const filter = batch[0][1].filter;
     assert.equal(filter.inMailbox, 'mb-inbox');
     assert.equal(filter.inMailboxOtherThan, undefined);
@@ -189,14 +204,14 @@ describe('getEmails', () => {
 
   it('default (no mailbox) excludes Trash + Spam via inMailboxOtherThan and runs a count query', async () => {
     stubMailboxes(client);
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1', subject: 'All' }], total: 8, broaderTotal: 11 }),
     );
 
     const result = await client.getEmails({ limit: 10 });
     assert.equal(result.items.length, 1);
 
-    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const batch = callArguments(makeReq)[0].methodCalls;
     const filter = batch[0][1].filter;
     assert.deepEqual([...filter.inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
     // Count query present (visible filter minus inMailboxOtherThan) at index 2.
@@ -210,12 +225,12 @@ describe('getEmails', () => {
 
   it('includeTrash + includeSpam disable the exclusion entirely', async () => {
     stubMailboxes(client);
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 1 }),
     );
 
     const result = await client.getEmails({ includeTrash: true, includeSpam: true });
-    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const batch = callArguments(makeReq)[0].methodCalls;
     assert.equal(batch[0][1].filter.inMailboxOtherThan, undefined);
     assert.equal(batch.length, 2);
     assert.equal(result.exclusion, undefined);
@@ -223,12 +238,12 @@ describe('getEmails', () => {
 
   it('excludeDrafts adds notKeyword $draft, AND-wrapped with the default exclusion', async () => {
     stubMailboxes(client);
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
     );
 
     await client.getEmails({ excludeDrafts: true });
-    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const batch = callArguments(makeReq)[0].methodCalls;
     const filter = batch[0][1].filter;
     // AND of the base (carrying inMailboxOtherThan) and the $draft keyword condition.
     assert.equal(filter.operator, 'AND');
@@ -252,10 +267,11 @@ describe('paging with position', () => {
     stubMailboxes(client);
   });
 
-  const emailQuery = (makeReq: any) => makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+  const emailQuery = (makeReq: ReturnType<typeof stubRequests>) =>
+    callArguments(makeReq)[0].methodCalls[0][1];
 
   it('getEmails sends the requested position to Email/query', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 137, broaderTotal: 137, position: 40 }),
     );
 
@@ -268,7 +284,7 @@ describe('paging with position', () => {
   // 0 is the JMAP default, so the paging parameter must not change the request the
   // non-paging callers have always sent.
   it('getEmails sends no position for position 0', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
     );
 
@@ -277,7 +293,7 @@ describe('paging with position', () => {
   });
 
   it('getEmails sends no position when none is asked for', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
     );
 
@@ -288,12 +304,12 @@ describe('paging with position', () => {
   // The Trash/Spam exclusion lives inside the JMAP filter, so it applies to whichever
   // page is served — and the hidden count still describes the whole match set.
   it('getEmails keeps the Trash/Spam exclusion and its hidden count on a later page', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 8, broaderTotal: 11, position: 40 }),
     );
 
     const result = await client.getEmails({ limit: 20, position: 40 });
-    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const batch = callArguments(makeReq)[0].methodCalls;
     assert.deepEqual([...batch[0][1].filter.inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
     // The hidden-count query is a count, not a page: it carries no position.
     assert.equal('position' in batch[2][1], false);
@@ -303,7 +319,7 @@ describe('paging with position', () => {
   // RFC 8620 section 5.5 has the server report the position it actually served, and
   // a request past the end is clamped there rather than erroring.
   it('getEmails reports the server position over the requested one', async () => {
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 137, broaderTotal: 137, position: 137 }),
     );
 
@@ -314,7 +330,7 @@ describe('paging with position', () => {
   });
 
   it('getEmails falls back to the requested position when the response omits it', async () => {
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 137, broaderTotal: 137 }),
     );
 
@@ -323,7 +339,7 @@ describe('paging with position', () => {
   });
 
   it('searchEmails sends the requested position to Email/query', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 137, broaderTotal: 137, position: 100 }),
     );
 
@@ -335,7 +351,7 @@ describe('paging with position', () => {
 
   // get_recent_emails caps limit at 50, so position is the only way past that cap.
   it('getRecentEmails sends the requested position and reports it back', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 90, position: 50 }),
     );
 
@@ -346,7 +362,7 @@ describe('paging with position', () => {
   });
 
   it('getRecentEmails sends no position by default', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0 }),
     );
 
@@ -428,7 +444,7 @@ describe('moveEmail', () => {
     // First call: getEmail to read current mailboxIds
     // Second call: Email/set to move
     let callCount = 0;
-    mock.method(client, 'makeRequest', async () => {
+    stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return {
@@ -451,7 +467,7 @@ describe('moveEmail', () => {
   // Drive a notUpdated failure with a chosen SetError, returning the get then the set.
   function stubMoveFailure(setError: { type: string; description?: string }) {
     let callCount = 0;
-    mock.method(client, 'makeRequest', async () => {
+    stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return {
@@ -603,7 +619,7 @@ describe('markEmailRead', () => {
   });
 
   it('marks email as read', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { updated: { 'e1': null } }, 'updateEmail'],
       ],
@@ -611,12 +627,12 @@ describe('markEmailRead', () => {
 
     await client.markEmailRead('e1', true);
 
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.deepEqual(update['e1'], { 'keywords/$seen': true });
   });
 
   it('marks email as unread', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { updated: { 'e1': null } }, 'updateEmail'],
       ],
@@ -624,7 +640,7 @@ describe('markEmailRead', () => {
 
     await client.markEmailRead('e1', false);
 
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.deepEqual(update['e1'], { 'keywords/$seen': null });
   });
 
@@ -655,7 +671,7 @@ describe('addKeywords', () => {
   });
 
   it('emits an additive keywords/<k>:true patch for each keyword', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { updated: { 'e1': null } }, 'addKeywords'],
       ],
@@ -663,7 +679,7 @@ describe('addKeywords', () => {
 
     await client.addKeywords('e1', ['$answered', '$seen']);
 
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.deepEqual(update['e1'], { 'keywords/$answered': true, 'keywords/$seen': true });
   });
 
@@ -695,7 +711,7 @@ describe('bulkMarkRead', () => {
   });
 
   it('marks multiple emails as read in one request', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { updated: { 'e1': null, 'e2': null, 'e3': null } }, 'bulkUpdate'],
       ],
@@ -703,14 +719,14 @@ describe('bulkMarkRead', () => {
 
     await client.bulkMarkRead(['e1', 'e2', 'e3'], true);
 
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.deepEqual(update['e1'], { 'keywords/$seen': true });
     assert.deepEqual(update['e2'], { 'keywords/$seen': true });
     assert.deepEqual(update['e3'], { 'keywords/$seen': true });
   });
 
   it('marks multiple emails as unread', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/set', { updated: { 'e1': null, 'e2': null } }, 'bulkUpdate'],
       ],
@@ -718,7 +734,7 @@ describe('bulkMarkRead', () => {
 
     await client.bulkMarkRead(['e1', 'e2'], false);
 
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.deepEqual(update['e1'], { 'keywords/$seen': null });
     assert.deepEqual(update['e2'], { 'keywords/$seen': null });
   });
@@ -758,7 +774,7 @@ describe('bulk set-error formatting', () => {
   // to a notUpdated map of our choosing.
   function stubBulkMoveFailure(notUpdated: Record<string, { type: string; description?: string }>) {
     let callCount = 0;
-    mock.method(client, 'makeRequest', async () => {
+    stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return {
@@ -1010,7 +1026,7 @@ describe('getThread', () => {
 
   it('requests compact properties by default (no body data)', async () => {
     let callCount = 0;
-    const makeReq = mock.method(client, 'makeRequest', async () => {
+    const makeReq = stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return {
@@ -1029,7 +1045,7 @@ describe('getThread', () => {
 
     await client.getThread('e1');
 
-    const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
+    const emailGetArgs = callArguments(makeReq, 1)[0].methodCalls[1][1];
     assert.ok(emailGetArgs.properties.includes('preview'), 'should request preview');
     assert.ok(emailGetArgs.properties.includes('inReplyTo'), 'should request inReplyTo');
     // textBody *structure* is requested for the bodyTextSize hint (#59), but no body
@@ -1045,7 +1061,7 @@ describe('getThread', () => {
 
   it('fetches text body values (and only those) when includeBodies is set', async () => {
     let callCount = 0;
-    const makeReq = mock.method(client, 'makeRequest', async () => {
+    const makeReq = stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return {
@@ -1064,7 +1080,7 @@ describe('getThread', () => {
 
     await client.getThread('e1', false, true);
 
-    const emailGetArgs = makeReq.mock.calls[1].arguments[0].methodCalls[1][1];
+    const emailGetArgs = callArguments(makeReq, 1)[0].methodCalls[1][1];
     // The defined VERBOSE superset, not a third ad-hoc property list.
     assert.ok(emailGetArgs.properties.includes('bodyValues'), 'should request bodyValues');
     assert.ok(emailGetArgs.properties.includes('textBody'), 'should request textBody structure');
@@ -1076,7 +1092,7 @@ describe('getThread', () => {
 
   it('throws InvalidInputError when the thread is not found (a bad id is caller-fixable input, #41)', async () => {
     let callCount = 0;
-    mock.method(client, 'makeRequest', async () => {
+    stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         // probe resolves the email's threadId
@@ -1100,7 +1116,7 @@ describe('getThread', () => {
   // A thread containing a normal email plus an in-progress draft reply.
   const threadWithDraftResponse = () => {
     let callCount = 0;
-    return mock.method(client, 'makeRequest', async () => {
+    return stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return {
@@ -1142,7 +1158,7 @@ describe('getThread', () => {
   // keyword. `mailboxes` is what the batch's trailing Mailbox/get returns.
   const threadWithTrashedDraftResponse = (mailboxes: any[]) => {
     let callCount = 0;
-    return mock.method(client, 'makeRequest', async () => {
+    return stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail']] };
@@ -1176,7 +1192,7 @@ describe('getThread', () => {
 
   it('still counts a draft that is in Trash AND another mailbox', async () => {
     let callCount = 0;
-    mock.method(client, 'makeRequest', async () => {
+    stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail']] };
@@ -1208,7 +1224,7 @@ describe('getThread', () => {
 
   it('drops a hidden draft together with its body when bodies are fetched', async () => {
     let callCount = 0;
-    mock.method(client, 'makeRequest', async () => {
+    stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail']] };
@@ -1244,7 +1260,7 @@ describe('getThread', () => {
 
   it('reports hiddenDraftCount 0 for a thread with no drafts', async () => {
     let callCount = 0;
-    mock.method(client, 'makeRequest', async () => {
+    stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
         return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-1' }] }, 'checkEmail']] };
@@ -1282,14 +1298,14 @@ describe('list method property checks', () => {
   // via makeRequest) — makeRequest then only ever sees the Email/query batch as calls[0].
   function mockAndCall(method: string, callFn: () => Promise<any>) {
     mock.method(client, 'getMailboxes', async () => DEFAULT_MAILBOXES);
-    const makeReq = mock.method(client, 'makeRequest', async () => standardQueryResponse);
+    const makeReq = stubRequests(client, async () => standardQueryResponse);
     return { makeReq, result: callFn() };
   }
 
   it('getEmails always requests compact properties (no bodies)', async () => {
     const { makeReq, result } = mockAndCall('getEmails', () => client.getEmails());
     await result;
-    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    const emailGetArgs = callArguments(makeReq)[0].methodCalls[1][1];
     // textBody structure requested (bodyTextSize hint, #59); body content still not.
     assert.ok(emailGetArgs.properties.includes('textBody'), 'should request textBody structure');
     assert.ok(!emailGetArgs.properties.includes('bodyValues'), 'should NOT request bodyValues');
@@ -1299,16 +1315,16 @@ describe('list method property checks', () => {
   it('searchEmails always requests compact properties (no bodies)', async () => {
     const { makeReq, result } = mockAndCall('searchEmails', () => client.searchEmails({ query: 'test' }));
     await result;
-    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    const emailGetArgs = callArguments(makeReq)[0].methodCalls[1][1];
     assert.ok(!emailGetArgs.properties.includes('bodyValues'));
     assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
   });
 
   it('getRecentEmails always requests compact properties (no bodies)', async () => {
     mock.method(client, 'getMailboxes', async () => [INBOX_MAILBOX]);
-    const makeReq = mock.method(client, 'makeRequest', async () => standardQueryResponse);
+    const makeReq = stubRequests(client, async () => standardQueryResponse);
     await client.getRecentEmails();
-    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    const emailGetArgs = callArguments(makeReq)[0].methodCalls[1][1];
     assert.ok(!emailGetArgs.properties.includes('bodyValues'));
     assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
   });
@@ -1316,7 +1332,7 @@ describe('list method property checks', () => {
   it('searchEmails with structured filters still requests compact properties', async () => {
     const { makeReq, result } = mockAndCall('searchEmails', () => client.searchEmails({ query: 'test', from: 'a@b.example' }));
     await result;
-    const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
+    const emailGetArgs = callArguments(makeReq)[0].methodCalls[1][1];
     assert.ok(!emailGetArgs.properties.includes('bodyValues'));
     assert.equal(emailGetArgs.fetchTextBodyValues, undefined);
   });
@@ -1325,6 +1341,14 @@ describe('list method property checks', () => {
 // ---------- JMAP property consistency ----------
 
 describe('JMAP property consistency', () => {
+  // The property lists are readonly tuples of string literals, so a name a list does
+  // NOT contain is not even an allowed argument to that list's own .includes(). The
+  // assertions below are about absence and have to keep working — by failing — on the
+  // day someone adds one of these names, so they read the list as plain strings.
+  // Widening the list, rather than casting each argument, keeps the argument itself
+  // checked as a string and leaves nothing to go stale silently.
+  const compactProperties: readonly string[] = EMAIL_PROPERTIES_COMPACT;
+
   it('verbose properties are a superset of compact properties', () => {
     for (const prop of EMAIL_PROPERTIES_COMPACT) {
       assert.ok(
@@ -1339,9 +1363,9 @@ describe('JMAP property consistency', () => {
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('bodyValues'));
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('attachments'));
     // Body *content* stays verbose-only; compact must never fetch it.
-    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('htmlBody'));
-    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('bodyValues'));
-    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('attachments'));
+    assert.ok(!compactProperties.includes('htmlBody'));
+    assert.ok(!compactProperties.includes('bodyValues'));
+    assert.ok(!compactProperties.includes('attachments'));
   });
 
   it('verbose fetches both draft provenance headers; compact fetches neither', () => {
@@ -1350,8 +1374,8 @@ describe('JMAP property consistency', () => {
     // forward-ness via isForwarded instead.
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('header:X-Forwarded-Message-Id:asMessageIds'));
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('header:X-Fastmail-MCP-Source-Id:asText'));
-    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('header:X-Forwarded-Message-Id:asMessageIds' as any));
-    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('header:X-Fastmail-MCP-Source-Id:asText' as any));
+    assert.ok(!compactProperties.includes('header:X-Forwarded-Message-Id:asMessageIds'));
+    assert.ok(!compactProperties.includes('header:X-Fastmail-MCP-Source-Id:asText'));
   });
 
   it('compact includes textBody structure (part sizes) for the bodyTextSize hint (#59)', () => {
@@ -1389,21 +1413,21 @@ describe('ascending sort parameter', () => {
   describe('getEmails', () => {
     it('defaults to isAscending: false', async () => {
       stubMailboxes(client);
-      const makeReq = mock.method(client, 'makeRequest', async () => QUERY_GET_RESPONSE);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
       await client.getEmails({ mailbox: 'mb-inbox', limit: 5 });
 
-      const sort = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].sort;
+      const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: false }]);
     });
 
     it('passes ascending=true as isAscending: true', async () => {
       stubMailboxes(client);
-      const makeReq = mock.method(client, 'makeRequest', async () => QUERY_GET_RESPONSE);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
       await client.getEmails({ mailbox: 'mb-inbox', limit: 5, ascending: true });
 
-      const sort = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].sort;
+      const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: true }]);
     });
   });
@@ -1411,21 +1435,21 @@ describe('ascending sort parameter', () => {
   describe('searchEmails', () => {
     it('defaults to isAscending: false', async () => {
       stubMailboxes(client);
-      const makeReq = mock.method(client, 'makeRequest', async () => QUERY_GET_RESPONSE);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
       await client.searchEmails({ query: 'test', limit: 10 });
 
-      const sort = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].sort;
+      const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: false }]);
     });
 
     it('passes ascending=true as isAscending: true', async () => {
       stubMailboxes(client);
-      const makeReq = mock.method(client, 'makeRequest', async () => QUERY_GET_RESPONSE);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
       await client.searchEmails({ query: 'test', limit: 10, ascending: true });
 
-      const sort = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].sort;
+      const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: true }]);
     });
   });
@@ -1433,21 +1457,21 @@ describe('ascending sort parameter', () => {
   describe('getRecentEmails', () => {
     it('defaults to isAscending: false', async () => {
       stubMailboxes(client);
-      const makeReq = mock.method(client, 'makeRequest', async () => QUERY_GET_RESPONSE);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
       await client.getRecentEmails(10, 'inbox');
 
-      const sort = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].sort;
+      const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: false }]);
     });
 
     it('passes ascending=true as isAscending: true', async () => {
       stubMailboxes(client);
-      const makeReq = mock.method(client, 'makeRequest', async () => QUERY_GET_RESPONSE);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
 
       await client.getRecentEmails(10, 'inbox', true);
 
-      const sort = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].sort;
+      const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: true }]);
     });
   });
@@ -1485,12 +1509,12 @@ describe('mailbox location (#10)', () => {
 
   it('getEmails attaches resolved names + roles from getMailboxes (multi-membership; unresolved surfaced)', async () => {
     mock.method(client, 'getMailboxes', async () => NAME_MAILBOXES);
-    const makeReq = mock.method(client, 'makeRequest', async () => NAME_QUERY_RESPONSE);
+    const makeReq = stubRequests(client, async () => NAME_QUERY_RESPONSE);
 
     const result = await client.getEmails({ mailbox: 'mb-inbox', limit: 5 });
 
     // No in-batch Mailbox/get — explicit mailbox => just query + get.
-    const calls = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const calls = callArguments(makeReq)[0].methodCalls;
     assert.equal(calls.length, 2);
     assert.equal(calls.some((c: any) => c[0] === 'Mailbox/get'), false);
 
@@ -1519,10 +1543,10 @@ describe('mailbox location (#10)', () => {
 
   it('searchEmails attaches names + roles and surfaces an unresolved id from getMailboxes (#53)', async () => {
     mock.method(client, 'getMailboxes', async () => NAME_MAILBOXES);
-    const makeReq = mock.method(client, 'makeRequest', async () => NAME_QUERY_RESPONSE);
+    const makeReq = stubRequests(client, async () => NAME_QUERY_RESPONSE);
     // includeTrash/includeSpam true => no exclusion/count query, just query + get.
     const result = await client.searchEmails({ query: 'x', limit: 5, includeTrash: true, includeSpam: true });
-    assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls.length, 2);
+    assert.equal(callArguments(makeReq)[0].methodCalls.length, 2);
     assert.deepEqual((result.items[0] as any)._mailboxNames, ['Inbox', 'Receipts']);
     assert.deepEqual((result.items[0] as any)._mailboxRoles, ['inbox']);
     // e2's id is not in the map → surfaced, not dropped.
@@ -1530,7 +1554,7 @@ describe('mailbox location (#10)', () => {
   });
 
   it('getEmailById attaches names + roles from its appended Mailbox/get (index 1), requesting role', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/get', { list: [{ id: 'e1', subject: 'A', mailboxIds: { 'mb-trash': true } }] }, 'email'],
         ['Mailbox/get', { list: [{ id: 'mb-trash', name: 'Trash', role: 'trash' }] }, 'mailboxes'],
@@ -1538,7 +1562,7 @@ describe('mailbox location (#10)', () => {
     }));
 
     const email = await client.getEmailById('e1');
-    const mailboxGet = makeReq.mock.calls[0].arguments[0].methodCalls[1];
+    const mailboxGet = callArguments(makeReq)[0].methodCalls[1];
     assert.equal(mailboxGet[0], 'Mailbox/get');
     assert.deepEqual(mailboxGet[1].properties, ['id', 'name', 'role']);
     assert.deepEqual((email as any)._mailboxNames, ['Trash']);
@@ -1547,7 +1571,7 @@ describe('mailbox location (#10)', () => {
 
   it('getRecentEmails reuses its existing getMailboxes list (no third methodCall) and attaches names + roles', async () => {
     stubMailboxes(client); // INBOX/DRAFTS/TRASH/SENT
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Email/query', { ids: ['e1'] }, 'query'],
         ['Email/get', { list: [{ id: 'e1', subject: 'A', mailboxIds: { 'mb-inbox': true } }] }, 'emails'],
@@ -1556,13 +1580,13 @@ describe('mailbox location (#10)', () => {
 
     const result = await client.getRecentEmails(10, 'inbox');
     // Reuses getMailboxes — the request stays a 2-call batch, no appended Mailbox/get.
-    assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls.length, 2);
+    assert.equal(callArguments(makeReq)[0].methodCalls.length, 2);
     assert.deepEqual((result.items[0] as any)._mailboxNames, ['Inbox']);
     assert.deepEqual((result.items[0] as any)._mailboxRoles, ['inbox']);
   });
 
   it('getThread attaches names + roles to retained messages before the draft filter, requesting role', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => ({
+    const makeReq = stubRequests(client, async () => ({
       methodResponses: [
         ['Thread/get', { list: [{ id: 't1', emailIds: ['e1', 'e2'] }] }, 'getThread'],
         ['Email/get', { list: [
@@ -1578,7 +1602,7 @@ describe('mailbox location (#10)', () => {
 
     const { emails } = await client.getThread('t1'); // drafts excluded by default
     // getThread makes two requests: an email-id probe, then the Thread/Email/Mailbox batch.
-    const mailboxGet = makeReq.mock.calls[1].arguments[0].methodCalls[2];
+    const mailboxGet = callArguments(makeReq, 1)[0].methodCalls[2];
     assert.equal(mailboxGet[0], 'Mailbox/get');
     assert.deepEqual(mailboxGet[1].properties, ['id', 'name', 'role']);
     assert.equal(emails.length, 1);
@@ -1769,10 +1793,10 @@ describe('searchEmails exclusion + count', () => {
   });
 
   it('explicit mailbox => inMailbox, no exclusion, no count query, no metadata', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 1 }));
     const result = await client.searchEmails({ query: 'x', mailbox: 'inbox' });
-    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const batch = callArguments(makeReq)[0].methodCalls;
     // text + inMailbox both live in the single base FilterCondition (no keyword conds
     // => no AND-wrap).
     const filter = batch[0][1].filter;
@@ -1784,36 +1808,36 @@ describe('searchEmails exclusion + count', () => {
   });
 
   it('explicit mailbox + includeSpam:true => inMailbox only (Spam NOT OR-d back in)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0 }));
     await client.searchEmails({ mailbox: 'inbox', includeSpam: true });
-    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     assert.equal(filter.inMailbox, 'mb-inbox');
     assert.equal(filter.inMailboxOtherThan, undefined);
   });
 
   it('isUnread:false => hasKeyword $seen; isPinned:false => notKeyword $flagged (polarity kept)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0 }));
     await client.searchEmails({ isUnread: false, isPinned: false, includeTrash: true, includeSpam: true });
-    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     assert.equal(filter.operator, 'AND');
     assert.ok(filter.conditions.some((c: any) => c.hasKeyword === '$seen'));
     assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$flagged'));
   });
 
   it('isUnread:true + isPinned:true => two separate keyword conditions', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0 }));
     await client.searchEmails({ isUnread: true, isPinned: true, includeTrash: true, includeSpam: true });
-    const filter = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].filter;
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     assert.equal(filter.operator, 'AND');
     assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$seen'));
     assert.ok(filter.conditions.some((c: any) => c.hasKeyword === '$flagged'));
   });
 
   it('hidden = broaderTotal - visibleTotal', async () => {
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 8, broaderTotal: 11 }));
     const result = await client.searchEmails({ query: 'x' });
     assert.equal(result.exclusion?.hidden, 3);
@@ -1821,14 +1845,14 @@ describe('searchEmails exclusion + count', () => {
   });
 
   it('fires hidden>0 even when the visible result set is empty', async () => {
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0, broaderTotal: 4 }));
     const result = await client.searchEmails({ query: 'x' });
     assert.equal(result.exclusion?.hidden, 4);
   });
 
   it('hidden === 0 when nothing was withheld', async () => {
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 5, broaderTotal: 5 }));
     const result = await client.searchEmails({ query: 'x' });
     assert.equal(result.exclusion?.hidden, 0);
@@ -1837,14 +1861,14 @@ describe('searchEmails exclusion + count', () => {
   it('FAIL-CLOSED: an absent count total => hidden:null (degraded), never silence', async () => {
     // Exclusion is active (so a count methodCall is in the request), but the mocked
     // response omits the count entry -> the count read throws -> hidden:null.
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 8 }));
     const result = await client.searchEmails({ query: 'x' });
     assert.equal(result.exclusion?.hidden, null);
   });
 
   it('FAIL-CLOSED: a negative hidden (bad broader total) => hidden:null', async () => {
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 8, broaderTotal: 0 }));
     const result = await client.searchEmails({ query: 'x' });
     assert.equal(result.exclusion?.hidden, null);
@@ -1852,7 +1876,7 @@ describe('searchEmails exclusion + count', () => {
 
   it('a missing junk/trash role surfaces in unresolvedRoles (no silent inclusion)', async () => {
     stubMailboxes(client, [{ id: 'mb-inbox', name: 'Inbox', role: 'inbox' }]);
-    mock.method(client, 'makeRequest', async () =>
+    stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0 }));
     const result = await client.searchEmails({ query: 'x' });
     assert.deepEqual(result.exclusion?.unresolvedRoles, ['Trash', 'Spam']);
@@ -1860,10 +1884,10 @@ describe('searchEmails exclusion + count', () => {
   });
 
   it('count filter keeps the keyword conds but drops inMailboxOtherThan (differs from visible)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () =>
+    const makeReq = stubRequests(client, async () =>
       queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }));
     await client.searchEmails({ query: 'x', excludeDrafts: true });
-    const batch = makeReq.mock.calls[0].arguments[0].methodCalls;
+    const batch = callArguments(makeReq)[0].methodCalls;
     const countFilter = batch[2][1].filter;
     // $draft cond survives; inMailboxOtherThan is gone -> count filter != visible filter.
     const flatHasDraft = countFilter.notKeyword === '$draft'
@@ -1921,7 +1945,7 @@ describe('bulkMove resolution', () => {
 
   it('resolves the destination by name and targets the resolved id', async () => {
     let call = 0;
-    const makeReq = mock.method(client, 'makeRequest', async () => {
+    const makeReq = stubRequests(client, async () => {
       call++;
       if (call === 1) {
         return { methodResponses: [['Email/get', { list: [{ id: 'e1', mailboxIds: { 'mb-inbox': true } }] }, 'getEmails']] };
@@ -1929,7 +1953,7 @@ describe('bulkMove resolution', () => {
       return { methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkMove']] };
     });
     await client.bulkMove(['e1'], 'Archive');
-    const update = makeReq.mock.calls[1].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq, 1)[0].methodCalls[0][1].update;
     assert.equal(update.e1['mailboxIds/mb-archive'], true);
     assert.equal(update.e1['mailboxIds/mb-inbox'], null);
   });
@@ -1958,28 +1982,28 @@ describe('label mailboxId resolution (#50)', () => {
   });
 
   function stubSet(c: JmapClient, callId: string) {
-    return mock.method(c, 'makeRequest', async () =>
+    return stubRequests(c, async () =>
       ({ methodResponses: [['Email/set', { updated: { e1: null } }, callId]] }));
   }
 
   it('resolves a ROLE to its id and emits the mailboxIds/<id> patch', async () => {
     const makeReq = stubSet(client, 'addLabels');
     await client.addLabels('e1', ['archive']); // role
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.equal(update.e1['mailboxIds/mb-archive'], true);
   });
 
   it('resolves a NAME (name-only mailbox, no role) to its id', async () => {
     const makeReq = stubSet(client, 'addLabels');
     await client.addLabels('e1', ['Receipts']); // name, resolves via the name branch only
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.equal(update.e1['mailboxIds/mb-receipts'], true);
   });
 
   it('accepts a raw id (resolves to itself)', async () => {
     const makeReq = stubSet(client, 'addLabels');
     await client.addLabels('e1', ['mb-archive']);
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.equal(update.e1['mailboxIds/mb-archive'], true);
   });
 
@@ -1988,13 +2012,13 @@ describe('label mailboxId resolution (#50)', () => {
     // Receipts is name-only, so this exercises id + NAME collapse (not id + role): both
     // 'mb-receipts' and 'Receipts' resolve to the same id and dedupe to one patch key.
     await client.addLabels('e1', ['mb-receipts', 'Receipts']);
-    const patch = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update.e1;
+    const patch = callArguments(makeReq)[0].methodCalls[0][1].update.e1;
     const labelKeys = Object.keys(patch).filter(k => k.startsWith('mailboxIds/'));
     assert.deepEqual(labelKeys, ['mailboxIds/mb-receipts']);
   });
 
   it('names ALL unresolved values and applies nothing (all-or-nothing)', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => { throw new Error('should not be called'); });
+    const makeReq = stubRequests(client, async () => { throw new Error('should not be called'); });
     await assert.rejects(
       () => client.addLabels('e1', ['nope', 'alsobad']),
       (err: Error) => {
@@ -2008,7 +2032,7 @@ describe('label mailboxId resolution (#50)', () => {
   });
 
   it('rejects the whole call when one value of a mix is unresolved', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => { throw new Error('should not be called'); });
+    const makeReq = stubRequests(client, async () => { throw new Error('should not be called'); });
     await assert.rejects(
       () => client.addLabels('e1', ['archive', 'nope']),
       (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
@@ -2046,14 +2070,14 @@ describe('label mailboxId resolution (#50)', () => {
   it('removeLabels resolves a role and emits the null patch', async () => {
     const makeReq = stubSet(client, 'removeLabels');
     await client.removeLabels('e1', ['archive']);
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.equal(update.e1['mailboxIds/mb-archive'], null);
   });
 
   it('bulkAddLabels resolves a name/role across the array', async () => {
     const makeReq = stubSet(client, 'bulkAddLabels');
     await client.bulkAddLabels(['e1'], ['Receipts', 'archive']);
-    const update = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].update;
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.equal(update.e1['mailboxIds/mb-receipts'], true);
     assert.equal(update.e1['mailboxIds/mb-archive'], true);
   });
@@ -2137,7 +2161,7 @@ describe('readSourceReferences', () => {
 
 describe('findEmailIdsByMessageId', () => {
   function stubLookup(client: JmapClient, list: any[]) {
-    return mock.method(client, 'makeRequest', async () => ({
+    return stubRequests(client, async () => ({
       methodResponses: [
         ['Email/query', { ids: list.map(e => e.id) }, 'query'],
         ['Email/get', { list }, 'emails'],
@@ -2153,7 +2177,7 @@ describe('findEmailIdsByMessageId', () => {
     ]);
 
     assert.deepEqual(await client.findEmailIdsByMessageId('orig@example.com'), ['orig-1']);
-    const query = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
+    const query = (callArguments(makeReq)[0] as any).methodCalls[0][1];
     assert.deepEqual(query.filter, { text: 'orig@example.com' });
     assert.equal(query.filter.inMailboxOtherThan, undefined); // Trash/Spam are NOT excluded
   });
@@ -2162,7 +2186,7 @@ describe('findEmailIdsByMessageId', () => {
     const client = makeClient();
     const makeReq = stubLookup(client, [{ id: 'orig-1', messageId: ['orig@example.com'] }]);
     await client.findEmailIdsByMessageId('orig@example.com');
-    const query = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
+    const query = (callArguments(makeReq)[0] as any).methodCalls[0][1];
     // Every message that references or quotes an id postdates the message that owns it,
     // so oldest-first puts the owner on the first page regardless of the limit.
     assert.deepEqual(query.sort, [{ property: 'receivedAt', isAscending: true }]);
@@ -2173,7 +2197,7 @@ describe('findEmailIdsByMessageId', () => {
     const client = makeClient();
     const makeReq = stubLookup(client, [{ id: 'orig-1', messageId: ['orig@example.com'] }]);
     assert.deepEqual(await client.findEmailIdsByMessageId('<orig@example.com>'), ['orig-1']);
-    const query = (makeReq.mock.calls[0].arguments[0] as any).methodCalls[0][1];
+    const query = (callArguments(makeReq)[0] as any).methodCalls[0][1];
     assert.deepEqual(query.filter, { text: 'orig@example.com' });
   });
 
@@ -2216,11 +2240,11 @@ describe('query total result count', () => {
   });
 
   it('getEmails requests calculateTotal on Email/query', async () => {
-    const makeReq = mock.method(client, 'makeRequest', async () => queryResponse({}));
+    const makeReq = stubRequests(client, async () => queryResponse({}));
 
     await client.getEmails({ mailbox: 'mb-inbox', limit: 5 });
 
-    assert.equal(makeReq.mock.calls[0].arguments[0].methodCalls[0][1].calculateTotal, true);
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].calculateTotal, true);
   });
 
   it('surfaces the server-reported total alongside the items', async () => {
@@ -2273,7 +2297,7 @@ describe('uploadBlob request discipline', () => {
     try {
       const out = await client.uploadBlob(Buffer.from('hello'), 'text/plain');
       assert.equal(out.blobId, 'B1');
-      const [url, opts] = fetchMock.mock.calls[0].arguments as [string, any];
+      const [url, opts] = callArguments(fetchMock) as [string, any];
       assert.equal(url, `https://api.fastmail.com/jmap/upload/${ACCOUNT_ID}/`);
       assert.equal(opts.method, 'POST');
       assert.equal(opts.headers['Content-Type'], 'text/plain');
@@ -2327,7 +2351,7 @@ describe('session and API request discipline', () => {
     try {
       const session = await client.getSession();
       assert.equal(session.accountId, ACCOUNT_ID);
-      const [url, opts] = fetchMock.mock.calls[0].arguments as [string, any];
+      const [url, opts] = callArguments(fetchMock) as [string, any];
       assert.equal(url, 'https://api.fastmail.com/jmap/session');
       // Whole option surface, not just the redirect key: the token is in these headers,
       // and a 3xx must fail rather than replay it to whatever host the redirect names.
@@ -2355,7 +2379,7 @@ describe('session and API request discipline', () => {
     try {
       const out = await client.makeRequest(request as any);
       assert.deepEqual(out.methodResponses, []);
-      const [url, opts] = fetchMock.mock.calls[0].arguments as [string, any];
+      const [url, opts] = callArguments(fetchMock) as [string, any];
       assert.equal(url, 'https://api.fastmail.com/jmap/api/');
       assert.deepEqual(opts, {
         method: 'POST',
@@ -2486,7 +2510,7 @@ const ATTACHED_FILE = {
 };
 
 function stubEmail(client: JmapClient, email: any) {
-  return mock.method(client, 'makeRequest', async () => ({
+  return stubRequests(client, async () => ({
     methodResponses: [['Email/get', { list: email ? [email] : [] }, 'getEmail']],
   }));
 }
@@ -2505,7 +2529,7 @@ describe('getEmailAttachments', () => {
     const client = makeClient();
     const makeReq = stubEmail(client, mixedShapeEmail());
     await client.getEmailAttachments('e1');
-    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    const params = callArguments(makeReq)[0].methodCalls[0][1];
     assert.deepEqual(params.properties, ['attachments', 'textBody', 'htmlBody']);
     assert.deepEqual(params.bodyProperties, [...EMAIL_BODY_PROPERTIES]);
   });
@@ -2554,7 +2578,7 @@ describe('downloadAttachment — fetch shape', () => {
     const client = makeDownloadClient();
     const makeReq = stubEmail(client, mixedShapeEmail());
     await client.downloadAttachment('e1', '3');
-    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    const params = callArguments(makeReq)[0].methodCalls[0][1];
     assert.deepEqual(params.properties, ['attachments', 'textBody', 'htmlBody']);
   });
 
@@ -2562,7 +2586,7 @@ describe('downloadAttachment — fetch shape', () => {
     const client = makeDownloadClient();
     const makeReq = stubEmail(client, mixedShapeEmail());
     await client.downloadAttachment('e1', '3');
-    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    const params = callArguments(makeReq)[0].methodCalls[0][1];
     assert.deepEqual(params.bodyProperties, [...EMAIL_BODY_PROPERTIES]);
   });
 
@@ -2570,7 +2594,7 @@ describe('downloadAttachment — fetch shape', () => {
     const client = makeDownloadClient();
     const makeReq = stubEmail(client, mixedShapeEmail());
     await client.downloadAttachment('e1', '3');
-    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    const params = callArguments(makeReq)[0].methodCalls[0][1];
     assert.equal(params.properties.includes('bodyValues'), false);
   });
 });
@@ -2973,7 +2997,7 @@ describe('download and upload URLs are built with literal substitution', () => {
     ));
     try {
       await client.uploadBlob(Buffer.from('hello'), 'text/plain');
-      const [url] = fetchMock.mock.calls[0].arguments as [string, any];
+      const [url] = callArguments(fetchMock) as [string, any];
       assert.equal(url, "https://api.fastmail.com/jmap/upload/a$&b$`c$'d$1e$$f/");
     } finally {
       fetchMock.mock.restore();

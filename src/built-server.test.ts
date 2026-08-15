@@ -260,7 +260,12 @@ describe('tsdav credential logging is suppressed', () => {
     // Ask the real matcher whether the skip pattern covers them, rather than
     // reimplementing the glob.
     const { default: createDebug } = await import('debug');
-    const restore = createDebug.namespaces;
+    // `disable()` returns the namespace string currently in force and clears it, so
+    // it both captures the state to restore and puts the matcher in a known one. The
+    // alternative read, `createDebug.namespaces`, is a real runtime property that
+    // @types/debug does not declare, and reaching it would need a cast; this is the
+    // declared API for the same job.
+    const restore = createDebug.disable();
     try {
       createDebug.enable('*,-tsdav*');
       for (const ns of namespaces) {
@@ -277,7 +282,7 @@ describe('tsdav credential logging is suppressed', () => {
       // The operator's own DEBUG survives for every other package.
       assert.equal(createDebug.enabled('other:thing'), true);
     } finally {
-      createDebug.enable(restore ?? '');
+      createDebug.enable(restore);
     }
   });
 });

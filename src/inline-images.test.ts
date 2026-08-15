@@ -808,14 +808,22 @@ describe('sanitizeQuoteHtml obfuscation properties', () => {
   });
 });
 
+// The sanitizer calls a tag transform with exactly (tagName, attribs) — that is both
+// what sanitize-html's Transformer type declares and what its traversal passes — so
+// these call it the same way. Anything a test added beyond those two would be
+// discarded before the transform saw it, and would prove nothing about the hook.
 describe('collectImgCidRefs', () => {
   it('reports a reference and returns the tag untouched', () => {
     const seen: string[] = [];
     const transform = collectImgCidRefs({ onCidRef: (key) => seen.push(key) });
     const attribs = { src: 'cid:logo', alt: 'a' };
-    const out = transform('img', attribs, false as any);
+    const out = transform('img', attribs);
     assert.deepEqual(seen, ['logo']);
     assert.deepEqual(out, { tagName: 'img', attribs });
+    // The collecting pass must hand the sanitizer back the SAME attributes object,
+    // not a copy of it: its whole contract is that the html it produces is
+    // byte-for-byte what the sanitizer would have emitted with no transform at all.
+    assert.equal(out.attribs, attribs);
   });
 
   it('reports a data: image separately and no reference', () => {
@@ -825,7 +833,7 @@ describe('collectImgCidRefs', () => {
       onCidRef: (key) => refs.push(key),
       onDataImage: () => { data++; },
     });
-    transform('img', { src: 'data:image/png;base64,AA' }, false as any);
+    transform('img', { src: 'data:image/png;base64,AA' });
     assert.deepEqual(refs, []);
     assert.equal(data, 1);
   });
@@ -837,8 +845,10 @@ describe('collectImgCidRefs', () => {
       onCidRef: (key) => refs.push(key),
       onDataImage: () => { data++; },
     });
-    for (const attribs of [{ src: 'https://a/b.png' }, { src: '/b.png' }, {}]) {
-      transform('img', attribs as any, false as any);
+    // Remote, root-relative, and an <img> with no src at all.
+    const cases: Record<string, string>[] = [{ src: 'https://a/b.png' }, { src: '/b.png' }, {}];
+    for (const attribs of cases) {
+      transform('img', attribs);
     }
     assert.deepEqual(refs, []);
     assert.equal(data, 0);
