@@ -634,17 +634,27 @@ const membershipReplaceDesc = (additiveTool: 'add_labels' | 'bulk_add_labels') =
 // duplicate of this sentence and of the `verbose` parameter text below, which is how the
 // wrong field name ("org" for `organization`) survived in all three at once.
 const CONTACT_SHAPE_DESC =
-  'Returns simplified format by default: id, name, emails, phones, organization, notes. ' +
+  'Returns simplified format by default: id, name, emails, phones, organization, notes, and kind. ' +
+  'In the DEFAULT view kind appears only when the card is NOT an ordinary person, so no kind ' +
+  'field there means an individual — which is nearly every card. kind:"group" is a contact ' +
+  'group, which update_contact and delete_contact both REFUSE (this server has no kind or ' +
+  'members parameter, so it cannot make one or put one back); other values (org, location, ' +
+  'device, application, …) are not people either. Check it before planning an edit or a cleanup ' +
+  'rather than discovering it from a refused write. ' +
   'Each emails/phones entry is EITHER a bare string (the address / the number, when the entry ' +
   'carries no label) OR an {address, label} / {number, label} object — so handle both shapes. ' +
-  'Use verbose=true for the whole entry objects (contexts, pref, …) plus addresses, titles, ' +
-  'URLs, photos and anniversaries. Use raw=true for the original JMAP response.';
+  'Use verbose=true for the whole entry objects (contexts, pref, …), addresses, titles, URLs, ' +
+  'photos and anniversaries, and kind on EVERY card (individual included, so the "no field means ' +
+  'individual" reading above applies to the default view only). Use raw=true for the original ' +
+  'JMAP response, which also carries kind on every card.';
 
 // The `verbose` parameter text shared by the same three tools.
 const CONTACT_VERBOSE_PARAM_DESC =
   'Return each emails/phones entry whole (contexts, pref and any other stored field) instead ' +
   'of the bare-string-or-{value,label} shape, and include the extra contact fields ' +
-  '(addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.';
+  '(addresses, titles, URLs, photos, anniversaries). Also returns kind on EVERY card, ' +
+  'including the individual the default view omits — so under verbose the presence of kind ' +
+  'says nothing about what the card is; read its value. Not needed for most tasks.';
 
 // The write tools state their success shape, because every one of them returns something a
 // caller has to parse rather than a sentence.

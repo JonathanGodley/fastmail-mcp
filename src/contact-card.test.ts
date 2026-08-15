@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import {
   assertUnambiguousEntryEdit,
   buildEntryMap,
+  contactCardKind,
   isAmbiguousEntryEdit,
+  isContactGroupCard,
+  nonDefaultContactKind,
   mergeContactName,
   mergeContactNotes,
   mergeEntryMap,
@@ -314,5 +317,65 @@ describe('buildEntryMap', () => {
       e0: { address: 'a' },
       e1: { address: 'b' },
     });
+  });
+});
+
+// ---------- the card kind ----------
+
+// One reading of the property serves both the `kind` the read tools show and the refusal the
+// write tools raise, so the two cannot end up disagreeing about what a group is.
+describe('contactCardKind', () => {
+  it('reads the declared kind', () => {
+    assert.equal(contactCardKind({ kind: 'group' }), 'group');
+    assert.equal(contactCardKind({ kind: 'individual' }), 'individual');
+  });
+
+  it('treats a missing, blank or non-string kind as undeclared', () => {
+    assert.equal(contactCardKind({}), undefined);
+    assert.equal(contactCardKind({ kind: '' }), undefined);
+    assert.equal(contactCardKind({ kind: 42 }), undefined);
+    assert.equal(contactCardKind(undefined), undefined);
+  });
+});
+
+describe('nonDefaultContactKind', () => {
+  it('drops the individual default, whether declared or merely implied', () => {
+    assert.equal(nonDefaultContactKind({ kind: 'individual' }), undefined);
+    assert.equal(nonDefaultContactKind({}), undefined);
+  });
+
+  it('keeps every other kind, so it is not a group-or-not flag', () => {
+    for (const kind of ['group', 'org', 'location', 'device', 'application', 'x-robot']) {
+      assert.equal(nonDefaultContactKind({ kind }), kind, kind);
+    }
+  });
+});
+
+describe('isContactGroupCard', () => {
+  it('recognises a group', () => {
+    assert.equal(isContactGroupCard({ kind: 'group' }), true);
+  });
+
+  it('does not treat other non-person kinds as groups', () => {
+    // Only a group is refused by the write tools: it is the one kind whose whole content is a
+    // members list this server has no surface for. An org card is an ordinary card that
+    // update_contact and delete_contact can still handle.
+    for (const kind of ['org', 'location', 'device', 'application', 'individual']) {
+      assert.equal(isContactGroupCard({ kind }), false, kind);
+    }
+    assert.equal(isContactGroupCard({}), false);
+    assert.equal(isContactGroupCard(undefined), false);
+  });
+
+  it('agrees with the kind the read surface surfaces', () => {
+    // The read shows a value and the write refuses on one: the same card must not read as a
+    // group in one place and not the other.
+    const group = { id: 'G1', kind: 'group' };
+    assert.equal(isContactGroupCard(group), true);
+    assert.equal(nonDefaultContactKind(group), 'group');
+
+    const person = { id: 'C1', kind: 'individual' };
+    assert.equal(isContactGroupCard(person), false);
+    assert.equal(nonDefaultContactKind(person), undefined);
   });
 });

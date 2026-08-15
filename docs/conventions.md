@@ -18,7 +18,7 @@ The files worth knowing:
 
 | path | what it settles |
 |---|---|
-| `imap/jscontact.c` | JSContact (RFC 9553) ↔ vCard conversion. Validates nothing on write; silently drops unrecognised `contexts` values on read. |
+| `imap/jscontact.c` | JSContact (RFC 9553) ↔ vCard conversion. Validates nothing on write; silently drops unrecognised `contexts` values on read. A card-level `kind` is **always** emitted — the object is seeded `individual` before any vCard property is read (`jscontact.c:1982`), so a card with no `KIND` line still returns `"individual"` — and the value is lowercased on the way out (`jscontact.c:1169`), with no whitelist, so an arbitrary kind passes through verbatim. `src/contact-card.ts` carries the consequences. |
 | `imap/jmap_contact.c` | `ContactCard/set`, address books. |
 | `imap/jmap_mail.c` | `Email/get`, `Email/query`, `Email/set`, and what the filter conditions actually mean. |
 | `imap/jmap_calendar.c`, `imap/ical_support.c`, `imap/caldav_db.c` | CalDAV and JSCalendar, including the validation `caldav_put` does and does not perform. |

@@ -433,6 +433,60 @@ describe('simplifyContact entry shape', () => {
   });
 });
 
+// ---------- simplifyContact: the card kind ----------
+
+// Cyrus (the server Fastmail runs) always sends a card-level `kind`, seeding it to
+// "individual" before it reads a single vCard property, so every case below is written
+// against the shape a real ContactCard/get returns rather than an invented one. See
+// contactCardKind for the source citations.
+describe('simplifyContact card kind', () => {
+  it('surfaces kind on a group card, so a caller sees what the write tools will refuse', () => {
+    const result = simplifyContact({ id: 'G1', kind: 'group', name: { full: 'Team' }, members: { 'uid-1': true } });
+    assert.equal(result.kind, 'group');
+  });
+
+  it('omits the default individual kind that every ordinary card carries', () => {
+    const result = simplifyContact({ id: 'ct-1', kind: 'individual', name: { full: 'Ada Lovelace' } });
+    assert.equal(result.kind, undefined);
+    assert.ok(!Object.prototype.hasOwnProperty.call(result, 'kind'));
+  });
+
+  it('omits kind when the card declares none at all', () => {
+    // Not what Fastmail sends, but a card can arrive without it — a `properties` request that
+    // filtered it out, or a card from anything other than Cyrus. Absent means the default.
+    const result = simplifyContact({ id: 'ct-2', name: { full: 'Ada Lovelace' } });
+    assert.equal(result.kind, undefined);
+  });
+
+  it('surfaces every other kind verbatim, not just group', () => {
+    // RFC 9553 section 2.1.4 defines six values and Cyrus whitelists none of them, so this is
+    // deliberately not a two-way group-or-not test: none of these is a person, and none is
+    // something create_contact could produce.
+    for (const kind of ['org', 'location', 'device', 'application']) {
+      assert.equal(simplifyContact({ id: 'ct-3', kind }).kind, kind, kind);
+    }
+  });
+
+  it('surfaces an unregistered kind rather than swallowing it', () => {
+    assert.equal(simplifyContact({ id: 'ct-4', kind: 'x-robot' }).kind, 'x-robot');
+  });
+
+  it('ignores a kind that is not a usable string', () => {
+    assert.equal(simplifyContact({ id: 'ct-5', kind: '' }).kind, undefined);
+    assert.equal(simplifyContact({ id: 'ct-6', kind: 42 }).kind, undefined);
+  });
+
+  it('restores the individual kind under verbose, which means everything the server sent', () => {
+    const result = simplifyContact({ id: 'ct-7', kind: 'individual' }, { verbose: true });
+    assert.equal(result.kind, 'individual');
+  });
+
+  it('still reports a non-default kind under verbose', () => {
+    const result = simplifyContact({ id: 'G2', kind: 'group' }, { verbose: true });
+    assert.equal(result.kind, 'group');
+  });
+});
+
 // ---------- formatEmailQueryResult ----------
 
 describe('formatEmailQueryResult', () => {

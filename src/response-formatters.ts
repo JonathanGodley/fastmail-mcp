@@ -1,7 +1,7 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
 import { redactBearerTokens } from './coerce.js';
-import { simplifyEntryMap } from './contact-card.js';
+import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 
@@ -342,6 +342,17 @@ export function simplifyIdentity(raw: any, options?: { verbose?: boolean }): any
 
 export function simplifyContact(raw: any, options?: { verbose?: boolean }): any {
   const result: any = { id: raw.id };
+
+  // What KIND of record this is, and only when that is not the ordinary `individual` — see
+  // nonDefaultContactKind for why the default is dropped rather than the property's absence
+  // being trusted. It sits next to the id because it qualifies the record the caller is about
+  // to pass to a write: a `group` is refused by update_contact and delete_contact, and the
+  // other kinds (`org`, `location`, `device`, `application`, …) are not people either, so a
+  // caller planning an edit or a cleanup can see that from the listing instead of from a
+  // failed call (#113). `individual` is restored under verbose by the passthrough below,
+  // which means everything the server sent.
+  const kind = nonDefaultContactKind(raw);
+  if (kind) result.kind = kind;
 
   // Name - could be in name.full, name.given+surname, or other forms
   if (raw.name) {

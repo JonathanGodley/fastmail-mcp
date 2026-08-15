@@ -442,16 +442,30 @@ The signature fields are the identity's configured sign-off, the same text the F
 
 ### Contact fields
 
-**Default**: `id`, `name`, `emails`, `phones`, `organization`, `notes`
+**Default**: `id`, `name`, `emails`, `phones`, `organization`, `notes`, and `kind` when it is not `individual`
 
-**Verbose adds**: `addresses`, `titles`, `online`, `photos`, `anniversaries`, plus any remaining JMAP fields — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
+**Verbose adds**: `addresses`, `titles`, `online`, `photos`, `anniversaries`, plus any remaining JMAP fields (including `kind` on an ordinary card) — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
 
 **Simplification applied:**
 - Name resolved from `name.full` or `given + surname`
 - Emails and phones flattened from JMAP's Id-map to an array — see the hybrid shape below
 - Organization extracted from first entry
 - Notes extracted from JMAP's `{hash: {note}}` object format
+- `kind` omitted when it is the default `individual` - see below
 - Verbose: addresses as objects, titles as strings, online/URLs as URIs
+
+#### `kind` tells you which cards the write tools will refuse
+
+A JSContact card carries a `kind` ([RFC 9553](https://www.rfc-editor.org/rfc/rfc9553.html) §2.1.4), and Cyrus - the server Fastmail runs - always emits one: it seeds the card with `"individual"` before reading a single vCard property, so a card whose stored vCard has no `KIND` line still comes back as `"individual"`. Repeating `"individual"` on nearly every card would cost tokens to say nothing, so **the default view shows `kind` only when it is something else**:
+
+```json
+[{"id": "C1", "name": "Ada Lovelace"},
+ {"id": "G1", "kind": "group", "name": "Book club"}]
+```
+
+No `kind` field means an individual. `kind: "group"` is a **contact group**, which `update_contact` and `delete_contact` both refuse (see [Writing contacts](#writing-contacts)) - so a listing now shows you that before you spend a call finding out. RFC 9553 also defines `org`, `location`, `device` and `application`, and the server passes an unregistered value through as-is, so treat this as a value to read rather than a group-or-not flag: none of those kinds is a person, and `create_contact` cannot produce any of them.
+
+`verbose: true` and `raw: true` pass `kind` through untouched, `individual` included - so under either one the presence of the field says nothing about what the card is, and you read its value. Should a card ever arrive without a `kind` at all, the default view reads that as an individual too ([#113](https://github.com/JonathanGodley/fastmail-mcp/issues/113)).
 
 #### `emails` and `phones` are a hybrid array — handle both shapes
 
@@ -484,6 +498,8 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
 - **A contact group cannot be updated** by this tool. Its `members` are not editable here, and none of the tool's parameters describe a group.
 
 **A contact group cannot be deleted here either, and that is the same rule from the other side.** `create_contact` has no `kind` and no `members` parameter, so this server cannot make a group - and a destroy path will not remove a record it could never put back, since the echo it hands you is only as good as the create surface that consumes it. `delete_contact` rejects a group card and points you at the Fastmail web interface. The rule is about the *kind* of record, not about fields the create tool cannot set: nearly every real card carries titles, organizations or photos this server cannot write, and those still delete normally.
+
+**You can see which cards those are before you write to them.** `list_contacts`, `get_contact` and `search_contacts` show `kind: "group"` on a group card - see [`kind` tells you which cards the write tools will refuse](#kind-tells-you-which-cards-the-write-tools-will-refuse).
 
 **Both writes echo the card as it stood before them.** `update_contact` returns `previousCard` and `delete_contact` returns `deletedCard`, always the full untransformed JMAP card. That is what makes a wrong write legible: a contact delete is irreversible (a card does not go to Trash the way an email does), so the echo is the only copy left, and an update made from a stale copy is visible in the response. Neither tool has a confirmation parameter — a caller passes a confirm flag as readily as it passed the wrong id, so the echo is the mitigation that actually works.
 
@@ -751,6 +767,8 @@ Images written as `data:` URIs are dropped and counted rather than converted, as
   - Parameters: `emailIds` (required array), `mailboxIds` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list)
 
 ### Contact Tools
+
+All three read tools carry `kind` on a card that is not an ordinary person - see [`kind` tells you which cards the write tools will refuse](#kind-tells-you-which-cards-the-write-tools-will-refuse).
 
 - **list_contacts**: List all contacts. Returns simplified format by default.
   - Parameters: `limit` (default: 20, hard cap 100 — no paging), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)

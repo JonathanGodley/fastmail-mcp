@@ -257,15 +257,65 @@ export function mergeEntryMap(
 const MAX_ECHOED_DROPPED_ENTRIES = 5;
 
 /**
+ * The card-level `kind` a card declares (JSContact, RFC 9553 section 2.1.4), or undefined
+ * when it declares nothing usable.
+ *
+ * This is the ONE place the property is read, so the read surface and the write refusals
+ * below cannot end up disagreeing about what a group is (#113). What Cyrus — the server
+ * Fastmail runs, and therefore the authority over the RFC — actually does with it:
+ *
+ *  - `kind` is ALWAYS present on a card it returns. `jscard_from_vcard` seeds the object with
+ *    `kind: "individual"` before it looks at a single vCard property and nothing removes it
+ *    afterwards (`imap/jscontact.c:1982`), so a plain person card whose vCard carries no KIND
+ *    line still comes back as `"individual"`. That default is materialised deliberately: a
+ *    `filter: {kind: "individual"}` query has to match those cards. So "the property is
+ *    absent" is NOT the signal for an ordinary card — the value being the default is.
+ *  - The value is LOWERCASED on the way out. `buf_lcase` mutates the buffer in place and the
+ *    emitted string is read back from it (`imap/jscontact.c:1169`), so a vCard `KIND:Group`
+ *    reaches us as `"group"`, never `"Group"`. That is why the group test below can compare
+ *    exactly — and it matches what Cyrus itself compares on write, a case-sensitive
+ *    `strcmpsafe("group", ...)` (`imap/jmap_contact.c:4282`).
+ *  - Any other value passes through verbatim. Cyrus keeps no whitelist for the card-level
+ *    property, so besides `group` a card can hold `org`, `location`, `device`,
+ *    `application` or an unregistered extension value. Callers must not read this as a
+ *    two-way group-or-not flag.
+ */
+export function contactCardKind(card: any): string | undefined {
+  const kind = card?.kind;
+  return typeof kind === 'string' && kind !== '' ? kind : undefined;
+}
+
+/** The kind every card is assumed to be when it says nothing else (RFC 9553 section 2.1.4). */
+const DEFAULT_CONTACT_KIND = 'individual';
+
+/**
+ * The kind worth showing a caller: the declared kind, unless it is the default.
+ *
+ * Emitting `"individual"` on every card would cost tokens to say what the absence of the
+ * field already says, which is the omit-empty rule the rest of the read shape follows. What
+ * is left is the useful half — a card this server's write tools may refuse, or simply is not
+ * a person — surfaced BEFORE the caller spends a write finding out (#113).
+ */
+export function nonDefaultContactKind(card: any): string | undefined {
+  const kind = contactCardKind(card);
+  return kind === DEFAULT_CONTACT_KIND ? undefined : kind;
+}
+
+/**
  * Whether a card is a contact GROUP rather than a person card.
  *
  * A group card carries a `members` map of the uids it contains and none of the person fields.
- * This server's contact surface has no `kind` parameter and no `members` parameter, so it can
- * neither create a group nor describe one — which is why both write tools that can meet one
- * refuse it, from a single rule stated in one place rather than two lookalike checks.
+ * This server's contact WRITE surface has no `kind` parameter and no `members` parameter, so
+ * it can neither create a group nor describe one — which is why both write tools that can
+ * meet one refuse it, from a single rule stated in one place rather than two lookalike checks.
+ * (The READ tools do surface `kind`, so a caller can see a group coming; that is what
+ * nonDefaultContactKind is for.)
+ *
+ * Reads the property through `contactCardKind` so the refusal and the `kind` the read tools
+ * show are answering from the same value.
  */
 export function isContactGroupCard(card: any): boolean {
-  return card?.kind === 'group';
+  return contactCardKind(card) === 'group';
 }
 
 /**
