@@ -54,6 +54,16 @@ describe('formatEditDraftResult', () => {
     assert.doesNotMatch(text, /p5@example\.com/);
   });
 
+  it('appends what the edit did to the draft\'s embedded images', () => {
+    const text = formatEditDraftResult({
+      id: 'draft-2',
+      replacedDraft: { id: 'draft-1' },
+      trashedOldDraftId: 'draft-1',
+      notes: ['This draft embeds 1 image(s) (2 KB).'],
+    });
+    assert.match(text, /moved to Trash.*This draft embeds 1 image\(s\) \(2 KB\)\.$/s);
+  });
+
   it('omits the echo-back sentence when the replaced draft had nothing to report', () => {
     const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1' });
     assert.match(text, /moved to Trash/);
@@ -69,6 +79,20 @@ describe('formatSendDraftResult', () => {
       formatSendDraftResult({ submissionId: 'sub-1' }),
       'Draft sent successfully. Submission ID: sub-1',
     );
+  });
+
+  it('carries the embedded-image receipt on every outcome, marked or not', () => {
+    const notes = ['Sent with 2 embedded image(s) (1.4 MB).'];
+    assert.equal(
+      formatSendDraftResult({ submissionId: 'sub-1', notes }),
+      'Draft sent successfully. Submission ID: sub-1 Sent with 2 embedded image(s) (1.4 MB).',
+    );
+    const skipped = formatSendDraftResult({
+      submissionId: 'sub-1',
+      keywordMaintenance: { kind: 'reply', messageId: 'orig@example.com', marked: false, skipReason: 'not-found' },
+      notes,
+    });
+    assert.match(skipped, /Sent with 2 embedded image\(s\) \(1\.4 MB\)\.$/);
   });
 
   it('reports the answered+read mark for a sent reply draft', () => {

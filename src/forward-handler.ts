@@ -190,9 +190,9 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
   // stripped from the forwarded html by the sanitizer, so carrying the bytes would
   // attach orphans. Counted so the degrade is loud; asAttachment is the lossless
   // alternative. Parts marked inline WITHOUT a cid are content (some clients mark
-  // regular attachments inline); carry them normalized to disposition:'attachment'
-  // — carrying 'inline' verbatim would trip edit_draft's inline reject and make the
-  // forward draft un-editable.
+  // regular attachments inline); carry them normalized to disposition:'attachment',
+  // since nothing can reference a part with no Content-ID and an inline marking no
+  // body backs would misdescribe what the draft carries.
   const droppedInlineImages = sourceAttachments.filter(isTrueInline).length;
   if (includeOriginalAttachments) {
     params.attachments = sourceAttachments

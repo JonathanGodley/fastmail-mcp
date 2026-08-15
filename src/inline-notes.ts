@@ -188,6 +188,28 @@ export function noteSentWithEmbedded(count: number, bytes: number): string {
 }
 
 /**
+ * The saved draft could not be re-read, so what it actually carries is unconfirmed.
+ *
+ * Never an error: the edit itself succeeded and the draft exists. This says only that the
+ * confirmation step did not run, which matters because embedding is the one outcome the
+ * caller cannot check from the result text alone.
+ */
+export function noteEmbedUnconfirmed(): string {
+  return (
+    'The draft was saved, but this server could not re-read it to confirm the embedded ' +
+    'image(s) are attached. Open the draft to check the images appear.'
+  );
+}
+
+/** The re-read found the saved draft short of images this call attached to it. */
+export function noteEmbedMissingAfterSave(count: number): string {
+  return (
+    `${count} embedded image(s) this call attached were not found on the saved draft. ` +
+    'Open the draft to check how it renders.'
+  );
+}
+
+/**
  * Text that looks like an embedded-image reference but is not one this server can act on.
  *
  * A note, never an error: the text may be someone writing about this feature, a pasted MIME
@@ -347,6 +369,49 @@ export function rejectBrokenDraft(
     ? `${base} Or add an attachments item with cid "${values[0]}" to supply the missing image.`
     : `${base} Or add attachments items with cid ${values.map((v) => `"${v}"`).join(', ')} ` +
       'to supply the missing images.';
+}
+
+// The short recreate recipe the body-shape refusals end with. It names the threading tools
+// for the same reason the longer recipe does — recreating a reply or forward with the plain
+// compose tool splits the conversation — but it needs no header-reading detour: these
+// refusals fire on the draft's own body shape, which the caller can see in get_email.
+// Unterminated on purpose: one caller ends the sentence, the other appends a pointer first.
+const RECREATE_RECIPE =
+  'Recreate it (reply_email/forward_email for replies and forwards, create_draft ' +
+  'otherwise), then delete this one';
+
+/**
+ * The draft's body carries a part the recreate cannot reproduce.
+ *
+ * Editing rebuilds the message from its parts, so a part this server cannot re-reference
+ * would be dropped or mangled by an edit that claims to have preserved it. Refusing is the
+ * loud alternative. Both interpolated values come from the message itself, so both render
+ * as quoted data.
+ */
+export function rejectUncarriableBodyPart(
+  name: string | null | undefined,
+  type: string | null | undefined,
+  isMedia: boolean,
+): string {
+  const noun = isMedia ? 'a media part' : 'a part';
+  return (
+    `This draft's body contains ${noun} this server cannot carry ` +
+    `(part "${describePart(name)}", content type "${describePart(type)}"). ${RECREATE_RECIPE}.`
+  );
+}
+
+/**
+ * The draft's body puts two parts of one text type around something else.
+ *
+ * The parts are individually carriable — what cannot be preserved is their ORDER around the
+ * content between them, which this server's flat rebuild has no way to express. Saying
+ * "cannot carry" here would be false, so this refusal has its own wording (see issue #85).
+ */
+export function rejectInterleavedTextParts(): string {
+  return (
+    "This draft's body interleaves multiple text parts of the same type (a layout this " +
+    `server cannot preserve). ${RECREATE_RECIPE} (see issue #85).`
+  );
 }
 
 /**

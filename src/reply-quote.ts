@@ -1,6 +1,7 @@
 import sanitizeHtml from 'sanitize-html';
 import { htmlToText, isBlank } from './body-format.js';
 import { formatAddress, formatReplyDate } from './email-formatter.js';
+import { sanitizeQuoteHtml } from './inline-images.js';
 
 // Build the reply bodies (caller's new text + an attributed, top-posted quote of the
 // original), matching the Fastmail web client with a portable quote-bar. createDraft adds
@@ -38,7 +39,14 @@ function stripSentinels(s: string): string {
 // scheme-stripped to an empty src, which we remove entirely so the quote never carries a
 // broken-image placeholder). This is purely a safety floor — we re-send under the user's
 // From — matching what mainstream clients emit; it is not a tracker-pixel filter.
-function sanitizeForQuote(html: string): string {
+//
+// A cidMap turns this into the mapping pass instead: each embedded-image reference the map
+// resolves is rewritten to the Content-ID the caller is attaching, so the quote displays the
+// image rather than losing it. Callers that pass no map (every compose path today) get the
+// shipped behaviour byte for byte — the two sanitizers apply the same tag/attribute floor,
+// and the map-less configuration admits no cid scheme at all.
+function sanitizeForQuote(html: string, cidMap?: Map<string, string>): string {
+  if (cidMap) return sanitizeQuoteHtml(html, { mode: 'map', cidMap }).html;
   return sanitizeHtml(html, {
     allowedTags: [
       'p', 'div', 'span', 'br', 'b', 'i', 'strong', 'em', 'u', 'a', 'ul', 'ol', 'li',
@@ -133,14 +141,26 @@ export function hasTextQuoteMarker(text: string | null | undefined): boolean {
   return /\bwrote:[ \t]*\r?\n([ \t]*\r?\n)*[ \t]*>/.test(text);
 }
 
+// The original's html as the quote builders read it. Exported so a caller that has to decide
+// which embedded images the quote will display — edit_draft, which resolves that against the
+// draft's own surviving parts before the quote is rebuilt — reads exactly the same string
+// these builders will quote, instead of reimplementing the body-list read.
+export function readQuotableHtml(original: any): string {
+  return readBodyList(original?.htmlBody, original?.bodyValues || {}, 'text/html', '<div>[…]</div>');
+}
+
 export function buildReplyBodies(input: {
   original: any;            // raw JMAP email from getEmailById (textBody/htmlBody arrays + bodyValues + date)
   textBody?: string;        // caller's new text
   htmlBody?: string;        // caller's new html
   quoteOriginal: boolean;
   timezone?: string;
+  // Embedded-image reference -> the Content-ID the rebuilt quote should emit for it. Omitted
+  // on every compose path (no draft exists yet to resolve references against), in which case
+  // the quote is built exactly as it always was.
+  cidMap?: Map<string, string>;
 }): { textBody?: string; htmlBody?: string } {
-  const { original, textBody, htmlBody, quoteOriginal, timezone } = input;
+  const { original, textBody, htmlBody, quoteOriginal, timezone, cidMap } = input;
 
   // Return only the formats the caller supplied (createDraft adds the text fallback later).
   const passthrough = () => ({
@@ -155,7 +175,7 @@ export function buildReplyBodies(input: {
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
   // Determine quotable content (content-based, not raw presence).
-  const sanitizedHtml = origHtml ? sanitizeForQuote(origHtml) : '';
+  const sanitizedHtml = origHtml ? sanitizeForQuote(origHtml, cidMap) : '';
   const htmlQuotable = sanitizedHtml ? isQuotable(sanitizedHtml) : false;
   const textQuotable = !isBlank(origText);
 
@@ -241,13 +261,15 @@ export function buildForwardBodies(input: {
   original: any;      // raw JMAP email from getEmailById (body lists + bodyValues + addresses)
   textBody?: string;  // caller's note, placed above the block
   htmlBody?: string;
+  // See buildReplyBodies: absent on every compose path, supplied by edit_draft's rebuild.
+  cidMap?: Map<string, string>;
 }): { textBody?: string; htmlBody?: string } {
-  const { original, textBody, htmlBody } = input;
+  const { original, textBody, htmlBody, cidMap } = input;
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
-  const sanitizedHtml = origHtml ? sanitizeForQuote(origHtml) : '';
+  const sanitizedHtml = origHtml ? sanitizeForQuote(origHtml, cidMap) : '';
   const htmlQuotable = sanitizedHtml ? isQuotable(sanitizedHtml) : false;
   const textQuotable = !isBlank(origText);
 
