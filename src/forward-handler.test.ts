@@ -372,3 +372,21 @@ describe('composeForward — draft-only orchestration', () => {
     assert.equal(calls.upload, undefined);
   });
 });
+
+describe('buildForwardParams — recorded source instance', () => {
+  it("records the original's JMAP id as sourceEmailId on an inline forward", () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal());
+    assert.equal(forwardParams.sourceEmailId, 'orig-1');
+  });
+
+  it('records it on an asAttachment forward too', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'], asAttachment: true }, makeOriginal());
+    assert.equal(forwardParams.sourceEmailId, 'orig-1');
+  });
+
+  it('records it even when the original has no settable Message-ID (id refines WHICH copy; the header still gates marking)', () => {
+    const { forwardParams } = buildForwardParams({ to: ['x@y.com'] }, makeOriginal({ messageId: undefined }));
+    assert.equal(forwardParams.forwardedMessageId, undefined);
+    assert.equal(forwardParams.sourceEmailId, 'orig-1');
+  });
+});

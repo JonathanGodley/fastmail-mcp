@@ -157,14 +157,38 @@ in-account message may be quoted.
 Transmission also **writes two keyword flags** (`$answered`+`$seen`, or
 `$forwarded`+`$seen`) after a send succeeds (#52/#54, #30, #60). The compose surface is
 draft-first, so this write lives in `send_draft`: the target is resolved from the draft's
-recorded provenance header (`In-Reply-To` / `X-Forwarded-Message-Id` — see
-`docs/conventions.md` "Draft provenance"), an attacker-influenceable value on a foreign
-draft, but the resolution only ever marks the unique message that *owns* that Message-ID
-(no match, or more than one, marks nothing). Either way it adds no capability class: two
-boolean keyword sets, no move/delete/body write, scoped to `session.accountId`, and
-dominated by `mark_email_read`, which already grants a standalone `$seen` write to any id.
-The write is best-effort (a failure is swallowed so it can't mask the already-sent mail).
+recorded provenance headers (see `docs/conventions.md` "Draft provenance"), which are
+attacker-influenceable values on a foreign draft — but neither path marks an arbitrary
+id. The exact-instance pointer (`X-Fastmail-MCP-Source-Id`) is honoured only after
+validating that the named instance still carries the Message-ID the draft's kind header
+names (a mismatched or dangling pointer falls back), and the Message-ID fallback only
+ever marks the unique message that *owns* that Message-ID (no match, or more than one,
+marks nothing). Either way it adds no capability class: two boolean keyword sets, no
+move/delete/body write, scoped to `session.accountId`, and dominated by
+`mark_email_read`, which already grants a standalone `$seen` write to any id. The write
+is best-effort (a failure is swallowed so it can't mask the already-sent mail).
 Accepted on the same footing as the read-and-embed primitive.
+
+### `X-Fastmail-MCP-Source-Id` is transmitted to recipients (accepted, deliberate)
+
+The exact-instance header that `reply_email`/`forward_email` stamp on a draft is **not
+stripped at send** — EmailSubmission transmits stored headers verbatim (probed live
+2026-08-14; see `docs/conventions.md` "Draft provenance" for the probe facts), so the
+recipient's copy carries it. This was considered and consciously declined rather than
+overlooked:
+
+- **What it discloses:** an opaque, account-scoped JMAP id. It is meaningless outside
+  the sending account's own session — it names no host, no folder, no address, and
+  cannot be dereferenced by anyone but the account holder. The `In-Reply-To` header on
+  the very same message already discloses strictly more (a globally meaningful
+  Message-ID including the originating domain).
+- **Precedent:** Fastmail's own mobile app transmits its private `X-PersonalityId`
+  (an internal identity id) on sent replies — same class of value, shipped by the
+  platform vendor.
+- **Why not strip:** removing the header at send would mean recreating the message
+  before submission (JMAP emails are immutable), turning every send into a
+  destroy+recreate with its own failure modes, solely to withhold a value with no
+  disclosure weight. The cure was strictly worse than the disease.
 
 ## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
 

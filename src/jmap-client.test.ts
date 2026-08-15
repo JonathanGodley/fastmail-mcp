@@ -3012,3 +3012,127 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     );
   });
 });
+
+// ---------- source-instance header (X-Fastmail-MCP-Source-Id) ----------
+// The exact stored instance a draft was composed from: stamped by reply_email /
+// forward_email, carried by the edit recreate, consumed by send_draft's keyword
+// maintenance. These tests pin the stamp, the carry, and the drop/re-point rules.
+
+describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  const SRC_PROP = 'header:X-Fastmail-MCP-Source-Id:asText';
+  const FWD_PROP = 'header:X-Forwarded-Message-Id:asMessageIds';
+  const SRC_FWD_HTML = '<p>note</p><div><br>----- Original message -----<br>From: Ada Lovelace &lt;ada@example.com&gt;<br>Subject: Hello<br></div><div type="cite"><p>orig body</p></div>';
+  const SRC_FWD_TEXT = 'note\n\n\n----- Original message -----\nFrom: Ada Lovelace <ada@example.com>\nSubject: Hello\n\norig text';
+
+  const REPLY_QUOTED = {
+    id: 'rdraft-1', subject: 'Re: Hello',
+    from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }], cc: [], bcc: [],
+    mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
+    inReplyTo: ['orig-msg@example.com'], references: ['orig-msg@example.com'],
+    [SRC_PROP]: 'orig-1',
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: {
+      t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, X wrote:\n> quoted' },
+      h: { value: '<p>my reply</p><blockquote type="cite">quoted</blockquote>' },
+    },
+  };
+  const FORWARD_WITH_SRC = {
+    id: 'fdraft-1', subject: 'Fwd: Hello',
+    from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }], cc: [], bcc: [],
+    mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
+    [FWD_PROP]: ['fwd-orig-msg@example.com'],
+    [SRC_PROP]: 'stale-src',
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: SRC_FWD_TEXT }, h: { value: SRC_FWD_HTML } },
+  };
+  const SRC_ORIGINAL = {
+    id: 'orig-1',
+    messageId: ['fwd-orig-msg@example.com'],
+    from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
+    sentAt: '2026-06-15T03:29:02Z',
+    subject: 'Hello',
+    textBody: [{ partId: 'ot', type: 'text/plain' }],
+    htmlBody: [{ partId: 'oh', type: 'text/html' }],
+    bodyValues: { ot: { value: 'ORIGINAL TEXT BODY' }, oh: { value: '<p>ORIGINAL HTML BODY</p>' } },
+  };
+
+  function mockSrcUpdate(c: JmapClient, draft: any) {
+    return mock.method(c, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        if (params.ids?.[0] === 'orig-1') return { methodResponses: [['Email/get', { list: [SRC_ORIGINAL] }, 'email']] };
+        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
+      }
+      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'new-draft' } } }, 'createDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
+    });
+  }
+
+  it('createDraft stamps the header from sourceEmailId', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-1' } } }, 'createDraft']],
+    }));
+    await client.createDraft({ subject: 'Re: x', sourceEmailId: 'orig-1' });
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.equal(emailObj[SRC_PROP], 'orig-1');
+  });
+
+  it('createDraft treats a non-JMAP-id sourceEmailId as absent (vetted, never fails the create)', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-1' } } }, 'createDraft']],
+    }));
+    await client.createDraft({ subject: 'Re: x', sourceEmailId: 'not a jmap id!' });
+    const emailObj = makeReq.mock.calls[0].arguments[0].methodCalls[0][1].create.draft;
+    assert.equal(emailObj[SRC_PROP], undefined);
+  });
+
+  it('updateDraft carries the header through a metadata-only edit', async () => {
+    const makeReq = mockSrcUpdate(client, REPLY_QUOTED);
+    await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft[SRC_PROP], 'orig-1');
+    assert.deepEqual(draft.inReplyTo, ['orig-msg@example.com']);
+  });
+
+  it('KEEPS the header on a reply-draft noQuote (In-Reply-To survives, so does the instance pointer)', async () => {
+    const makeReq = mockSrcUpdate(client, REPLY_QUOTED);
+    await client.updateDraft('rdraft-1', { htmlBody: '<p>fresh body</p>', noQuote: true });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft[SRC_PROP], 'orig-1');
+    assert.deepEqual(draft.inReplyTo, ['orig-msg@example.com']);
+  });
+
+  it('DROPS the header with the forward marking on a forward-draft noQuote (a de-forward)', async () => {
+    const makeReq = mockSrcUpdate(client, FORWARD_WITH_SRC);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>fresh body</p>', noQuote: true });
+    const draft = draftFromCall(makeReq);
+    assert.equal(draft[FWD_PROP], undefined);
+    assert.equal(draft[SRC_PROP], undefined);
+  });
+
+  it('re-points the header alongside the forward keep (both name the fetched original)', async () => {
+    const makeReq = mockSrcUpdate(client, FORWARD_WITH_SRC);
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>', originalEmailId: 'orig-1' });
+    // The keep path adds an Email/get for the original, shifting the create call —
+    // find it by shape rather than by index.
+    const createCall = makeReq.mock.calls
+      .map((c: any) => c.arguments[0].methodCalls[0][1])
+      .find((p: any) => p.create?.draft);
+    const draft = createCall.create.draft;
+    assert.deepEqual(draft[FWD_PROP], ['fwd-orig-msg@example.com']);
+    assert.equal(draft[SRC_PROP], 'orig-1'); // no longer the stale 'stale-src'
+  });
+
+  it('a draft that never had the header stays without it', async () => {
+    const { [SRC_PROP]: _drop, ...rest } = REPLY_QUOTED as any;
+    const makeReq = mockSrcUpdate(client, { ...rest, id: 'rdraft-1' });
+    await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
+    assert.equal(draftFromCall(makeReq)[SRC_PROP], undefined);
+  });
+});

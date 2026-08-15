@@ -200,14 +200,39 @@ export const EMAIL_PROPERTIES_VERBOSE = [
 export interface SourceReferences {
   inReplyTo: string[];
   forwardedMessageId: string[];
+  // The JMAP id of the exact stored instance the draft was composed from (the
+  // X-Fastmail-MCP-Source-Id header). A Message-ID names a MESSAGE, not a stored
+  // instance — an account can hold several copies of one message (e.g. a Sent copy
+  // plus a self-delivered copy filed elsewhere), and only the compose call knew which
+  // one the caller meant. Absent on drafts made by other clients or before this
+  // header existed; send_draft then falls back to the Message-ID lookup.
+  sourceEmailId?: string;
 }
 
-// Read the provenance headers off a raw Email, tolerating a server that returns neither.
+// The JMAP header form used to SET and GET the recorded source instance. Private
+// bookkeeping in the Exchange/Thunderbird/Fastmail-client tradition (Fastmail's own
+// clients stamp e.g. X-PersonalityId on drafts). It is NOT stripped on send:
+// EmailSubmission transmits the stored bytes verbatim (probed live 2026-08-14 — even
+// Fastmail's mobile app ships its private headers), and the value is an opaque,
+// account-scoped id that discloses strictly less than the In-Reply-To header next to
+// it. See docs/security-model.md for the recorded decision.
+export const SOURCE_ID_HEADER = 'header:X-Fastmail-MCP-Source-Id:asText';
+
+// Pre-vet a value before recording it as the source instance. RFC 8620 ids are
+// URL-safe (A-Za-z0-9, hyphen, underscore); anything else is not a JMAP id and is
+// treated as absent rather than risking a header-set rejection failing the create.
+function isSettableSourceId(id: unknown): id is string {
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,255}$/.test(id);
+}
+
+// Read the provenance headers off a raw Email, tolerating a server that returns none.
 export function readSourceReferences(email: any): SourceReferences {
   const forwarded = email?.['header:X-Forwarded-Message-Id:asMessageIds'];
+  const sourceId = email?.[SOURCE_ID_HEADER];
   return {
     inReplyTo: Array.isArray(email?.inReplyTo) ? email.inReplyTo : [],
     forwardedMessageId: Array.isArray(forwarded) ? forwarded : [],
+    ...(typeof sourceId === 'string' && sourceId.trim() !== '' && { sourceEmailId: sourceId.trim() }),
   };
 }
 
@@ -836,6 +861,7 @@ export class JmapClient {
     references?: string[];
     replyTo?: string[];
     forwardedMessageId?: string[];
+    sourceEmailId?: string;
     attachments?: AttachmentPart[];
   }): Promise<string> {
     const session = await this.getSession();
@@ -903,6 +929,11 @@ export class JmapClient {
     // 2026-07-05). The value is pre-vetted by the forward handler; Fastmail itself
     // rejects CRLF/non-ASCII, so no injection is possible here.
     if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
+    // The exact stored instance this draft was composed from (reply_email /
+    // forward_email pass the fetched original's own id). Vetted here — the single
+    // seam that sets the header — so a malformed value degrades to absent (send_draft
+    // falls back to the Message-ID lookup) instead of failing the whole create.
+    if (isSettableSourceId(email.sourceEmailId)) emailObject[SOURCE_ID_HEADER] = email.sourceEmailId;
     if (email.attachments?.length) emailObject.attachments = email.attachments;
     // Generate the body parts (auto text/plain fallback for html-only input where
     // derivable; ships html-only otherwise; no-body html is rejected by shapeBodies). A
@@ -1009,7 +1040,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'textBody', 'htmlBody', 'bodyValues', 'mailboxIds', 'keywords', 'inReplyTo', 'references', 'attachments', 'header:X-Forwarded-Message-Id:asMessageIds'],
+          properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'textBody', 'htmlBody', 'bodyValues', 'mailboxIds', 'keywords', 'inReplyTo', 'references', 'attachments', 'header:X-Forwarded-Message-Id:asMessageIds', SOURCE_ID_HEADER],
           // Inline list (NOT the module-level EMAIL_BODY_PROPERTIES) — extended with
           // name/disposition/cid so the faithful recreate can carry attachment metadata
           // and detect inline (cid:) images.
@@ -1207,6 +1238,14 @@ export class JmapClient {
     // case), and carrying the stale id would leave the guard's advertised recovery
     // pointer rebuilding the block for the wrong message on a later edit.
     let carriedForwardHeader: string[] = forwardHeader;
+    // The recorded source INSTANCE (X-Fastmail-MCP-Source-Id, the exact JMAP id
+    // send_draft marks) rides the same carry: re-pointed with the forward header on a
+    // keep, dropped with it on a de-forwarding noQuote. On a REPLY draft a noQuote
+    // drops only the quote text — In-Reply-To survives, the draft is still a reply to
+    // that same instance — so the instance pointer survives with it.
+    const storedSourceId = existingEmail[SOURCE_ID_HEADER];
+    let carriedSourceId: string | undefined =
+      typeof storedSourceId === 'string' && storedSourceId.trim() !== '' ? storedSourceId.trim() : undefined;
     if (guardVariant && touchesBody && !quoteKeptByConstruction && !coupledTextEdit) {
       const keepNoun = guardVariant === 'reply' ? 'the quote' : 'the forwarded block';
       if (updates.originalEmailId && updates.noQuote === true) {
@@ -1278,6 +1317,11 @@ export class JmapClient {
             // standard recipe.
             const repointedId = original?.messageId?.[0];
             if (isSettableMessageId(repointedId)) carriedForwardHeader = [repointedId];
+            // Keep the instance pointer consistent with the Message-ID it just
+            // re-pointed: both now name the fetched original. (The reply variant
+            // deliberately re-points neither — its In-Reply-To stays as stored, and
+            // the instance pointer stays consistent with THAT.)
+            if (isSettableSourceId(original?.id)) carriedSourceId = original.id;
           }
         } else {
           const regenNoun = guardVariant === 'reply' ? 'a quote' : 'the forwarded block';
@@ -1464,6 +1508,11 @@ export class JmapClient {
       // intact (create-first order below) — recoverable in one step via noQuote, never
       // a silent drop.
       ...(carriedForwardHeader.length > 0 && !dropForwardHeader && { 'header:X-Forwarded-Message-Id:asMessageIds': carriedForwardHeader }),
+      // The exact-instance pointer follows the provenance it refines: dropped when a
+      // noQuote de-forwards a FORWARD draft (the forward header above goes with it),
+      // kept on a reply draft (noQuote drops the quote text, but In-Reply-To — and so
+      // the reply itself, and the instance it replies to — survives).
+      ...(carriedSourceId !== undefined && !(dropForwardHeader && !isReply) && { [SOURCE_ID_HEADER]: carriedSourceId }),
       ...(finalAttachments.length && { attachments: finalAttachments }),
     };
 
@@ -1608,7 +1657,7 @@ export class JmapClient {
           ids: [emailId],
           properties: [
             'id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'textBody', 'htmlBody', 'bodyValues',
-            'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds',
+            'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds', SOURCE_ID_HEADER,
           ],
           bodyProperties: ['partId', 'blobId', 'type', 'size'],
           fetchTextBodyValues: true,
@@ -1768,6 +1817,31 @@ export class JmapClient {
     return this.getListResult(response, 1)
       .filter((e: any) => Array.isArray(e?.messageId) && e.messageId.includes(bare))
       .map((e: any) => e.id);
+  }
+
+  /**
+   * Read the Message-ID list of one stored message by its JMAP id; null when no such
+   * message exists (destroyed, or a foreign/hand-set pointer). send_draft's keyword
+   * maintenance uses this to validate the draft's recorded source INSTANCE before
+   * marking it — the instance must still exist and still carry the Message-ID the
+   * draft's provenance header names, otherwise the caller falls back to the
+   * Message-ID lookup above rather than marking whatever the stale pointer hits.
+   */
+  async getEmailMessageId(emailId: string): Promise<string[] | null> {
+    const session = await this.getSession();
+    const response = await this.makeRequest({
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/get', {
+          accountId: session.accountId,
+          ids: [emailId],
+          properties: ['id', 'messageId'],
+        }, 'getSourceInstance'],
+      ],
+    });
+    const email = this.getListResult(response, 0)[0];
+    if (!email) return null;
+    return Array.isArray(email.messageId) ? email.messageId : [];
   }
 
   async getRecentEmails(limit: number = 10, mailbox: string = 'inbox', ascending: boolean = false, position: number = 0): Promise<QueryResult> {

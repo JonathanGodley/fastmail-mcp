@@ -21,6 +21,10 @@ function spyClient(over: Partial<SendDraftClient> = {}) {
       calls.lookup = messageId;
       return ['orig-1'];
     },
+    getEmailMessageId: async (emailId: string) => {
+      calls.instanceCheck = emailId;
+      return null;
+    },
     addKeywords: async (emailId: string, keywords: string[]) => {
       calls.keywords = { id: emailId, kw: keywords };
     },
@@ -28,6 +32,17 @@ function spyClient(over: Partial<SendDraftClient> = {}) {
   };
   return { client, calls };
 }
+
+// A sendDraft override whose draft records the exact source instance (what
+// reply_email/forward_email now stamp as X-Fastmail-MCP-Source-Id).
+const sendWithRecordedInstance = (kind: 'reply' | 'forward') => async () => ({
+  submissionId: 'sub-1',
+  sourceReferences: {
+    inReplyTo: kind === 'reply' ? ['orig-msg@example.com'] : [],
+    forwardedMessageId: kind === 'forward' ? ['orig-msg@example.com'] : [],
+    sourceEmailId: 'exact-1',
+  },
+});
 
 describe('selectSource', () => {
   it('reads a reply from In-Reply-To', () => {
@@ -178,6 +193,100 @@ describe('sendDraftAndMaintainKeywords', () => {
     const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
     assert.equal(r.submissionId, 'sub-1');
     assert.equal(r.keywordMaintenance?.marked, false);
+  });
+
+  it('marks the RECORDED instance directly when the draft carries the source id (no lookup)', async () => {
+    const { client, calls } = spyClient({
+      sendDraft: sendWithRecordedInstance('reply'),
+      getEmailMessageId: async (id: string) => {
+        calls.instanceCheck = id;
+        return ['orig-msg@example.com'];
+      },
+    });
+    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.equal(calls.instanceCheck, 'exact-1');
+    assert.equal(calls.lookup, undefined); // the Message-ID lookup never runs
+    assert.deepEqual(calls.keywords, { id: 'exact-1', kw: ['$answered', '$seen'] });
+    assert.deepEqual(r.keywordMaintenance, {
+      kind: 'reply',
+      messageId: 'orig-msg@example.com',
+      originalEmailId: 'exact-1',
+      marked: true,
+    });
+  });
+
+  it('exact-instance path marks a forward with the forward keywords', async () => {
+    const { client, calls } = spyClient({
+      sendDraft: sendWithRecordedInstance('forward'),
+      getEmailMessageId: async () => ['orig-msg@example.com'],
+    });
+    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.deepEqual(calls.keywords, { id: 'exact-1', kw: ['$forwarded', '$seen'] });
+    assert.equal(r.keywordMaintenance?.kind, 'forward');
+    assert.equal(r.keywordMaintenance?.marked, true);
+  });
+
+  it('falls back to the lookup when the recorded instance was destroyed', async () => {
+    const { client, calls } = spyClient({
+      sendDraft: sendWithRecordedInstance('reply'),
+      getEmailMessageId: async () => null,
+    });
+    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.equal(calls.lookup, 'orig-msg@example.com');
+    assert.deepEqual(calls.keywords, { id: 'orig-1', kw: ['$answered', '$seen'] });
+    assert.equal(r.keywordMaintenance?.marked, true);
+  });
+
+  it('falls back to the lookup when the recorded instance carries a DIFFERENT Message-ID (stale pointer)', async () => {
+    const { client, calls } = spyClient({
+      sendDraft: sendWithRecordedInstance('reply'),
+      getEmailMessageId: async () => ['someone-else@example.com'],
+    });
+    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.equal(calls.lookup, 'orig-msg@example.com');
+    assert.equal(r.keywordMaintenance?.originalEmailId, 'orig-1'); // never the stale pointer
+  });
+
+  it('falls back to the lookup when the instance read fails', async () => {
+    const { client, calls } = spyClient({
+      sendDraft: sendWithRecordedInstance('reply'),
+      getEmailMessageId: async () => { throw new Error('boom'); },
+    });
+    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.equal(calls.lookup, 'orig-msg@example.com');
+    assert.equal(r.keywordMaintenance?.marked, true);
+  });
+
+  it('exact-instance fallback still reports the ambiguous skip (never guesses)', async () => {
+    const { client, calls } = spyClient({
+      sendDraft: sendWithRecordedInstance('reply'),
+      getEmailMessageId: async () => null,
+      findEmailIdsByMessageId: async () => ['a', 'b'],
+    });
+    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.equal(calls.keywords, undefined);
+    assert.equal(r.keywordMaintenance?.skipReason, 'ambiguous');
+  });
+
+  it('exact-instance write failure stays silent and never re-marks via the lookup', async () => {
+    const { client, calls } = spyClient({
+      sendDraft: sendWithRecordedInstance('reply'),
+      getEmailMessageId: async () => ['orig-msg@example.com'],
+      addKeywords: async () => { throw new Error('boom'); },
+    });
+    const r = await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.equal(r.submissionId, 'sub-1');
+    assert.equal(calls.lookup, undefined); // identified instance + failed write ≠ unidentified
+    assert.equal(r.keywordMaintenance?.marked, false);
+    assert.equal(r.keywordMaintenance?.skipReason, undefined);
+    assert.equal(r.keywordMaintenance?.originalEmailId, 'exact-1');
+  });
+
+  it('a draft with no recorded instance never touches the instance read (legacy path unchanged)', async () => {
+    const { client, calls } = spyClient();
+    await sendDraftAndMaintainKeywords({ emailId: 'd1' }, client);
+    assert.equal(calls.instanceCheck, undefined);
+    assert.equal(calls.lookup, 'orig-msg@example.com');
   });
 
   it('does no keyword work when the send itself fails (an unreadable draft never sends)', async () => {

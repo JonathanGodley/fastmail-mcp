@@ -306,12 +306,15 @@ body to read regardless) and `get_email`/`get_email_attachments` for ground trut
 
 ## Draft provenance: how a draft names the message it came from
 
-A draft composed from an existing message records which message that was — in a header,
-by **Message-ID**, never by JMAP id. Four surfaces read that record (`reply_email`,
+A draft composed from an existing message records which message that was — in headers,
+so the record rides the draft itself and survives everything a draft survives (a new
+session, an edit, another client). Four surfaces read that record (`reply_email`,
 `forward_email`, `send_draft`, and `edit_draft`'s quote guard), so the model belongs here
-rather than in any one of them.
+rather than in any one of them. The record has two tiers: **which message** (by
+Message-ID, interoperable, set by other clients too) and **which stored copy of it**
+(by JMAP id, this server's own header).
 
-- **The two headers.** `In-Reply-To` marks a reply (set by `reply_email` and by every
+- **The two kind headers.** `In-Reply-To` marks a reply (set by `reply_email` and by every
   other client's reply); `X-Forwarded-Message-Id` marks a forward (set by `forward_email`,
   and by Fastmail's own clients — see `docs/email-bodies.md` for the forward-threading
   rationale and the value-validation rules). Both are JMAP `MessageIds`, i.e. **bare** ids
@@ -329,6 +332,29 @@ rather than in any one of them.
   `edit_draft`'s guard does not arm on the bare header when the draft carries a
   `message/rfc822` attachment: the forwarded content lives in the `.eml`, which body
   edits can't drop and the recreate preserves alongside the header.
+- **The exact-instance header: `X-Fastmail-MCP-Source-Id`.** A Message-ID names a
+  *message*; an account can hold several stored copies of one message (a duplicate
+  delivery, or a self-addressed copy the user filed into another folder), and only the
+  compose call knows which copy the caller actually had in hand. So `reply_email` and
+  `forward_email` (both shapes, including `asAttachment`) also record the JMAP id of the
+  fetched original in this header. That id is what lets `send_draft` mark exactly the
+  copy the caller composed from — matching Fastmail's own client, which marks the
+  instance replied to and leaves other copies of the same Message-ID untouched
+  (observed live, 2026-08-14: replying to the Archive copy of a self-addressed message
+  set `$answered` on that copy only, never the Sent twin).
+- **The exact id is validated before use; the Message-ID lookup is the fallback, not a
+  peer.** `send_draft` checks that the recorded instance still exists and still carries
+  the Message-ID the kind header names. A destroyed instance, a mismatch (a stale or
+  hand-set pointer), or a failed read falls through to the lookup below rather than
+  marking on faith. The value is also vetted at the single seam that writes it
+  (`createDraft`): only an RFC 8620 URL-safe id shape (`[A-Za-z0-9_-]{1,255}`) is
+  stamped, and anything else degrades to absent — the fallback covers a draft without
+  the header, so a malformed value is never worth an error.
+- **`edit_draft` carries the exact id like the kind headers.** The immutable-email
+  recreate copies it verbatim; the forward keep path (`originalEmailId`) re-points it at
+  the newly-named original alongside the Message-ID re-point; `noQuote` on a forward
+  draft drops it together with `X-Forwarded-Message-Id` (the draft stops being a
+  forward), while a reply draft keeps it under `noQuote` just as it keeps `In-Reply-To`.
 - **Message-ID to JMAP id is a lookup, and it is two steps.** Every write path needs a
   JMAP id, so the header value has to be resolved: a full-text `Email/query` on the
   **bare** id is the recall step (the bracketed form matches nothing — the platform fact
@@ -342,9 +368,29 @@ rather than in any one of them.
 - **The lookup can legitimately fail to identify one message**, and callers must not
   guess: no match, or more than one (a duplicate delivery, or a self-addressed message
   held in both Sent and Inbox), means the resolution is unknown. `send_draft` reports the
-  skip rather than marking an arbitrary candidate; `edit_draft`'s guard never resolves at
-  all and instead requires the caller to pass `originalEmailId`, so a quote is never
-  rebuilt from a message the caller didn't name.
+  skip rather than marking an arbitrary candidate — this is exactly the case the
+  exact-instance header exists to avoid, and it remains reachable on drafts that lack
+  the header (older drafts, foreign clients, a pointer that failed validation).
+  `edit_draft`'s guard never resolves at all and instead requires the caller to pass
+  `originalEmailId`, so a quote is never rebuilt from a message the caller didn't name.
+
+Platform facts behind the design (live-probed 2026-08-14 against Fastmail):
+
+- **Fastmail's own reply marks the exact instance**, not every copy of the Message-ID —
+  the behaviour the exact-instance header replicates.
+- **A Fastmail-UI reply draft records nothing richer than `In-Reply-To`/`References`**,
+  plus a private `X-PersonalityId` (an internal sending-identity id). There is no
+  platform-provided exact-instance record to reuse, so this server writes its own.
+- **A private header survived a Fastmail-UI draft edit** (their edit also recreates the
+  message): `x-forwarded-message-id` came through intact. Fastmail recognizes that
+  header as its own convention, so survival of a *truly foreign* header is unverified —
+  one more reason the Message-ID fallback stays load-bearing rather than vestigial.
+- **EmailSubmission transmits stored headers verbatim.** The delivered copy of a
+  self-forward still carried `x-forwarded-message-id`, and a reply sent from Fastmail's
+  mobile app arrived still carrying `X-PersonalityId`. Header stripping at send is a
+  per-client habit (their webmail strips private headers; their app does not), not a
+  platform guarantee — so `X-Fastmail-MCP-Source-Id` IS transmitted to recipients.
+  Why that is accepted is recorded in `docs/security-model.md`.
 
 ## Local-time formatting and the U+202F trap
 
