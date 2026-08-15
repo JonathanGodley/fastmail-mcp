@@ -137,7 +137,15 @@ wrong — re-form it; don't blind-retry as-is,"** while `InternalError` (-32603)
 This rule is **tool-family-agnostic.** Because the calendar tools share the same
 `requireNonEmpty` / `validateClearFields` helpers from `src/coerce.ts`, their input
 rejects (`create_calendar_event` / `update_calendar_event`) are `InvalidParams` too — the
-classification is a property of the shared helpers, not of email specifically.
+classification is a property of the shared helpers, not of email specifically. The
+calendar rejects raised in `src/caldav-client.ts` itself follow the same rule and throw
+`InvalidInputError` directly: the start/end frame and ordering checks below, and the
+recurring-exception confirmation prompt (the one asking for `confirmRecurring: true`).
+That last one is the clearest case in the file — the caller resolves it by re-sending the
+same call with one more argument, which is the definition of caller-fixable, so surfacing
+it as `InternalError` was telling them a bare retry might work when it never would. Its
+`catch` re-throws on `instanceof InvalidInputError` rather than on a message substring, so
+the routing no longer depends on the wording of the prompt.
 
 **One deliberate carve-out:** `download_attachment` returns `InternalError` for a bad
 `emailId`/`attachmentId`. Its local catch collapses non-path errors to a generic message
@@ -399,6 +407,47 @@ rather than in any one of them.
   skip rather than marking an arbitrary candidate; `edit_draft`'s guard never resolves at
   all and instead requires the caller to pass `originalEmailId`, so a quote is never
   rebuilt from a message the caller didn't name.
+
+## Calendar DTSTART/DTEND: four time frames, and why they must agree
+
+An iCalendar date/time property (RFC 5545 §3.3.4 / §3.3.5) carries its value in one of
+four **frames**, and the frame — not the digits — decides what the value means:
+
+| frame | shape | means |
+| --- | --- | --- |
+| date | `DTSTART;VALUE=DATE:20260320` | an all-day value, no time at all |
+| floating | `DTSTART:20260320T093000` | whatever the local clock says; a different instant for every reader |
+| UTC | `DTSTART:20260320T093000Z` | one fixed instant (a caller-supplied `+HH:MM` offset is normalised to this) |
+| zoned | `DTSTART;TZID=Europe/Rome:20260320T093000` | one instant, resolved through a named zone |
+
+Two properties are comparable to each other only inside one frame. That is the whole
+reason `validateDateConsistency` in `src/caldav-client.ts` checks frame agreement *before*
+ordering: a floating `DTSTART` beside a UTC `DTEND` has no single duration to order, and
+writing the pair produces an event that is zero-length in UTC, backwards in UTC+10, and a
+different length for every attendee. The ordering rule itself is RFC 5545 §3.8.2.2 —
+`DTEND` strictly later than `DTSTART`, with `DTEND` exclusive for all-day events.
+
+Three properties of the implementation are load-bearing and easy to undo by accident:
+
+- **Classification runs on the serialized line, not on the caller's raw input.**
+  `formatDateTimeProperty` rewrites a floating input to carry the stored event's `TZID`
+  when there is one (the long-standing preserve-the-timezone behaviour), so by the time
+  `describeDateProperty` sees it, it is already `zoned` and agrees with its `zoned`
+  partner. Classify the raw input instead and that legitimate case starts failing, while
+  the floating-against-UTC case it exists to catch starts passing.
+- **The comparison is against the value that will sit beside it, not just the caller's
+  own arguments.** On an update, an untouched side is read from the *stored* VEVENT. Both
+  defects this check closes are single-sided updates, so comparing only what the caller
+  passed sees nothing. The visible consequence: moving an event to another day, or
+  converting one side to UTC, requires passing both `start` and `end`.
+- **Two `zoned` values in different zones are accepted, and only their ordering is
+  skipped.** A flight departing Rome and landing New York is a legal VEVENT whose wall
+  clocks read backwards. Resolving that ordering needs a timezone database this server
+  does not carry, so the check declines to guess rather than reject valid travel events.
+
+The frame check is deliberately *not* applied when the caller touches neither `start` nor
+`end`: it exists to stop us writing a broken pair, not to hold a title edit hostage to an
+inconsistency some other client left in the event.
 
 ## Local-time formatting and the U+202F trap
 

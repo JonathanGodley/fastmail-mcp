@@ -557,12 +557,23 @@ On `edit_draft`, `attachments` **appends** (existing attachments are kept). Use 
   - Parameters: `calendarId` (optional), `startDate` (optional, ISO 8601), `endDate` (optional, ISO 8601), `limit` (default: 50, hard cap 500)
 - **get_calendar_event**: Get a specific calendar event by ID. Returns organizer and participants when available. Throws if the ID is not found.
   - Parameters: `eventId` (required)
-- **create_calendar_event**: Create a new calendar event. Supports date-only (e.g. `2026-04-01`) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs `end: "2026-04-02"`.
+- **create_calendar_event**: Create a new calendar event. Supports date-only (e.g. `2026-04-01`) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs `end: "2026-04-02"`. See [Start/end agreement](#startend-agreement) for the form and ordering rules.
   - Parameters: `calendarId` (required), `title` (required), `description` (optional), `start` (required, ISO 8601 or date-only), `end` (required, ISO 8601 or date-only), `location` (optional), `participants` (optional array of `{email, name?}`)
-- **update_calendar_event**: Patch an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty or whitespace-only string for `title`, `description`, or `location` is rejected (it won't silently blank the property). To delete `description` or `location`, list them in `clearFields`. Floating times (no Z/offset) preserve the original timezone. WARNING: providing `participants` replaces ALL existing attendee data; `participants: []` removes all attendees (and the now-orphaned ORGANIZER).
+- **update_calendar_event**: Patch an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty or whitespace-only string for `title`, `description`, or `location` is rejected (it won't silently blank the property). To delete `description` or `location`, list them in `clearFields`. Floating times (no Z/offset) preserve the original timezone. A new `start`/`end` is checked against the value it will sit beside — see [Start/end agreement](#startend-agreement). WARNING: providing `participants` replaces ALL existing attendee data; `participants: []` removes all attendees (and the now-orphaned ORGANIZER).
   - Parameters: `eventId` (required), `title`, `description`, `start`, `end`, `location`, `participants` (array of `{email, name?}`), `clearFields` (array of `"description"`/`"location"` to delete), `confirmRecurring` (boolean)
 - **delete_calendar_event**: Delete a calendar event
   - Parameters: `eventId` (required)
+
+#### Start/end agreement
+
+An event's `start` and `end` are only meaningful together, so both `create_calendar_event` and `update_calendar_event` check the pair that will actually be written and reject it if it doesn't hold up. Two rules:
+
+1. **Same form.** Both must land in the same one of: date-only (`2026-03-20`), a zone-designated time (`2026-03-20T09:30:00Z` or `2026-03-20T09:30:00+10:00`, both stored as UTC), a time with no zone at all, or a time carried by the event's existing `TZID`. A mixed pair has no single duration — `DTSTART:20260320T093000` (no zone) beside `DTEND:20260320T093000Z` (UTC) is zero-length in UTC and ends ten hours before it starts in UTC+10, and renders differently for every attendee.
+2. **`end` after `start`.** Equal values are rejected too; RFC 5545 §3.8.2.2 requires DTEND to be strictly later. For all-day events, remember DTEND is exclusive.
+
+On `update_calendar_event` the comparison is against **the value it will sit beside** — the other one you passed, or the stored one you left alone. So changing only `start` is fine when it stays in the same form and still lands before the stored `end`, but **moving an event to a different day, or converting one side to UTC, means passing both `start` and `end`.** A floating time on an event that carries a `TZID` still inherits that `TZID` (the long-standing behaviour), so it agrees with its partner and is accepted.
+
+Two `TZID`-bearing values in *different* zones — a flight that departs in one zone and lands in another — are a legal shape and are accepted; the ordering check stands down there, because resolving two named zones to instants needs a timezone database this server doesn't carry. Both rejections are `InvalidParams` and name both values and both forms.
 
 #### Calendar known limitations
 

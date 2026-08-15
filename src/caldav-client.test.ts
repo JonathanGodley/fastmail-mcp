@@ -1497,7 +1497,10 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     const objects = [{ data: noAttendeeIcal, url: '/cal/solo.ics' }];
     const { client, mockDAVClient } = createMockedPatchClient(objects);
 
-    await client.updateCalendarEvent('solo@fm', { start: '2026-04-02T10:00:00Z' });
+    // Stays before the untouched DTEND (20260401T110000Z) — a start change that
+    // would jump past it is rejected on its own merits, which is not what this
+    // test is about.
+    await client.updateCalendarEvent('solo@fm', { start: '2026-04-01T10:30:00Z' });
 
     const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:0'));
@@ -1659,7 +1662,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       'BEGIN:VEVENT',
       'UID:allday@fm',
       'DTSTART;VALUE=DATE:20260401',
-      'DTEND;VALUE=DATE:20260402',
+      // Runs to April 6 so the new April 5 start still precedes the untouched DTEND.
+      'DTEND;VALUE=DATE:20260406',
       'SUMMARY:All Day',
       'END:VEVENT',
       'END:VCALENDAR',
@@ -1896,7 +1900,12 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
     const ical = makeRecurringIcal([]); // No exceptions
     const { client, mockDAVClient } = createMockedRecurringClient(ical);
 
-    await client.updateCalendarEvent('recur@fm', { start: '2026-04-07T10:00:00Z' });
+    // Both ends move together: shifting only DTSTART to a later day would leave
+    // DTEND behind it, which is rejected independently of the recurring guard.
+    await client.updateCalendarEvent('recur@fm', {
+      start: '2026-04-07T10:00:00Z',
+      end: '2026-04-07T11:00:00Z',
+    });
 
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
     const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
@@ -1926,6 +1935,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
     // the new Tuesday schedule
     await client.updateCalendarEvent('recur@fm', {
       start: '2026-04-07T10:00:00Z',
+      end: '2026-04-07T11:00:00Z',
       confirmRecurring: true,
     });
 
@@ -1964,6 +1974,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent recurring events', () => {
 
     await client.updateCalendarEvent('recur@fm', {
       start: '2026-04-07T10:00:00Z',
+      end: '2026-04-07T11:00:00Z',
       confirmRecurring: true,
     });
 
@@ -2235,7 +2246,8 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
     const ical = makeRichIcal('seqstart@fm');
     const { client, mockDAVClient } = createMockedClient([{ data: ical, url: '/cal/seqstart.ics' }]);
 
-    await client.updateCalendarEvent('seqstart@fm', { start: '2026-04-02T10:00:00' });
+    // Same day as the untouched DTEND (Europe/Rome 11:00) and before it.
+    await client.updateCalendarEvent('seqstart@fm', { start: '2026-04-01T10:30:00' });
 
     const updatedData = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
     assert.ok(updatedData.includes('SEQUENCE:3'));
@@ -2517,7 +2529,9 @@ describe('updateCalendarEvent — rrule DoS guard', () => {
     ].join('\r\n');
     const client = mockClient(ical);
     const started = Date.now();
-    await client.updateCalendarEvent('dos@fm', { start: '2026-01-01T10:00:00Z', confirmRecurring: true });
+    // Stays before the untouched DTEND (20260101T093000Z); the guard under test
+    // is the rrule expansion bound, not the start/end ordering rule.
+    await client.updateCalendarEvent('dos@fm', { start: '2026-01-01T09:10:00Z', confirmRecurring: true });
     // Should return promptly, not spin. Generous bound to avoid flakiness.
     assert.ok(Date.now() - started < 3000, 'guard should prevent unbounded rrule expansion');
     const written = (client as any).client.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
@@ -2576,5 +2590,423 @@ describe('resolveDisplayName', () => {
   });
   it('falls back on an unresolved DXT config placeholder', () => {
     assert.equal(resolveDisplayName('${user_config.fastmail_caldav_display_name}', 'fb'), 'fb');
+  });
+});
+
+// ---------- DTSTART/DTEND time-frame and ordering agreement ----------
+
+describe('createCalendarEvent start/end frame and ordering agreement', () => {
+  function createMockedCreateClient() {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      createCalendarObject: mock.fn(async () => ({})),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function create(client: CalDAVCalendarClient, start: string, end: string) {
+    return client.createCalendarEvent({ calendarId: 'Personal', title: 'T', start, end });
+  }
+
+  it('rejects a datetime end that is before the start, without writing', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T10:00:00Z', '2026-03-20T09:00:00Z'),
+      /DTEND must be later than DTSTART/
+    );
+    assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
+  });
+
+  it('rejects a datetime end equal to the start (zero-length event)', async () => {
+    const { client } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T10:00:00Z', '2026-03-20T10:00:00Z'),
+      /DTEND must be later than DTSTART/
+    );
+  });
+
+  it('rejects a backwards end expressed with a UTC offset', async () => {
+    const { client } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T20:00:00+10:00', '2026-03-20T09:00:00Z'),
+      /DTEND must be later than DTSTART/
+    );
+  });
+
+  it('rejects a floating start against a UTC end', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T09:30:00', '2026-03-20T10:30:00Z'),
+      /same date\/time form/
+    );
+    assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
+  });
+
+  it('rejects a UTC start against a floating end', async () => {
+    const { client } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T09:30:00Z', '2026-03-20T10:30:00'),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a date-only start against a datetime end', async () => {
+    const { client } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20', '2026-03-20T10:30:00Z'),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a datetime start against a date-only end', async () => {
+    const { client } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T09:30:00Z', '2026-03-21'),
+      /same date\/time form/
+    );
+  });
+
+  it('names both values and both forms so the caller can fix the call', async () => {
+    const { client } = createMockedCreateClient();
+    await assert.rejects(
+      () => create(client, '2026-03-20T09:30:00', '2026-03-20T10:30:00Z'),
+      (err: Error) => {
+        assert.ok(err.message.includes("'2026-03-20T09:30:00'"), 'names the start value');
+        assert.ok(err.message.includes("'2026-03-20T10:30:00Z'"), 'names the end value');
+        assert.ok(err.message.includes('no time zone'), 'names the start form');
+        assert.ok(err.message.includes('UTC date-time'), 'names the end form');
+        return true;
+      }
+    );
+  });
+
+  it('throws InvalidInputError so the index maps it to InvalidParams', async () => {
+    const { client } = createMockedCreateClient();
+    for (const [start, end] of [
+      ['2026-03-20T10:00:00Z', '2026-03-20T09:00:00Z'],
+      ['2026-03-20T09:30:00', '2026-03-20T10:30:00Z'],
+    ]) {
+      await assert.rejects(
+        () => create(client, start, end),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          return true;
+        }
+      );
+    }
+  });
+
+  it('accepts an all-day event (both date-only, exclusive end)', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await create(client, '2026-03-20', '2026-03-21');
+    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    assert.ok(ical.includes('DTSTART;VALUE=DATE:20260320'));
+    assert.ok(ical.includes('DTEND;VALUE=DATE:20260321'));
+  });
+
+  it('accepts a both-UTC event', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await create(client, '2026-03-20T08:30:00Z', '2026-03-20T09:30:00Z');
+    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    assert.ok(ical.includes('DTSTART:20260320T083000Z'));
+    assert.ok(ical.includes('DTEND:20260320T093000Z'));
+  });
+
+  it('accepts a both-floating event', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await create(client, '2026-03-20T08:30:00', '2026-03-20T09:30:00');
+    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    assert.ok(ical.includes('DTSTART:20260320T083000'));
+    assert.ok(ical.includes('DTEND:20260320T093000'));
+  });
+});
+
+describe('updateCalendarEvent start/end frame and ordering agreement', () => {
+  function mockClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async () => [{ data: icalData, url: '/cal/e.ics' }]),
+      updateCalendarObject: mock.fn(async () => ({})),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function stored(uid: string, dtstart: string, dtend?: string): string {
+    return [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      'DTSTAMP:20260301T000000Z',
+      dtstart,
+      ...(dtend ? [dtend] : []),
+      'SUMMARY:Stored',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  const UTC_EVENT = stored('utc@fm', 'DTSTART:20260320T083000Z', 'DTEND:20260320T093000Z');
+  const FLOATING_EVENT = stored('flt@fm', 'DTSTART:20260320T083000', 'DTEND:20260320T093000');
+  const ZONED_EVENT = stored(
+    'tz@fm',
+    'DTSTART;TZID=Europe/Rome:20260320T083000',
+    'DTEND;TZID=Europe/Rome:20260320T093000'
+  );
+  const ALLDAY_EVENT = stored('day@fm', 'DTSTART;VALUE=DATE:20260320', 'DTEND;VALUE=DATE:20260325');
+
+  it('rejects a backwards datetime pair supplied together', async () => {
+    const { client, mockDAVClient } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', {
+        start: '2026-03-20T10:00:00Z',
+        end: '2026-03-20T09:00:00Z',
+      }),
+      /DTEND must be later than DTSTART/
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  it('rejects an equal datetime start and end', async () => {
+    const { client } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', {
+        start: '2026-03-20T10:00:00Z',
+        end: '2026-03-20T10:00:00Z',
+      }),
+      /DTEND must be later than DTSTART/
+    );
+  });
+
+  it('rejects a start alone that would land after the stored end', async () => {
+    const { client, mockDAVClient } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', { start: '2026-03-20T11:00:00Z' }),
+      /DTEND must be later than DTSTART/
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  it('rejects an end alone that would land before the stored start', async () => {
+    const { client } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', { end: '2026-03-20T07:00:00Z' }),
+      /DTEND must be later than DTSTART/
+    );
+  });
+
+  it('rejects a floating start against a stored UTC end', async () => {
+    const { client, mockDAVClient } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', { start: '2026-03-20T09:30:00' }),
+      /same date\/time form/
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  it('rejects a floating end against a stored UTC start', async () => {
+    const { client } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', { end: '2026-03-20T09:30:00' }),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a UTC start against a stored floating end', async () => {
+    const { client } = mockClient(FLOATING_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('flt@fm', { start: '2026-03-20T08:00:00Z' }),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a UTC end against a stored floating start', async () => {
+    const { client } = mockClient(FLOATING_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('flt@fm', { end: '2026-03-20T10:00:00Z' }),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a UTC start against a stored TZID-bearing end', async () => {
+    const { client } = mockClient(ZONED_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('tz@fm', { start: '2026-03-20T07:00:00Z' }),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a date-only start against a stored datetime end', async () => {
+    const { client } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', { start: '2026-03-19' }),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a datetime end against a stored date-only start', async () => {
+    const { client } = mockClient(ALLDAY_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('day@fm', { end: '2026-03-25T09:00:00Z' }),
+      /same date\/time form/
+    );
+  });
+
+  it('rejects a date-only start that would land on or after the stored date-only end', async () => {
+    const { client } = mockClient(ALLDAY_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('day@fm', { start: '2026-03-25' }),
+      /DTEND is exclusive/
+    );
+  });
+
+  it('throws InvalidInputError so the index maps it to InvalidParams', async () => {
+    for (const fields of [
+      { start: '2026-03-20T09:30:00' },
+      { start: '2026-03-20T11:00:00Z' },
+    ]) {
+      const { client } = mockClient(UTC_EVENT);
+      await assert.rejects(
+        () => client.updateCalendarEvent('utc@fm', fields),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          return true;
+        }
+      );
+    }
+  });
+
+  it('accepts a start alone that stays before the stored end (same frame)', async () => {
+    const { client, mockDAVClient } = mockClient(UTC_EVENT);
+    await client.updateCalendarEvent('utc@fm', { start: '2026-03-20T09:00:00Z' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('DTSTART:20260320T090000Z'));
+    assert.ok(written.includes('DTEND:20260320T093000Z'));
+  });
+
+  it('accepts an end alone that stays after the stored start (same frame)', async () => {
+    const { client, mockDAVClient } = mockClient(FLOATING_EVENT);
+    await client.updateCalendarEvent('flt@fm', { end: '2026-03-20T10:30:00' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('DTEND:20260320T103000'));
+  });
+
+  it('accepts a date-only start alone that stays before the stored date-only end', async () => {
+    const { client, mockDAVClient } = mockClient(ALLDAY_EVENT);
+    await client.updateCalendarEvent('day@fm', { start: '2026-03-22' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('DTSTART;VALUE=DATE:20260322'));
+    assert.ok(written.includes('DTEND;VALUE=DATE:20260325'));
+  });
+
+  it('accepts a floating start on a TZID-bearing event, keeping the stored timezone', async () => {
+    const { client, mockDAVClient } = mockClient(ZONED_EVENT);
+    await client.updateCalendarEvent('tz@fm', { start: '2026-03-20T09:00:00' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('DTSTART;TZID=Europe/Rome:20260320T090000'));
+    assert.ok(written.includes('DTEND;TZID=Europe/Rome:20260320T093000'));
+  });
+
+  it('accepts a floating end on a TZID-bearing event, keeping the stored timezone', async () => {
+    const { client, mockDAVClient } = mockClient(ZONED_EVENT);
+    await client.updateCalendarEvent('tz@fm', { end: '2026-03-20T11:00:00' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('DTEND;TZID=Europe/Rome:20260320T110000'));
+  });
+
+  it('rejects a floating start that would land after the stored end in the same timezone', async () => {
+    const { client } = mockClient(ZONED_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('tz@fm', { start: '2026-03-20T10:00:00' }),
+      /DTEND must be later than DTSTART/
+    );
+  });
+
+  it('accepts a cross-timezone event, skipping an ordering comparison it cannot make', async () => {
+    // Departs Europe/Rome, lands America/New_York. The wall clocks read backwards
+    // but the instants do not; resolving that needs a timezone database, so the
+    // frames agree and the ordering check stands down rather than guess.
+    const flight = stored(
+      'fly@fm',
+      'DTSTART;TZID=Europe/Rome:20260320T100000',
+      'DTEND;TZID=America/New_York:20260320T083000'
+    );
+    const { client, mockDAVClient } = mockClient(flight);
+    await client.updateCalendarEvent('fly@fm', { start: '2026-03-20T11:00:00' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('DTSTART;TZID=Europe/Rome:20260320T110000'));
+  });
+
+  it('accepts a start change on a DURATION-based event with no stored DTEND', async () => {
+    const durationEvent = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:dur3@fm',
+      'DTSTART:20260320T083000Z',
+      'DURATION:PT1H',
+      'SUMMARY:Duration Event',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client, mockDAVClient } = mockClient(durationEvent);
+    await client.updateCalendarEvent('dur3@fm', { start: '2026-03-25T08:30:00Z' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('DTSTART:20260325T083000Z'));
+    assert.ok(written.includes('DURATION:PT1H'));
+  });
+
+  it('does not block a non-time edit on an event whose stored dates are already inconsistent', async () => {
+    // The check exists to stop us WRITING a broken pair, not to hold a title
+    // edit hostage to an inconsistency a third-party client left behind.
+    const broken = stored('bad@fm', 'DTSTART:20260320T093000', 'DTEND:20260320T093000Z');
+    const { client, mockDAVClient } = mockClient(broken);
+    await client.updateCalendarEvent('bad@fm', { title: 'Renamed' });
+    const written = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(written.includes('SUMMARY:Renamed'));
+  });
+});
+
+describe('recurring-exception confirmation is a caller-fixable rejection', () => {
+  it('throws InvalidInputError, not a plain Error, when confirmRecurring is missing', async () => {
+    const ical = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:conf@fm', 'DTSTAMP:20260401T000000Z',
+      'DTSTART:20260406T100000Z', 'DTEND:20260406T110000Z',
+      'RRULE:FREQ=WEEKLY;COUNT=10', 'SUMMARY:Weekly',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'UID:conf@fm', 'RECURRENCE-ID:20260413T100000Z',
+      'DTSTAMP:20260401T000000Z',
+      'DTSTART:20260413T100000Z', 'DTEND:20260413T110000Z',
+      'SUMMARY:Exception Week 2',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async () => [{ data: ical, url: '/cal/conf.ics' }]),
+      updateCalendarObject: mock.fn(async () => ({})),
+    };
+
+    await assert.rejects(
+      () => client.updateCalendarEvent('conf@fm', {
+        start: '2026-04-07T10:00:00Z',
+        end: '2026-04-07T11:00:00Z',
+      }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /confirmRecurring/);
+        return true;
+      }
+    );
   });
 });

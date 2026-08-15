@@ -846,7 +846,7 @@ function formatDateTimeProperty(
   value: string,
   originalVevent: string | null,
   lineEnding: string
-): { line: string; isDateOnly: boolean } {
+): string {
   // Same guard as validateAndFormatICalDate (v1.9.3): reject control characters
   // outright so a hostile value can never reach the property-serialization paths.
   if (typeof value !== 'string') {
@@ -863,7 +863,7 @@ function formatDateTimeProperty(
       throw new Error(`Invalid date: ${value}`);
     }
     const icalDate = value.replace(/-/g, '');
-    return { line: foldICalLine(`${propName};VALUE=DATE:${icalDate}`, lineEnding), isDateOnly: true };
+    return foldICalLine(`${propName};VALUE=DATE:${icalDate}`, lineEnding);
   }
 
   // Floating time (no offset, no Z)
@@ -875,7 +875,7 @@ function formatDateTimeProperty(
       if (rawLines.length > 0) {
         const tzMatch = rawLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
         if (tzMatch) {
-          return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding), isDateOnly: false };
+          return foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding);
         }
       }
       // If propName is DTEND and no TZID found (DURATION-based), fall back to DTSTART's TZID
@@ -884,17 +884,17 @@ function formatDateTimeProperty(
         if (startLines.length > 0) {
           const tzMatch = startLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
           if (tzMatch) {
-            return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding), isDateOnly: false };
+            return foldICalLine(`${propName};TZID=${tzMatch[1]}:${icalTime}`, lineEnding);
           }
         }
       }
     }
     // No TZID to preserve — emit as floating
-    return { line: foldICalLine(`${propName}:${icalTime}`, lineEnding), isDateOnly: false };
+    return foldICalLine(`${propName}:${icalTime}`, lineEnding);
   }
 
   // UTC or offset — convert to UTC
-  return { line: foldICalLine(`${propName}:${toICalUTC(value)}`, lineEnding), isDateOnly: false };
+  return foldICalLine(`${propName}:${toICalUTC(value)}`, lineEnding);
 }
 
 /**
@@ -905,29 +905,125 @@ function isDateOnlyProperty(rawLine: string): boolean {
 }
 
 /**
- * Validate that DTSTART and DTEND have consistent value types and DTEND > DTSTART.
+ * The time frame a DTSTART/DTEND value is expressed in. RFC 5545 §3.3.4/§3.3.5
+ * give a date/time property one of these forms, and two properties are only
+ * comparable — to each other, or to a wall clock — when they share one:
+ *   - date     — VALUE=DATE, an all-day value with no time at all
+ *   - floating — a date-time with no zone: "whatever the local clock says",
+ *                a different instant for every reader
+ *   - utc      — a date-time pinned to an instant (trailing Z; a caller-supplied
+ *                offset is normalized to Z before it reaches here)
+ *   - zoned    — a date-time carried by a TZID parameter
  */
-function validateDateConsistency(
-  startIsDateOnly: boolean | null,
-  endIsDateOnly: boolean | null,
-  startValue?: string,
-  endValue?: string
-): void {
-  if (startIsDateOnly !== null && endIsDateOnly !== null) {
-    if (startIsDateOnly !== endIsDateOnly) {
-      throw new Error('DTSTART and DTEND must have the same value type (both date-only or both datetime) per RFC 5545 §3.6.1');
-    }
+type DateFrame = 'date' | 'floating' | 'utc' | 'zoned';
+
+interface DatePropertyFrame {
+  frame: DateFrame;
+  /** TZID parameter value, unquoted. Set only when frame === 'zoned'. */
+  tzid?: string;
+  /**
+   * Serialized iCal value (20260320 / 20260320T093000 / 20260320T093000Z).
+   * Fixed-width within a frame, so lexical order is chronological order.
+   */
+  value: string;
+  /** Human-readable rendering, for error messages. */
+  display: string;
+}
+
+/**
+ * Classify a serialized DTSTART/DTEND property line into its time frame.
+ *
+ * This deliberately runs on the line that will actually be WRITTEN rather than
+ * on the caller's raw input, and that is what keeps `formatDateTimeProperty`'s
+ * "a floating input preserves the stored TZID" behaviour intact. A floating
+ * value aimed at a TZID-bearing event has already been rewritten to carry that
+ * TZID by the time it arrives here, so it classifies as `zoned` and agrees with
+ * its zoned partner — exactly as before. A floating value aimed at a UTC (or
+ * floating) event has no TZID to inherit, stays floating, and is then correctly
+ * seen as a different frame from a UTC partner instead of silently converting
+ * one half of the event to a wall-clock time.
+ *
+ * One classifier serves both sides on purpose: an untouched property is read
+ * from the stored VEVENT and a changed one from the freshly formatted line, and
+ * they have to be judged by identical rules for the comparison to mean anything.
+ *
+ * @param displayOverride the caller's own input, when the line was built from
+ *   it — error messages should echo what the caller wrote, not our rendering.
+ */
+function describeDateProperty(rawLine: string, displayOverride?: string): DatePropertyFrame {
+  // Unfold first: a long TZID can push the line past the 75-octet fold width.
+  const line = rawLine.replace(/\r?\n[ \t]/g, '');
+  const colonIdx = findValueBoundary(line);
+  const params = colonIdx === -1 ? line : line.slice(0, colonIdx);
+  const value = (colonIdx === -1 ? '' : line.slice(colonIdx + 1)).trim();
+  const display = displayOverride ?? formatICalDate(value) ?? value;
+
+  // The 8-digit shape is checked alongside VALUE=DATE because a third-party
+  // client can write a bare `DTSTART:20260401`; it is still an all-day value.
+  if (isDateOnlyProperty(line) || /^\d{8}$/.test(value)) {
+    return { frame: 'date', value, display };
+  }
+  const tzMatch = params.match(/;TZID=("[^"]*"|[^;:]+)/);
+  if (tzMatch) {
+    return { frame: 'zoned', tzid: tzMatch[1].replace(/^"|"$/g, ''), value, display };
+  }
+  if (/Z$/.test(value)) {
+    return { frame: 'utc', value, display };
+  }
+  return { frame: 'floating', value, display };
+}
+
+function describeFrame(d: DatePropertyFrame): string {
+  switch (d.frame) {
+    case 'date': return 'a date-only (all-day) value';
+    case 'floating': return 'a date-time with no time zone';
+    case 'utc': return 'a UTC date-time';
+    case 'zoned': return `a date-time in time zone ${d.tzid}`;
+  }
+}
+
+/**
+ * Validate the DTSTART/DTEND pair that is about to be written: they must be in
+ * the same time frame (RFC 5545 §3.6.1 value-type agreement) and in the right
+ * order (RFC 5545 §3.8.2.2, "DTEND MUST be later than DTSTART").
+ *
+ * The two checks are one check in sequence, not two independent ones: values in
+ * different frames are not comparable at all, so ordering can only be judged
+ * after the frames agree. That is also why the frame check exists — a mixed
+ * pair such as `DTSTART:20260320T093000` (floating) beside
+ * `DTEND:20260320T093000Z` (UTC) has no single duration; it renders as a
+ * different length for every reader, and in some zones ends before it starts.
+ */
+function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFrame): void {
+  if (start.frame !== end.frame) {
+    throw new InvalidInputError(
+      `DTSTART and DTEND must use the same date/time form per RFC 5545 §3.6.1 — ` +
+      `start '${start.display}' is ${describeFrame(start)} but end '${end.display}' is ${describeFrame(end)}. ` +
+      `Pass start and end in the same form: both date-only (2026-03-20), both with a zone designator ` +
+      `(2026-03-20T09:30:00Z or 2026-03-20T09:30:00+10:00), or both without one (2026-03-20T09:30:00).`
+    );
   }
 
-  // Validate DTEND > DTSTART when both are date-only
-  if (startValue && endValue && startIsDateOnly && endIsDateOnly) {
-    if (startValue >= endValue) {
-      throw new Error(
-        `DTEND is exclusive per RFC 5545 — for a one-day event on ${startValue}, ` +
-        `pass end: '${nextDay(startValue)}'`
-      );
-    }
+  // Two TZID-bearing values in DIFFERENT zones are a legal RFC 5545 shape — a
+  // flight that departs in one zone and lands in another — so the frames agree
+  // and the event is written. Ordering is skipped there and only there:
+  // resolving two named zones to instants needs a timezone database this
+  // client does not carry, and guessing would reject valid travel events.
+  if (start.frame === 'zoned' && start.tzid !== end.tzid) return;
+
+  if (start.value < end.value) return;
+
+  if (start.frame === 'date') {
+    const startDate = formatICalDate(start.value) ?? start.value;
+    throw new InvalidInputError(
+      `DTEND is exclusive per RFC 5545 — for a one-day event on ${startDate}, ` +
+      `pass end: '${nextDay(startDate)}'`
+    );
   }
+  throw new InvalidInputError(
+    `DTEND must be later than DTSTART per RFC 5545 §3.8.2.2 — start '${start.display}' ` +
+    `is not before end '${end.display}'. Pass an end later than the start.`
+  );
 }
 
 function nextDay(dateStr: string): string {
@@ -1141,15 +1237,15 @@ export class CalDAVCalendarClient {
     const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
     // Format start/end with all-day event support
-    const startResult = formatDateTimeProperty('DTSTART', event.start, null, '\r\n');
-    const endResult = formatDateTimeProperty('DTEND', event.end, null, '\r\n');
+    const startLine = formatDateTimeProperty('DTSTART', event.start, null, '\r\n');
+    const endLine = formatDateTimeProperty('DTEND', event.end, null, '\r\n');
 
-    // Value type consistency check
+    // Time frame + ordering consistency. Classifying the serialized lines rather
+    // than the raw inputs is the same thing the update path does, so create and
+    // update reject an identical set of bad pairs.
     validateDateConsistency(
-      startResult.isDateOnly,
-      endResult.isDateOnly,
-      event.start,
-      event.end
+      describeDateProperty(startLine, event.start),
+      describeDateProperty(endLine, event.end)
     );
 
     const icalLines = [
@@ -1160,8 +1256,8 @@ export class CalDAVCalendarClient {
       `UID:${uid}`,
       `DTSTAMP:${now}`,
       `LAST-MODIFIED:${now}`,
-      startResult.line,
-      endResult.line,
+      startLine,
+      endLine,
       foldICalLine(`SUMMARY:${escapeICalText(event.title)}`),
     ];
 
@@ -1330,7 +1426,11 @@ export class CalDAVCalendarClient {
             if (orphanedDates.length > 0 && !fields.confirmRecurring) {
               // List the orphaned exceptions
               const dateList = orphanedDates.map(d => d.toISOString().slice(0, 10)).join(', ');
-              throw new Error(
+              // InvalidInputError, not a plain Error: this is a confirmation
+              // prompt, and the caller fixes it by re-sending the same call with
+              // confirmRecurring: true. InternalError would tell them a bare
+              // retry might work, which is precisely wrong here.
+              throw new InvalidInputError(
                 `This recurring event has ${exceptions.length} exception(s). ` +
                 `Changing start/end will orphan ${orphanedDates.length} of them (${dateList}). ` +
                 `These will be removed to prevent server errors. Pass confirmRecurring: true to proceed.`
@@ -1342,7 +1442,13 @@ export class CalDAVCalendarClient {
               data = removeExceptionVEvents(data, orphanedDates);
             }
           } catch (e) {
-            if (e instanceof Error && e.message.includes('confirmRecurring')) throw e;
+            // The class is the discriminator, not the message text: this catch
+            // exists to swallow RRULE-parsing failures into a best-effort
+            // no-prune, and a caller-fixable rejection must never be swallowed
+            // that way. Matching on a message substring tied the routing to the
+            // wording; instanceof survives a reword and also correctly re-throws
+            // any other caller-fixable error raised inside this block.
+            if (e instanceof InvalidInputError) throw e;
             // If RRULE parsing fails, proceed without pruning (best effort)
           }
         }
@@ -1350,8 +1456,8 @@ export class CalDAVCalendarClient {
     }
 
     // --- Patch fields ---
-    let startIsDateOnly: boolean | null = null;
-    let endIsDateOnly: boolean | null = null;
+    let newStartLine: string | null = null;
+    let newEndLine: string | null = null;
     let timeChanged = false;
 
     if (fields.title !== undefined) {
@@ -1365,36 +1471,37 @@ export class CalDAVCalendarClient {
     }
 
     if (fields.start !== undefined) {
-      const result = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding);
-      data = replaceICalProperty(data, 'DTSTART', result.line);
-      startIsDateOnly = result.isDateOnly;
+      newStartLine = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding);
+      data = replaceICalProperty(data, 'DTSTART', newStartLine);
       timeChanged = true;
     }
 
     if (fields.end !== undefined) {
-      const result = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding);
-      data = replaceICalProperty(data, 'DTEND', result.line);
-      endIsDateOnly = result.isDateOnly;
+      newEndLine = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding);
+      data = replaceICalProperty(data, 'DTEND', newEndLine);
       // Remove DURATION — DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1)
       data = removeAllICalProperties(data, 'DURATION');
       timeChanged = true;
     }
 
-    // Value type consistency: check against existing properties when only one is provided
-    if (fields.start !== undefined && fields.end === undefined) {
-      const existingEndLines = parseAllICalProperties(originalVevent, 'DTEND');
-      if (existingEndLines.length > 0) {
-        endIsDateOnly = isDateOnlyProperty(existingEndLines[0]);
-        validateDateConsistency(startIsDateOnly, endIsDateOnly);
+    // Time frame + ordering consistency, judged on the pair that will actually
+    // be written: the freshly formatted line for a side the caller supplied,
+    // and the STORED line for a side they left alone. Comparing only the
+    // caller's own values would miss the single-sided update entirely, which is
+    // where both a frame flip (a floating start landing beside a UTC end) and a
+    // backwards DTEND come from. The check is skipped when neither side was
+    // touched, so a title-only edit is never blocked by an inconsistency that
+    // was already in the stored event.
+    if (fields.start !== undefined || fields.end !== undefined) {
+      const startLine = newStartLine ?? parseAllICalProperties(originalVevent, 'DTSTART')[0];
+      const endLine = newEndLine ?? parseAllICalProperties(originalVevent, 'DTEND')[0];
+      // A DURATION-based event has no stored DTEND — nothing to compare against.
+      if (startLine && endLine) {
+        validateDateConsistency(
+          describeDateProperty(startLine, newStartLine ? fields.start : undefined),
+          describeDateProperty(endLine, newEndLine ? fields.end : undefined)
+        );
       }
-    } else if (fields.end !== undefined && fields.start === undefined) {
-      const existingStartLines = parseAllICalProperties(originalVevent, 'DTSTART');
-      if (existingStartLines.length > 0) {
-        startIsDateOnly = isDateOnlyProperty(existingStartLines[0]);
-        validateDateConsistency(startIsDateOnly, endIsDateOnly);
-      }
-    } else if (fields.start !== undefined && fields.end !== undefined) {
-      validateDateConsistency(startIsDateOnly, endIsDateOnly, fields.start, fields.end);
     }
 
     if (fields.location !== undefined) {

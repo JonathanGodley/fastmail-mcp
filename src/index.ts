@@ -919,7 +919,7 @@ const TOOLS = [
       },
       {
         name: 'create_calendar_event',
-        description: 'Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02.',
+        description: 'Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -937,11 +937,11 @@ const TOOLS = [
             },
             start: {
               type: 'string',
-              description: 'Start time in ISO 8601 format (e.g. 2026-04-07T14:00:00Z) or date-only for all-day events (e.g. 2026-04-07)',
+              description: 'Start time in ISO 8601 format (e.g. 2026-04-07T14:00:00Z) or date-only for all-day events (e.g. 2026-04-07). Must be in the same form as end.',
             },
             end: {
               type: 'string',
-              description: 'End time in ISO 8601 format. For all-day events, DTEND is exclusive — a one-day event on April 1 requires end: 2026-04-02',
+              description: 'End time in ISO 8601 format, in the SAME form as start (both date-only, both with a Z/offset, or both without one) and later than start. For all-day events, DTEND is exclusive — a one-day event on April 1 requires end: 2026-04-02',
             },
             location: {
               type: 'string',
@@ -965,7 +965,7 @@ const TOOLS = [
       },
       {
         name: 'update_calendar_event',
-        description: 'Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times preserve the original timezone; explicit UTC/offset times convert to UTC. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees.',
+        description: 'Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -983,11 +983,11 @@ const TOOLS = [
             },
             start: {
               type: 'string',
-              description: 'New start time in ISO 8601 format. Floating times (no Z/offset) preserve original timezone',
+              description: 'New start time in ISO 8601 format. Floating times (no Z/offset) preserve the original timezone. Must end up in the same form as the end it sits beside (the one you pass, or the stored one) and before it — pass both start and end when moving the event.',
             },
             end: {
               type: 'string',
-              description: 'New end time in ISO 8601 format. DTEND is exclusive per RFC 5545',
+              description: 'New end time in ISO 8601 format, in the same form as the start it sits beside and later than it. DTEND is exclusive per RFC 5545',
             },
             location: {
               type: 'string',
