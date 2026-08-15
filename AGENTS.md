@@ -90,7 +90,7 @@ The *why* behind shipped behaviour lives in two places, split by scope. Look her
 - **Cross-cutting rationale → the `docs/*.md` files** (checked in, version-controlled). Facts and models that span multiple tools, or that are properties of the JMAP/Fastmail platform or the shared codebase:
   - `docs/email-bodies.md` — the body-format model (HTML as source of truth, text/plain as a derived fallback), the asymmetric `edit_draft` coupling, MIME-matched body extraction + the 12-cell edit matrix, destroy+recreate, and live-probed Fastmail body facts.
   - `docs/security-model.md` — path confinement for download/attachment (always-on, configurable scope, the read-vs-write guard distinction).
-  - `docs/conventions.md` — lenient input coercion, the U+202F local-time trap, the two-pass quote sanitiser (its posture, and why a quote is rebuilt in two passes), and dependency/build gotchas.
+  - `docs/conventions.md` — lenient input coercion (and its fail-closed variant for arguments that narrow what a call touches), mailbox-query scoping (JMAP's singular `inMailbox`, the solely-in `inMailboxOtherThan`, the single unioned excluded set, and the two sites that decide whether the default Trash/Spam exclusion runs), the U+202F local-time trap, the two-pass quote sanitiser (its posture, and why a quote is rebuilt in two passes), and dependency/build gotchas.
 
 The dividing line: **an issue explains why ONE tool behaves as it does; a docs file captures a fact or model spanning multiple tools, or a property of the platform/codebase.** When you add a durable decision, file it on the side of that line — don't leave it in a local scratch file.
 

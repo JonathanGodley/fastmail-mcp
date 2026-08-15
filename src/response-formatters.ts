@@ -157,6 +157,17 @@ export function formatSendDraftResult(result: SendDraftResult): string {
   return `${base} The message this draft ${relation} (Message-ID ${km.messageId}) was not marked ${marking}: ${why}.${receipt}`;
 }
 
+// The exact wording each exclusion note carries, exported so the tool descriptions can
+// quote the string a caller will ACTUALLY see instead of a paraphrase. The descriptions
+// tell a model which note to look for and what to do about it; a paraphrase that drifts
+// from the emitted text sends it hunting for a string that is never printed, which reads
+// to it as "no note" — the one reading the fail-closed contract must never produce.
+// `excludedCountPhrase` is a function because the roles are interpolated mid-phrase, so a
+// plain constant could not be shared by both the emitter and the quoter.
+export const excludedCountPhrase = (roles: string) => `message(s) in ${roles} were excluded`;
+export const UNCONFIRMED_COUNT_PHRASE = "the hidden count couldn't be confirmed";
+export const NOT_EXCLUDED_PHRASE = "couldn't be found, so it was NOT excluded";
+
 // Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the
 // out-of-band metadata that searchEmails/getEmails populate; the formatters above
 // deliberately ignore it). Returns '' when there is nothing to disclose. The note is
@@ -167,27 +178,41 @@ export function formatSendDraftResult(result: SendDraftResult): string {
 //   - hidden === null   -> excluded, but the count couldn't be confirmed (degraded)
 //   - hidden > 0        -> N matches were withheld to Trash/Spam
 //   - hidden === 0      -> NO note (silence is the published "nothing matched" signal)
+//
+// BOTH halves of the recovery clause — the includeTrash/includeSpam flags AND the
+// `mailbox:` override — are derived from the SURVIVING excludedRoles, never written as a
+// constant. Every role named there has to be one the prescribed recovery can actually
+// reveal, and there are two ways a hard-coded pair goes wrong: it names Trash when only
+// Spam was excluded (includeTrash:true was already set), and it names a role the caller
+// excluded ITSELF via search_emails' excludeMailboxes — which computeExclusion drops from
+// excludedRoles upstream precisely because no flag can override the caller's own
+// exclusion, and `mailbox:"trash"` against `inMailboxOtherThan:["mb-trash"]` is a query
+// that contradicts itself and returns nothing.
 export function buildExclusionNote(exclusion?: QueryResult['exclusion']): string {
   if (!exclusion) return '';
   const { hidden, excludedRoles, unresolvedRoles } = exclusion;
   const flagFor = (role: string) => (role === 'Trash' ? 'includeTrash:true' : 'includeSpam:true');
+  // The role label as it is spelled in a `mailbox` parameter: the folder shown as "Spam"
+  // carries the JMAP role `junk`, and `junk` is what the matcher accepts.
+  const mailboxRefFor = (role: string) => (role === 'Trash' ? '"trash"' : '"junk"');
   const notes: string[] = [];
 
   if (unresolvedRoles && unresolvedRoles.length > 0) {
     notes.push(
-      `Re-run to be sure: the ${unresolvedRoles.join('/')} folder couldn't be found, so it was NOT excluded — these results may include ${unresolvedRoles.join('/')} mail.`,
+      `Re-run to be sure: the ${unresolvedRoles.join('/')} folder ${NOT_EXCLUDED_PHRASE} — these results may include ${unresolvedRoles.join('/')} mail.`,
     );
   }
 
   if (excludedRoles && excludedRoles.length > 0) {
     const flags = excludedRoles.map(flagFor).join(' / ');
+    const mailboxRefs = excludedRoles.map(mailboxRefFor).join('/');
     if (hidden === null) {
       notes.push(
-        `Re-run with ${flags}: ${excludedRoles.join('/')} were excluded but the hidden count couldn't be confirmed.`,
+        `Re-run with ${flags}: ${excludedRoles.join('/')} were excluded but ${UNCONFIRMED_COUNT_PHRASE}.`,
       );
     } else if (hidden > 0) {
       notes.push(
-        `Note: ${hidden} message(s) in ${excludedRoles.join('/')} were excluded; set ${flags} (or mailbox:"trash"/"junk") to include them.`,
+        `Note: ${hidden} ${excludedCountPhrase(excludedRoles.join('/'))}; set ${flags} (or mailbox:${mailboxRefs}) to include them.`,
       );
     }
     // hidden === 0 -> no note: silence is the trustworthy "nothing matched in Trash/Spam" signal.

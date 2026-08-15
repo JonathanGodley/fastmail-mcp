@@ -13,6 +13,14 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
 
 - `coerceStringArray` — array / comma-string / single value to `string[]` (or
   `undefined`). `""` coerces to `[]`.
+- `coerceStringArrayStrict` — the same coercion for a parameter that must **fail closed**:
+  a value that is present but uncoercible (a number, an object, a boolean) is an
+  `InvalidInputError` naming the parameter, instead of the plain coercer's `undefined`.
+  `null`/`undefined` still read as absent. The dividing line is what a dropped value
+  costs: on a *content* field it means "leave this unchanged", which is harmless; on a
+  field that **narrows what the call touches** it silently widens the operation the
+  argument was passed to restrict, and the caller reads the wider answer as complete.
+  `search_emails`' `requiredMailboxes` / `excludeMailboxes` are the first users.
 - `coerceRecipients` — fans `coerceStringArray` over `to` / `cc` / `bcc` / `replyTo` so
   no recipient field can reach `.map(parseAddress)` as a bare string (the original
   `cc:""` / `bcc:""` crash class).
@@ -251,8 +259,9 @@ mailbox (a top-level folder named `A/B`, no such nesting) is not a collision and
 
 The walk lives in `findMailboxExact` rather than in its throwing wrapper, and that placement
 is the point: both callers inherit it. The label tools' `mailboxIds` arrays (`add_labels` /
-`remove_labels` / `bulk_add_labels` / `bulk_remove_labels`) call the matcher directly, so a
-form accepted on `move_email` but not in a `mailboxIds` entry would rebuild the split
+`remove_labels` / `bulk_add_labels` / `bulk_remove_labels`) call the matcher directly, and
+`search_emails`' `requiredMailboxes` / `excludeMailboxes` entries go through `resolveMailbox`,
+so a form accepted on `move_email` but not in one of those arrays would rebuild the split
 vocabulary that #50 closed and that made this fork decline upstream's separate
 `get_mailbox_by_name` tool. `resolveMailbox` is the throwing single-input wrapper over the
 same core, and `list_mailboxes` publishes the same paths it accepts, so a path read out of a
@@ -275,13 +284,22 @@ descriptions - which one is the folder, which one is the nesting - each carrying
 the only form that separates them. Rendering both as their computed path would hand the
 caller the same string twice and no way to choose.
 
-The array resolver stays **all-or-nothing** - if any entry fails it applies no labels, rather
-than half-applying a mutation the caller must reconcile - and it names *every* failing entry
-in one error, keeping the shapes in separate buckets. That is what preserves the single-retry
+**One array resolver, shared** (`resolveMailboxIdList` in `src/jmap-client.ts`): the label
+arrays and `search_emails`' `requiredMailboxes`/`excludeMailboxes` all go through it. It
+stays **all-or-nothing** - if any entry fails, nothing happens: no labels are applied, and no
+query runs against a scope the caller only half-named - and it names *every* failing entry in
+one error, keeping the shapes in separate buckets. That is what preserves the single-retry
 property: an ambiguous name and a typo need different corrections (pick a path vs re-spell),
 so folding an ambiguity into "not found" would send a caller to re-spell a name that was
 already right, costing a retry the split buckets save. When every failure is a plain miss the
 message keeps its original single-bucket wording verbatim.
+
+Sharing it rather than giving the read path its own first-failure loop is deliberate: the
+single-retry property is a property of resolving a **list**, not of what the list is then
+used for, and a read is cheaper to retry than a write, not harder - so there is no version of
+"reads can afford to be worse here" that survives being written down. The caller passes in
+the mailbox list when it already holds one (`searchEmails` fetches it to resolve `mailbox`
+and compute the exclusion), so the sharing costs no extra round trip.
 
 The `path` a mailbox is listed under is computed by walking its `parentId` chain up to a
 top-level mailbox, bounded so a corrupt chain terminates. A mailbox whose chain does not
@@ -309,6 +327,78 @@ mark a message read. Marking read is `mark_email_read`. This is a deliberate div
 upstream PR `MadLlama25/fastmail-mcp#67`, whose `archive_email` writes `$seen` as part of the move:
 folding two effects into one verb means a caller who wanted only the filing cannot get it, while a
 caller who wanted both can still make the second call.
+
+## Scoping a query: intersection, exclusion, and what `inMailboxOtherThan` really means
+
+The read tools scope by mailbox through two JMAP filter keys, and both have a shape that is
+easy to assume wrongly. This is a property of the protocol, so it applies to anything built
+on `runFilteredQuery` later, not just to `search_emails` where the parameters live today.
+
+- **`inMailbox` is SINGULAR** (RFC 8621 §4.4.1). "The message must be in all of these" is
+  therefore N separate `{ inMailbox }` conditions AND-ed together, never one array-valued
+  key. `search_emails`' `requiredMailboxes` builds exactly that, and the scalar `mailbox`
+  contributes one more `inMailbox` to the same intersection — which is why the two are
+  documented as one thing at different arities rather than as alternatives.
+- **`inMailboxOtherThan` is SOLELY-IN, not "not in".** It withholds a message only when
+  **every** mailbox that message is filed in is in the excluded set. A message in Inbox plus
+  an excluded label is still returned. JMAP offers no strict "not in this mailbox" filter at
+  all, so absolute exclusion is only reachable by filtering the returned results caller-side.
+  This is stated in the `excludeMailboxes` description *first*, before what the parameter
+  does, because the name implies the stricter reading — and it applies equally to the
+  default Trash/Spam exclusion, which uses the same key, so a message cross-filed in Trash
+  and a normal folder was never hidden and is not in the withheld count.
+- **One excluded set, not two conditions.** The default Trash/Spam ids and any
+  caller-supplied ids are **unioned** into a single `inMailboxOtherThan`. That is
+  deliberately stronger than applying them as two separate exclusions would be: a message
+  filed in {Trash, an excluded label} is hidden by the union, though neither exclusion alone
+  would hide it. It is also the only shape the protocol offers, since the key takes one set.
+
+**Two flags that look alike and are not.** `runFilteredQuery`'s `doExclude` means *the
+default Trash/Spam exclusion is active* — it drives the hidden-count query and the
+disclosure note, nothing else. The excluded ids are assigned to the filter **ungated**,
+because `doExclude` goes false on paths that say nothing about the caller's own excludes: an
+explicit scope, `includeTrash`+`includeSpam`, and the degraded runtime case where neither
+role resolves. Gating the assignment on it would drop a caller's excludes on all three — a
+fail-open on the parameter that exists to narrow.
+
+**The hidden count subtracts the DEFAULT ids only.** The count query re-runs the visible
+filter with the default ids removed and the caller's ids kept, so `hidden` still means
+"withheld to Trash/Spam". Subtracting the union instead would make the count identical to the
+visible query, so `hidden` would always be 0 and the published "no note means nothing was
+withheld" contract would silently become fail-open; subtracting nothing would count
+caller-excluded matches while the note prescribes `includeTrash`/`includeSpam`, which cannot
+reveal them. For the same reason, a Trash- or Spam-role mailbox the caller excluded itself is
+dropped from `excludedRoles` upstream in `computeExclusion` — the note must not prescribe a
+recovery flag that the caller's own exclusion overrides.
+
+**Both halves of the note's recovery clause are derived, never written as a constant.** The
+`includeTrash`/`includeSpam` flags AND the `mailbox:"trash"/"junk"` override both come from
+the surviving `excludedRoles`, because a hard-coded pair goes wrong two ways: it names Trash
+when only Spam was excluded, and it names a role the caller excluded itself — where
+`mailbox:"trash"` against `inMailboxOtherThan:["mb-trash"]` is a query that contradicts
+itself and can only return nothing. A prescription the caller cannot follow is worse than no
+prescription.
+
+**Accepted residual: a role-less mailbox NAMED like a role.** On an account with no
+`trash`-role mailbox but a folder literally named "Trash", a caller passing
+`excludeMailboxes: ["Trash"]` gets the fail-loud "the Trash folder couldn't be found, so it
+was NOT excluded" note even though that folder *was* excluded — by the caller's own request.
+The note is about the **role**-resolved default exclusion, which genuinely excluded nothing.
+Left as-is deliberately: the only way to suppress it is to match the caller's excluded ids
+against the role's *name*, which is exactly the substring/name inference the exact-role rule
+above exists to forbid (a "Junk mail rules" folder must never be read as the junk role), and
+here it would be inference used to **silence** a fail-loud signal — the worse direction to be
+wrong in. The cost of keeping it is one redundant "re-run to be sure" in a rare account
+shape; the cost of suppressing it is a missing warning on a fuzzy match.
+
+**What disables the default exclusion is decided in two places, and they must agree**:
+`computeExclusion`'s `hasExplicitScope` input, and the `exclusionIntended` expression each
+caller of `runFilteredQuery` computes for itself (`getEmails` over `opts.*`, `searchEmails`
+over `filters.*`). The shared helper does not compute it, so "they both go through
+`runFilteredQuery`" does not keep them in step — anything that changes what counts as an
+explicit scope has two edit sites. Naming folders to look **in** (`mailbox`,
+`requiredMailboxes`) is an explicit scope and turns the default off; naming folders to
+exclude is not, because narrowing by exclusion says nothing about wanting Trash/Spam back.
 
 ## Error classification: `InvalidParams` vs `InternalError`
 

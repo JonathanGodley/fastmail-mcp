@@ -12,8 +12,8 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes } from './response-formatters.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes } from './response-formatters.js';
+import { coerceRecipients, coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -318,15 +318,32 @@ function lenientBool(description: string): string {
   return description + (needsStop ? '.' : '') + LENIENT_BOOL_DESC;
 }
 
-// Shared scope-control descriptions for the read tools (search_emails + list_emails),
-// defined once so the per-flag strings and the reliability-contract clause stay in sync
-// between the two tools rather than drifting as hand-copied strings.
+// Shared scope-control descriptions for the read tools, defined once so the per-flag
+// strings and the reliability-contract clause stay in sync between the tools rather than
+// drifting as hand-copied strings.
+//
+// The set is SPLIT by what is true of a given tool, not by tool name: the base constants
+// say only what holds for any tool with a single `mailbox` scope parameter (today
+// list_emails and search_emails; get_recent_emails takes the same reference forms through
+// READ_MAILBOX_PARAM_DESC), and the SEARCH_-prefixed constants append the clauses that
+// exist only where the multi-mailbox scope arrays do — which is search_emails alone,
+// because list_emails deliberately does not offer them. A tool gaining the Trash/Spam
+// flags later consumes the base constants unchanged; do not fold a search-only clause
+// back into a base constant, or the base ones start describing parameters their other
+// consumers don't have.
 const EXCLUDE_DRAFTS_DESC =
   lenientBool('Drafts are included by default; set true to omit them from results (and from the total count). (Note: get_thread differs on BOTH axes — it uses includeDrafts AND excludes drafts by default.)');
+// What "excluded" actually means, stated once and carried by both flags so they cannot
+// drift apart. JMAP's only exclusion operator is inMailboxOtherThan, which is SOLELY-IN:
+// it withholds a message only when every mailbox the message is filed in is excluded.
+// Said plainly here because the flag names ("include Trash") imply the opposite reading,
+// under which a caller would conclude a cross-filed message must be missing and re-run.
+const SOLELY_IN_CAVEAT =
+  'Exclusion is "solely in": a message is withheld only when EVERY mailbox it is filed in is excluded, so one filed in both Trash and a normal folder is never withheld — it is already in the results and the withheld-count note does not count it.';
 const INCLUDE_TRASH_DESC =
-  lenientBool('Trash is excluded by default; set true to also include Trash in the results.');
+  lenientBool('Trash is excluded by default; set true to also include Trash in the results. ' + SOLELY_IN_CAVEAT);
 const INCLUDE_SPAM_DESC =
-  lenientBool('The Spam/Junk folder is excluded by default; set true to also include it in the results.');
+  lenientBool('The Spam/Junk folder is excluded by default; set true to also include it in the results. ' + SOLELY_IN_CAVEAT);
 
 // `ascending`, declared identically on the three list/search tools (list_emails,
 // search_emails, get_recent_emails) so their sort contract can't drift.
@@ -336,11 +353,33 @@ const ASCENDING_DESC =
 // The reliability contract that makes silence trustworthy. Lead with the no-note
 // guarantee as its own sentence (a skimming model must hit "no note => trustworthy"
 // first), then the per-signal actions; scoped to the default all-mailbox scope.
-const SCOPE_RELIABILITY_CONTRACT =
-  'When you search the default scope (no mailbox set): NO note means no Trash/Spam message matched this search — do not re-run with includeTrash/includeSpam just to re-check the same query. ' +
-  'A "N in Trash/Spam excluded" note means re-run (includeTrash:true / includeSpam:true, or mailbox:"trash"/"junk") to see those matches. ' +
-  'A "count could not be confirmed" or "folder not found; not excluded" note means re-run to be sure. ' +
+//
+// Each note is quoted through the phrase constants buildExclusionNote itself emits
+// (src/response-formatters.ts), never as hand-copied text: telling a caller to look for a
+// string the server never prints reads to it as "no note", which is the one conclusion
+// this contract exists to make safe.
+// The per-signal actions, shared verbatim; only the lead "what silence promises" sentence
+// differs between the tools, because on search_emails the caller can have withheld
+// messages itself and silence has to be qualified accordingly.
+const SCOPE_NOTE_ACTIONS =
+  `A note saying "${excludedCountPhrase('Trash/Spam')}" means re-run (includeTrash:true / includeSpam:true, or mailbox:"trash"/"junk") to see those matches. ` +
+  `A note saying "${UNCONFIRMED_COUNT_PHRASE}" or "${NOT_EXCLUDED_PHRASE}" means re-run to be sure. ` +
   'Setting mailbox searches only that folder (no note, by definition).';
+
+const SCOPE_RELIABILITY_CONTRACT =
+  'When you search the default scope (no mailbox set): NO note means nothing was withheld — no message filed ONLY in Trash/Spam matched this search, so do not re-run with includeTrash/includeSpam just to re-check the same query. ' +
+  SCOPE_NOTE_ACTIONS;
+
+// search_emails additionally has the multi-mailbox scope arrays, and they land on
+// opposite sides of the disable rule — which is exactly the thing a caller would guess
+// wrong, so it is stated rather than left to symmetry. The lead sentence is also
+// qualified rather than inherited: excluding Trash or Spam through excludeMailboxes takes
+// that role out of the default set, so silence there means "nothing was withheld BEYOND
+// what you excluded" — the unqualified promise would be literally false in that state.
+const SEARCH_SCOPE_RELIABILITY_CONTRACT =
+  'When you search the default scope (no mailbox and no requiredMailboxes set): NO note means nothing was withheld beyond what you excluded yourself — no message filed ONLY in Trash/Spam matched this search, other than any Trash/Spam you named in excludeMailboxes, so do not re-run with includeTrash/includeSpam just to re-check the same query. ' +
+  SCOPE_NOTE_ACTIONS +
+  ' requiredMailboxes is an explicit scope too and turns the default exclusion and its note off the same way; excludeMailboxes does NOT — the default exclusion and its note stay on, minus any Trash/Spam role you excluded yourself.';
 
 // The forms every mailbox-taking parameter accepts, written ONCE and shared by all of
 // them — the scalar ones (mailbox / targetMailbox / parent) and the mailboxIds arrays
@@ -353,9 +392,37 @@ const MAILBOX_REF_FORMS =
   'A name shared by several mailboxes is rejected as ambiguous, listing their full paths — retry with one of those, or with the id. An unknown mailbox is rejected with the valid list. ' +
   'list_mailboxes returns each mailbox\'s path, and a path it returns can be pasted straight back into this parameter.';
 
+// True of every read tool that scopes by a single mailbox (list_emails, search_emails).
+// Anything specific to the multi-mailbox arrays belongs in SEARCH_MAILBOX_PARAM_DESC
+// below, not here — list_emails does not have them.
 const MAILBOX_PARAM_DESC =
   'Mailbox to scope to. ' + MAILBOX_REF_FORMS +
   ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion.';
+
+// search_emails' `mailbox`, which is the one-element case of requiredMailboxes.
+const SEARCH_MAILBOX_PARAM_DESC =
+  MAILBOX_PARAM_DESC +
+  ' It is exactly the single-mailbox shorthand for requiredMailboxes: mailbox:"X" and requiredMailboxes:["X"] are the same query, with no hidden difference. Passing both is allowed — they fold into one intersection (the message must be in all of them).';
+
+// The two multi-mailbox scope arrays (#26). Both take every reference form the scalar
+// `mailbox` takes, resolved by the same exact matcher as the label arrays and with the
+// same all-or-nothing rejection, so a path or role learned on one works on the others and
+// a bad array is fixed in one retry.
+const SCOPE_ARRAY_REJECT_DESC =
+  ' Any entry that fails to resolve rejects the whole call (no widened search runs), and the error names every failing entry at once. Every entry must be a string; a non-string entry is rejected by index.';
+
+const REQUIRED_MAILBOXES_PARAM_DESC =
+  'Mailboxes the message must be filed in — ALL of them (they intersect: each entry is a separate condition, so a message in only some of them does not match). ' +
+  'Use it to find mail carrying several labels at once. Each entry: ' + MAILBOX_REF_FORMS + SCOPE_ARRAY_REJECT_DESC +
+  ' Setting this is an explicit scope, so like mailbox it turns OFF the default Trash/Spam exclusion and its note — the folders you named are the scope. mailbox is its single-mailbox shorthand, and passing both intersects them.';
+
+const EXCLUDE_MAILBOXES_PARAM_DESC =
+  'Mailboxes to exclude — but read this first: it maps to JMAP\'s inMailboxOtherThan, which is SOLELY-IN. A message is hidden only when EVERY mailbox it is filed in is in this list, so a message in Inbox plus an excluded label is still returned. ' +
+  'Nothing here offers strict exclusion: JMAP has no filter for "not in this mailbox", so absolute exclusion means filtering the returned results yourself. ' +
+  'Each entry: ' + MAILBOX_REF_FORMS + SCOPE_ARRAY_REJECT_DESC +
+  ' These entries are UNIONED with the default Trash/Spam exclusion into one excluded set rather than applied as a second, separate condition. That is deliberate and strictly stronger: a message filed in {Trash, an excluded label} is hidden by the union, though neither exclusion on its own would hide it. ' +
+  'Excluding mailboxes does NOT disable the default Trash/Spam exclusion or its note (unlike mailbox and requiredMailboxes) — except that naming Trash or Spam here takes that role out of the default set, so the note stops prescribing includeTrash/includeSpam, which could not override your own exclusion. ' +
+  'May be combined with requiredMailboxes: the query then reads "in every required mailbox, and in at least one mailbox outside the excluded set".';
 
 // The mailbox a draft is filed into, shared by nothing else: create_draft is the only tool
 // that picks a save destination without moving anything.
@@ -599,7 +666,7 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -925,7 +992,7 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -967,7 +1034,17 @@ const TOOLS = [
             },
             mailbox: {
               type: 'string',
-              description: MAILBOX_PARAM_DESC,
+              description: SEARCH_MAILBOX_PARAM_DESC,
+            },
+            requiredMailboxes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: REQUIRED_MAILBOXES_PARAM_DESC,
+            },
+            excludeMailboxes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: EXCLUDE_MAILBOXES_PARAM_DESC,
             },
             after: {
               type: 'string',
@@ -2465,6 +2542,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
         const position = coercePosition((args as any).position);
+        // The scope arrays coerce STRICTLY: a present-but-uncoercible value is rejected
+        // rather than read as absent. Dropping one would silently widen the query the
+        // caller passed it to narrow, and the results would look like a complete answer.
+        const requiredMailboxes = coerceStringArrayStrict((args as any).requiredMailboxes, 'requiredMailboxes');
+        const excludeMailboxes = coerceStringArrayStrict((args as any).excludeMailboxes, 'excludeMailboxes');
         const client = initializeClient();
         const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
         const result = await client.searchEmails({
@@ -2472,7 +2554,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           hasAttachment: coerceBool(hasAttachment),
           isUnread: coerceBool(isUnread),
           isPinned: coerceBool(isPinned),
-          mailbox, after, before, limit: validLimit, position,
+          mailbox, requiredMailboxes, excludeMailboxes,
+          after, before, limit: validLimit, position,
           ascending,
           excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
           includeTrash: coerceBool((args as any).includeTrash) ?? false,

@@ -97,6 +97,60 @@ export function coerceStringArray(value: unknown): string[] | undefined {
   return trimmed.split(',').map(s => s.trim()).filter(Boolean);
 }
 
+// coerceStringArray for a parameter that must FAIL CLOSED: a value that is present but
+// cannot be coerced (a number, an object, a boolean) is rejected instead of coming back
+// as `undefined` and being read as "not supplied". The plain coercer's silent-undefined
+// is right where dropping the value only means "field unchanged", and wrong where the
+// value NARROWS what the call touches — a dropped scoping argument silently widens the
+// query, which is the failure the argument was passed to prevent.
+//
+// Strict per ELEMENT as well, following coerceAttachments' discipline: a non-string entry
+// is rejected BY INDEX rather than passed through `String()`. Without that, `[null]` and
+// `[{}]` reach the mailbox matcher as the literal text "null" and "[object Object]" and
+// come back as `Mailbox 'null' not found. Use an id, a role...` — a type error wearing a
+// typo's error message, which sends the caller re-spelling a value that was never text.
+// (The lenient whole-value forms stay: a real array, a JSON-string array, and a
+// comma-separated string are all accepted, and only their elements are checked.)
+//
+// `null` is treated as absent at the TOP level, not as an error, matching
+// coerceStringArray: a lenient client that fills every declared key emits `null` for the
+// ones it has nothing to say about, and that is a statement of absence rather than an
+// unusable value. Inside the array it is an unusable value, and rejects.
+export function coerceStringArrayStrict(value: unknown, paramName: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  // Unwrap a JSON-string array HERE rather than leaving it to coerceStringArray, so the
+  // elements can be type-checked before `.map(String)` erases what they were. A string
+  // that is not a JSON array falls through untouched and is comma-split as before.
+  let candidate: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) candidate = parsed;
+      } catch { /* not JSON: leave it for the comma-split path */ }
+    }
+  }
+
+  if (Array.isArray(candidate)) {
+    candidate.forEach((entry, i) => {
+      if (typeof entry !== 'string') {
+        const kind = entry === null ? 'null' : Array.isArray(entry) ? 'array' : typeof entry;
+        throw new InvalidInputError(`${paramName}[${i}] must be a string; received ${kind}.`);
+      }
+    });
+  }
+
+  const coerced = coerceStringArray(candidate);
+  if (coerced === undefined) {
+    throw new InvalidInputError(
+      `${paramName} must be an array of strings (or a comma-separated string); received ${typeof value}.`,
+    );
+  }
+  return coerced;
+}
+
 // Coerce the four recipient list fields from whatever shape a (possibly lenient)
 // client sent into string[] | undefined, so the JMAP client's .map(parseAddress)
 // calls never receive a bare string (issue #54). Pass the raw tool args; reads

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -52,6 +52,72 @@ describe('coerceStringArray', () => {
 
   it('falls back to comma-split when JSON parsing fails', () => {
     assert.deepEqual(coerceStringArray('[not valid json]'), ['[not valid json]']);
+  });
+});
+
+describe('coerceStringArrayStrict', () => {
+  it('accepts everything the lenient coercion accepts', () => {
+    assert.deepEqual(coerceStringArrayStrict(['Archive', 'Sent'], 'requiredMailboxes'), ['Archive', 'Sent']);
+    assert.deepEqual(coerceStringArrayStrict('Archive, Sent', 'requiredMailboxes'), ['Archive', 'Sent']);
+    assert.deepEqual(coerceStringArrayStrict('["Archive"]', 'requiredMailboxes'), ['Archive']);
+    assert.deepEqual(coerceStringArrayStrict('', 'requiredMailboxes'), []);
+  });
+
+  it('treats undefined and null as absent', () => {
+    assert.equal(coerceStringArrayStrict(undefined, 'requiredMailboxes'), undefined);
+    assert.equal(coerceStringArrayStrict(null, 'requiredMailboxes'), undefined);
+  });
+
+  // The whole point of the strict variant: a value that is present but unusable must not
+  // come back as `undefined`, because on a scoping parameter that reads as "not supplied"
+  // and silently widens the query the caller passed it to narrow.
+  it('rejects a present-but-uncoercible value instead of dropping it', () => {
+    for (const bad of [123, {}, true]) {
+      assert.throws(
+        () => coerceStringArrayStrict(bad, 'excludeMailboxes'),
+        InvalidInputError,
+      );
+    }
+  });
+
+  it('names the parameter in the rejection', () => {
+    assert.throws(
+      () => coerceStringArrayStrict({ mailbox: 'Archive' }, 'excludeMailboxes'),
+      /excludeMailboxes/,
+    );
+  });
+
+  // Without the per-element check these reach the mailbox matcher as "null", "123" and
+  // "[object Object]", and come back as a not-found error telling the caller to fix a
+  // spelling — when what they actually passed was the wrong type.
+  it('rejects a non-string entry by index instead of stringifying it', () => {
+    const cases: [unknown, RegExp][] = [
+      [[null], /\[0\] must be a string; received null/],
+      [[123], /\[0\] must be a string; received number/],
+      [[{}], /\[0\] must be a string; received object/],
+      [[true], /\[0\] must be a string; received boolean/],
+      [[['Archive']], /\[0\] must be a string; received array/],
+      [['Archive', 7], /\[1\] must be a string; received number/],
+    ];
+    for (const [value, pattern] of cases) {
+      assert.throws(() => coerceStringArrayStrict(value, 'requiredMailboxes'), InvalidInputError);
+      assert.throws(() => coerceStringArrayStrict(value, 'requiredMailboxes'), pattern);
+    }
+  });
+
+  // The JSON-string array a lenient client sends is unwrapped before the element check,
+  // so it cannot smuggle a non-string entry past it.
+  it('checks the elements of a JSON-string array too', () => {
+    assert.deepEqual(coerceStringArrayStrict('["Archive", "Sent"]', 'requiredMailboxes'), ['Archive', 'Sent']);
+    assert.throws(
+      () => coerceStringArrayStrict('[1, 2]', 'requiredMailboxes'),
+      /requiredMailboxes\[0\] must be a string; received number/,
+    );
+  });
+
+  it('leaves the non-JSON string forms comma-split as before', () => {
+    assert.deepEqual(coerceStringArrayStrict('[not valid json]', 'requiredMailboxes'), ['[not valid json]']);
+    assert.deepEqual(coerceStringArrayStrict('Archive', 'requiredMailboxes'), ['Archive']);
   });
 });
 

@@ -361,12 +361,25 @@ than overclaimed:
   `get_mailbox_stats mailbox:"junk"` returns Trash/Spam totals directly with zero friction, and
   `get_recent_emails mailbox:"trash"` reads them outright — so a determined/injected agent
   trivially bypasses the note. Its purpose is honesty (disclose what default-scope hid), not a
-  boundary. The fail-closed degraded note exists so the published "no note ⇒ nothing in
-  Trash/Spam matched" contract can be *trusted by a cooperative caller*, not to stop an attacker.
+  boundary. The fail-closed degraded note exists so the published "no note ⇒ nothing was
+  withheld" contract can be *trusted by a cooperative caller*, not to stop an attacker. Read
+  that contract precisely: the exclusion is solely-in, so what the silence promises is that no
+  message filed **only** in Trash/Spam matched — a message cross-filed in Trash and a normal
+  folder was never withheld and is already in the results.
 - **Count-into-Trash/Spam oracle, and the more direct `get_mailbox_stats` total-oracle.** The
   hidden-count discloses how many matches sit in Trash/Spam; `get_mailbox_stats mailbox:"trash"`/
   `"junk"` (single-mailbox = an explicit-scope override) hands those totals directly — the
   lowest-effort volume probe. Accepted; it's the caller's own account.
+- **`search_emails`' `excludeMailboxes` (#26) is a caller-directed narrowing, and adds no
+  concealment reach.** It hides results from *the caller who asked for them to be hidden*, in
+  that one response — it writes nothing and changes no default, so there is no state an
+  injected agent could leave behind for a later reader. It also does not weaken the note: a
+  Trash- or Spam-role mailbox named there is dropped from the default exclusion's
+  `excludedRoles`, so the note never prescribes an `includeTrash`/`includeSpam` recovery that
+  the caller's own exclusion would override, and the hidden count keeps subtracting the
+  default ids only (see `docs/conventions.md`). The one honest caveat is scope, not security:
+  the parameter maps to JMAP's solely-in `inMailboxOtherThan`, so it hides less than its name
+  suggests — a message cross-filed outside the excluded set still comes back.
 - **Exact resolution hardens *mis-resolution*, NOT deliberate steering.** Switching every
   read/delete/move target from substring (`findMailboxByRoleOrName`'s name fallback, which could
   mis-hit e.g. a custom "Junk mail rules" mailbox and silently hide real mail) to exact id/role/

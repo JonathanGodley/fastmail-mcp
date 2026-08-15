@@ -1858,11 +1858,34 @@ describe('computeExclusion', () => {
     assert.deepEqual(computeExclusion(withRoles, { includeSpam: true }).excludedRoles, ['Trash']);
   });
 
-  it('an explicit mailbox disables exclusion entirely', () => {
-    const r = computeExclusion(withRoles, { hasExplicitMailbox: true });
+  it('an explicit mailbox scope disables exclusion entirely', () => {
+    const r = computeExclusion(withRoles, { hasExplicitScope: true });
     assert.deepEqual(r.excludeIds, []);
     assert.deepEqual(r.excludedRoles, []);
     assert.deepEqual(r.unresolvedRoles, []);
+  });
+
+  it('a role the caller already excluded is dropped from both the ids and the note roles', () => {
+    const r = computeExclusion(withRoles, { callerExcludedIds: ['mb-trash'] });
+    // The id would otherwise be sent twice (the caller's copy is in the union already),
+    // and the role would make the note prescribe includeTrash:true — which cannot reveal
+    // those messages while the caller's own exclusion still hides them.
+    assert.deepEqual(r.excludeIds, ['mb-junk']);
+    assert.deepEqual(r.excludedRoles, ['Spam']);
+    assert.deepEqual(r.unresolvedRoles, []);
+  });
+
+  it('caller-excluding both roles leaves nothing for the default exclusion to add', () => {
+    const r = computeExclusion(withRoles, { callerExcludedIds: ['mb-trash', 'mb-junk'] });
+    assert.deepEqual(r.excludeIds, []);
+    assert.deepEqual(r.excludedRoles, []);
+    assert.deepEqual(r.unresolvedRoles, []);
+  });
+
+  it('a caller exclusion of an unrelated mailbox changes nothing', () => {
+    const r = computeExclusion(withRoles, { callerExcludedIds: ['mb-inbox'] });
+    assert.deepEqual([...r.excludeIds].sort(), ['mb-junk', 'mb-trash']);
+    assert.deepEqual(r.excludedRoles, ['Trash', 'Spam']);
   });
 
   it('a missing role is flagged unresolved (fail-loud), not silently included', () => {
@@ -1990,6 +2013,311 @@ describe('searchEmails exclusion + count', () => {
     assert.ok(flatHasDraft);
     const stringified = JSON.stringify(countFilter);
     assert.ok(!stringified.includes('inMailboxOtherThan'));
+  });
+});
+
+// ---------- searchEmails multi-mailbox scoping: requiredMailboxes / excludeMailboxes ----------
+
+describe('searchEmails requiredMailboxes + excludeMailboxes', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client);
+  });
+
+  const filterOf = (makeReq: ReturnType<typeof stubRequests>) =>
+    callArguments(makeReq)[0].methodCalls[0][1].filter;
+  const batchOf = (makeReq: ReturnType<typeof stubRequests>) =>
+    callArguments(makeReq)[0].methodCalls;
+
+  // JMAP's inMailbox is singular, so "in all of these" is N AND-ed conditions.
+  it('two requiredMailboxes become two separate inMailbox conditions', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({ requiredMailboxes: ['Archive', 'Sent'] });
+    const filter = filterOf(makeReq);
+    assert.equal(filter.operator, 'AND');
+    const inMailboxes = filter.conditions.filter((c: any) => c.inMailbox).map((c: any) => c.inMailbox);
+    assert.deepEqual([...inMailboxes].sort(), ['mb-archive', 'mb-sent']);
+    // requiredMailboxes is an explicit scope: default exclusion off, no count query,
+    // no exclusion metadata.
+    assert.equal(JSON.stringify(filter).includes('inMailboxOtherThan'), false);
+    assert.equal(batchOf(makeReq).length, 2);
+  });
+
+  it('mailbox and requiredMailboxes fold into one intersection', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({ mailbox: 'inbox', requiredMailboxes: ['Archive'] });
+    const filter = filterOf(makeReq);
+    assert.equal(filter.operator, 'AND');
+    assert.ok(filter.conditions.some((c: any) => c.inMailbox === 'mb-inbox'));
+    assert.ok(filter.conditions.some((c: any) => c.inMailbox === 'mb-archive'));
+  });
+
+  // The combine() shortcut collapses an empty base plus a single condition down to that
+  // condition alone. The caller's exclusion has to be in `base` before that is decided,
+  // or a query with no text/from fields would ship without it — fail-open on the
+  // parameter whose whole job is narrowing.
+  it('excludeMailboxes survives an otherwise-empty base with a single keyword condition', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }));
+    await client.searchEmails({ isUnread: true, excludeMailboxes: ['Archive'] });
+    const filter = filterOf(makeReq);
+    assert.equal(filter.operator, 'AND');
+    const exclusionCond = filter.conditions.find((c: any) => c.inMailboxOtherThan);
+    assert.ok(exclusionCond, 'the exclusion must not be dropped by the single-condition shortcut');
+    assert.ok(exclusionCond.inMailboxOtherThan.includes('mb-archive'));
+    assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$seen'));
+  });
+
+  // The discriminating form of the case above: with the default exclusion OFF, the
+  // caller's ids are the ONLY thing in `base`, so a mis-ordering that computed baseEmpty
+  // first would collapse the filter to the lone keyword condition and ship no exclusion at
+  // all. With the default active, the default ids mask that mistake.
+  it('excludeMailboxes survives the empty-base shortcut with the default exclusion off', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({
+      isUnread: true, excludeMailboxes: ['Archive'], includeTrash: true, includeSpam: true,
+    });
+    const filter = filterOf(makeReq);
+    assert.equal(filter.operator, 'AND');
+    assert.deepEqual(
+      filter.conditions.find((c: any) => c.inMailboxOtherThan)?.inMailboxOtherThan,
+      ['mb-archive'],
+    );
+    assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$seen'));
+  });
+
+  // The exclusion ids are assigned UNGATED, so turning the default Trash/Spam exclusion
+  // off does not take the caller's own excludes with it.
+  it('excludeMailboxes still reaches the filter with includeTrash + includeSpam set', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    const result = await client.searchEmails({
+      query: 'x', excludeMailboxes: ['Archive'], includeTrash: true, includeSpam: true,
+    });
+    assert.deepEqual(filterOf(makeReq).inMailboxOtherThan, ['mb-archive']);
+    // No default exclusion => no count query and no disclosure note metadata.
+    assert.equal(batchOf(makeReq).length, 2);
+    assert.equal(result.exclusion, undefined);
+  });
+
+  it('excludeMailboxes still reaches the filter under an explicit mailbox scope', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({ mailbox: 'inbox', excludeMailboxes: ['Archive'] });
+    const filter = filterOf(makeReq);
+    assert.equal(filter.inMailbox, 'mb-inbox');
+    assert.deepEqual(filter.inMailboxOtherThan, ['mb-archive']);
+  });
+
+  // One union set, not two conditions: a message in {Trash, an excluded label} is hidden
+  // by the union even though neither exclusion alone would hide it.
+  it('caller excludes are unioned with the default Trash/Spam ids', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 2, broaderTotal: 5 }));
+    const result = await client.searchEmails({ query: 'x', excludeMailboxes: ['Archive'] });
+    assert.deepEqual(
+      [...filterOf(makeReq).inMailboxOtherThan].sort(),
+      ['mb-archive', 'mb-junk', 'mb-trash'],
+    );
+    // The default exclusion is still active, so its note still fires.
+    assert.equal(result.exclusion?.hidden, 3);
+    assert.deepEqual(result.exclusion?.excludedRoles, ['Trash', 'Spam']);
+  });
+
+  it('excludeMailboxes alone keeps the default exclusion and its note', async () => {
+    stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 4 }));
+    const result = await client.searchEmails({ query: 'x', excludeMailboxes: ['Archive'] });
+    const note = buildExclusionNote(result.exclusion);
+    assert.ok(note.includes('4 message(s) in Trash/Spam were excluded'));
+    assert.ok(note.includes('includeTrash:true / includeSpam:true'));
+  });
+
+  // Excluding Trash yourself takes that role out of the default set, so the note stops
+  // prescribing includeTrash:true — a flag that could not override the caller's exclusion.
+  it('caller-excluding Trash drops it from the note roles but keeps the id in the filter', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 1, broaderTotal: 3 }));
+    const result = await client.searchEmails({ query: 'x', excludeMailboxes: ['trash'] });
+    assert.deepEqual([...filterOf(makeReq).inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
+    assert.deepEqual(result.exclusion?.excludedRoles, ['Spam']);
+    const note = buildExclusionNote(result.exclusion);
+    assert.ok(note.includes('in Spam were excluded'));
+    // BOTH halves of the recovery clause have to drop Trash, not just the flag half. The
+    // mailbox override is the one that fails loudest if it survives: mailbox:"trash"
+    // against inMailboxOtherThan:["mb-trash"] is a self-contradicting query that can only
+    // return nothing.
+    assert.ok(!note.includes('includeTrash:true'));
+    assert.ok(!note.includes('"trash"'));
+    assert.ok(note.includes('(or mailbox:"junk")'));
+  });
+
+  // The same derivation, with no caller exclusion involved: excluding only Spam must not
+  // prescribe mailbox:"trash" either.
+  it('the recovery clause names only the roles actually excluded', async () => {
+    stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 1, broaderTotal: 3 }));
+    const result = await client.searchEmails({ query: 'x', includeTrash: true });
+    assert.deepEqual(result.exclusion?.excludedRoles, ['Spam']);
+    const note = buildExclusionNote(result.exclusion);
+    assert.ok(note.includes('set includeSpam:true (or mailbox:"junk")'));
+    assert.ok(!note.includes('"trash"'));
+  });
+
+  it('requiredMailboxes and excludeMailboxes combine into one AND-ed filter', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({
+      requiredMailboxes: ['Archive', 'Sent'],
+      excludeMailboxes: ['Drafts'],
+    });
+    const filter = filterOf(makeReq);
+    assert.equal(filter.operator, 'AND');
+    const base = filter.conditions.find((c: any) => c.inMailboxOtherThan);
+    assert.deepEqual(base.inMailboxOtherThan, ['mb-drafts']);
+    const inMailboxes = filter.conditions.filter((c: any) => c.inMailbox).map((c: any) => c.inMailbox);
+    assert.deepEqual([...inMailboxes].sort(), ['mb-archive', 'mb-sent']);
+  });
+
+  // The count query is what makes the hidden count mean "withheld to Trash/Spam". It
+  // subtracts the DEFAULT ids only: subtracting the union would make it identical to the
+  // visible query (hidden always 0, silence becomes fail-open), and subtracting nothing
+  // would count caller-excluded matches the note then tells the caller to recover with
+  // includeTrash/includeSpam, which cannot reveal them.
+  it('the count query drops the default ids but keeps the caller ids', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 1, broaderTotal: 4 }));
+    await client.searchEmails({ query: 'x', excludeMailboxes: ['Archive'] });
+    const countFilter = batchOf(makeReq)[2][1].filter;
+    assert.deepEqual(countFilter.inMailboxOtherThan, ['mb-archive']);
+    assert.equal(countFilter.text, 'x');
+  });
+
+  it('the count query carries no inMailboxOtherThan when there are no caller excludes', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 1, broaderTotal: 4 }));
+    await client.searchEmails({ query: 'x' });
+    const countFilter = batchOf(makeReq)[2][1].filter;
+    assert.equal('inMailboxOtherThan' in countFilter, false);
+  });
+
+  // doExclude also goes false on a degraded runtime path — neither role resolving — which
+  // is not a caller choice at all. The ungated assignment has to cover that too.
+  it('caller excludes survive a mailbox list where neither Trash nor Spam resolves', async () => {
+    stubMailboxes(client, [
+      { id: 'mb-inbox', name: 'Inbox', role: 'inbox' },
+      { id: 'mb-archive', name: 'Archive', role: 'archive' },
+    ]);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    const result = await client.searchEmails({ query: 'x', excludeMailboxes: ['Archive'] });
+    assert.deepEqual(filterOf(makeReq).inMailboxOtherThan, ['mb-archive']);
+    // The default exclusion was still INTENDED, so the fail-loud note still fires.
+    assert.deepEqual(result.exclusion?.unresolvedRoles, ['Trash', 'Spam']);
+    assert.deepEqual(result.exclusion?.excludedRoles, []);
+    assert.equal(result.exclusion?.hidden, 0);
+  });
+
+  it('an entry that resolves to nothing rejects the whole call', async () => {
+    stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    await assert.rejects(
+      () => client.searchEmails({ query: 'x', requiredMailboxes: ['Archive', 'No Such Folder'] }),
+      InvalidInputError,
+    );
+    await assert.rejects(
+      () => client.searchEmails({ query: 'x', excludeMailboxes: ['No Such Folder'] }),
+      InvalidInputError,
+    );
+  });
+
+  // The scope arrays share the label arrays' resolver, so they inherit its single-retry
+  // property: EVERY failing entry is named at once, rather than one per round trip.
+  it('names every failing entry in one rejection', async () => {
+    stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    await assert.rejects(
+      () => client.searchEmails({ requiredMailboxes: ['Nope1', 'Nope2'] }),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Nope1/);
+        assert.match(err.message, /Nope2/);
+        return true;
+      },
+    );
+  });
+
+  // A typo and an ambiguous name need different corrections, so they stay in separate
+  // buckets instead of both reading as "not found".
+  it('keeps a typo and an ambiguous name in separate buckets', async () => {
+    stubMailboxes(client, [
+      ...DEFAULT_MAILBOXES,
+      { id: 'mb-dup-a', name: 'Receipts', parentId: 'mb-archive' },
+      { id: 'mb-dup-b', name: 'Receipts', parentId: 'mb-inbox' },
+    ]);
+    stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    await assert.rejects(
+      () => client.searchEmails({ excludeMailboxes: ['Receipts', 'Nope'] }),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Nope/);
+        assert.match(err.message, /Receipts/);
+        // The ambiguity is answered with the full paths that disambiguate it.
+        assert.match(err.message, /Archive\/Receipts/);
+        return true;
+      },
+    );
+  });
+
+  it('accepts every mailbox reference form, like the scalar mailbox param', async () => {
+    // A nested mailbox so the root-anchored path form has something to resolve against.
+    stubMailboxes(client, [
+      ...DEFAULT_MAILBOXES,
+      { id: 'mb-2026', name: '2026', parentId: 'mb-archive' },
+    ]);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    // id, role, name and root-anchored path in one call.
+    await client.searchEmails({
+      requiredMailboxes: ['mb-inbox', 'archive', 'Archive/2026'],
+      excludeMailboxes: ['Drafts'],
+    });
+    const filter = filterOf(makeReq);
+    const inMailboxes = filter.conditions.filter((c: any) => c.inMailbox).map((c: any) => c.inMailbox);
+    assert.deepEqual([...inMailboxes].sort(), ['mb-2026', 'mb-archive', 'mb-inbox']);
+    assert.deepEqual(
+      filter.conditions.find((c: any) => c.inMailboxOtherThan).inMailboxOtherThan,
+      ['mb-drafts'],
+    );
+  });
+
+  it('two entries naming the same mailbox collapse to one id', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({
+      requiredMailboxes: ['mb-archive', 'Archive'],
+      excludeMailboxes: ['Drafts', 'drafts'],
+      includeTrash: true,
+      includeSpam: true,
+    });
+    const filter = filterOf(makeReq);
+    const inMailboxes = filter.conditions.filter((c: any) => c.inMailbox).map((c: any) => c.inMailbox);
+    assert.deepEqual(inMailboxes, ['mb-archive']);
+    assert.deepEqual(
+      filter.conditions.find((c: any) => c.inMailboxOtherThan).inMailboxOtherThan,
+      ['mb-drafts'],
+    );
+  });
+
+  it('empty scope arrays behave exactly like omitting them', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 1, broaderTotal: 1 }));
+    const result = await client.searchEmails({ query: 'x', requiredMailboxes: [], excludeMailboxes: [] });
+    assert.deepEqual([...filterOf(makeReq).inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
+    assert.deepEqual(result.exclusion?.excludedRoles, ['Trash', 'Spam']);
   });
 });
 

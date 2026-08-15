@@ -1184,33 +1184,49 @@ export function assertLeafMailboxName(name: string): void {
 // Compute the default Trash/Spam exclusion. Resolves trash/junk by EXACT role only
 // (case-insensitive) — NEVER findMailboxByRoleOrName, whose substring name fallback
 // could mis-hit a custom mailbox (e.g. "Junk mail rules") and silently hide real mail.
-// When an explicit mailbox is set, exclusion is off (the explicit scope wins). When we
-// intend to exclude a role we can't resolve (role absent, OR an empty/degraded mailbox
-// list), DO NOT silently include it: flag it in unresolvedRoles so the handler emits a
-// fail-loud "not excluded" note — never run a default search/list with zero exclusion
-// ids and zero disclosure. Exported pure for unit testing.
+// When the caller set an explicit scope, exclusion is off (the explicit scope wins).
+// When we intend to exclude a role we can't resolve (role absent, OR an empty/degraded
+// mailbox list), DO NOT silently include it: flag it in unresolvedRoles so the handler
+// emits a fail-loud "not excluded" note — never run a default search/list with zero
+// exclusion ids and zero disclosure. Exported pure for unit testing.
+//
+// This is ONE of the two places that decide whether the default exclusion runs; the
+// other is the `exclusionIntended` expression each caller of runFilteredQuery computes
+// for itself (see getEmails/searchEmails). Anything that counts as an explicit scope has
+// to be taught to both.
+//
+// `callerExcludedIds` are mailbox ids the caller excluded itself (search_emails'
+// excludeMailboxes). A role the caller already excluded is dropped from BOTH returned
+// arrays: keeping the id would duplicate it in the union the query sends, and keeping the
+// role would make the note prescribe includeTrash/includeSpam as the recovery — flags that
+// cannot reveal those messages, because the caller's own exclusion still hides them.
 export function computeExclusion(
   mailboxes: any[],
-  opts: { includeTrash?: boolean; includeSpam?: boolean; hasExplicitMailbox?: boolean },
+  opts: {
+    includeTrash?: boolean;
+    includeSpam?: boolean;
+    hasExplicitScope?: boolean;
+    callerExcludedIds?: string[];
+  },
 ): ExclusionResult {
   const excludeIds: string[] = [];
   const excludedRoles: string[] = [];
   const unresolvedRoles: string[] = [];
-  if (opts.hasExplicitMailbox) {
+  if (opts.hasExplicitScope) {
     return { excludeIds, excludedRoles, unresolvedRoles };
   }
   const list = mailboxes || [];
+  const alreadyExcluded = new Set(opts.callerExcludedIds || []);
   const findRole = (role: string) => list.find(mb => mb && typeof mb.role === 'string' && mb.role.toLowerCase() === role);
-  if (!opts.includeTrash) {
-    const tb = findRole('trash');
-    if (tb) { excludeIds.push(tb.id); excludedRoles.push('Trash'); }
-    else unresolvedRoles.push('Trash');
-  }
-  if (!opts.includeSpam) {
-    const jb = findRole('junk');
-    if (jb) { excludeIds.push(jb.id); excludedRoles.push('Spam'); }
-    else unresolvedRoles.push('Spam');
-  }
+  const add = (role: string, label: string) => {
+    const mb = findRole(role);
+    if (!mb) { unresolvedRoles.push(label); return; }
+    if (alreadyExcluded.has(mb.id)) return;
+    excludeIds.push(mb.id);
+    excludedRoles.push(label);
+  };
+  if (!opts.includeTrash) add('trash', 'Trash');
+  if (!opts.includeSpam) add('junk', 'Spam');
   return { excludeIds, excludedRoles, unresolvedRoles };
 }
 
@@ -1686,13 +1702,18 @@ export class JmapClient {
     const conds: any[] = [];
     if (opts.excludeDrafts) conds.push({ notKeyword: '$draft' });
 
-    const hasExplicitMailbox = !!resolvedMailboxId;
+    // list_emails' only explicit scope is the scalar `mailbox` — it deliberately does not
+    // offer the multi-mailbox scope arrays, so this expression needs nothing beyond it.
+    // searchEmails has its OWN copy of this line (over `filters.*`) which additionally
+    // counts requiredMailboxes; the shared runFilteredQuery does not compute it, so the
+    // two must be changed together whenever what counts as an explicit scope changes.
+    const hasExplicitScope = !!resolvedMailboxId;
     const exclusion = computeExclusion(mailboxes, {
       includeTrash: opts.includeTrash,
       includeSpam: opts.includeSpam,
-      hasExplicitMailbox,
+      hasExplicitScope,
     });
-    const exclusionIntended = !hasExplicitMailbox && (!opts.includeTrash || !opts.includeSpam);
+    const exclusionIntended = !hasExplicitScope && (!opts.includeTrash || !opts.includeSpam);
 
     return this.runFilteredQuery({
       base,
@@ -3376,19 +3397,33 @@ export class JmapClient {
     }
   }
 
-  // Resolve each label mailbox input to a real mailbox id by id/role/name/path (exact —
-  // findMailboxExact, no substring), so the label arrays accept every form a caller
-  // learned works on every other mailbox-taking tool (fork #50, #27). Collects EVERY
-  // failure across the array so the caller fixes them all in one retry, keeping each in
-  // its own bucket: a typo and an ambiguous name need different corrections, and folding
-  // an ambiguity into "not found" would tell a caller their spelling was wrong when it was
-  // not. All-or-nothing: if any input can't be resolved, throw InvalidInputError and apply
-  // no labels (avoids a half-applied mutation the caller must reconcile). Duplicate inputs
-  // (an id and its own name) collapse downstream since the Email/set patch keys by id. A
-  // real id absent from the live list is still rejected — accepted residual, see
+  // Resolve an ARRAY of mailbox inputs to real mailbox ids by id/role/name/path (exact —
+  // findMailboxExact, no substring), so every array-shaped mailbox parameter accepts the
+  // forms a caller learned work on every other mailbox-taking tool (fork #50, #27). Shared
+  // by the label arrays and by search_emails' requiredMailboxes/excludeMailboxes (#26).
+  //
+  // Collects EVERY failure across the array so the caller fixes them all in one retry,
+  // keeping each in its own bucket: a typo and an ambiguous name need different
+  // corrections, and folding an ambiguity into "not found" would tell a caller their
+  // spelling was wrong when it was not. That single-retry property is the reason this is
+  // shared rather than re-implemented per caller — it is a property of resolving a LIST,
+  // not of what the list is then used for, so a read scope array earns it exactly as much
+  // as a label write does.
+  //
+  // All-or-nothing: if any input can't be resolved, throw InvalidInputError and do
+  // nothing — no half-applied label mutation for a caller to reconcile, and no query run
+  // against a scope the caller only half-named (a dropped scope entry silently widens the
+  // search it was passed to narrow). Duplicate inputs (an id and its own name) are NOT
+  // collapsed here: the label path lets them collapse downstream because the Email/set
+  // patch keys by id, while the scope arrays de-duplicate at their call site. A real id
+  // absent from the live list is still rejected — accepted residual, see
   // docs/security-model.md.
-  private async resolveLabelMailboxIds(inputs: string[]): Promise<string[]> {
-    const mailboxes = await this.getMailboxes();
+  //
+  // `mailboxes` is passed in by callers that already hold the list (searchEmails fetches
+  // it to resolve `mailbox` and compute the exclusion), so sharing this resolver costs no
+  // extra round trip.
+  private async resolveMailboxIdList(inputs: string[], mailboxList?: any[]): Promise<string[]> {
+    const mailboxes = mailboxList ?? await this.getMailboxes();
     const resolved: string[] = [];
     const failures: MailboxResolutionFailures = { notFound: [], ambiguous: [], nameVsPath: [], unwalkable: [] };
     for (const input of inputs) {
@@ -3417,7 +3452,7 @@ export class JmapClient {
 
   async addLabels(emailId: string, mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveMailboxIdList(mailboxIds);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};
@@ -3447,7 +3482,7 @@ export class JmapClient {
 
   async removeLabels(emailId: string, mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveMailboxIdList(mailboxIds);
 
     // Build patch object to remove specific mailboxIds
     const patch: Record<string, any> = {};
@@ -3477,7 +3512,7 @@ export class JmapClient {
 
   async bulkAddLabels(emailIds: string[], mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveMailboxIdList(mailboxIds);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};
@@ -3510,7 +3545,7 @@ export class JmapClient {
 
   async bulkRemoveLabels(emailIds: string[], mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    const resolvedIds = await this.resolveLabelMailboxIds(mailboxIds);
+    const resolvedIds = await this.resolveMailboxIdList(mailboxIds);
 
     // Build patch object to remove specific mailboxIds
     const patch: Record<string, any> = {};
@@ -4051,6 +4086,11 @@ export class JmapClient {
     conds: any[];
     exclusion: ExclusionResult;
     exclusionIntended: boolean;
+    // Mailbox ids the CALLER asked to exclude (search_emails' excludeMailboxes), already
+    // resolved. Kept separate from exclusion.excludeIds all the way down because the two
+    // are recovered differently: the default ids come back with includeTrash/includeSpam,
+    // the caller's do not, and the hidden-count query below depends on telling them apart.
+    callerExcludeIds?: string[];
     limit: number;
     ascending: boolean;
     mailboxes: any[];
@@ -4059,12 +4099,26 @@ export class JmapClient {
     const session = await this.getSession();
     const { base, conds, exclusion, exclusionIntended, limit, ascending, mailboxes } = opts;
     const position = opts.position ?? 0;
+    const callerExcludeIds = opts.callerExcludeIds ?? [];
 
+    // `doExclude` means "the DEFAULT Trash/Spam exclusion is active" — it drives the
+    // hidden-count query and the disclosure note, and NOTHING else. It used to double as
+    // "something is being excluded", which was safe only while the default was the only
+    // source of exclusions; with caller-supplied excludeMailboxes it no longer is, and
+    // gating the filter on it would drop the caller's excludes on every path where the
+    // default is off (an explicit mailbox/requiredMailboxes, includeTrash+includeSpam, or
+    // neither role resolving) — a fail-open on the parameter that exists to narrow.
     const doExclude = exclusion.excludeIds.length > 0;
-    // Inject the exclusion into `base` BEFORE computing baseEmpty — otherwise an
-    // exclusion-only query (no text/from fields) would see base as {} and take the
-    // conds[0]-alone branch, silently dropping the folder exclusion (fail-open).
-    if (doExclude) base.inMailboxOtherThan = exclusion.excludeIds;
+    // ONE union array, assigned UNGATED. JMAP's inMailboxOtherThan takes a single set, and
+    // unioning is deliberately stronger than two separate exclusion conditions would be: a
+    // message filed in {Trash, an excluded label} is hidden by the union, though neither
+    // exclusion on its own would hide it (the operator is "solely in" — see the parameter
+    // descriptions in index.ts).
+    // Inject into `base` BEFORE computing baseEmpty — otherwise an exclusion-only query
+    // (no text/from fields) would see base as {} and take the conds[0]-alone branch,
+    // silently dropping the folder exclusion (fail-open).
+    const allExcludeIds = [...exclusion.excludeIds, ...callerExcludeIds];
+    if (allExcludeIds.length > 0) base.inMailboxOtherThan = allExcludeIds;
 
     // Combine the base FilterCondition with N single-keyword conditions. Each keyword
     // is its own condition object because a single JMAP FilterCondition allows only one
@@ -4111,8 +4165,16 @@ export class JmapClient {
       // the AND-wrap (count == visible -> note never fires, fail-open). Issued in the
       // SAME makeRequest at a higher index: one atomic snapshot (no two-query race) and
       // one fewer round-trip; the visible indices 0/1 are unchanged.
+      //
+      // Only the DEFAULT ids are subtracted; any caller-supplied excludes stay on the
+      // count query. Dropping them too would count messages the note then tells the
+      // caller to recover with includeTrash/includeSpam, which cannot reveal them (the
+      // caller's own exclusion still applies) — and subtracting nothing (the union) would
+      // make the count identical to the visible one, so hidden would always be 0 and the
+      // fail-closed "no note means nothing was withheld" contract would become fail-open.
       const countBase = { ...base };
-      delete countBase.inMailboxOtherThan;
+      if (callerExcludeIds.length > 0) countBase.inMailboxOtherThan = callerExcludeIds;
+      else delete countBase.inMailboxOtherThan;
       const countBaseEmpty = Object.keys(countBase).length === 0;
       const countFilter = combine(countBase, conds, countBaseEmpty);
       methodCalls.push(['Email/query', {
@@ -4173,6 +4235,8 @@ export class JmapClient {
     isUnread?: boolean;
     isPinned?: boolean;
     mailbox?: string;
+    requiredMailboxes?: string[];
+    excludeMailboxes?: string[];
     after?: string;
     before?: string;
     limit?: number;
@@ -4190,6 +4254,21 @@ export class JmapClient {
 
     const mailboxes = await this.getMailboxes();
     const resolvedMailboxId = await this.resolveMailboxId(filters.mailbox, mailboxes);
+    // The multi-mailbox scope arrays (#26) go through the SAME array resolver the label
+    // arrays use, so they take every reference form the scalar `mailbox` takes and inherit
+    // its all-or-nothing, name-every-failure behaviour: an unresolvable entry rejects the
+    // whole call (a dropped scope entry would silently widen the query it was passed to
+    // narrow), and a typo alongside an ambiguous name is fixed in one retry rather than
+    // two. The already-fetched mailbox list is handed in, so there is no second round trip.
+    // Two entries naming the SAME mailbox (an id and its own name) collapse to one id:
+    // nothing downstream would collapse them here the way the label path's Email/set patch
+    // does, and a repeated id is noise on the wire either way.
+    const resolveAll = async (inputs?: string[]) =>
+      inputs && inputs.length > 0
+        ? [...new Set(await this.resolveMailboxIdList(inputs, mailboxes))]
+        : [];
+    const requiredMailboxIds = await resolveAll(filters.requiredMailboxes);
+    const callerExcludeIds = await resolveAll(filters.excludeMailboxes);
 
     const base: any = {};
     if (filters.query) base.text = filters.query;
@@ -4210,20 +4289,33 @@ export class JmapClient {
     if (filters.isPinned === true) conds.push({ hasKeyword: '$flagged' });
     else if (filters.isPinned === false) conds.push({ notKeyword: '$flagged' });
     if (filters.excludeDrafts) conds.push({ notKeyword: '$draft' });
+    // JMAP's inMailbox is SINGULAR (RFC 8621 §4.4.1), so "must be in all of these" is N
+    // separate conditions AND-ed together, not one array-valued key. base.inMailbox from
+    // the scalar `mailbox` above joins the same intersection, which is why the two
+    // parameters are documented as the same thing at different arities.
+    for (const id of requiredMailboxIds) conds.push({ inMailbox: id });
 
-    const hasExplicitMailbox = !!resolvedMailboxId;
+    // An explicit scope turns the default Trash/Spam exclusion off, and `requiredMailboxes`
+    // is an explicit scope for the same reason `mailbox` is: the caller named the folders to
+    // look in. Caller excludes do NOT count — narrowing by exclusion says nothing about
+    // wanting Trash/Spam back. This expression is computed per call site rather than inside
+    // runFilteredQuery; getEmails carries its own copy over `opts.*`, which correctly does
+    // NOT know about these arrays (list_emails does not offer them). Keep the two in step.
+    const hasExplicitScope = !!resolvedMailboxId || requiredMailboxIds.length > 0;
     const exclusion = computeExclusion(mailboxes, {
       includeTrash: filters.includeTrash,
       includeSpam: filters.includeSpam,
-      hasExplicitMailbox,
+      hasExplicitScope,
+      callerExcludedIds: callerExcludeIds,
     });
-    const exclusionIntended = !hasExplicitMailbox && (!filters.includeTrash || !filters.includeSpam);
+    const exclusionIntended = !hasExplicitScope && (!filters.includeTrash || !filters.includeSpam);
 
     return this.runFilteredQuery({
       base,
       conds,
       exclusion,
       exclusionIntended,
+      callerExcludeIds,
       limit: Math.min(filters.limit || 20, 100),
       ascending: filters.ascending ?? false,
       mailboxes,
