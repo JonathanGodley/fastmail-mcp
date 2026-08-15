@@ -4,6 +4,33 @@ Developer-facing conventions and non-obvious traps that span multiple tools or a
 properties of the toolchain. Per-tool behaviour rationale lives in the relevant GitHub
 issue; this file is the shared stuff a developer reading the code needs to know.
 
+## Where to check what the server actually does
+
+Fastmail runs [Cyrus IMAP](https://github.com/cyrusimap/cyrus-imapd) and employs its
+maintainers, and the JMAP implementation lives in that tree. So for any question of the
+form "what will the server do with this", Cyrus is not a proxy for the answer, it is the
+answer — and it outranks the RFC wherever the two disagree, because the RFC says what
+should happen and Cyrus says what will. Several decisions recorded in this file and in the
+issue tracker were reached by reading it after reasoning from the spec produced a wrong
+answer.
+
+The files worth knowing:
+
+| path | what it settles |
+|---|---|
+| `imap/jscontact.c` | JSContact (RFC 9553) ↔ vCard conversion. Validates nothing on write; silently drops unrecognised `contexts` values on read. |
+| `imap/jmap_contact.c` | `ContactCard/set`, address books. |
+| `imap/jmap_mail.c` | `Email/get`, `Email/query`, `Email/set`, and what the filter conditions actually mean. |
+| `imap/jmap_calendar.c`, `imap/ical_support.c`, `imap/caldav_db.c` | CalDAV and JSCalendar, including the validation `caldav_put` does and does not perform. |
+| `imap/jmap_api.c` | Method-response and error framing (RFC 8620 §3.4). |
+
+**Read it; do not copy from it.** `cyrus-imapd` is CMU 4-clause BSD, whose clause 4
+requires every redistribution in any form to carry the Carnegie Mellon acknowledgment —
+satisfiable, but a deliberate act, not something to do by accident. Its iCalendar parsing
+delegates to [libical](https://github.com/libical/libical), which is MPL-2.0 / LGPL-2.1
+dual: MPL is file-level copyleft, so a copied file would stay MPL inside this MIT package.
+Neither licence restricts reading it to learn what the server does.
+
 ## Lenient input coercion
 
 MCP clients (especially LLMs) send sloppy parameter shapes: a comma-joined string where
