@@ -151,6 +151,12 @@ springs quietly:
 - No error text reaches tool output unredacted — returned fields count, not just
   throws.
 - No new caller-fixable rejection throws a plain `Error` at the boundary.
+- `assertICalTextLimits` is still called in BOTH the `create_calendar_event` and
+  `update_calendar_event` handlers. `src/ical-limits.ts` is fork-only so it
+  survives any resolution untouched, but its two call sites live in `index.ts`
+  and a `--theirs` resolution there drops them silently: the tools keep working,
+  and the quadratic `foldICalLine` goes back to being reachable without a bound
+  (see `docs/conventions.md`, "Bounding a quadratic serializer").
 
 Then the full gate — `npx tsc --noEmit && npm test && npm run build` — and, because
 the live harness spawns `dist/index.js`, at least one live check of a path that

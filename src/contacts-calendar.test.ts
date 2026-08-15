@@ -230,6 +230,19 @@ describe('createContact', () => {
     );
   });
 
+  it('classes empty input as caller-fixable', async () => {
+    // A missing required field is corrected in one retry, so it maps to InvalidParams
+    // rather than the InternalError that reads as "nothing you can do".
+    await assert.rejects(
+      () => client.createContact({}),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /name or at least one email/);
+        return true;
+      },
+    );
+  });
+
   it('surfaces notCreated errors with type and description', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -289,6 +302,23 @@ describe('updateContact', () => {
     assert.equal(makeReq.mock.calls.length, 1);
   });
 
+  it('classes the not-found rejection as caller-fixable input', async () => {
+    // A message regex passes under either class. A wrong id is corrected and re-sent by
+    // the caller, so it must arrive as InvalidParams, not the InternalError a plain
+    // Error maps to.
+    stubMakeRequest(client, {
+      methodResponses: [['ContactCard/get', { list: [], notFound: ['ghost'] }, 'g']],
+    });
+    await assert.rejects(
+      () => client.updateContact('ghost', { notes: 'x' }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Contact not found: ghost/);
+        return true;
+      },
+    );
+  });
+
   it('surfaces notUpdated errors', async () => {
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
@@ -299,8 +329,38 @@ describe('updateContact', () => {
     await assert.rejects(() => client.updateContact('C1', { notes: 'x' }), /stateMismatch/);
   });
 
+  it('keeps an operational set failure a server-side error', async () => {
+    // The other half of the split: a stateMismatch is not fixed by re-forming the
+    // arguments, so it must NOT be tagged as caller-fixable input.
+    mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'ContactCard/get') {
+        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+      }
+      return { methodResponses: [['ContactCard/set', { notUpdated: { C1: { type: 'stateMismatch' } } }, 'u']] };
+    });
+    await assert.rejects(
+      () => client.updateContact('C1', { notes: 'x' }),
+      (err: Error) => {
+        assert.notEqual(err.name, 'InvalidInputError');
+        assert.match(err.message, /Failed to update contact: stateMismatch/);
+        return true;
+      },
+    );
+  });
+
   it('rejects an empty patch client-side', async () => {
     await assert.rejects(() => client.updateContact('C1', {}), /at least one field/i);
+  });
+
+  it('classes an empty patch as caller-fixable input', async () => {
+    await assert.rejects(
+      () => client.updateContact('C1', {}),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /at least one field/i);
+        return true;
+      },
+    );
   });
 });
 
@@ -332,6 +392,22 @@ describe('deleteContact', () => {
     await assert.rejects(() => client.deleteContact('ghost'), /Contact not found: ghost/);
   });
 
+  it('classes a notFound destroy error as caller-fixable input', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['ContactCard/set', { notDestroyed: { ghost: { type: 'notFound' } } }, 'd'],
+      ],
+    });
+    await assert.rejects(
+      () => client.deleteContact('ghost'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Contact not found: ghost/);
+        return true;
+      },
+    );
+  });
+
   it('surfaces other notDestroyed errors with their type', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -339,6 +415,24 @@ describe('deleteContact', () => {
       ],
     });
     await assert.rejects(() => client.deleteContact('C1'), /forbidden.*read-only scope/s);
+  });
+
+  it('keeps a forbidden destroy error a server-side error', async () => {
+    // A permissions failure is not fixed by re-forming the arguments, so it stays out of
+    // the caller-fixable class even though the sibling notFound case is in it.
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['ContactCard/set', { notDestroyed: { C1: { type: 'forbidden', description: 'read-only scope' } } }, 'd'],
+      ],
+    });
+    await assert.rejects(
+      () => client.deleteContact('C1'),
+      (err: Error) => {
+        assert.notEqual(err.name, 'InvalidInputError');
+        assert.match(err.message, /Failed to delete contact: forbidden - read-only scope/);
+        return true;
+      },
+    );
   });
 
   it('passes expectState through as ifInState', async () => {

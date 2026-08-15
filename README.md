@@ -387,7 +387,7 @@ The signature fields are the identity's configured sign-off, the same text the F
 
 > **Draft-first compose:** there is no send-in-one-call tool. `create_draft`, `reply_email`, and `forward_email` all save a draft, and **`send_draft` is the only tool that transmits mail** — so every outgoing message exists as stored, inspectable bytes before it is sent, and a name-based permission system can gate exactly one verb ([#32](https://github.com/JonathanGodley/fastmail-mcp/issues/32), [#66](https://github.com/JonathanGodley/fastmail-mcp/issues/66)). To compose and send: `create_draft` (or `reply_email`/`forward_email`) → `send_draft`.
 >
-> **Recipient format:** every recipient field (`to`/`cc`/`bcc`/`replyTo` on `reply_email`, `forward_email`, `create_draft`, `edit_draft`) accepts each entry as either a bare address (`a@x.com`) or the RFC 5322 `"Name <email>"` form (`Alice <a@x.com>`), which is parsed into a display name + address. The SMTP envelope always uses the bare address.
+> **Recipient format:** every recipient field (`to`/`cc`/`bcc`/`replyTo` on `reply_email`, `forward_email`, `create_draft`, `edit_draft`) accepts each entry as either a bare address (`a@x.example`) or the RFC 5322 `"Name <email>"` form (`Alice <a@x.example>`), which is parsed into a display name + address. The SMTP envelope always uses the bare address.
 >
 > **Draft sender name:** drafts created or edited via `create_draft`/`edit_draft` carry the sending identity's display name, so the From shows your name rather than a bare address.
 
@@ -511,7 +511,7 @@ Both are opt-in and neither changes any default: verbatim-by-default is the righ
 `create_draft`, `reply_email`, `forward_email`, and `edit_draft` all take `textBody` / `htmlBody`. HTML is the source of truth and the plain-text part is derived from it when you don't supply one (see [What this fork adds](#what-this-fork-adds-over-upstream)). In that derivation an image contributes its alt text, and an embedded (`cid:`) image with no alt contributes `[image]`; a remote image with no alt contributes nothing, so a body that is nothing but remote images still ships HTML-only. Three malformed body shapes are **rejected** with an `InvalidParams` error rather than stored, because each one used to reach the recipient before anyone noticed:
 
 - **A non-string body.** Passing a number, array, or object where a body string belongs now names the parameter instead of failing as an internal error ([#62](https://github.com/JonathanGodley/fastmail-mcp/issues/62)). An omitted body, or an explicit `null`, still just means "not provided".
-- **An `htmlBody` that is entirely HTML-escaped** — escaped element tags (`&lt;p&gt;`) and no actual elements ([#71](https://github.com/JonathanGodley/fastmail-mcp/issues/71) / [#77](https://github.com/JonathanGodley/fastmail-mcp/issues/77)). Stored as-is it renders as literal `<p>` tags to the recipient, and the derived text part carries the same junk. Escaping is a reasonable-looking default for a client filling a markup field, so this is an easy mistake to make and an invisible one to catch. The error names the fix: pass real markup, or use `textBody`. Escaped markup **inside** real elements (`<pre>&lt;p&gt;</pre>`) is legitimate and passes, as does an ordinary `&amp;`. Because the check only fires on a body with no real markup at all, it is deliberately narrow about what counts as an escaped tag — a known element name followed by a real tag delimiter — so ordinary prose like `Hi &lt;name&gt;`, `mail me at &lt;a@b.com&gt;`, or `reply with &lt;approve&gt;` still goes through.
+- **An `htmlBody` that is entirely HTML-escaped** — escaped element tags (`&lt;p&gt;`) and no actual elements ([#71](https://github.com/JonathanGodley/fastmail-mcp/issues/71) / [#77](https://github.com/JonathanGodley/fastmail-mcp/issues/77)). Stored as-is it renders as literal `<p>` tags to the recipient, and the derived text part carries the same junk. Escaping is a reasonable-looking default for a client filling a markup field, so this is an easy mistake to make and an invisible one to catch. The error names the fix: pass real markup, or use `textBody`. Escaped markup **inside** real elements (`<pre>&lt;p&gt;</pre>`) is legitimate and passes, as does an ordinary `&amp;`. Because the check only fires on a body with no real markup at all, it is deliberately narrow about what counts as an escaped tag — a known element name followed by a real tag delimiter — so ordinary prose like `Hi &lt;name&gt;`, `mail me at &lt;a@b.example&gt;`, or `reply with &lt;approve&gt;` still goes through.
 - **A body wrapped in a CDATA section** ([#78](https://github.com/JonathanGodley/fastmail-mcp/issues/78)). The plain-text alternative is derived by an HTML parser that recognises the section and consumes it whole, so the message is lost from it entirely; a browser, which has no CDATA in HTML, instead drops the `<![CDATA[` opener as a bogus comment and renders the trailing `]]>` as visible text. On a reply or forward it is worst of all: the quoted original supplies enough visible content that nothing downstream notices, and a text-only recipient sees only their own words quoted back.
 
 The CDATA rule differs by format, because the damage does. In `htmlBody` a section is rejected **wherever** it appears, since a mid-body one swallows just as much as a wrapper (to show a literal CDATA token in HTML you have to escape it as `&lt;![CDATA[`, which passes). In `textBody` only a body that **starts** with `<![CDATA[` is rejected — a plain-text part is never markup-parsed, so an XML snippet quoted inside a plain-text message is real content and keeps working. A bare `]]>` with no opening token is left alone in both formats: it renders as ordinary text and survives the text derivation intact.
@@ -593,9 +593,9 @@ Embedding needs the same opt-in as any attachment: without `FASTMAIL_ATTACH_DIR`
   - Parameters: `calendarId` (optional), `startDate` (optional, ISO 8601), `endDate` (optional, ISO 8601), `limit` (default: 50, hard cap 500)
 - **get_calendar_event**: Get a specific calendar event by ID. Returns organizer and participants when available. Throws if the ID is not found.
   - Parameters: `eventId` (required)
-- **create_calendar_event**: Create a new calendar event. Supports date-only (e.g. `2026-04-01`) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs `end: "2026-04-02"`. See [Start/end agreement](#startend-agreement) for the form and ordering rules.
+- **create_calendar_event**: Create a new calendar event. Supports date-only (e.g. `2026-04-01`) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs `end: "2026-04-02"`. See [Start/end agreement](#startend-agreement) for the form and ordering rules, and [Calendar text size limits](#calendar-text-size-limits) for the size caps.
   - Parameters: `calendarId` (required), `title` (required), `description` (optional), `start` (required, ISO 8601 or date-only), `end` (required, ISO 8601 or date-only), `location` (optional), `participants` (optional array of `{email, name?}`)
-- **update_calendar_event**: Patch an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty or whitespace-only string for `title`, `description`, or `location` is rejected (it won't silently blank the property). To delete `description` or `location`, list them in `clearFields`. Floating times (no Z/offset) preserve the original timezone. A new `start`/`end` is checked against the value it will sit beside — see [Start/end agreement](#startend-agreement). WARNING: providing `participants` replaces ALL existing attendee data; `participants: []` removes all attendees (and the now-orphaned ORGANIZER).
+- **update_calendar_event**: Patch an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty or whitespace-only string for `title`, `description`, or `location` is rejected (it won't silently blank the property). To delete `description` or `location`, list them in `clearFields`. Floating times (no Z/offset) preserve the original timezone. A new `start`/`end` is checked against the value it will sit beside — see [Start/end agreement](#startend-agreement). WARNING: providing `participants` replaces ALL existing attendee data; `participants: []` removes all attendees (and the now-orphaned ORGANIZER). The same [text size limits](#calendar-text-size-limits) apply as on create.
   - Parameters: `eventId` (required), `title`, `description`, `start`, `end`, `location`, `participants` (array of `{email, name?}`), `clearFields` (array of `"description"`/`"location"` to delete), `confirmRecurring` (boolean)
 - **delete_calendar_event**: Delete a calendar event
   - Parameters: `eventId` (required)
@@ -610,6 +610,20 @@ An event's `start` and `end` are only meaningful together, so both `create_calen
 On `update_calendar_event` the comparison is against **the value it will sit beside** — the other one you passed, or the stored one you left alone. So changing only `start` is fine when it stays in the same form and still lands before the stored `end`, but **moving an event to a different day, or converting one side to UTC, means passing both `start` and `end`.** A floating time on an event that carries a `TZID` still inherits that `TZID` (the long-standing behaviour), so it agrees with its partner and is accepted.
 
 Two `TZID`-bearing values in *different* zones — a flight that departs in one zone and lands in another — are a legal shape and are accepted; the ordering check stands down there, because resolving two named zones to instants needs a timezone database this server doesn't carry. Both rejections are `InvalidParams` and name both values and both forms.
+
+#### Calendar text size limits
+
+Every text field that ends up in the event (`title`, `description`, `location`, and each participant's `name` and `email`) is written as an iCalendar content line, which has to be folded to 75 octets per RFC 5545. That folding is quadratic in the length of the field, so an unbounded value is a way to stall or kill the server process. Both `create_calendar_event` and `update_calendar_event` therefore bound the input up front:
+
+| Bound | Limit |
+| --- | --- |
+| Any single field (`title`, `description`, `location`, participant `name`, participant `email`) | 64 KB |
+| Number of `participants` | 500 |
+| All of that text combined, in one call | 256 KB |
+
+The combined bound is what stops many fields that are each just under the per-field cap from adding up to the same problem.
+
+Oversized input is **rejected, never truncated**: a silently trimmed description is data loss you would not find out about until someone read the event. The rejection is `InvalidParams` and names the offending field, its actual size and the limit, so one retry with a shorter value fixes it. The limits are generous by design; they exist to bound the serializer, not to referee how long an agenda may be.
 
 #### Calendar known limitations
 
@@ -677,6 +691,7 @@ src/
 ├── response-formatters.ts  # Mailbox/identity/contact simplifiers and query formatters
 ├── field-projection.ts     # `fields` output projection for the email read tools
 ├── contacts-calendar.ts    # Contacts and calendar extensions
+├── ical-limits.ts          # Size bounds on calendar text, checked before serialization
 └── caldav-client.ts        # CalDAV calendar client (fallback)
 ```
 

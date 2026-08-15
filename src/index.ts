@@ -21,8 +21,14 @@ import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { composeDraft } from './compose-handler.js';
 import { assertBodyInputs } from './body-format.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
+import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
 import createDebug from 'debug';
+
+// The calendar text bounds, rendered once in KB for the tool descriptions below so the
+// documented numbers can never drift from the numbers actually enforced.
+const MAX_ICAL_FIELD_KB = MAX_ICAL_FIELD_BYTES / 1024;
+const MAX_ICAL_TOTAL_KB = MAX_ICAL_TOTAL_BYTES / 1024;
 
 // Silence tsdav's debug logging. tsdav logs the HTTP Basic credential as bare base64
 // ("tsdav:authHelper Basic auth token generated: <base64 of user:password>") whenever
@@ -945,7 +951,7 @@ const TOOLS = [
       },
       {
         name: 'create_calendar_event',
-        description: 'Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected.',
+        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
@@ -955,11 +961,11 @@ const TOOLS = [
             },
             title: {
               type: 'string',
-              description: 'Event title',
+              description: `Event title (max ${MAX_ICAL_FIELD_KB}KB)`,
             },
             description: {
               type: 'string',
-              description: 'Event description (optional)',
+              description: `Event description (optional, max ${MAX_ICAL_FIELD_KB}KB)`,
             },
             start: {
               type: 'string',
@@ -971,19 +977,19 @@ const TOOLS = [
             },
             location: {
               type: 'string',
-              description: 'Event location (optional)',
+              description: `Event location (optional, max ${MAX_ICAL_FIELD_KB}KB)`,
             },
             participants: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  email: { type: 'string', description: 'Participant email address' },
-                  name: { type: 'string', description: 'Participant display name (optional)' }
+                  email: { type: 'string', description: `Participant email address (max ${MAX_ICAL_FIELD_KB}KB)` },
+                  name: { type: 'string', description: `Participant display name (optional, max ${MAX_ICAL_FIELD_KB}KB)` }
                 },
                 required: ['email'],
               },
-              description: 'Event participants (optional). Automatically adds ORGANIZER from CalDAV username.',
+              description: `Event participants (optional, at most ${MAX_ICAL_PARTICIPANTS}). Automatically adds ORGANIZER from CalDAV username.`,
             },
           },
           required: ['calendarId', 'title', 'start', 'end'],
@@ -991,7 +997,7 @@ const TOOLS = [
       },
       {
         name: 'update_calendar_event',
-        description: 'Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees.',
+        description: `Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1001,11 +1007,11 @@ const TOOLS = [
             },
             title: {
               type: 'string',
-              description: 'New event title',
+              description: `New event title (max ${MAX_ICAL_FIELD_KB}KB)`,
             },
             description: {
               type: 'string',
-              description: 'New event description',
+              description: `New event description (max ${MAX_ICAL_FIELD_KB}KB)`,
             },
             start: {
               type: 'string',
@@ -1017,19 +1023,19 @@ const TOOLS = [
             },
             location: {
               type: 'string',
-              description: 'New event location',
+              description: `New event location (max ${MAX_ICAL_FIELD_KB}KB)`,
             },
             participants: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  email: { type: 'string', description: 'Participant email address' },
-                  name: { type: 'string', description: 'Participant display name (optional)' }
+                  email: { type: 'string', description: `Participant email address (max ${MAX_ICAL_FIELD_KB}KB)` },
+                  name: { type: 'string', description: `Participant display name (optional, max ${MAX_ICAL_FIELD_KB}KB)` }
                 },
                 required: ['email'],
               },
-              description: 'Replaces ALL existing attendees. Empty array removes all attendees. Omit to preserve existing attendees.',
+              description: `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
             },
             clearFields: {
               type: 'array',
@@ -1789,6 +1795,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'create_calendar_event': {
         const { calendarId, title, description, start, end, location, participants } = args as any;
+        // Bound the text before anything measures, escapes or folds it: the iCal line
+        // folding these values pass through is quadratic in the field length, so an
+        // unbounded description or participant name stalls the whole process. Rejects
+        // (never truncates) with the field, its size and the limit. See ical-limits.ts.
+        assertICalTextLimits({ title, description, location, participants });
         if (!calendarId || !title || !start || !end) {
           throw new McpError(ErrorCode.InvalidParams, 'calendarId, title, start, and end are required');
         }
@@ -1804,6 +1815,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'update_calendar_event': {
         const { eventId, title, description, start, end, location, participants } = args as any;
+        // Same bound the create path applies, for the same reason: the update path folds
+        // SUMMARY/DESCRIPTION/LOCATION and every ATTENDEE line through the same quadratic
+        // folder, so it is the identical stall from the identical input. See ical-limits.ts.
+        assertICalTextLimits({ title, description, location, participants });
         // Same lenient-client reason as edit_draft's clearFields: a stringified array
         // ('["location"]') would fail the Array.isArray test below, so the call would be
         // rejected as "no field to update" while the caller had named one — and if some

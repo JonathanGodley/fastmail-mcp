@@ -579,6 +579,34 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
       /Calendar event not found: nonexistent@fm/
     );
   });
+
+  it('classes a not-found id as caller-fixable input, not a server fault', async () => {
+    // The message assertion above passes under either class. A wrong event id is
+    // something the caller corrects and re-sends, so the class has to say so:
+    // InvalidInputError maps to InvalidParams, a plain Error to InternalError.
+    const { client } = createMockedClientWithUpdateDelete([]);
+    await assert.rejects(
+      () => client.updateCalendarEvent('nonexistent@fm', { title: 'X' }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Calendar event not found: nonexistent@fm/);
+        return true;
+      },
+    );
+  });
+
+  it('classes a malformed start value as caller-fixable input', async () => {
+    const ical = makeFullIcal('evt9@fm', 'Meeting', '20260401T100000Z', '20260401T110000Z');
+    const { client } = createMockedClientWithUpdateDelete([{ data: ical, url: '/cal/evt9.ics' }]);
+    await assert.rejects(
+      () => client.updateCalendarEvent('evt9@fm', { start: 'tomorrow-ish' }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Invalid start date format/);
+        return true;
+      },
+    );
+  });
 });
 
 describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
@@ -621,6 +649,20 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
     await assert.rejects(
       () => client.deleteCalendarEvent('nonexistent@fm'),
       /Calendar event not found: nonexistent@fm/
+    );
+  });
+
+  it('classes a not-found id as caller-fixable input, not a server fault', async () => {
+    // Pins the class, which the message assertion above cannot: InvalidInputError maps
+    // to InvalidParams ("fix the id and re-send"), a plain Error to InternalError.
+    const { client } = createMockedClientWithDelete([]);
+    await assert.rejects(
+      () => client.deleteCalendarEvent('nonexistent@fm'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Calendar event not found: nonexistent@fm/);
+        return true;
+      },
     );
   });
 });
@@ -739,7 +781,7 @@ describe('parseAllICalProperties', () => {
   });
 
   it('handles CRLF input', () => {
-    const vevent = 'BEGIN:VEVENT\r\nATTENDEE;CN=Alice:mailto:a@b.com\r\nEND:VEVENT';
+    const vevent = 'BEGIN:VEVENT\r\nATTENDEE;CN=Alice:mailto:a@b.example\r\nEND:VEVENT';
     const results = parseAllICalProperties(vevent, 'ATTENDEE');
     assert.equal(results.length, 1);
     assert.ok(!results[0].includes('\r'));
@@ -1104,14 +1146,14 @@ describe('removeAllICalProperties', () => {
   });
 
   it('preserves CRLF line endings', () => {
-    const event = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nATTENDEE:mailto:a@b.com\r\nSUMMARY:Test\r\nEND:VEVENT\r\nEND:VCALENDAR';
+    const event = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nATTENDEE:mailto:a@b.example\r\nSUMMARY:Test\r\nEND:VEVENT\r\nEND:VCALENDAR';
     const result = removeAllICalProperties(event, 'ATTENDEE');
     assert.ok(result.includes('\r\n'));
     assert.ok(!result.includes('ATTENDEE'));
   });
 
   it('preserves LF-only line endings', () => {
-    const event = 'BEGIN:VCALENDAR\nBEGIN:VEVENT\nATTENDEE:mailto:a@b.com\nSUMMARY:Test\nEND:VEVENT\nEND:VCALENDAR';
+    const event = 'BEGIN:VCALENDAR\nBEGIN:VEVENT\nATTENDEE:mailto:a@b.example\nSUMMARY:Test\nEND:VEVENT\nEND:VCALENDAR';
     const result = removeAllICalProperties(event, 'ATTENDEE');
     assert.ok(!result.includes('\r\n'));
     assert.ok(!result.includes('ATTENDEE'));
@@ -1273,7 +1315,7 @@ describe('validateAttendeeEmail', () => {
   });
 
   it('rejects email with newline', () => {
-    assert.throws(() => validateAttendeeEmail('a@b.com\r\nX-INJECT:true'), /illegal/i);
+    assert.throws(() => validateAttendeeEmail('a@b.example\r\nX-INJECT:true'), /illegal/i);
   });
 
   it('rejects email with colon', () => {
@@ -2036,6 +2078,70 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
     assert.ok(ical.includes('ATTENDEE;CN=Bob:mailto:bob@example.com'));
   });
 
+  it('classes an unknown calendarId as caller-fixable input', async () => {
+    // The caller fixes this by re-sending with an id or name from list_calendars, so it
+    // must arrive as InvalidParams rather than the InternalError a plain Error maps to.
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        calendarId: 'No Such Calendar',
+        title: 'Meeting',
+        start: '2026-04-07T14:00:00Z',
+        end: '2026-04-07T15:00:00Z',
+      }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Calendar not found: No Such Calendar/);
+        return true;
+      },
+    );
+    assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
+  });
+
+  it('classes a participant email the caller supplied as caller-fixable input', async () => {
+    const { client } = createMockedCreateClient();
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        calendarId: 'Personal',
+        title: 'Meeting',
+        start: '2026-04-07T14:00:00Z',
+        end: '2026-04-07T15:00:00Z',
+        participants: [{ email: 'not-an-email' }],
+      }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Invalid participant email/);
+        return true;
+      },
+    );
+  });
+
+  it('keeps an unusable configured CalDAV username a server-side failure', async () => {
+    // The ORGANIZER address is server configuration, not part of the tool call, so it
+    // reuses the participant address rules but NOT the caller-fixable class: telling the
+    // caller to re-form their arguments would send them after something they cannot change.
+    const client = new CalDAVCalendarClient({ username: 'not-an-email', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      createCalendarObject: mock.fn(async () => ({})),
+    };
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        calendarId: 'Personal',
+        title: 'Meeting',
+        start: '2026-04-07T14:00:00Z',
+        end: '2026-04-07T15:00:00Z',
+        participants: [{ email: 'alice@example.com' }],
+      }),
+      (err: Error) => {
+        assert.notEqual(err.name, 'InvalidInputError');
+        assert.match(err.message, /Invalid participant email: not-an-email/);
+        return true;
+      },
+    );
+  });
+
   it('does not include ATTENDEE/ORGANIZER when no participants', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await client.createCalendarEvent({
@@ -2072,7 +2178,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
         title: 'Meeting',
         start: '2026-04-07T14:00:00Z',
         end: '2026-04-07T15:00:00Z',
-        participants: [{ email: 'a@b.com\r\nX-INJECT:true' }],
+        participants: [{ email: 'a@b.example\r\nX-INJECT:true' }],
       }),
       /illegal/i
     );

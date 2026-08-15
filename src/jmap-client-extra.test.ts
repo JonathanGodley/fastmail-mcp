@@ -2,6 +2,7 @@ import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion, readSourceReferences } from './jmap-client.js';
 import { InvalidInputError } from './coerce.js';
+import { validateFastmailUrl } from './url-validation.js';
 import { buildExclusionNote } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
 import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
@@ -1208,7 +1209,7 @@ describe('list method property checks', () => {
   });
 
   it('searchEmails with structured filters still requests compact properties', async () => {
-    const { makeReq, result } = mockAndCall('searchEmails', () => client.searchEmails({ query: 'test', from: 'a@b.com' }));
+    const { makeReq, result } = mockAndCall('searchEmails', () => client.searchEmails({ query: 'test', from: 'a@b.example' }));
     await result;
     const emailGetArgs = makeReq.mock.calls[0].arguments[0].methodCalls[1][1];
     assert.ok(!emailGetArgs.properties.includes('bodyValues'));
@@ -2709,5 +2710,68 @@ describe('downloadAttachment — declared filename', () => {
       attachments: [{ partId: 'p1', type: 'image/png', size: 5, blobId: 'b1', name: 'CON.png' }],
     });
     assert.match(await client.downloadAttachment('e1', 'p1'), /name=CON_\.png$/);
+  });
+});
+
+// ---------- download URL: the allowlist check that runs AFTER substitution ----------
+
+// Both the download URL template and the values spliced into it come from the session,
+// so a session can be allowlisted as a template and off-allowlist once substituted. Here
+// the account id lands in the userinfo position and closes the authority early with a
+// '/', which moves the effective host to one the allowlist rejects. Checking the template
+// at session time sees nothing wrong with this; only re-checking the finished URL does.
+const SPLICING_DOWNLOAD_TEMPLATE =
+  'https://{accountId}@www.fastmailusercontent.com/{blobId}?type={type}&name={name}';
+const SPLICING_ACCOUNT_ID = 'attacker.example.com/';
+
+function makeSplicingDownloadClient(): JmapClient {
+  const client = makeClient();
+  mock.method(client, 'getSession', async () => ({
+    apiUrl: 'https://api.example.com/jmap/api/',
+    accountId: SPLICING_ACCOUNT_ID,
+    capabilities: {},
+    downloadUrl: SPLICING_DOWNLOAD_TEMPLATE,
+  }));
+  return client;
+}
+
+describe('downloadAttachment — the URL is re-validated after substitution', () => {
+  it('finds nothing wrong with the template on its own', () => {
+    // The premise the other two cases rest on: a check that only ever saw the template
+    // would pass this session through, because the template's host is allowlisted.
+    const parsed = validateFastmailUrl(SPLICING_DOWNLOAD_TEMPLATE, 'downloadUrl');
+    assert.equal(parsed.hostname, 'www.fastmailusercontent.com');
+  });
+
+  it('refuses a substituted URL whose real host is off the allowlist', async () => {
+    const client = makeSplicingDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    await assert.rejects(
+      () => client.downloadAttachment('e1', '4'),
+      (error: unknown) => {
+        assert.match(
+          (error as Error).message,
+          /downloadUrl host 'attacker\.example\.com' is not in the Fastmail allowlist/,
+        );
+        return true;
+      },
+    );
+  });
+
+  it('makes no request at all, so the bearer token never reaches that host', async () => {
+    // The whole point of the check is where it lands: before the token-bearing fetch,
+    // not on its response.
+    const client = makeSplicingDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    const fetchMock = mock.method(globalThis, 'fetch', async () => new Response('bytes', { status: 200 }));
+    try {
+      await assert.rejects(
+        () => client.fetchAttachmentBuffer('e1', '4'),
+        /not in the Fastmail allowlist/,
+      );
+      assert.equal(fetchMock.mock.calls.length, 0);
+    } finally {
+      fetchMock.mock.restore();
+    }
   });
 });

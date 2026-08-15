@@ -212,7 +212,9 @@ export class ContactsCalendarClient extends JmapClient {
   }): Promise<string> {
     const hasName = !!(input.name?.full || input.name?.given || input.name?.surname);
     if (!hasName && !input.emails?.length) {
-      throw new Error('A contact needs a name or at least one email address');
+      // A missing required field is caller-fixable, so it must reach the MCP
+      // boundary as InvalidParams rather than the InternalError a plain Error maps to.
+      throw new InvalidInputError('A contact needs a name or at least one email address');
     }
 
     const accountId = await this.contactsAccountId();
@@ -233,8 +235,10 @@ export class ContactsCalendarClient extends JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
     if (result.notCreated?.newContact) {
-      const err = result.notCreated.newContact;
-      throw new Error(`Failed to create contact: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      // Same SetError classification the mail writes use: a `notFound` is a bad id the
+      // caller can fix (InvalidParams), anything else is an operational failure
+      // (InternalError). The rendered message is unchanged.
+      this.throwSingleSetError(result.notCreated.newContact, 'create contact');
     }
     const id = result.created?.newContact?.id;
     if (!id) {
@@ -254,7 +258,8 @@ export class ContactsCalendarClient extends JmapClient {
     const { expectState, ...fields } = patch;
     const patchObject = this.buildCardProperties(fields);
     if (Object.keys(patchObject).length === 0) {
-      throw new Error('At least one field to update must be provided (name, emails, phones, addresses, or notes)');
+      // An empty patch is caller-fixable input, not a server fault.
+      throw new InvalidInputError('At least one field to update must be provided (name, emails, phones, addresses, or notes)');
     }
 
     const accountId = await this.contactsAccountId();
@@ -265,7 +270,9 @@ export class ContactsCalendarClient extends JmapClient {
       methodCalls: [['ContactCard/get', { accountId, ids: [id], properties: ['id'] }, 'g']],
     });
     if (!this.getListResult(getResponse, 0)[0]) {
-      throw new Error(`Contact not found: ${id}`);
+      // A wrong id is the caller's to fix, so this maps to InvalidParams — matching
+      // getContactById and the not-found convention across the client.
+      throw new InvalidInputError(`Contact not found: ${id}`);
     }
 
     // JMAP PatchObject semantics: each provided top-level field wholly
@@ -282,8 +289,7 @@ export class ContactsCalendarClient extends JmapClient {
     });
     const result = this.getMethodResult(response, 0);
     if (result.notUpdated?.[id]) {
-      const err = result.notUpdated[id];
-      throw new Error(`Failed to update contact: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      this.throwSingleSetError(result.notUpdated[id], 'update contact');
     }
   }
 
@@ -303,9 +309,11 @@ export class ContactsCalendarClient extends JmapClient {
     if (result.notDestroyed?.[id]) {
       const err = result.notDestroyed[id];
       if (err.type === 'notFound') {
-        throw new Error(`Contact not found: ${id}`);
+        // Caller-fixable bad id: InvalidParams, not the InternalError a plain Error
+        // would map to. The wording matches the other not-found paths.
+        throw new InvalidInputError(`Contact not found: ${id}`);
       }
-      throw new Error(`Failed to delete contact: ${err.type}${err.description ? ' - ' + err.description : ''}`);
+      this.throwSingleSetError(err, 'delete contact');
     }
   }
 }

@@ -838,7 +838,7 @@ function matchesIdentity(identityEmail: string, address: string): boolean {
     // this, a composite value like "a@evil.com,b@example.com" (or one carrying CR/LF or
     // a quoted local part) satisfies the endsWith test and lands unparsed in the
     // outgoing `from`/`mailFrom`, turning the "verified identity" check into a pass.
-    // Note the pattern admits a BARE addr-spec only — a "Name <a@b.com>" form is
+    // Note the pattern admits a BARE addr-spec only — a "Name <a@b.example>" form is
     // rejected on purpose, because the display name is supplied separately and is never
     // part of the value matched here. Do not widen it to accept angle-addr shapes.
     if (!/^[^\s@,;"]+@[^\s@,;"]+$/.test(addr)) return false;
@@ -3256,7 +3256,9 @@ export class JmapClient {
     // own ceiling in the core capability, so a doomed upload need not be sent at all.
     const maxSize = session.capabilities?.['urn:ietf:params:jmap:core']?.maxSizeUpload;
     if (typeof maxSize === 'number' && data.length > maxSize) {
-      throw new Error(`Attachment is ${data.length} bytes; the server's upload limit is ${maxSize} bytes`);
+      // Caller-fixable: attach something smaller. An InternalError here would read as
+      // a server fault and invite a bare retry of an upload that can never succeed.
+      throw new InvalidInputError(`Attachment is ${data.length} bytes; the server's upload limit is ${maxSize} bytes`);
     }
 
     const url = session.uploadUrl.replace('{accountId}', session.accountId);

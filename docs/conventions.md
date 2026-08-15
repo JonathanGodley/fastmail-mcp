@@ -145,13 +145,34 @@ This rule is **tool-family-agnostic.** Because the calendar tools share the same
 rejects (`create_calendar_event` / `update_calendar_event`) are `InvalidParams` too — the
 classification is a property of the shared helpers, not of email specifically. The
 calendar rejects raised in `src/caldav-client.ts` itself follow the same rule and throw
-`InvalidInputError` directly: the start/end frame and ordering checks below, and the
-recurring-exception confirmation prompt (the one asking for `confirmRecurring: true`).
+`InvalidInputError` directly: the start/end frame and ordering checks below, the date
+format and control-character rejects, the participant-address rejects, a `calendarId` or
+`eventId` that resolves to nothing, and the recurring-exception confirmation prompt (the
+one asking for `confirmRecurring: true`). `src/contacts-calendar.ts` follows it too — its
+input rejects (a contact with neither name nor address, an update naming no field) and its
+not-found rejects are `InvalidInputError`, and its create/update/delete set-errors route
+through the same `throwSingleSetError` classifier the mail writes use.
+
+Two nearby throws stay a plain `Error` **on purpose**, and both look like exceptions to the
+rule until you see what they carry. The ORGANIZER address check validates the operator's
+configured CalDAV username through the participant validator — a configuration fault no
+argument can fix, so it is re-thrown in the plain class with its own wording. And the
+recurrence-expansion guard's `skip-pruning:` throws are internal control-flow signals for a
+`catch` that re-raises only `InvalidInputError`; tagging them would let a resource guard
+escape to the caller dressed as a rejection of their input.
 That last one is the clearest case in the file — the caller resolves it by re-sending the
 same call with one more argument, which is the definition of caller-fixable, so surfacing
 it as `InternalError` was telling them a bare retry might work when it never would. Its
 `catch` re-throws on `instanceof InvalidInputError` rather than on a message substring, so
 the routing no longer depends on the wording of the prompt.
+
+`assertICalTextLimits` (`src/ical-limits.ts`) follows the same rule from the other end of
+the call chain: it runs in the `create_calendar_event` / `update_calendar_event` handlers,
+before anything measures or serializes the values, and throws `InvalidInputError` naming
+the field, its size and the limit. The classification matters more than usual there. The
+whole point of the bound is that the work it refuses is expensive (see **Bounding a
+quadratic serializer** below), so an `InternalError` would not merely be inaccurate, it
+would invite the bare retry that repeats the cost.
 
 **One deliberate carve-out:** `download_attachment` returns `InternalError` for a bad
 `emailId`/`attachmentId`. Its local catch collapses non-path errors to a generic message
@@ -208,6 +229,33 @@ The JMAP set-error reason itself is surfaced (not just the code): every throwing
 mutators additionally report success/fail counts and the caller's failing ids grouped by
 reason. The helper concatenates only server-authored text — we add no message body of our
 own.
+
+## Bounding a quadratic serializer
+
+`foldICalLine` (`src/caldav-client.ts`) folds an iCalendar content line to 75 octets per
+RFC 5545 §3.1 by repeatedly re-slicing the remainder of the line, allocating a fresh copy
+of the tail each time. Its cost therefore grows with the square of the field length:
+roughly 135ms to fold a 200KB value, and out of memory somewhere near 800KB. Every
+caller-supplied calendar text field reaches it, on both the create and the update path
+(SUMMARY, DESCRIPTION, LOCATION, and each ORGANIZER/ATTENDEE line, whose `CN=` parameter
+carries a participant name). One oversized value was enough to stall or kill the process
+for every other request sharing it.
+
+The guard lives in `src/ical-limits.ts`, ahead of the handlers' own checks, and takes
+three bounds rather than one: a per-field cap (64KB), a participant-count cap (500), and
+a cap on the combined text of the whole call (256KB). The third is not redundant. A
+per-field cap on its own is defeated by many fields each sitting just under it, which is
+trivial to arrange through the participants array. Sizes are measured in UTF-8 bytes, not
+JS characters, because the fold is defined on octets.
+
+It **rejects and never truncates.** Trimming an over-long description would produce an
+event that reads as successfully created while quietly missing content, and the caller
+would have no signal at all. The rejection names the field, its actual size and the
+limit, which is everything needed to fix it in one retry.
+
+The bounds are properties of that serializer, not of iCalendar or of Fastmail. If the
+folding is ever made linear, they are the thing to revisit; until then, removing them
+re-opens a denial of service reachable from ordinary tool input.
 
 ## Surfacing computed fields without leaking into `raw: true`
 

@@ -252,7 +252,9 @@ export function formatICalDate(raw: string | undefined): string | undefined {
  * e.g. "2026-04-07T18:45:00+10:00" → "20260407T084500Z"
  */
 export function toICalUTC(isoString: string): string {
-  // Guard: date-only input must be handled by caller, not passed here
+  // Guard: date-only input must be handled by caller, not passed here. This one stays a
+  // plain Error on purpose — it reports a broken internal contract between this function
+  // and the code calling it, not anything the tool caller supplied or can correct.
   if (/^\d{4}-\d{2}-\d{2}$/.test(isoString)) {
     throw new Error('date-only input must be handled by caller, not passed to toICalUTC');
   }
@@ -261,7 +263,9 @@ export function toICalUTC(isoString: string): string {
     return isoString.replace(/[-:]/g, '');
   }
   const d = new Date(isoString);
-  if (isNaN(d.getTime())) throw new Error(`Invalid date: ${isoString}`);
+  // The value reaching here is the start/end the tool caller passed (via
+  // formatDateTimeProperty), so an unparseable one is caller-fixable input.
+  if (isNaN(d.getTime())) throw new InvalidInputError(`Invalid date: ${isoString}`);
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 }
 
@@ -752,29 +756,31 @@ export function escapeICalText(value: string): string {
  * for date-only). Throws on invalid input.
  */
 export function validateAndFormatICalDate(value: string, fieldName: string): string {
+  // Every rejection below names the caller's own field and value, so all of them are
+  // caller-fixable input errors (InvalidParams), never server faults.
   if (typeof value !== 'string') {
-    throw new Error(`${fieldName} must be a string`);
+    throw new InvalidInputError(`${fieldName} must be a string`);
   }
   if (/[\x00-\x1F\x7F]/.test(value)) {
-    throw new Error(`${fieldName} contains control characters`);
+    throw new InvalidInputError(`${fieldName} contains control characters`);
   }
   const trimmed = value.trim();
   // Date-only: 2026-04-18
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     const d = new Date(trimmed + 'T00:00:00Z');
-    if (Number.isNaN(d.getTime())) throw new Error(`${fieldName} is not a valid date`);
+    if (Number.isNaN(d.getTime())) throw new InvalidInputError(`${fieldName} is not a valid date`);
     return trimmed.replace(/-/g, '');
   }
   // Datetime forms: floating, UTC (Z), or with offset (+/-HH:MM, +/-HHMM, +/-HH)
   const dtMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(Z|[+-]\d{2}:?\d{0,2})?$/.exec(trimmed);
   if (!dtMatch) {
-    throw new Error(`${fieldName} must be ISO-8601 date or datetime (got: ${trimmed.slice(0, 60)})`);
+    throw new InvalidInputError(`${fieldName} must be ISO-8601 date or datetime (got: ${trimmed.slice(0, 60)})`);
   }
   const [, datePart, timePart, tz] = dtMatch;
   const isoForParse = `${datePart}T${timePart}${tz || ''}`;
   const d = new Date(isoForParse);
   if (Number.isNaN(d.getTime())) {
-    throw new Error(`${fieldName} is not a valid datetime`);
+    throw new InvalidInputError(`${fieldName} is not a valid datetime`);
   }
   if (!tz) {
     // Floating: emit as-is without zone designator
@@ -790,14 +796,40 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
  * Prevents iCal property injection via malicious email values.
  */
 export function validateAttendeeEmail(email: string): void {
+  // Participant addresses come straight from the tool call, so every rejection here is
+  // caller-fixable input (InvalidParams). The one place this function is applied to a
+  // value the caller did NOT supply — the configured CalDAV username, embedded in the
+  // ORGANIZER line — goes through validateOrganizerUsername below, which restores the
+  // plain-Error class for that case.
   if (!email || typeof email !== 'string') {
-    throw new Error('Participant email is required');
+    throw new InvalidInputError('Participant email is required');
   }
   if (!/^[^@]+@[^@]+$/.test(email)) {
-    throw new Error(`Invalid participant email: ${email}`);
+    throw new InvalidInputError(`Invalid participant email: ${email}`);
   }
   if (/[\r\n:;"\\]|\s/.test(email)) {
-    throw new Error(`Invalid participant email (contains illegal characters): ${email}`);
+    throw new InvalidInputError(`Invalid participant email (contains illegal characters): ${email}`);
+  }
+}
+
+/**
+ * Apply the same strict addr-spec check to the configured CalDAV username, which is
+ * embedded verbatim in the ORGANIZER line whenever attendees are present.
+ *
+ * The address rules are identical to a participant's, but the failure is not: this value
+ * is server configuration, so re-forming the tool call cannot fix it. Rethrowing as a
+ * plain Error keeps it in the InternalError class instead of telling the caller their
+ * arguments were wrong. The message is passed through unchanged.
+ */
+function validateOrganizerUsername(username: string): void {
+  try {
+    validateAttendeeEmail(username);
+  } catch (e) {
+    // The shared validator words its message for a participant address. Say whose
+    // address this actually is, or an operator with a bad CalDAV username spends the
+    // failure hunting a participant who is fine.
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`The configured CalDAV username is not usable as an ORGANIZER address. ${detail}`);
   }
 }
 
@@ -849,18 +881,19 @@ function formatDateTimeProperty(
 ): string {
   // Same guard as validateAndFormatICalDate (v1.9.3): reject control characters
   // outright so a hostile value can never reach the property-serialization paths.
+  // `value` is the start/end the tool caller passed, so these are input errors.
   if (typeof value !== 'string') {
-    throw new Error(`${propName} must be a string`);
+    throw new InvalidInputError(`${propName} must be a string`);
   }
   if (/[\x00-\x1F\x7F]/.test(value)) {
-    throw new Error(`${propName} contains control characters`);
+    throw new InvalidInputError(`${propName} contains control characters`);
   }
 
   // Date-only
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     const d = new Date(value);
     if (isNaN(d.getTime()) || !d.toISOString().startsWith(value)) {
-      throw new Error(`Invalid date: ${value}`);
+      throw new InvalidInputError(`Invalid date: ${value}`);
     }
     const icalDate = value.replace(/-/g, '');
     return foldICalLine(`${propName};VALUE=DATE:${icalDate}`, lineEnding);
@@ -1230,7 +1263,9 @@ export class CalDAVCalendarClient {
       c => c.url === event.calendarId || c.displayName === event.calendarId
     );
     if (!targetCal) {
-      throw new Error(`Calendar not found: ${event.calendarId}`);
+      // A calendarId that matches no calendar is caller-fixable: they re-issue the call
+      // with an id or name from list_calendars.
+      throw new InvalidInputError(`Calendar not found: ${event.calendarId}`);
     }
 
     const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@fastmail-mcp`;
@@ -1279,7 +1314,7 @@ export class CalDAVCalendarClient {
       // strict addr-spec (rejects ; , : CR LF etc.) so it can't corrupt or inject
       // into the ORGANIZER line when embedded below.
       const caldavUsername = this.config.username;
-      validateAttendeeEmail(caldavUsername);
+      validateOrganizerUsername(caldavUsername);
       const displayName = resolveDisplayName(process.env.FASTMAIL_CALDAV_DISPLAY_NAME, caldavUsername);
       const cnPart = `;CN=${quoteParamValue(displayName)}`;
       icalLines.push(foldICalLine(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
@@ -1320,9 +1355,13 @@ export class CalDAVCalendarClient {
     const client = await this.getClient();
     const obj = await this.findCalendarObjectByUID(eventId);
     if (!obj) {
-      throw new Error(`Calendar event not found: ${eventId}`);
+      // Caller-fixable bad id, same as getCalendarEventById: InvalidParams, not the
+      // InternalError a plain Error maps to.
+      throw new InvalidInputError(`Calendar event not found: ${eventId}`);
     }
 
+    // Stays a plain Error: the event was found, but the server handed back an object with
+    // no usable iCal payload. Nothing in the caller's arguments can change that.
     if (!obj.data || !obj.data.includes('BEGIN:VEVENT')) {
       throw new Error('Cannot update event: no iCal data found');
     }
@@ -1331,10 +1370,10 @@ export class CalDAVCalendarClient {
     const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
     if (fields.start !== undefined && !datePattern.test(fields.start) && !dateTimePattern.test(fields.start)) {
-      throw new Error(`Invalid start date format: ${fields.start}. Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
+      throw new InvalidInputError(`Invalid start date format: ${fields.start}. Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
     if (fields.end !== undefined && !datePattern.test(fields.end) && !dateTimePattern.test(fields.end)) {
-      throw new Error(`Invalid end date format: ${fields.end}. Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
+      throw new InvalidInputError(`Invalid end date format: ${fields.end}. Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
 
     // Validate clearFields: only the optional, string-settable, not-otherwise-
@@ -1354,6 +1393,7 @@ export class CalDAVCalendarClient {
 
     // Capture original VEVENT before any patching for reads
     const originalVevent = extractVEvent(normalizedData);
+    // Also a plain Error: the stored object is malformed, which is not a caller input fault.
     if (!originalVevent) {
       throw new Error('Cannot update event: no VEVENT block found');
     }
@@ -1381,7 +1421,16 @@ export class CalDAVCalendarClient {
             // Convert offset-bearing timestamps to UTC before passing to rrule
             let dtStartForRrule: string;
             if (/[+-]\d{2}:\d{2}$/.test(newStartRaw)) {
-              dtStartForRrule = toICalUTC(newStartRaw).replace(/Z$/, '');
+              // This value only feeds occurrence expansion for orphan detection, and it
+              // may have come from the STORED event rather than the caller. A conversion
+              // failure therefore stays best-effort like every other parse failure in
+              // this block, so it is re-thrown in the class the catch below swallows.
+              // The write path validates the caller's own value again regardless.
+              try {
+                dtStartForRrule = toICalUTC(newStartRaw).replace(/Z$/, '');
+              } catch {
+                throw new Error('skip-pruning: start value cannot be expanded into occurrences');
+              }
             } else {
               dtStartForRrule = newStartRaw.replace(/[-:]/g, '').replace(/Z$/, '');
             }
@@ -1395,6 +1444,9 @@ export class CalDAVCalendarClient {
             // by third parties (invitations), so skip selective pruning for sub-daily
             // rules and fall through to the best-effort path (no deletion).
             const freq = (rule as any).options?.freq;
+            // Deliberately a plain Error: this is an internal control-flow signal for the
+            // catch below, which re-throws only InvalidInputError. Tagging it as a caller
+            // input error would make it escape to the caller as a bogus rejection.
             if (typeof freq === 'number' && freq >= RRule.HOURLY) {
               throw new Error('skip-pruning: sub-daily recurrence frequency');
             }
@@ -1545,7 +1597,7 @@ export class CalDAVCalendarClient {
         // .includes('@') admits ; , : CR LF, which would corrupt or inject into
         // the ORGANIZER line built below — the two paths emit the identical line
         // from the identical value, so they validate it identically.
-        validateAttendeeEmail(caldavUsername);
+        validateOrganizerUsername(caldavUsername);
         const displayName = resolveDisplayName(process.env.FASTMAIL_CALDAV_DISPLAY_NAME, caldavUsername);
         const cnPart = displayName ? `;CN=${quoteParamValue(displayName)}` : '';
         data = replaceICalProperty(data, 'ORGANIZER', fold(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
@@ -1583,7 +1635,8 @@ export class CalDAVCalendarClient {
     const client = await this.getClient();
     const obj = await this.findCalendarObjectByUID(eventId);
     if (!obj) {
-      throw new Error(`Calendar event not found: ${eventId}`);
+      // Caller-fixable bad id, matching getCalendarEventById/updateCalendarEvent.
+      throw new InvalidInputError(`Calendar event not found: ${eventId}`);
     }
 
     const deleteResp = await client.deleteCalendarObject({ calendarObject: obj });

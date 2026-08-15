@@ -329,6 +329,14 @@ than overclaimed:
   these tools lacked. The one read path that deliberately does NOT expose this is
   `download_attachment`, whose local catch keeps a generic `InternalError` for a bad
   `emailId`/`attachmentId` so it leaks no attachment metadata.
+- **The same per-id oracle now extends to calendar events and contacts.** `update_calendar_event`,
+  `delete_calendar_event`, `update_contact` and `delete_contact` return `InvalidParams` for an id
+  that resolves to nothing, so each confirms whether that event or contact exists. `create_calendar_event`
+  does the same for a `calendarId`. Accepted on exactly the footing above: every one of these ids is
+  already readable through `list_calendar_events` / `get_calendar_event` / `list_contacts` /
+  `get_contact` with the same token, so the rejection discloses nothing a caller holding these tools
+  could not already enumerate, and the recoverability it buys is the whole point — a caller who
+  cannot tell "wrong id" from "server broke" retries a call that can never succeed.
 - **Two-query hidden-count race.** The visible query and the count query run in the same
   `makeRequest` (one atomic snapshot — no race) where possible; the derivation tolerates a missing/
   garbled count by failing closed to the degraded note. A message moving between *any* two reads is
