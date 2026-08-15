@@ -32,6 +32,9 @@ export interface KeywordMaintenance {
 export interface SendDraftResult {
   submissionId: string;
   keywordMaintenance?: KeywordMaintenance;
+  // What the transmitted message carried as embedded images, reported straight through
+  // from the send (#13).
+  notes?: string[];
 }
 
 const KEYWORDS: Record<'reply' | 'forward', string[]> = {
@@ -85,10 +88,19 @@ export async function sendDraftAndMaintainKeywords(
   // The provenance rides back on the send: sendDraft reads it off the same pre-send
   // Email/get that validates the draft, so there is no second fetch and no "the send
   // worked but we couldn't tell what it was" state — a draft we can't read never sends.
-  const { submissionId, sourceReferences } = await client.sendDraft(emailId);
+  const { submissionId, sourceReferences, notes } = await client.sendDraft(emailId);
+
+  // Every outcome below reports the same send; only the thread-state half varies. Composing
+  // the result in one place keeps the send's own receipt on all of them, including the early
+  // returns, instead of only the paths that happen to fall through to the end.
+  const sent = (keywordMaintenance?: KeywordMaintenance): SendDraftResult => ({
+    submissionId,
+    ...(notes?.length && { notes }),
+    ...(keywordMaintenance && { keywordMaintenance }),
+  });
 
   const source = selectSource(sourceReferences);
-  if (!source) return { submissionId }; // a fresh compose has no original to mark
+  if (!source) return sent(); // a fresh compose has no original to mark
 
   // Exact-instance path. reply_email/forward_email record the JMAP id of the stored
   // instance the caller actually composed from (X-Fastmail-MCP-Source-Id); a
@@ -110,10 +122,10 @@ export async function sendDraftAndMaintainKeywords(
     if (instanceMessageIds?.includes(source.messageId)) {
       try {
         await client.addKeywords(recorded, KEYWORDS[source.kind]);
-        return { submissionId, keywordMaintenance: { ...source, originalEmailId: recorded, marked: true } };
+        return sent({ ...source, originalEmailId: recorded, marked: true });
       } catch {
         /* best-effort: the draft already sent; write failure stays silent */
-        return { submissionId, keywordMaintenance: { ...source, originalEmailId: recorded, marked: false } };
+        return sent({ ...source, originalEmailId: recorded, marked: false });
       }
     }
   }
@@ -122,25 +134,25 @@ export async function sendDraftAndMaintainKeywords(
   try {
     candidates = await client.findEmailIdsByMessageId(source.messageId);
   } catch {
-    return { submissionId, keywordMaintenance: { ...source, marked: false, skipReason: 'lookup-failed' } };
+    return sent({ ...source, marked: false, skipReason: 'lookup-failed' });
   }
 
   if (candidates.length === 0) {
-    return { submissionId, keywordMaintenance: { ...source, marked: false, skipReason: 'not-found' } };
+    return sent({ ...source, marked: false, skipReason: 'not-found' });
   }
   if (candidates.length > 1) {
     // Two stored messages carrying the same Message-ID (a duplicate delivery, or a copy
     // kept in another folder). Marking one would be a guess about which the caller means,
     // and marking both would spread a keyword across a message we were never pointed at.
-    return { submissionId, keywordMaintenance: { ...source, marked: false, skipReason: 'ambiguous' } };
+    return sent({ ...source, marked: false, skipReason: 'ambiguous' });
   }
 
   const originalEmailId = candidates[0];
   try {
     await client.addKeywords(originalEmailId, KEYWORDS[source.kind]);
-    return { submissionId, keywordMaintenance: { ...source, originalEmailId, marked: true } };
+    return sent({ ...source, originalEmailId, marked: true });
   } catch {
     /* best-effort: the draft already sent */
-    return { submissionId, keywordMaintenance: { ...source, originalEmailId, marked: false } };
+    return sent({ ...source, originalEmailId, marked: false });
   }
 }

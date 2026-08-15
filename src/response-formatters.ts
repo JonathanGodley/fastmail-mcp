@@ -100,6 +100,13 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
   return parts.join(', ');
 }
 
+// The embedded-image sentences a call produced, appended to its result text (#13). They are
+// already whole sentences, composed in one place so their counts agree, so this only joins
+// them; an empty channel adds nothing.
+function formatInlineNotes(notes?: string[]): string {
+  return notes?.length ? ` ${notes.join(' ')}` : '';
+}
+
 // The edit_draft result text. An edit recreates the message (JMAP content is immutable),
 // so this has to say three things: the new id, where the old copy went, and what that old
 // copy contained — the last one so a caller that edited from a stale copy can see at once
@@ -112,7 +119,7 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
   const replaced = fingerprint
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
     : '';
-  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}`;
+  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${formatInlineNotes(result.notes)}`;
 }
 
 // The send_draft result text. Reports the submission, then what happened to the message
@@ -122,13 +129,16 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
 // than invisible. A keyword-write failure after a successful lookup is deliberately not
 // reported, matching reply_email/forward_email on the same failure.
 export function formatSendDraftResult(result: SendDraftResult): string {
+  // The receipt rides on the end of every outcome below, so what the message carried is
+  // reported whether or not the thread-state maintenance had anything to say.
   const base = `Draft sent successfully. Submission ID: ${result.submissionId}`;
+  const receipt = formatInlineNotes(result.notes);
   const km = result.keywordMaintenance;
-  if (!km) return base;
+  if (!km) return `${base}${receipt}`;
 
   const marking = km.kind === 'reply' ? 'answered and read' : 'forwarded and read';
-  if (km.marked) return `${base} Original marked ${marking}.`;
-  if (!km.skipReason) return base; // keyword write failed; the draft still sent
+  if (km.marked) return `${base} Original marked ${marking}.${receipt}`;
+  if (!km.skipReason) return `${base}${receipt}`; // keyword write failed; the draft still sent
 
   const relation = km.kind === 'reply' ? 'replies to' : 'forwards';
   const why = km.skipReason === 'ambiguous'
@@ -136,7 +146,7 @@ export function formatSendDraftResult(result: SendDraftResult): string {
     : km.skipReason === 'lookup-failed'
       ? 'the lookup failed'
       : 'no stored message carries that Message-ID';
-  return `${base} The message this draft ${relation} (Message-ID ${km.messageId}) was not marked ${marking}: ${why}.`;
+  return `${base} The message this draft ${relation} (Message-ID ${km.messageId}) was not marked ${marking}: ${why}.${receipt}`;
 }
 
 // Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the

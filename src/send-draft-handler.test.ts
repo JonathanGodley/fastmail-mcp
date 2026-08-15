@@ -136,6 +136,27 @@ describe('sendDraftAndMaintainKeywords', () => {
     assert.equal(r.keywordMaintenance?.kind, 'reply');
   });
 
+  it("passes the send's embedded-image receipt through, whatever the thread-state outcome", async () => {
+    const notes = ['Sent with 1 embedded image(s) (2 KB).'];
+    const plain = spyClient({
+      sendDraft: async () => ({
+        submissionId: 'sub-1',
+        sourceReferences: { inReplyTo: [], forwardedMessageId: [] },
+        notes,
+      }),
+    });
+    assert.deepEqual((await sendDraftAndMaintainKeywords({ emailId: 'd1' }, plain.client)).notes, notes);
+
+    const marked = spyClient({
+      sendDraft: async () => ({
+        submissionId: 'sub-1',
+        sourceReferences: { inReplyTo: ['orig-msg@example.com'], forwardedMessageId: [] },
+        notes,
+      }),
+    });
+    assert.deepEqual((await sendDraftAndMaintainKeywords({ emailId: 'd1' }, marked.client)).notes, notes);
+  });
+
   it('writes no keywords when the draft references nothing (an ordinary compose)', async () => {
     const { client, calls } = spyClient({
       sendDraft: async () => ({

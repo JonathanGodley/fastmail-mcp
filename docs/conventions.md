@@ -84,7 +84,13 @@ wrong — re-form it; don't blind-retry as-is,"** while `InternalError` (-32603)
 **"server-side; a bare retry might succeed."** So the dividing line is recoverability:
 
 - **Caller-fixable → `InvalidParams`.** A failure the caller can resolve by re-forming the
-  call's arguments OR by editing the object (e.g. the draft) the call operates on. This
+  call's arguments, by editing the object (e.g. the draft) the call operates on, OR by
+  **replacing that object** — recreating it and deleting the old one — when the object
+  itself is unusable rather than merely wrong. That last route is what the body-shape
+  refusals on `edit_draft` offer: a draft whose body carries a part the recreate cannot
+  reproduce is not something any argument can fix, but recreating the draft is entirely
+  within the caller's reach, so it is still their failure to resolve and not a server
+  fault. This
   covers bad/empty fields, a not-found id (`get_email`/`get_thread`, `originalEmailId`, a
   draft-mutation target), the body-coupling rejects, an unverified `from`, the
   `send_draft` draft-state guards (no recipients / no from / from not matching an

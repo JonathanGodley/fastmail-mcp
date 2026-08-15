@@ -962,16 +962,16 @@ describe('updateDraft', () => {
     ]);
   });
 
-  it('rejects editing a draft with an inline (cid:) image', async () => {
+  it('carries an embedded (cid:) image through a metadata edit unchanged', async () => {
     const inlineDraft = {
       ...EXISTING_DRAFT,
       attachments: [{ blobId: 'blob-img', type: 'image/png', disposition: 'inline', cid: 'img@x', name: null, partId: '2', size: 70 }],
     };
-    mockUpdate(client, inlineDraft);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { subject: 'X' }),
-      /inline images.*Recreate the draft instead/s,
-    );
+    const makeReq = mockUpdate(client, inlineDraft);
+    await client.updateDraft('draft-1', { subject: 'X' });
+    assert.deepEqual(draftFromCall(makeReq).attachments, [
+      { blobId: 'blob-img', type: 'image/png', disposition: 'inline', cid: 'img@x' },
+    ]);
   });
 
   it('carries a regular attachment that merely has a cid (disposition not inline)', async () => {
@@ -986,7 +986,7 @@ describe('updateDraft', () => {
     ]);
   });
 
-  it('rejects editing a draft with a non-text/non-html body part', async () => {
+  it('rejects editing a draft whose body carries a part the recreate cannot reproduce', async () => {
     const weirdDraft = {
       ...EXISTING_DRAFT,
       textBody: [{ partId: '1', type: 'text/calendar' }],
@@ -996,7 +996,7 @@ describe('updateDraft', () => {
     mockUpdate(client, weirdDraft);
     await assert.rejects(
       () => client.updateDraft('draft-1', { subject: 'X' }),
-      /plain text or HTML.*Recreate the draft instead/s,
+      /body contains a part this server cannot carry.*text\/calendar.*Recreate it/s,
     );
   });
 
@@ -1495,6 +1495,40 @@ describe('sendDraft', () => {
       { email: 'cc@example.com' },
       { email: 'hidden@example.com' },
     ]);
+  });
+
+  it('reports the embedded images the sent message carried', async () => {
+    const withImage = {
+      ...SENDABLE_DRAFT,
+      attachments: [
+        { partId: '3', blobId: 'blob-pic', type: 'image/png', name: 'pic.png', cid: 'pic@x', disposition: 'inline', size: 2048 },
+        { partId: '4', blobId: 'blob-doc', type: 'application/pdf', name: 'doc.pdf', cid: null, disposition: 'attachment', size: 9999 },
+      ],
+    };
+    const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [withImage] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    const outcome = await client.sendDraft('draft-1');
+    assert.deepEqual(outcome.notes, ['Sent with 1 embedded image(s) (2 KB).']);
+    // The receipt needs the part listing, so the pre-send read must ask for it.
+    const getParams = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.ok(getParams.properties.includes('attachments'));
+    for (const p of ['disposition', 'cid', 'name']) assert.ok(getParams.bodyProperties.includes(p));
+  });
+
+  it('says nothing about images on a message that carried none', async () => {
+    mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+    const outcome = await client.sendDraft('draft-1');
+    assert.equal(outcome.notes, undefined);
   });
 
   it('rejects non-draft email', async () => {
@@ -2659,6 +2693,566 @@ describe('updateDraft attachments', () => {
   });
 });
 
+describe('updateDraft embedded images (#13)', () => {
+  let client: JmapClient;
+  beforeEach(() => { client = makeClient(); });
+
+  // The shape of an identifier this server mints for a quoted image. Tests can't inject the
+  // generator through updateDraft, so a fresh mint is recognized by shape.
+  const MINT_SHAPE = /^ii-[0-9a-f]{32}@inline\.invalid$/;
+  // A stored one, standing in for a mint an earlier call made.
+  const STORED_MINT = 'ii-0123456789abcdef0123456789abcdef@inline.invalid';
+  const SECOND_MINT = 'ii-fedcba9876543210fedcba9876543210@inline.invalid';
+
+  function imagePart(over: any = {}) {
+    return {
+      partId: 'p9', blobId: 'blob-img', type: 'image/png', name: 'pic.png',
+      cid: 'pic@x', disposition: 'inline', size: 2048, ...over,
+    };
+  }
+
+  // An html-only draft: `parts` populates the JMAP attachments array, `bodyParts` the html
+  // body list (which is where a server routes an embedded image on some MIME shapes).
+  function htmlDraft(html: string, parts: any[] = [], bodyParts: any[] = []) {
+    return {
+      ...EXISTING_DRAFT,
+      textBody: null,
+      htmlBody: [{ partId: 'h', type: 'text/html' }, ...bodyParts],
+      bodyValues: { h: { value: html } },
+      attachments: parts,
+    };
+  }
+
+  // Dispatches Email/get by id so the post-edit re-read can return a DIFFERENT draft from the
+  // one the edit started with — the whole point of that read is to report on the saved state.
+  function mockEdit(c: JmapClient, before: any, saved?: any, opts: { readBackFails?: boolean } = {}) {
+    mock.method(c, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    return mock.method(c, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        if (params.ids?.[0] === 'draft-2') {
+          if (opts.readBackFails) throw new Error('read-back unavailable');
+          return { methodResponses: [['Email/get', { list: saved ? [saved] : [] }, 'getEmail']] };
+        }
+        return { methodResponses: [['Email/get', { list: [before] }, 'getEmail']] };
+      }
+      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+    });
+  }
+
+  function createdDraft(makeReq: ReturnType<typeof mock.method>) {
+    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
+    return call!.arguments[0].methodCalls[0][1].create.draft;
+  }
+
+  // ---- what the draft carries survives an edit that isn't about it ----
+
+  it('carries a body-list-routed image the JMAP attachments array never listed', async () => {
+    const draft = htmlDraft('<p>see <img src="cid:pic@x"></p>', [], [imagePart()]);
+    const makeReq = mockEdit(client, draft);
+    await client.updateDraft('draft-1', { subject: 'New' });
+    assert.deepEqual(createdDraft(makeReq).attachments, [
+      { blobId: 'blob-img', type: 'image/png', name: 'pic.png', disposition: 'inline', cid: 'pic@x' },
+    ]);
+  });
+
+  it('says nothing about images on an edit that cannot have changed what the body displays', async () => {
+    const draft = htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]);
+    const makeReq = mockEdit(client, draft);
+    const result = await client.updateDraft('draft-1', { subject: 'New' });
+    assert.equal(result.notes, undefined);
+    assert.equal(result.inlineImages, undefined);
+    assert.equal(makeReq.mock.calls.length, 3); // no re-read: nothing was attached
+  });
+
+  it('resolves a percent-encoded reference to the part that supplies it', async () => {
+    const draft = htmlDraft('<p>x</p>', [imagePart()]);
+    const makeReq = mockEdit(client, draft, htmlDraft('<p>y</p>', [imagePart()]));
+    await client.updateDraft('draft-1', { htmlBody: '<p>y <img src="cid:pic%40x"></p>' });
+    assert.match(createdDraft(makeReq).bodyValues.html.value, /cid:pic%40x/);
+  });
+
+  // ---- a draft whose stored body already references an image it doesn't carry ----
+
+  const BROKEN = htmlDraft('<p>hi</p><img src="cid:gone@x">');
+
+  it('refuses a body edit while the stored body references an image nothing supplies', async () => {
+    mockEdit(client, BROKEN);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>new</p><img src="cid:gone@x">' }),
+      /stored body references image identifier\(s\) with no matching attachment.*gone@x/s,
+    );
+  });
+
+  it('still runs a metadata edit on such a draft, carrying the broken body verbatim', async () => {
+    const makeReq = mockEdit(client, BROKEN);
+    await client.updateDraft('draft-1', { subject: 'Renamed' });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.html.value, '<p>hi</p><img src="cid:gone@x">');
+    assert.equal(draft.textBody, undefined); // body-invariant: no text part invented
+  });
+
+  it('still appends an unrelated attachment to such a draft', async () => {
+    const makeReq = mockEdit(client, BROKEN);
+    await client.updateDraft('draft-1', {
+      attachments: [{ blobId: 'b-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' }],
+    });
+    assert.equal(createdDraft(makeReq).attachments.length, 1);
+  });
+
+  it('accepts an attachment that supplies the missing image', async () => {
+    const supplied = imagePart({ cid: 'gone@x', blobId: 'b-gone' });
+    const makeReq = mockEdit(client, BROKEN, htmlDraft('<p>hi</p><img src="cid:gone@x">', [supplied]));
+    const result = await client.updateDraft('draft-1', {
+      attachments: [{ blobId: 'b-gone', type: 'image/png', name: 'pic.png', cid: 'gone@x', disposition: 'inline' }],
+    });
+    assert.equal(createdDraft(makeReq).attachments.length, 1);
+    assert.deepEqual(result.notes, ['This draft embeds 1 image(s) (2 KB).']);
+  });
+
+  it('accepts a body edit that replaces the broken body outright', async () => {
+    const makeReq = mockEdit(client, BROKEN);
+    await client.updateDraft('draft-1', { htmlBody: '<p>all new</p>' });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, '<p>all new</p>');
+  });
+
+  // ---- identifiers the recreate cannot reproduce ----
+
+  const EXOTIC_CID = htmlDraft('<p>hi</p>', [imagePart({ cid: 'has space@x' })]);
+
+  it('refuses a body edit when a stored identifier cannot be re-created faithfully', async () => {
+    mockEdit(client, EXOTIC_CID);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>new</p>' }),
+      /cannot safely re-create.*Recreate it — with reply_email or forward_email/s,
+    );
+  });
+
+  it('leaves metadata edits of such a draft alone (the carry reproduces the value verbatim)', async () => {
+    const makeReq = mockEdit(client, EXOTIC_CID);
+    await client.updateDraft('draft-1', { subject: 'Renamed' });
+    assert.equal(createdDraft(makeReq).attachments[0].cid, 'has space@x');
+  });
+
+  // ---- body shapes the recreate cannot express ----
+
+  it('refuses a body that interleaves two parts of the same text type', async () => {
+    const interleaved = {
+      ...EXISTING_DRAFT,
+      textBody: null,
+      htmlBody: [{ partId: 'h1', type: 'text/html' }, imagePart(), { partId: 'h2', type: 'text/html' }],
+      bodyValues: { h1: { value: '<p>above</p>' }, h2: { value: '<p>below</p>' } },
+      attachments: [],
+    };
+    mockEdit(client, interleaved);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      /interleaves multiple text parts of the same type.*see issue #85/s,
+    );
+  });
+
+  it('raises a body-shape refusal before an attachment one', async () => {
+    const weird = {
+      ...EXISTING_DRAFT,
+      textBody: [{ partId: '1', type: 'text/calendar' }],
+      htmlBody: null,
+      bodyValues: { '1': { value: 'BEGIN:VCALENDAR' } },
+      attachments: [],
+    };
+    mockEdit(client, weird);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { removeAttachments: ['no-such-blob'] }),
+      /cannot carry/,
+    );
+  });
+
+  // ---- removals ----
+
+  it('refuses a removal that would leave the surviving body pointing at nothing', async () => {
+    mockEdit(client, htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { removeAttachments: ['blob-img'] }),
+      /removeAttachments would remove an image the draft's body still references/,
+    );
+  });
+
+  it('refuses an attachment wipe that would leave the surviving body pointing at nothing', async () => {
+    mockEdit(client, htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['attachments'] }),
+      /would strip image\(s\) the surviving body still references/,
+    );
+  });
+
+  it('wipes the attachments when the surviving body references none of them', async () => {
+    const makeReq = mockEdit(client, htmlDraft('<p>no images here</p>', [imagePart()]));
+    await client.updateDraft('draft-1', { clearFields: ['attachments'] });
+    assert.equal(createdDraft(makeReq).attachments, undefined);
+  });
+
+  it('takes a server-managed image off the draft when the rewritten body stops displaying it', async () => {
+    const draft = htmlDraft(`<p><img src="cid:${STORED_MINT}"></p>`, [imagePart({ cid: STORED_MINT })]);
+    const makeReq = mockEdit(client, draft);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    assert.equal(createdDraft(makeReq).attachments, undefined);
+    assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 0, removed: 1 });
+    assert.deepEqual(result.notes, ['Removed 1 image(s) that were embedded in the quote.']);
+  });
+
+  it("keeps someone else's image as a regular attachment when the body stops displaying it", async () => {
+    const draft = htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]);
+    const makeReq = mockEdit(client, draft);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    assert.deepEqual(createdDraft(makeReq).attachments, [
+      { blobId: 'blob-img', type: 'image/png', name: 'pic.png', disposition: 'attachment', cid: 'pic@x' },
+    ]);
+    assert.deepEqual(result.notes, ['1 of your image(s) became regular attachments (no html body ships them).']);
+  });
+
+  it('counts both parts when two embedded images share one blob', async () => {
+    // The same bytes displayed twice under different Content-IDs are two parts, and both
+    // leave the draft. Counting by blob would report one and quietly lose the other.
+    const shared = [
+      imagePart({ partId: 'a', cid: STORED_MINT }),
+      imagePart({ partId: 'b', cid: SECOND_MINT }),
+    ];
+    const draft = htmlDraft(`<p><img src="cid:${STORED_MINT}"><img src="cid:${SECOND_MINT}"></p>`, shared);
+    const makeReq = mockEdit(client, draft);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    assert.equal(createdDraft(makeReq).attachments, undefined);
+    assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 0, removed: 2 });
+    assert.deepEqual(result.notes, ['Removed 2 image(s) that were embedded in the quote.']);
+  });
+
+  it('counts both parts when two blob-sharing images degrade to attachments', async () => {
+    const shared = [
+      imagePart({ partId: 'a', cid: 'first@x' }),
+      imagePart({ partId: 'b', cid: 'second@x' }),
+    ];
+    const draft = htmlDraft('<p><img src="cid:first@x"><img src="cid:second@x"></p>', shared);
+    const makeReq = mockEdit(client, draft);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    assert.equal(createdDraft(makeReq).attachments.length, 2);
+    assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 2, removed: 0 });
+    assert.deepEqual(result.notes, ['2 of your image(s) became regular attachments (no html body ships them).']);
+  });
+
+  it('reports a part the caller removed once, as a removal it asked for', async () => {
+    // The explicit removal is the caller's own action and needs no sentence; what must not
+    // happen is the same part ALSO being counted as one the edit took off the body.
+    const draft = htmlDraft(`<p><img src="cid:${STORED_MINT}"></p>`, [imagePart({ cid: STORED_MINT })]);
+    const result = await client.updateDraft.call(
+      (mockEdit(client, draft), client),
+      'draft-1',
+      { htmlBody: '<p>gone</p>', removeAttachments: ['blob-img'] },
+    );
+    assert.equal(result.notes, undefined);
+    assert.equal(result.inlineImages, undefined);
+  });
+
+  // ---- collisions ----
+
+  it('refuses two attachments in one call sharing an identifier', async () => {
+    mockEdit(client, htmlDraft('<p>x</p>', []));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        htmlBody: '<p>y <img src="cid:dup@me"></p>',
+        attachments: [
+          { blobId: 'b1', type: 'image/png', cid: 'dup@me', disposition: 'inline' },
+          { blobId: 'b2', type: 'image/png', cid: 'dup@me', disposition: 'inline' },
+        ],
+      }),
+      /2 attachments items share cid "dup@me"/,
+    );
+  });
+
+  it('refuses an attachment whose identifier is already used on the draft', async () => {
+    mockEdit(client, htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        attachments: [{ blobId: 'b-other', type: 'image/png', cid: 'pic@x', disposition: 'inline' }],
+      }),
+      /already used by another attachment on this draft/,
+    );
+  });
+
+  it('refuses a caller reference to a server-managed identifier', async () => {
+    mockEdit(client, htmlDraft('<p>x</p>', []));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: `<p><img src="cid:${STORED_MINT}"></p>` }),
+      /a server-managed identifier for quoted images/,
+    );
+  });
+
+  it('refuses a caller reference nothing supplies', async () => {
+    mockEdit(client, htmlDraft('<p>x</p>', []));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p><img src="cid:mine-logo"></p>' }),
+      /references cid "mine-logo" but no attachment supplies it.*add an attachments item with cid: "mine-logo"/s,
+    );
+  });
+
+  it('offers no attachments repair when this server cannot attach files at all', async () => {
+    mockEdit(client, htmlDraft('<p>x</p>', []));
+    await assert.rejects(
+      () => client.updateDraft(
+        'draft-1',
+        { htmlBody: '<p><img src="cid:mine-logo"></p>' },
+        { attachmentsEnabled: false },
+      ),
+      /sending attachments is disabled on this server/,
+    );
+  });
+
+  // ---- confirming what the saved draft carries ----
+
+  const NEW_INLINE = { blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'logo@me', disposition: 'inline' };
+  const WITH_LOGO = htmlDraft('<p><img src="cid:logo@me"></p>', [imagePart({ blobId: 'b-logo', cid: 'logo@me', name: 'logo.png' })]);
+
+  it('re-reads the saved draft when it attached an embedded image, and reports its size', async () => {
+    const makeReq = mockEdit(client, htmlDraft('<p>x</p>', []), WITH_LOGO);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p><img src="cid:logo@me"></p>',
+      attachments: [NEW_INLINE],
+    });
+    assert.equal(makeReq.mock.calls.length, 4); // the re-read is the fourth call
+    assert.deepEqual(result.notes, ['This draft embeds 1 image(s) (2 KB).']);
+  });
+
+  it('says so when the saved draft comes back without the image it attached', async () => {
+    const result = await client.updateDraft.call(
+      (mockEdit(client, htmlDraft('<p>x</p>', []), htmlDraft('<p>x</p>', [])), client),
+      'draft-1',
+      { htmlBody: '<p><img src="cid:logo@me"></p>', attachments: [NEW_INLINE] },
+    );
+    assert.ok(result.notes?.some((n) => /were not found on the saved draft/.test(n)));
+  });
+
+  it('never fails the edit when the confirming read does', async () => {
+    mockEdit(client, htmlDraft('<p>x</p>', []), undefined, { readBackFails: true });
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p><img src="cid:logo@me"></p>',
+      attachments: [NEW_INLINE],
+    });
+    assert.equal(result.id, 'draft-2');
+    assert.ok(result.notes?.some((n) => /could not re-read it to confirm/.test(n)));
+  });
+});
+
+describe('updateDraft quote rebuild with embedded images (#13)', () => {
+  let client: JmapClient;
+  beforeEach(() => { client = makeClient(); });
+
+  const MINT_SHAPE = /^ii-[0-9a-f]{32}@inline\.invalid$/;
+  const STORED_MINT = 'ii-0123456789abcdef0123456789abcdef@inline.invalid';
+  const SECOND_MINT = 'ii-fedcba9876543210fedcba9876543210@inline.invalid';
+
+  function storedQuotePart(cid: string, blobId = 'blob-one') {
+    return { partId: 'p2', blobId, type: 'image/png', name: 'one.png', cid, disposition: 'inline', size: 2048 };
+  }
+
+  // A reply draft this server made: a note, an attribution, and a cited quote whose image is
+  // supplied by a part already on the draft.
+  function replyDraft(quoteImageCids: string[], parts: any[]) {
+    const imgs = quoteImageCids.map((c) => `<img src="cid:${c}">`).join('');
+    return {
+      id: 'draft-1', subject: 'Re: Hello',
+      from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }], cc: [], bcc: [],
+      mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
+      inReplyTo: ['orig-msg@example.com'], references: ['orig-msg@example.com'],
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: {
+        t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Jon wrote:\n> ORIGINAL' },
+        h: { value: `<p>my reply</p><div>On Sun, Jun 28, 2026, at 12:46 AM, Jon wrote:</div><blockquote type="cite">${imgs}<p>ORIGINAL</p></blockquote>` },
+      },
+      attachments: parts,
+    };
+  }
+
+  // The message being replied to. `imageCids` are the references its own html makes, each
+  // supplied by one of `parts`.
+  function originalWith(imageCids: string[], parts: any[]) {
+    const imgs = imageCids.map((c) => `<img src="cid:${c}">`).join('');
+    return {
+      id: 'orig-1',
+      messageId: ['orig-msg@example.com'],
+      from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
+      sentAt: '2026-06-15T03:29:02Z',
+      subject: 'Hello',
+      textBody: [{ partId: 'ot', type: 'text/plain' }],
+      htmlBody: [{ partId: 'oh', type: 'text/html' }],
+      bodyValues: { ot: { value: 'ORIGINAL TEXT' }, oh: { value: `<p>ORIGINAL${imgs}</p>` } },
+      attachments: parts,
+    };
+  }
+
+  const ORIG_ONE_IMAGE = originalWith(['one@orig'], [
+    { partId: 'op', blobId: 'blob-one', type: 'image/png', name: 'one.png', cid: 'one@orig', disposition: 'inline', size: 2048 },
+  ]);
+  const ORIG_NO_IMAGES = originalWith([], []);
+  const ORIG_TEXT_ONLY = {
+    id: 'orig-1', messageId: ['orig-msg@example.com'],
+    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
+    sentAt: '2026-06-15T03:29:02Z', subject: 'Hello',
+    textBody: [{ partId: 'ot', type: 'text/plain' }], htmlBody: [], bodyValues: { ot: { value: 'ORIGINAL TEXT' } },
+    attachments: [],
+  };
+
+  // Echoes the created draft back on a re-read of the saved copy: what the server stores is
+  // what the create sent, which is what makes the confirming read meaningful here (the
+  // freshly minted identifiers aren't knowable in advance).
+  function mockKeep(c: JmapClient, draft: any, original: any) {
+    mock.method(c, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    let created: any = null;
+    return mock.method(c, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        if (params.ids?.[0] === 'orig-1') return { methodResponses: [['Email/get', { list: [original] }, 'email']] };
+        if (params.ids?.[0] === 'draft-2') {
+          return { methodResponses: [['Email/get', { list: [{ id: 'draft-2', attachments: created?.attachments ?? [] }] }, 'getEmail']] };
+        }
+        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
+      }
+      if (params.create) {
+        created = params.create.draft;
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
+      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+    });
+  }
+
+  function createdDraft(makeReq: ReturnType<typeof mock.method>) {
+    const call = makeReq.mock.calls.find((c: any) => c.arguments[0].methodCalls[0][1].create);
+    return call!.arguments[0].methodCalls[0][1].create.draft;
+  }
+
+  it('keeps the identifier a stored quote image already has', async () => {
+    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
+    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.html.value, new RegExp(`cid:${STORED_MINT}`));
+    assert.deepEqual(draft.attachments, [
+      { blobId: 'blob-one', type: 'image/png', name: 'one.png', disposition: 'inline', cid: STORED_MINT },
+    ]);
+  });
+
+  it('mints a fresh identifier when the draft carries no part for the quoted image', async () => {
+    const makeReq = mockKeep(client, replyDraft([], []), ORIG_ONE_IMAGE);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.attachments.length, 1);
+    assert.match(draft.attachments[0].cid, MINT_SHAPE);
+    assert.equal(draft.attachments[0].disposition, 'inline');
+    assert.match(draft.bodyValues.html.value, new RegExp(`cid:${draft.attachments[0].cid.replace(/[.@]/g, '\\$&')}`));
+    assert.deepEqual(result.notes, ['This draft embeds 1 image(s) (2 KB).']);
+  });
+
+  it('mints afresh when the stored part carries a different blob', async () => {
+    const makeReq = mockKeep(
+      client,
+      replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT, 'blob-stale')]),
+      ORIG_ONE_IMAGE,
+    );
+    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    // The stale part is unreferenced by the rebuilt quote and comes off; the minted one rides
+    // its own channel at the end.
+    assert.equal(draft.attachments.length, 1);
+    assert.match(draft.attachments[0].cid, MINT_SHAPE);
+    assert.equal(draft.attachments[0].blobId, 'blob-one');
+  });
+
+  it('claims one survivor per reference when two references share a blob', async () => {
+    const original = originalWith(['one@orig', 'two@orig'], [
+      { partId: 'oa', blobId: 'blob-one', type: 'image/png', name: 'one.png', cid: 'one@orig', disposition: 'inline', size: 2048 },
+      { partId: 'ob', blobId: 'blob-one', type: 'image/png', name: 'one.png', cid: 'two@orig', disposition: 'inline', size: 2048 },
+    ]);
+    const draft = replyDraft([STORED_MINT, SECOND_MINT], [
+      storedQuotePart(STORED_MINT),
+      { ...storedQuotePart(SECOND_MINT), partId: 'p3' },
+    ]);
+    const makeReq = mockKeep(client, draft, original);
+    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
+    const created = createdDraft(makeReq);
+    assert.deepEqual(created.attachments.map((p: any) => p.cid), [STORED_MINT, SECOND_MINT]);
+    assert.match(created.bodyValues.html.value, new RegExp(`cid:${STORED_MINT}`));
+    assert.match(created.bodyValues.html.value, new RegExp(`cid:${SECOND_MINT}`));
+  });
+
+  it('takes a stored quote image off the draft when the rebuilt quote no longer shows it', async () => {
+    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_NO_IMAGES);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
+    assert.equal(createdDraft(makeReq).attachments, undefined);
+    assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 0, removed: 1 });
+    assert.deepEqual(result.notes, ['Removed 1 image(s) that were embedded in the quote.']);
+  });
+
+  it('re-embeds the quote images after an attachment wipe, and says it did both', async () => {
+    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>edited</p>', originalEmailId: 'orig-1', clearFields: ['attachments'],
+    });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.attachments.length, 1);
+    assert.match(draft.attachments[0].cid, MINT_SHAPE); // wiped, then re-embedded afresh
+    assert.ok(result.notes?.includes('Cleared 1 attachment(s); the kept quote re-embedded 1 image(s).'));
+  });
+
+  it('refuses to remove an individual image the kept quote supplies', async () => {
+    mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        htmlBody: '<p>edited</p>', originalEmailId: 'orig-1', removeAttachments: ['blob-one'],
+      }),
+      /embedded by the kept quote.*Use noQuote with a replacement body/s,
+    );
+  });
+
+  it('drops the quote and its images when noQuote replaces the body', async () => {
+    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>bare</p>', noQuote: true });
+    assert.equal(createdDraft(makeReq).attachments, undefined);
+    assert.deepEqual(result.notes, ['Removed 1 image(s) that were embedded in the quote.']);
+  });
+
+  it('counts a quote image once when the caller also names it for removal', async () => {
+    // Dropping the quote would take the image off anyway. Because the named removal is
+    // applied first, the image is gone exactly once and the result reports the caller's own
+    // removal rather than also claiming the edit took it off the body.
+    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>bare</p>', noQuote: true, removeAttachments: ['blob-one'],
+    });
+    assert.equal(createdDraft(makeReq).attachments, undefined);
+    assert.equal(result.notes, undefined);
+    assert.equal(result.inlineImages, undefined);
+  });
+
+  it('quotes a text-only original on the keep path', async () => {
+    const makeReq = mockKeep(client, replyDraft([], []), ORIG_TEXT_ONLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.html.value, /ORIGINAL TEXT/);
+    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
+  });
+
+  it('leaves a text-only keep with no minted parts (no html body would ship them)', async () => {
+    const textOnlyReply = {
+      ...replyDraft([], []),
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 't', type: 'text/plain' }],
+      bodyValues: { t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Jon wrote:\n> ORIGINAL' } },
+    };
+    const makeReq = mockKeep(client, textOnlyReply, ORIG_ONE_IMAGE);
+    await client.updateDraft('draft-1', { textBody: 'edited', originalEmailId: 'orig-1' });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.attachments, undefined);
+    assert.match(draft.bodyValues.text.value, /> ORIGINAL/);
+  });
+});
+
 describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
   let client: JmapClient;
 
@@ -2935,6 +3529,49 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     await client.updateDraft('fdraft-1', { textBody: 'bare note', noQuote: true });
     const draft = createdDraftObj(makeReq);
     assert.equal(draft[FWD_HEADER_PROP], undefined);
+  });
+
+  it('a body-less noQuote de-forwards without touching the draft\'s parts', async () => {
+    // noQuote on an edit that writes no body has one documented effect — clearing the forward
+    // marking — and must keep everything else exactly as it was, embedded images included:
+    // there is no body change for the parts to be reconciled against.
+    const withImage = {
+      ...DUAL_FORWARD,
+      attachments: [{
+        partId: '2', blobId: 'blob-pic', type: 'image/png', name: 'pic.png',
+        cid: 'ii-0123456789abcdef0123456789abcdef@inline.invalid', disposition: 'inline', size: 2048,
+      }],
+    };
+    const makeReq = mockForwardUpdate(client, withImage);
+    const result = await client.updateDraft('fdraft-1', { subject: 'Renamed', noQuote: true });
+    const draft = createdDraftObj(makeReq);
+    assert.equal(draft[FWD_HEADER_PROP], undefined);
+    assert.equal(draft.bodyValues.html.value, FWD_HTML); // body untouched
+    assert.deepEqual(draft.attachments, [{
+      blobId: 'blob-pic', type: 'image/png', name: 'pic.png', disposition: 'inline',
+      cid: 'ii-0123456789abcdef0123456789abcdef@inline.invalid',
+    }]);
+    assert.equal(result.notes, undefined);
+  });
+
+  it('keeps the guard inert when the attached message is routed into the body list', async () => {
+    // Which list a server puts the .eml in is a MIME-shape accident; the carve-out that keeps
+    // an attached-message forward editable has to hold either way.
+    const bodyRouted = {
+      ...FORWARD_BASE, id: 'fdraft-1',
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [
+        { partId: 't', type: 'text/plain' },
+        { partId: '2', blobId: 'blob-eml', type: 'message/rfc822', size: 999, name: 'Hello.eml', disposition: 'attachment', cid: null },
+      ],
+      bodyValues: { t: { value: 'Forwarded message attached.' } },
+      attachments: [],
+    };
+    const makeReq = mockForwardUpdate(client, bodyRouted);
+    await client.updateDraft('fdraft-1', { textBody: 'updated note about the attached message' });
+    const draft = createdDraftObj(makeReq);
+    assert.equal(draft.attachments[0].blobId, 'blob-eml');
+    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
   });
 
   it('originalEmailId + noQuote together are rejected even on an unengaged (asAttachment) draft', async () => {

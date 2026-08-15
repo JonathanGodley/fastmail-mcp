@@ -112,21 +112,45 @@ primary defense, not a claim that exfiltration is impossible once enabled.
 
 ### edit_draft attachment model
 
-`edit_draft` carries the existing (non-inline) attachments across the immutable-email
-recreate and then applies the requested change: `attachments` **appends**;
-`removeAttachments` drops carried parts by `blobId` (or a unique non-null `name`), rejecting
-a ref that matches nothing or a name matching more than one; `clearFields:['attachments']`
-removes all. Passing `attachments` together with `clearFields:['attachments']` is a rejected
-conflict. An attachment-only edit stays body-invariant (it must not inject or strip a body).
+`edit_draft` carries the existing attachments across the immutable-email recreate and then
+applies the requested change: `attachments` **appends**; `removeAttachments` drops carried
+parts by `blobId` (or a unique non-null `name`), rejecting a ref that matches nothing or a
+name matching more than one; `clearFields:['attachments']` removes all. Passing
+`attachments` together with `clearFields:['attachments']` is a rejected conflict. An
+attachment-only edit stays body-invariant (it must not inject or strip a body).
+
+The carried set is the **union** of the JMAP `attachments` array and the media parts the
+server routed into the body lists, which is what makes images embedded in the body carriable
+at all — and it means both removal routes reach them. That reach is deliberate and
+disclosed in the tool descriptions: a removal is refused whenever the surviving body would
+still reference what it took away, so the destructive case a caller can reach silently is
+the one where nothing displays the part any more.
 
 **Accepted residual — orphaned blobs on a late reject.** The handlers upload new
 attachment blobs *before* the draft create/recreate runs, so a rejection raised by a later
-guard (e.g. `edit_draft`'s inline-cid reject, a non-text/html body part, an unresolvable
-`removeAttachments` ref, or the no-body-result guard) leaves the just-uploaded blobs
-unreferenced. `uploadAttachments` orphans zero blobs *within its own batch* (a two-pass
-design), but that guarantee ends at its return; the upload-then-reject ordering reopens a
-window. Accepted because Fastmail garbage-collects unreferenced blobs (the same GC the code
-already relies on for a mid-batch upload failure) — no unbounded growth, no data exposure.
+guard (e.g. `edit_draft`'s refusal over a body part the recreate cannot reproduce, an
+unresolvable `removeAttachments` ref, a reference to an image nothing supplies, or the
+no-body-result guard) leaves the just-uploaded blobs unreferenced. `uploadAttachments`
+orphans zero blobs *within its own batch* (a two-pass design), but that guarantee ends at
+its return; the upload-then-reject ordering reopens a window. Accepted because Fastmail
+garbage-collects unreferenced blobs (the same GC the code already relies on for a
+mid-batch upload failure) — no unbounded growth, no data exposure.
+
+### send_draft reads the parts to report, never to refuse (#13)
+
+`send_draft`'s pre-send fetch asks for the draft's part listing (`attachments`, plus each
+part's `disposition`, `cid` and `name`) for one purpose: the sentence that reports how many
+embedded images the transmitted message carried. It is a **receipt, computed after the
+submission** — never a send-time vet. Nothing in that listing can refuse a send.
+
+That is a deliberate split, not an oversight. `send_draft` submits the stored draft **by
+reference**: it transmits exactly the bytes already saved, and it cannot rewrite them. A
+refusal there would therefore strand a finished message with no in-place repair, which is
+why every refusal over message *shape* lives on the edit path instead, where the draft can
+actually be fixed or replaced. The corollary matters when reading the `edit_draft`
+refusals above: **a draft this server declines to edit is still perfectly sendable.** Those
+refusals say "this server cannot rebuild that shape faithfully", never "this message is
+unsafe to send".
 
 ### forward_email attachment postures (#30)
 

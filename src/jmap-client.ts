@@ -2,9 +2,23 @@ import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, PathAccessError, InvalidInputError } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
-import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker } from './reply-quote.js';
+import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml } from './reply-quote.js';
 import { isSettableMessageId } from './forward-handler.js';
-import { buildUnionParts, cidKey, describePart, sanitizeDownloadFilename } from './inline-images.js';
+import {
+  buildUnionParts, cidKey, describePart, sanitizeDownloadFilename,
+  buildCidMap, checkInlineClosure, isRecreatableCid, isReservedCid, reconcileInlineParts,
+  sanitizeQuoteHtml,
+} from './inline-images.js';
+import type { CidMapping, CidPart, MintedInlinePart, UnionPart } from './inline-images.js';
+import {
+  InlineNoteLedger, emitInlineNotes,
+  noteEmbedMissingAfterSave, noteEmbedUnconfirmed, noteSentWithEmbedded,
+  rejectBrokenDraft, rejectCidCollisionInCall, rejectCidCollisionOnDraft,
+  rejectClearAttachmentsDanglingRefs, rejectDanglingCidRef, rejectInterleavedTextParts,
+  rejectRemovalDanglingRef, rejectRemovalOfQuoteCarriedPart, rejectReservedCidRef,
+  rejectUncarriableBodyPart, rejectUnrecreatableCid,
+} from './inline-notes.js';
+import type { AttachmentAvailability } from './inline-notes.js';
 import { writeFile, mkdir, realpath, stat, lstat, open } from 'fs/promises';
 import type { FileHandle } from 'fs/promises';
 import { dirname, resolve, normalize, sep, basename, join } from 'path';
@@ -246,6 +260,9 @@ export function readSourceReferences(email: any): SourceReferences {
 export interface SendDraftOutcome {
   submissionId: string;
   sourceReferences: SourceReferences;
+  // What the transmitted message actually carried as embedded images (#13). A receipt, read
+  // off the same pre-send fetch: the caller sees what went out, not what was intended.
+  notes?: string[];
 }
 
 // Recall cap for the Message-ID lookup. The full-text step can match messages that merely
@@ -356,6 +373,193 @@ function resolveAttachmentRef(parts: any[], attachmentId: string): any {
   return undefined;
 }
 
+// ---------------------------------------------------------------------------
+// The draft-edit part model: body shape, removals, carry (#13)
+// ---------------------------------------------------------------------------
+
+// The identity a part is deduped by across the three lists — the same rule the part union
+// uses, so a part counted once there is counted once here. RFC 8621 §4.1.4 puts one
+// displayed part into BOTH body lists, and a single-format draft aliases its one text part
+// into both, so counting raw array entries would double every part in the message.
+function draftPartKey(part: any, fallback: number): string {
+  if (typeof part?.partId === 'string' && part.partId) return `p:${part.partId}`;
+  if (typeof part?.blobId === 'string' && part.blobId) return `b:${part.blobId}`;
+  return `i:${fallback}`;
+}
+
+// Content type without its parameters, lowercased. For CLASSIFYING only — the value stored
+// or sent for a part is always the server's own string (RFC 2045 §5.1).
+function classifyPartType(type: unknown): string {
+  if (typeof type !== 'string') return '';
+  const semicolon = type.indexOf(';');
+  return (semicolon === -1 ? type : type.slice(0, semicolon)).trim().toLowerCase();
+}
+
+const TEXT_BODY_TYPES = new Set(['text/plain', 'text/html']);
+
+// The non-text body parts the recreate can reproduce. The media three are what RFC 8621
+// §4.1.4 routes into a body list in the first place; message/rfc822 is there because
+// forward_email writes exactly that part itself (asAttachment), and a server that lists it
+// as body content must not make its own drafts uneditable. Everything else — a calendar
+// part, a signature part, an arbitrary application/* — has no flat-property spelling, so
+// carrying it would change what the message IS.
+function isCarriableBodyType(type: string): boolean {
+  return /^(?:image|audio|video)\//.test(type) || type === 'message/rfc822';
+}
+
+export interface DraftBodyShape {
+  // A part the recreate cannot reproduce, with whether it is media (which decides the
+  // wording — "a media part" reads wrong for a calendar attachment).
+  uncarriablePart?: { part: any; isMedia: boolean };
+  // Set when two DISTINCT parts of one text type sit in the body lists: the Apple Mail
+  // text-image-text layout, whose ordering a flat rebuild cannot express (issue #85).
+  interleavedTextType?: string;
+}
+
+/**
+ * Decide whether a draft's body is a shape the immutable-email recreate can rebuild.
+ *
+ * Deduping FIRST is load-bearing, not an optimization: a single-format draft lists its one
+ * text part under both textBody and htmlBody, so a raw count would see two text/plain parts
+ * on an ordinary plain-text draft and refuse to edit it. A typeless part is left alone —
+ * the body reader treats one as body text, and inventing a refusal for it would reject
+ * drafts that have always worked.
+ */
+export function classifyDraftBodyShape(email: any): DraftBodyShape {
+  const lists = [email?.textBody, email?.htmlBody].filter(Array.isArray) as any[][];
+  const seen = new Set<string>();
+  const textTypeCounts = new Map<string, number>();
+  const shape: DraftBodyShape = {};
+  let index = 0;
+
+  for (const list of lists) {
+    for (const part of list) {
+      if (!part) continue;
+      const key = draftPartKey(part, index++);
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const type = classifyPartType(part.type);
+      if (!type || TEXT_BODY_TYPES.has(type)) {
+        if (!type) continue;
+        const count = (textTypeCounts.get(type) ?? 0) + 1;
+        textTypeCounts.set(type, count);
+        if (count > 1 && !shape.interleavedTextType) shape.interleavedTextType = type;
+        continue;
+      }
+
+      const carriable = isCarriableBodyType(type)
+        && typeof part.blobId === 'string' && part.blobId !== '';
+      if (!carriable && !shape.uncarriablePart) {
+        shape.uncarriablePart = { part, isMedia: /^(?:image|audio|video)\//.test(type) };
+      }
+    }
+  }
+
+  return shape;
+}
+
+export interface AttachmentRemovalPlan {
+  /** Parts this call takes off the draft, in stored order. */
+  removed: any[];
+  /** Parts that stay, in stored order. */
+  survivors: any[];
+  /**
+   * The refusal a bad ref earned, held rather than thrown.
+   *
+   * Resolution runs EARLY (the rebuilt quote has to know which parts survive it) but the
+   * body-shape guards must keep raising first, so this is raised at the point in the order
+   * the removal loop always occupied. Resolution itself performs no I/O and throws nothing.
+   */
+  error?: PathAccessError;
+}
+
+/**
+ * Match each removeAttachments ref against the draft's parts, or clear them all.
+ *
+ * A ref names a blobId (every part with that blob comes off — a blob shared by two parts is
+ * the same bytes) or, failing that, a unique non-null name. A ref that matches nothing, or a
+ * name that matches several, is an error rather than a silent no-op: a removal the caller
+ * believes happened is the confidently-wrong result this codebase refuses to produce.
+ */
+export function resolveAttachmentRemovals(
+  storedParts: any[],
+  refs: string[] | undefined,
+  clearAll: boolean,
+): AttachmentRemovalPlan {
+  if (clearAll) return { removed: storedParts.slice(), survivors: [] };
+
+  let survivors = storedParts.slice();
+  const removed: any[] = [];
+  for (const ref of refs ?? []) {
+    const byBlob = survivors.filter((p) => p.blobId !== ref);
+    if (byBlob.length < survivors.length) {
+      removed.push(...survivors.filter((p) => p.blobId === ref));
+      survivors = byBlob;
+      continue;
+    }
+    const nameMatches = survivors.filter((p) => p.name != null && p.name === ref);
+    if (nameMatches.length === 1) {
+      removed.push(nameMatches[0]);
+      survivors = survivors.filter((p) => p !== nameMatches[0]);
+      continue;
+    }
+    if (nameMatches.length > 1) {
+      return {
+        removed,
+        survivors,
+        error: new PathAccessError(
+          `removeAttachments ref '${ref}' matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${survivors.map((p) => p.blobId).join(', ')}).`,
+        ),
+      };
+    }
+    return {
+      removed,
+      survivors,
+      error: new PathAccessError(
+        `removeAttachments ref '${ref}' matched no attachment on this draft. Carried blobIds: ${storedParts.map((p) => p.blobId).join(', ') || '(none)'}.`,
+      ),
+    };
+  }
+  return { removed, survivors };
+}
+
+// Re-reference a stored part on the recreated draft. Whitelist exactly these fields — a
+// blob-backed part is blobId XOR partId, and `size` is server-set, so sending partId/size
+// would be rejected by a strict server. `demote` is what an embedded image becomes when the
+// body that displayed it is gone but the bytes are not this server's to discard: an ordinary
+// attachment. Its Content-ID rides along — a Content-ID never makes a part inline on its
+// own (probed live 2026-08-14) — so nothing is lost if a later edit displays it again.
+function carriedPartFrom(part: any, demote = false): AttachmentPart {
+  return {
+    blobId: part.blobId,
+    type: part.type,
+    ...(part.name != null && { name: part.name }),
+    ...(demote ? { disposition: 'attachment' } : part.disposition != null && { disposition: part.disposition }),
+    ...(part.cid != null && { cid: part.cid }),
+  };
+}
+
+// The embedded-image references an html body makes, as comparison keys. The collecting pass
+// reports them without deciding anything, so this reads the same references the quote
+// rewriter would act on.
+function htmlCidRefs(html: string | null | undefined): string[] {
+  if (!html) return [];
+  return sanitizeQuoteHtml(html, { mode: 'collect' }).refs;
+}
+
+function partCid(part: any): string {
+  return typeof part?.cid === 'string' ? part.cid : '';
+}
+
+function partBytes(part: any): number {
+  return typeof part?.size === 'number' && part.size > 0 ? part.size : 0;
+}
+
+function isImagePart(part: any): boolean {
+  return classifyPartType(part?.type).startsWith('image/');
+}
+
 // A compact fingerprint of the draft an edit replaced, echoed back so a caller that
 // edited from a stale copy sees immediately what it overwrote (#65). Body sizes are the
 // character lengths of the stored values, not the bodies themselves: the old draft
@@ -380,6 +584,12 @@ export interface UpdateDraftResult {
   orphanedOldDraftId?: string;
   // Why the Trash move didn't happen. Set whenever orphanedOldDraftId is.
   orphanedOldDraftReason?: string;
+  // What the edit did to the draft's embedded images (#13). Present only when it did
+  // something: an edit that neither embeds, demotes nor removes one omits both fields.
+  inlineImages?: { embedded: number; degraded: number; removed: number };
+  // The sentences describing those outcomes, composed once from the final state. Rendered
+  // by the handler — a count nobody prints is not a disclosure.
+  notes?: string[];
 }
 
 export interface MailboxInfo {
@@ -1123,7 +1333,13 @@ export class JmapClient {
     // message; noQuote = deliberately drop it. Absent both, the edit is rejected (no silent loss).
     originalEmailId?: string;
     noQuote?: boolean;
-  }): Promise<UpdateDraftResult> {
+  }, options: {
+    // Whether this server can attach files at all (FASTMAIL_ATTACH_DIR is set). It changes
+    // only which repair a refusal offers: pointing at "add an attachments item" when the
+    // server would then refuse to read one is a dead end. Defaults to the attachment-capable
+    // wording, which is right for every caller that never had the gate to begin with.
+    attachmentsEnabled?: boolean;
+  } = {}): Promise<UpdateDraftResult> {
     // The caller-supplied-body guard for edit_draft. It lives here, unlike the other four
     // compose paths (which guard in their handlers), because updateDraft is edit_draft's
     // only caller — so `updates` IS the caller's own input, before this method regenerates
@@ -1142,10 +1358,9 @@ export class JmapClient {
           accountId: session.accountId,
           ids: [emailId],
           properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'textBody', 'htmlBody', 'bodyValues', 'mailboxIds', 'keywords', 'inReplyTo', 'references', 'attachments', 'header:X-Forwarded-Message-Id:asMessageIds', SOURCE_ID_HEADER],
-          // Inline list (NOT the module-level EMAIL_BODY_PROPERTIES) — extended with
-          // name/disposition/cid so the faithful recreate can carry attachment metadata
-          // and detect inline (cid:) images.
-          bodyProperties: ['partId', 'blobId', 'type', 'size', 'name', 'disposition', 'cid'],
+          // The full part properties: the faithful recreate carries a part's metadata, and
+          // `cid`/`disposition`/`type` are what tell it which parts the body displays.
+          bodyProperties: [...EMAIL_BODY_PROPERTIES],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
         }, 'getEmail']
@@ -1163,24 +1378,31 @@ export class JmapClient {
       throw new InvalidInputError('Cannot edit a non-draft email');
     }
 
-    // Faithful-recreate guards. The recreate below rebuilds the message from flat
-    // convenience props (textBody/htmlBody/attachments), which can't round-trip an
-    // inline (cid:) image's multipart/related linkage, nor a non-text/non-html body
-    // part (e.g. an externally-created multipart/signed or text/calendar draft). Rather
-    // than silently drop or mangle those, reject loudly. (Verified live 2026-06-24: a
-    // cid: inline image surfaces in `attachments` with disposition:'inline'; a regular
-    // attachment that merely carries a cid keeps disposition 'attachment'/absent and is
-    // carried fine. Inline-image authoring/editing is tracked as fork issue #13.)
-    const existingAttachments: any[] = existingEmail.attachments || [];
-    if (existingAttachments.some((a: any) => a.disposition === 'inline')) {
-      throw new InvalidInputError('This draft has inline images, which editing can\'t preserve yet. Recreate the draft instead (see issue #13).');
+    const availability: AttachmentAvailability = {
+      attachmentsEnabled: options.attachmentsEnabled !== false,
+    };
+
+    // The part set this edit works from is the UNION of the JMAP attachments array and the
+    // media parts the server routed into the body lists. The same embedded image lands in
+    // one list or the other depending on the message's MIME shape (RFC 8621 §4.1.4), so
+    // reading `attachments` alone would make a body-routed image invisible to the carry —
+    // it would simply vanish from the recreated draft — and would let the forward guard
+    // re-arm on a draft whose attached .eml the server listed as body content.
+    const storedParts: any[] = buildUnionParts(existingEmail).map((u: UnionPart) => u.part);
+
+    // Faithful-recreate guard. The recreate below rebuilds the message from flat convenience
+    // props (textBody/htmlBody/attachments). That reproduces every blob-backed part along
+    // with its embedded-image linkage — Fastmail assembles the multipart/related shape from
+    // a flat create (probed live 2026-08-14) — but it has no spelling for a part it cannot
+    // re-reference, nor for a body that alternates between two parts of the same text type.
+    // Those two shapes are refused loudly rather than mangled (#13, #85).
+    const bodyShape = classifyDraftBodyShape(existingEmail);
+    if (bodyShape.uncarriablePart) {
+      const { part, isMedia } = bodyShape.uncarriablePart;
+      throw new InvalidInputError(rejectUncarriableBodyPart(part?.name, part?.type, isMedia));
     }
-    // Alias-aware: a single-format draft aliases its one part into BOTH lists with its
-    // real MIME type, so a text-only draft lists text/plain twice — not a reject. Only a
-    // genuinely non-text/non-html typed part trips this; a typeless part is left alone.
-    const allBodyParts = [...(existingEmail.textBody || []), ...(existingEmail.htmlBody || [])];
-    if (allBodyParts.some((p: any) => p.type && p.type !== 'text/plain' && p.type !== 'text/html')) {
-      throw new InvalidInputError('This draft has a body part that isn\'t plain text or HTML, which editing can\'t preserve. Recreate the draft instead.');
+    if (bodyShape.interleavedTextType) {
+      throw new InvalidInputError(rejectInterleavedTextParts());
     }
 
     // Resolve identity
@@ -1272,9 +1494,10 @@ export class JmapClient {
     // header. Residual: a foreign draft with BOTH an unrecognizable inline block and
     // an .eml attachment loses the block's challenge, but the .eml still preserves
     // the forwarded content in full, so nothing is unrecoverable.
+    // Read off the part UNION, not the attachments array: which list a server routes the
+    // .eml into is a MIME-shape accident, and the carve-out has to hold either way.
     const forwardHeader: string[] = existingEmail['header:X-Forwarded-Message-Id:asMessageIds'] || [];
-    const emlAttached = Array.isArray(existingEmail.attachments)
-      && existingEmail.attachments.some((p: any) => p?.type === 'message/rfc822');
+    const emlAttached = storedParts.some((p: any) => classifyPartType(p?.type) === 'message/rfc822');
     const isForward = forwardHeader.length > 0 && !emlAttached;
     const oldHtmlForwarded = hasForwardMarker(existingHtmlValue);
     const oldTextForwarded = hasTextForwardMarker(existingTextValue);
@@ -1303,6 +1526,29 @@ export class JmapClient {
     const clearedHtml = clear.has('htmlBody');
     const clearedText = clear.has('textBody');
     const touchesBody = wroteHtml || wroteText || clearedHtml || clearedText;
+
+    // The caller's OWN html, snapshotted before the keep path can replace it with a rebuilt
+    // body. The checks that must not see this server's own output — an authored reference to
+    // a server-managed identifier is an error, while the rebuilt quote is full of them by
+    // design — read this, never updates.htmlBody.
+    const callerWrittenHtml = updates.htmlBody;
+
+    // Which parts this call takes off the draft, resolved HERE because the quote rebuild
+    // below has to know what survives it: a surviving part supplies its own embedded image,
+    // and a removed one has to be re-attached under a fresh identifier. Resolution is pure
+    // and holds its refusal (see AttachmentRemovalPlan.error) so the body-shape guards keep
+    // raising first; the removal is APPLIED at the point in the order it always was.
+    const removalPlan = resolveAttachmentRemovals(
+      storedParts,
+      updates.removeAttachments,
+      clear.has('attachments'),
+    );
+
+    // Embedded-image references the STORED body already makes with nothing to supply them.
+    // A draft in that state is broken however it got that way, and the refusal it earns is
+    // scoped to edits that write its body — see the check below.
+    const storedPartCids = new Set(storedParts.map(partCid).filter((c) => c !== ''));
+    const storedDanglingRefs = htmlCidRefs(existingHtmlValue).filter((r) => !storedPartCids.has(r));
 
     // The quote survives WITHOUT inspecting any new content in exactly two shapes:
     //  - a metadata-only edit (no body written or cleared) leaves both bodies untouched;
@@ -1333,6 +1579,15 @@ export class JmapClient {
     // pathological both-marker draft would strand the header and the NEXT body edit
     // would be re-challenged by the header floor. One step must fully de-arm.
     let dropForwardHeader = false;
+    // The embedded images a rebuilt quote will display. Filled only on the keep path: the
+    // pure builders see the ORIGINAL but not this draft's surviving parts, so the decision
+    // of which surviving part supplies which reference is made here and the finished map is
+    // handed to them. They rewrite; they never mint.
+    let mintedParts: MintedInlinePart[] = [];
+    let quoteImageMappings: CidMapping[] = [];
+    let rebuiltQuote = false;
+    // How the surrounding refusal or note names the block being kept or dropped.
+    let keepNoun = 'the quote';
     // The recorded source the recreate carries. A forward-variant keep RE-POINTS this
     // to the fetched original's own Message-ID (when settable): the caller may name a
     // DIFFERENT original than the recorded one (the blessed correcting-a-wrong-original
@@ -1348,7 +1603,7 @@ export class JmapClient {
     let carriedSourceId: string | undefined =
       typeof storedSourceId === 'string' && storedSourceId.trim() !== '' ? storedSourceId.trim() : undefined;
     if (guardVariant && touchesBody && !quoteKeptByConstruction && !coupledTextEdit) {
-      const keepNoun = guardVariant === 'reply' ? 'the quote' : 'the forwarded block';
+      keepNoun = guardVariant === 'reply' ? 'the quote' : 'the forwarded block';
       if (updates.originalEmailId && updates.noQuote === true) {
         throw new InvalidInputError(`Pass either originalEmailId (keep ${keepNoun}) or noQuote (discard it), not both.`);
       } else if (updates.originalEmailId) {
@@ -1373,17 +1628,42 @@ export class JmapClient {
         // the downstream no-body reject for a clear-the-last-body edit (the caller sees the
         // regenerate message, not the no-body one); both are loud and lose no data.
         if (wroteHtml || wroteText) {
+          // Resolve the rebuilt quote's embedded images BEFORE building it, but ONLY when
+          // this edit writes an html body: an embedded image needs an html body to display
+          // it (the mail server refuses an inline part without one), so a text-only keep
+          // mints nothing and quotes exactly as it always did. Each reference the original's
+          // html makes is matched to one of the original's parts; a part already on this
+          // draft that survived the removals above and carries an identifier of this
+          // server's own shape supplies it under that SAME identifier, so an ordinary edit
+          // does not renumber images a client has already rendered. Anything unmatched is
+          // carried under a fresh identifier and attached as its own assembly step.
+          let quoteCidMap: Map<string, string> | undefined;
+          if (wroteHtml) {
+            const resolvedQuoteImages = buildCidMap({
+              refs: htmlCidRefs(readQuotableHtml(original)),
+              sourceParts: buildUnionParts(original).map((u: UnionPart) => u.part),
+              // Every surviving part is offered; buildCidMap keeps only the ones carrying an
+              // identifier of this server's own shape.
+              survivors: removalPlan.survivors as CidPart[],
+            });
+            quoteCidMap = resolvedQuoteImages.cidMap;
+            mintedParts = resolvedQuoteImages.minted;
+            quoteImageMappings = resolvedQuoteImages.mappings;
+          }
+          rebuiltQuote = true;
           const rebuilt = guardVariant === 'reply'
             ? buildReplyBodies({
                 original,
                 ...(wroteHtml && { htmlBody: updates.htmlBody }),
                 ...(wroteText && { textBody: updates.textBody }),
                 quoteOriginal: true,
+                ...(quoteCidMap && { cidMap: quoteCidMap }),
               })
             : buildForwardBodies({
                 original,
                 ...(wroteHtml && { htmlBody: updates.htmlBody }),
                 ...(wroteText && { textBody: updates.textBody }),
+                ...(quoteCidMap && { cidMap: quoteCidMap }),
               });
           if (wroteHtml) updates.htmlBody = rebuilt.htmlBody;
           if (wroteText) updates.textBody = rebuilt.textBody;
@@ -1541,51 +1821,177 @@ export class JmapClient {
       throw new InvalidInputError('a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
     }
 
-    // Carry existing (non-inline) attachments by referencing their existing blobIds.
-    // Whitelist exactly these fields — a blob-backed part is blobId XOR partId, and
-    // `size` is server-set, so sending partId/size would be rejected by a strict server.
-    const carriedAttachments: AttachmentPart[] = existingAttachments.map((a: any) => ({
-      blobId: a.blobId,
-      type: a.type,
-      ...(a.name != null && { name: a.name }),
-      ...(a.disposition != null && { disposition: a.disposition }),
-      ...(a.cid != null && { cid: a.cid }),
-    }));
+    // ---- Part assembly: apply the removals resolved earlier, work out what the surviving
+    // parts still do for the body that actually ships, then append (#13) ----
 
-    // Build the final attachment set: clear-all empties it; each removeAttachments ref
-    // drops a carried part by blobId (the stable ref the caller sees), or by a UNIQUE
-    // non-null name as a convenience; then the freshly uploaded parts are appended.
-    // A ref that matches nothing, or an ambiguous name, is rejected loudly rather than
-    // silently no-op'd (a silent no-match is the confident-wrong-result class this
-    // codebase rejects). `attachments` + clearFields:['attachments'] was already rejected
-    // as a conflict above, so clear-all never coexists with an append/remove here.
-    let finalAttachments: AttachmentPart[] = clear.has('attachments') ? [] : carriedAttachments.slice();
-    if (updates.removeAttachments?.length) {
-      for (const ref of updates.removeAttachments) {
-        const beforeLen = finalAttachments.length;
-        const byBlob = finalAttachments.filter(a => a.blobId !== ref);
-        if (byBlob.length < beforeLen) {
-          finalAttachments = byBlob;
-          continue;
-        }
-        const nameMatches = finalAttachments.filter(a => a.name != null && a.name === ref);
-        if (nameMatches.length === 1) {
-          finalAttachments = finalAttachments.filter(a => a !== nameMatches[0]);
-          continue;
-        }
-        if (nameMatches.length > 1) {
-          throw new PathAccessError(
-            `removeAttachments ref '${ref}' matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${finalAttachments.map(a => a.blobId).join(', ')}).`
-          );
-        }
-        throw new PathAccessError(
-          `removeAttachments ref '${ref}' matched no attachment on this draft. Carried blobIds: ${carriedAttachments.map(a => a.blobId).join(', ') || '(none)'}.`
-        );
+    // The removal refusal is raised HERE, at the position the removal loop always occupied,
+    // so a body-shape error keeps its precedence over an attachment one. Resolution happened
+    // before the quote rebuild because the rebuild needs to know what survives it.
+    if (removalPlan.error) throw removalPlan.error;
+
+    const bodyTouching = wroteAnyBody || clearedAnyBody;
+    const finalHtmlRefs = htmlCidRefs(htmlBodyValue);
+
+    // A stored Content-ID this server cannot reproduce faithfully is a refusal rather than a
+    // silent mangle. Evaluated AFTER the removals, so a call that takes the offending part
+    // off the draft is not blocked by it, and only on an edit that touches the body: the
+    // carry copies such a value through verbatim (measured round-tripping exactly against
+    // Fastmail, 2026-08-14), so metadata and attachment edits are already safe and refusing
+    // them would cost the caller their only in-place repair.
+    if (bodyTouching) {
+      for (const part of removalPlan.survivors) {
+        const cid = partCid(part);
+        if (cid && !isRecreatableCid(cid)) throw new InvalidInputError(rejectUnrecreatableCid(cid));
       }
     }
-    if (updates.attachments?.length) {
-      finalAttachments = finalAttachments.concat(updates.attachments);
+
+    // What becomes of each surviving part now the shipping body is known: still displayed →
+    // unchanged; no longer displayed and carrying one of this server's own identifiers →
+    // taken off (it was only ever there to show an image the body no longer shows); no
+    // longer displayed but someone else's → demoted to an ordinary attachment rather than
+    // dropped, because those bytes are not this server's to discard. Runs only when this
+    // call wrote or cleared a body — a metadata or attachment edit is body-invariant by
+    // design, so nothing about the parts' relationship to the body can have changed.
+    const reconciled = bodyTouching
+      ? reconcileInlineParts({
+          storedParts: removalPlan.survivors as CidPart[],
+          referencedCids: finalHtmlRefs,
+          htmlShips: !isBlank(htmlBodyValue),
+        })
+      : null;
+
+    const ledger = new InlineNoteLedger();
+    const carriedParts: AttachmentPart[] = [];
+    if (reconciled) {
+      reconciled.parts.forEach(({ part, action }, index) => {
+        // Keyed by POSITION, not by blob. Two parts can share one blobId — the same bytes
+        // displayed twice under different Content-IDs is a real shape (and one Fastmail
+        // stores as two distinct parts), and the ledger replaces by key, so a blob-keyed
+        // record would collapse the pair into one and report half of what came off the
+        // draft. The disclosure has to count parts, because parts are what the reader loses.
+        const key = `part:${index}`;
+        if (action === 'removed') {
+          ledger.record({ key, outcome: 'removed', name: (part as any).name });
+          return;
+        }
+        if (action === 'degraded') {
+          ledger.record({ key, outcome: 'degraded', name: (part as any).name });
+        }
+        carriedParts.push(carriedPartFrom(part, action === 'degraded'));
+      });
+    } else {
+      for (const part of removalPlan.survivors) carriedParts.push(carriedPartFrom(part));
     }
+
+    // Assembly order: what survived, then the caller's own additions, then the parts minted
+    // for the rebuilt quote. Minted parts ride their own channel to the very end so they
+    // stay distinguishable from anything carried or supplied.
+    let finalAttachments: AttachmentPart[] = carriedParts.slice();
+    if (updates.attachments?.length) finalAttachments = finalAttachments.concat(updates.attachments);
+    if (mintedParts.length) finalAttachments = finalAttachments.concat(mintedParts);
+
+    // ---- Checks over the assembled state, in the order a caller can act on ----
+
+    const finalPartCids = new Set(
+      finalAttachments.map((p) => (typeof p.cid === 'string' ? p.cid : '')).filter((c) => c !== ''),
+    );
+    const danglingRefs = finalHtmlRefs.filter((r) => !finalPartCids.has(r));
+
+    // Removing an image the kept quote supplies cannot be honoured at all: the rebuild would
+    // put it straight back under a fresh identifier, and a removal that silently does nothing
+    // is worse than a refusal. Pruning individual quote images is not a thing this server can
+    // do — dropping the quote with a replacement body is the way out, which the message says.
+    // Scoped to a NAMED removal. Wiping the attachments wholesale alongside a kept quote is
+    // coherent and supported: the stored quote parts go, the rebuild re-embeds under fresh
+    // identifiers, and the result says both happened.
+    if (rebuiltQuote && !clear.has('attachments') && removalPlan.removed.length > 0) {
+      const reEmbeddedBlobs = new Set(mintedParts.map((p) => p.blobId));
+      if (removalPlan.removed.some((p) => reEmbeddedBlobs.has(p.blobId))) {
+        throw new InvalidInputError(rejectRemovalOfQuoteCarriedPart());
+      }
+    }
+
+    // A reference left pointing at nothing BY THIS CALL'S REMOVAL, named as such. This is a
+    // diff, not a body scan: a reference that was already broken before the call is not
+    // attributed here, so removing part C never reports a pre-existing break on part B.
+    const removedCids = new Set(removalPlan.removed.map(partCid).filter((c) => c !== ''));
+    const removalCaused = danglingRefs.filter((r) => removedCids.has(r));
+    if (removalCaused.length > 0) {
+      throw new InvalidInputError(
+        clear.has('attachments')
+          ? rejectClearAttachmentsDanglingRefs()
+          : rejectRemovalDanglingRef(removalCaused[0]),
+      );
+    }
+
+    if (bodyTouching) {
+      // The draft's own stored body already referenced images nothing supplies. The draft's
+      // state dominates: this wording wins over anything the caller's html got wrong in the
+      // same call, because recreating the draft is the repair either way. Checked POST-MERGE
+      // on purpose — an edit that replaces the body and eliminates the references passes, and
+      // so does one that adds the attachment supplying them.
+      const stillBroken = danglingRefs.filter((r) => storedDanglingRefs.includes(r));
+      if (stillBroken.length > 0) throw new InvalidInputError(rejectBrokenDraft(stillBroken, availability));
+
+      // Scoped to the caller's OWN html: the rebuilt quote references server-managed
+      // identifiers by construction, so scanning the merged body here would refuse every
+      // keep-edit of a draft that carries quoted images.
+      for (const ref of htmlCidRefs(callerWrittenHtml)) {
+        if (isReservedCid(ref)) throw new InvalidInputError(rejectReservedCidRef(ref));
+      }
+
+      if (danglingRefs.length > 0) {
+        throw new InvalidInputError(rejectDanglingCidRef(danglingRefs[0], availability));
+      }
+    }
+
+    // Two parts sharing one identifier make every reference to it ambiguous, so a colliding
+    // addition is refused before it can be uploaded into the draft. The in-call wording
+    // interpolates the real count — three items sharing an identifier must not read "two".
+    const appendedCids = (updates.attachments ?? [])
+      .map((p) => (typeof p.cid === 'string' ? p.cid : ''))
+      .filter((c) => c !== '');
+    const appendedCidCounts = new Map<string, number>();
+    for (const cid of appendedCids) appendedCidCounts.set(cid, (appendedCidCounts.get(cid) ?? 0) + 1);
+    for (const [cid, n] of appendedCidCounts) {
+      if (n > 1) throw new InvalidInputError(rejectCidCollisionInCall(n, cid));
+    }
+    const carriedCids = new Set(carriedParts.map((p) => p.cid ?? '').filter((c) => c !== ''));
+    for (const cid of appendedCidCounts.keys()) {
+      if (carriedCids.has(cid)) throw new InvalidInputError(rejectCidCollisionOnDraft(cid));
+    }
+
+    // Self-check, not a caller-facing rule: every reference in a body this call produced
+    // resolves to a part the message carries, and every part it minted is referenced by one
+    // of those bodies. Nothing above can be true and this false, so a failure means the
+    // assembly itself is wrong.
+    checkInlineClosure({
+      htmlBodies: bodyTouching ? [htmlBodyValue] : [],
+      finalPartCids: finalAttachments.map((p) => p.cid),
+      attachedMintedCids: mintedParts.map((p) => p.cid),
+      skip: !bodyTouching && mintedParts.length === 0,
+    });
+
+    // What the shipping body displays, counted once per part whatever supplied it: a part
+    // already on the draft, one the caller just added, or one minted for the rebuilt quote.
+    // The identifier IS the key, so a part that is both reused and re-referenced is one
+    // record, never two.
+    //
+    // Reported only when this call could have CHANGED what the body displays — it wrote or
+    // cleared a body, or it supplied parts. An edit that touches neither is body-invariant by
+    // design, and announcing what such a draft has always embedded would be noise on every
+    // subject change.
+    const reportsEmbeds = bodyTouching || !!updates.attachments?.length;
+    const bytesByCid = new Map<string, number>();
+    for (const part of storedParts) {
+      if (partCid(part)) bytesByCid.set(partCid(part), partBytes(part));
+    }
+    for (const mapping of quoteImageMappings) bytesByCid.set(mapping.cid, partBytes(mapping.source));
+    const embeddedNow = reportsEmbeds
+      ? finalAttachments.filter(
+          (p) => typeof p.cid === 'string' && p.cid !== '' && finalHtmlRefs.includes(p.cid),
+        )
+      : [];
 
     const emailObject: any = {
       mailboxIds: existingEmail.mailboxIds,
@@ -1733,12 +2139,94 @@ export class JmapClient {
       orphanedOldDraftReason = err instanceof Error ? err.message : String(err);
     }
 
+    // Confirm what the saved draft carries, but ONLY when this call attached or minted an
+    // embedded image. The flat create is what assembles the multipart shape that makes an
+    // image display, so an embed is the one outcome the result text would otherwise assert
+    // without evidence — while an ordinary edit gets no extra round trip. Its own try/catch
+    // and its own sentence: the edit has already succeeded here, so nothing this step finds
+    // may fail it. The confirmed sizes replace the ones known at assembly time, which is
+    // where a freshly uploaded part's size comes from at all.
+    const followUpNotes: string[] = [];
+    const attachedInlineCids = embeddedNow
+      .map((p) => p.cid as string)
+      .filter((cid) => mintedParts.some((m) => m.cid === cid) || appendedCidCounts.has(cid));
+    if (attachedInlineCids.length > 0) {
+      try {
+        const savedParts = await this.readDraftParts(newEmailId);
+        const savedByCid = new Map<string, any>();
+        for (const part of savedParts) {
+          if (partCid(part)) savedByCid.set(partCid(part), part);
+        }
+        const missing = attachedInlineCids.filter((cid) => !savedByCid.has(cid));
+        if (missing.length > 0) followUpNotes.push(noteEmbedMissingAfterSave(missing.length));
+        for (const [cid, part] of savedByCid) {
+          if (partBytes(part) > 0) bytesByCid.set(cid, partBytes(part));
+        }
+      } catch {
+        followUpNotes.push(noteEmbedUnconfirmed());
+      }
+    }
+
+    for (const part of embeddedNow) {
+      const cid = part.cid as string;
+      ledger.record({
+        key: `cid:${cid}`,
+        outcome: 'embedded',
+        bytes: bytesByCid.get(cid) ?? 0,
+        name: part.name,
+        isImage: true,
+      });
+    }
+
+    const tally = ledger.tally();
+    const notes = [
+      ...emitInlineNotes(tally, {
+        surface: 'draft',
+        keepNoun,
+        ...(clear.has('attachments') && rebuiltQuote && {
+          clearedAttachmentCount: removalPlan.removed.length,
+          reEmbeddedCount: quoteImageMappings.length,
+        }),
+      }),
+      ...followUpNotes,
+    ];
+    const touchedInlineImages = tally.embedded > 0 || tally.degraded > 0 || tally.removed > 0;
+
     return {
       id: newEmailId,
       replacedDraft,
       ...(trashedOldDraftId && { trashedOldDraftId }),
       ...(orphanedOldDraftId && { orphanedOldDraftId, orphanedOldDraftReason }),
+      ...(touchedInlineImages && {
+        inlineImages: { embedded: tally.embedded, degraded: tally.degraded, removed: tally.removed },
+      }),
+      ...(notes.length > 0 && { notes }),
     };
+  }
+
+  /**
+   * Re-read a draft's part listing, for confirming what a just-saved draft actually carries.
+   *
+   * Deliberately a listing read and nothing else: no body values, no keywords, no guard.
+   * Callers use it after a successful write, where the only question left is whether the
+   * parts landed.
+   */
+  private async readDraftParts(emailId: string): Promise<any[]> {
+    const session = await this.getSession();
+    const response = await this.makeRequest({
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/get', {
+          accountId: session.accountId,
+          ids: [emailId],
+          properties: ['id', 'attachments', 'textBody', 'htmlBody'],
+          bodyProperties: [...EMAIL_BODY_PROPERTIES],
+        }, 'getEmail']
+      ]
+    });
+    const email = this.getListResult(response, 0)[0];
+    if (!email) throw new Error(`Email with ID '${emailId}' not found`);
+    return buildUnionParts(email).map((u: UnionPart) => u.part);
   }
 
   async sendDraft(emailId: string): Promise<SendDraftOutcome> {
@@ -1758,9 +2246,16 @@ export class JmapClient {
           ids: [emailId],
           properties: [
             'id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'textBody', 'htmlBody', 'bodyValues',
+            'attachments',
             'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds', SOURCE_ID_HEADER,
           ],
-          bodyProperties: ['partId', 'blobId', 'type', 'size'],
+          // `attachments` above and disposition/cid/name here are for the RECEIPT ONLY —
+          // the sentence below that reports what the sent message carried. They are never a
+          // send-time vet: this method submits the stored draft by reference, exactly as it
+          // is, and adds no check that could refuse a message the caller already approved.
+          // Anything that would refuse a draft belongs on the edit path, which can offer a
+          // repair; a refusal here would only strand a finished message.
+          bodyProperties: ['partId', 'blobId', 'type', 'size', 'disposition', 'cid', 'name'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
         }, 'getEmail']
@@ -1865,7 +2360,21 @@ export class JmapClient {
       throw new Error('Draft submission returned no submission ID');
     }
 
-    return { submissionId, sourceReferences: readSourceReferences(email) };
+    // The receipt: what the message that just went out actually displayed inline. Computed
+    // after the submission because it reports on a completed send and must never influence
+    // one — an image counted wrong here changes a sentence, never whether the mail ships.
+    // An embedded image is one the body displays, which the server signals either by routing
+    // the part into a body list or by marking it inline; a message with neither says nothing.
+    const embedded = buildUnionParts(email).filter(
+      (u: UnionPart) => isImagePart(u.part) && (u.inBodyList || u.part?.disposition === 'inline'),
+    );
+    const embeddedBytes = embedded.reduce((sum, u) => sum + partBytes(u.part), 0);
+
+    return {
+      submissionId,
+      sourceReferences: readSourceReferences(email),
+      ...(embedded.length > 0 && { notes: [noteSentWithEmbedded(embedded.length, embeddedBytes)] }),
+    };
   }
 
   /**
