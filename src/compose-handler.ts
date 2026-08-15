@@ -1,8 +1,9 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
-import { assertBodyInputs } from './body-format.js';
-import type { AttachmentPart } from './jmap-client.js';
+import { assertBodyInputs, isBlank } from './body-format.js';
+import { planAuthoredInlineImages, reportAuthoredInlineImages } from './compose-inline.js';
+import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // Parameters passed to createDraft for a freshly composed message (matches its input
 // shape; everything is optional because an attachment-only or subject-only draft is
@@ -26,8 +27,14 @@ export interface DraftParams {
 // structurally. Declared here (rather than importing JmapClient) so the handler stays
 // unit-testable with a mock, matching ReplyClient / ForwardClient.
 export interface ComposeClient {
-  uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
+  uploadAttachments(
+    specs: AttachmentSpec[],
+    attachDir: string | undefined,
+    options?: UploadAttachmentsOptions,
+  ): Promise<AttachmentPart[]>;
   createDraft(params: DraftParams): Promise<string>;
+  // Only for the post-save confirmation read; this tool needs no fetch to compose.
+  getEmailById(id: string): Promise<any>;
 }
 
 export interface ComposeDraftResult {
@@ -35,6 +42,8 @@ export interface ComposeDraftResult {
   subject?: string;
   to?: string[];
   cc?: string[];
+  /** What the draft ended up embedding, or could not (#13). Absent when there is nothing to say. */
+  notes?: string[];
 }
 
 // Orchestrate create_draft: validate the caller's bodies, coerce the recipient lists,
@@ -69,7 +78,20 @@ export async function composeDraft(
     throw new McpError(ErrorCode.InvalidParams, 'At least one of to, subject, textBody, htmlBody, or attachments must be provided');
   }
 
-  const attachments = specs?.length ? await client.uploadAttachments(specs, attachDir) : undefined;
+  // Embedded-image checks run here, before a single byte is read off disk, so a refused
+  // call leaves nothing behind in the blob store — the same ordering the malformed-body
+  // guard above already has.
+  const plan = planAuthoredInlineImages({
+    callerHtml: htmlBody,
+    htmlShips: !isBlank(htmlBody),
+    specs,
+    attachmentsEnabled: !!attachDir,
+    surface: 'compose',
+  });
+
+  const attachments = specs?.length
+    ? await client.uploadAttachments(specs, attachDir, { inlineCids: plan.inlineCids })
+    : undefined;
 
   const emailId = await client.createDraft({
     to,
@@ -86,5 +108,12 @@ export async function composeDraft(
     attachments,
   });
 
-  return { emailId, subject, to, cc };
+  const notes = await reportAuthoredInlineImages({
+    uploaded: attachments,
+    plan,
+    emailId,
+    readBack: (id) => client.getEmailById(id),
+  });
+
+  return { emailId, subject, to, cc, ...(notes.length > 0 && { notes }) };
 }

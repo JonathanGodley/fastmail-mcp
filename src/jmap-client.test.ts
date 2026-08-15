@@ -2497,6 +2497,51 @@ describe('uploadAttachments', () => {
     }
   });
 
+  it('builds a 5-key inline part when the composed message displays the cid', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'uploadBlob', async () => ({ blobId: 'blob-img', type: 'image/png', size: 3 }));
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      await fsWriteFile(join(root, 'logo.png'), 'png');
+      const parts = await client.uploadAttachments(
+        [{ path: 'logo.png', cid: 'logo' }],
+        root,
+        { inlineCids: new Set(['logo']) },
+      );
+      assert.deepEqual(parts, [
+        { blobId: 'blob-img', type: 'image/png', name: 'logo.png', disposition: 'inline', cid: 'logo' },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // The hard case: the caller gave the file a Content-ID but the message ships no html body
+  // that could display it. Fastmail refuses an inline part in that shape outright, so the
+  // file rides as an ordinary attachment — keeping its Content-ID, and never dropped.
+  it('keeps a cid but disposes it as an attachment when nothing displays it', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(client, 'uploadBlob', async () => ({ blobId: 'blob-img', type: 'image/png', size: 3 }));
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
+    try {
+      await fsWriteFile(join(root, 'logo.png'), 'png');
+      const parts = await client.uploadAttachments([{ path: 'logo.png', cid: 'logo' }], root, {});
+      assert.deepEqual(parts, [
+        { blobId: 'blob-img', type: 'image/png', name: 'logo.png', disposition: 'attachment', cid: 'logo' },
+      ]);
+      // And a supplied cid that is simply not among the displayed ones behaves the same.
+      const other = await client.uploadAttachments(
+        [{ path: 'logo.png', cid: 'logo' }],
+        root,
+        { inlineCids: new Set(['something-else']) },
+      );
+      assert.equal(other[0].disposition, 'attachment');
+      assert.equal(other[0].cid, 'logo');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects an invalid caller contentType before any read/upload', async () => {
     const client = clientWithUpload();
     const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
@@ -2907,7 +2952,7 @@ describe('updateDraft embedded images (#13)', () => {
     assert.deepEqual(createdDraft(makeReq).attachments, [
       { blobId: 'blob-img', type: 'image/png', name: 'pic.png', disposition: 'attachment', cid: 'pic@x' },
     ]);
-    assert.deepEqual(result.notes, ['1 of your image(s) became regular attachments (no html body ships them).']);
+    assert.deepEqual(result.notes, ['1 of your image(s) became regular attachments (nothing in the body displays them).']);
   });
 
   it('counts both parts when two embedded images share one blob', async () => {
@@ -2935,7 +2980,7 @@ describe('updateDraft embedded images (#13)', () => {
     const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
     assert.equal(createdDraft(makeReq).attachments.length, 2);
     assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 2, removed: 0 });
-    assert.deepEqual(result.notes, ['2 of your image(s) became regular attachments (no html body ships them).']);
+    assert.deepEqual(result.notes, ['2 of your image(s) became regular attachments (nothing in the body displays them).']);
   });
 
   it('reports a part the caller removed once, as a removal it asked for', async () => {
@@ -3003,6 +3048,54 @@ describe('updateDraft embedded images (#13)', () => {
       ),
       /sending attachments is disabled on this server/,
     );
+  });
+
+  // ---- an added file the edited body displays ----
+
+  // The upload cannot know what body the edit ends up with, so a freshly uploaded part
+  // arrives dispositioned as an ordinary attachment. A Content-ID never makes a part inline
+  // on its own, so the marking has to happen here, against the body this call assembled.
+  it('marks an added file inline when the edited body references its cid', async () => {
+    const makeReq = mockEdit(client, htmlDraft('<p>x</p>', []));
+    await client.updateDraft('draft-1', {
+      htmlBody: '<p><img src="cid:mine-logo"></p>',
+      attachments: [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'mine-logo', disposition: 'attachment' }],
+    });
+    assert.deepEqual(createdDraft(makeReq).attachments, [
+      { blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'mine-logo', disposition: 'inline' },
+    ]);
+  });
+
+  it('leaves an added file with an unreferenced cid as an ordinary attachment, and says so', async () => {
+    const makeReq = mockEdit(client, htmlDraft('<p>x</p>', []));
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>no image here</p>',
+      attachments: [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'mine-logo', disposition: 'attachment' }],
+    });
+    assert.equal(createdDraft(makeReq).attachments[0].disposition, 'attachment');
+    assert.equal(createdDraft(makeReq).attachments[0].cid, 'mine-logo');
+    assert.deepEqual(result.notes, ['1 of your image(s) became regular attachments (nothing in the body displays them).']);
+  });
+
+  // The other way to end up with a file nothing displays: the reference was written, but
+  // the same edit left the draft with no html body to display it from.
+  it('says an added file was attached when the edit clears the html body', async () => {
+    mockEdit(client, htmlDraft('<p>x</p>', []));
+    const result = await client.updateDraft('draft-1', {
+      textBody: 'plain text only now',
+      clearFields: ['htmlBody'],
+      attachments: [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'mine-logo', disposition: 'attachment' }],
+    });
+    assert.deepEqual(result.notes, ['1 of your image(s) became regular attachments (nothing in the body displays them).']);
+  });
+
+  it('says nothing about an ordinary added file that asked to embed nothing', async () => {
+    mockEdit(client, htmlDraft('<p>x</p>', []));
+    const result = await client.updateDraft('draft-1', {
+      subject: 'New subject',
+      attachments: [{ blobId: 'b-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' }],
+    });
+    assert.equal(result.notes, undefined);
   });
 
   // ---- confirming what the saved draft carries ----

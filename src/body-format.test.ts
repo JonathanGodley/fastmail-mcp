@@ -46,6 +46,58 @@ describe('htmlToText', () => {
   });
 });
 
+// What an image with no alt text contributes is the caller's choice, because the same
+// conversion serves the outgoing derivation and the quotability probe, which want opposite
+// answers for it (#13).
+describe('htmlToText — the image policy', () => {
+  const EMBEDDED = '<div><img src="cid:logo"></div>';
+  const REMOTE = '<div><img src="https://example.com/banner.jpg"></div>';
+
+  it('suppresses the placeholder by default, as it always did', () => {
+    assert.equal(isBlank(htmlToText(EMBEDDED)), true);
+    assert.equal(isBlank(htmlToText(EMBEDDED, 'suppress')), true);
+  });
+
+  it('derives a placeholder for an alt-less embedded image when asked unconditionally', () => {
+    assert.equal(htmlToText(EMBEDDED, 'unconditional'), '[image]');
+  });
+
+  it('prefers real alt text over the placeholder under every policy', () => {
+    const html = '<img src="cid:logo" alt="Our logo">';
+    for (const policy of ['suppress', 'unconditional', 'resolve'] as const) {
+      assert.equal(htmlToText(html, policy), 'Our logo');
+    }
+  });
+
+  // A remote image is not something the message carries, so there is nothing to stand in
+  // for: an image-only newsletter still derives to empty and ships html-only.
+  it('derives nothing from an alt-less remote image under every policy', () => {
+    for (const policy of ['suppress', 'unconditional', 'resolve'] as const) {
+      assert.equal(isBlank(htmlToText(REMOTE, policy)), true);
+    }
+  });
+
+  it('resolves against the parts the message actually carries', () => {
+    const carried = new Map([['logo', 'blob-1']]);
+    assert.equal(htmlToText(EMBEDDED, 'resolve', carried), '[image]');
+    // The same body whose image was dropped: no placeholder standing for something gone.
+    assert.equal(isBlank(htmlToText(EMBEDDED, 'resolve', new Map())), true);
+  });
+
+  it('never emits the raw cid token, whatever the policy', () => {
+    for (const policy of ['suppress', 'unconditional', 'resolve'] as const) {
+      assert.equal(/cid:/.test(htmlToText(EMBEDDED, policy)), false);
+    }
+  });
+
+  it('derives non-image text byte-identically under every policy', () => {
+    const html = '<p>Hello <b>world</b></p><ul><li>one</li></ul><a href="http://x.test">click</a>';
+    const base = htmlToText(html, 'suppress');
+    assert.equal(htmlToText(html, 'unconditional'), base);
+    assert.equal(htmlToText(html, 'resolve', new Map()), base);
+  });
+});
+
 describe('htmlHasVisibleContent', () => {
   it('is true for any visible media element', () => {
     assert.equal(htmlHasVisibleContent('<div><img src="x.png"></div>'), true);
@@ -83,6 +135,13 @@ describe('normalizeBodies', () => {
     assert.equal(r.textBody, undefined);
     assert.equal(r.htmlOnly, true);
     assert.equal(r.htmlBody, '<div><img src="banner.jpg"></div>');
+  });
+  // The outgoing derivation is the one place a placeholder is unconditional: a message
+  // whose only content is an embedded image otherwise reaches a text-only reader blank.
+  it('derives a placeholder for an embedded-image-only body (not htmlOnly)', () => {
+    const r = normalizeBodies({ htmlBody: '<div><img src="cid:logo"></div>' });
+    assert.equal(r.textBody, '[image]');
+    assert.equal(r.htmlOnly, undefined);
   });
   it('flags htmlOnly for zero-width-only html (treated empty)', () => {
     const r = normalizeBodies({ htmlBody: '<p>\u200B\u200C</p>' });

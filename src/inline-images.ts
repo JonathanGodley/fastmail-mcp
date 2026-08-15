@@ -322,7 +322,15 @@ export type ImgSrcClass =
 // and only these two make sense on an <img>.
 const REMOTE_IMAGE_SCHEMES = new Set(['http', 'https']);
 
-function classifyImgSrc(src: unknown): ImgSrcClass {
+/**
+ * Classify an `<img src>` after the same normalization the sanitizer's scheme gate applies.
+ *
+ * Exported because two very different consumers need the SAME answer: the quote sanitizer,
+ * which decides what to emit, and the html-to-text derivation, which decides whether an
+ * alt-less image deserves a placeholder in the plain-text alternative. Classifying twice
+ * with two tests is how the derivation would end up disagreeing with what actually shipped.
+ */
+export function classifyImgSrc(src: unknown): ImgSrcClass {
   if (typeof src !== 'string' || src === '') return { kind: 'other' };
   const laundered = launderUrlValue(src);
   const match = URL_SCHEME.exec(laundered);

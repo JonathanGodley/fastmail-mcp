@@ -594,4 +594,38 @@ describe('coerceAttachments', () => {
   it('trims an accidental leading/trailing space on path', () => {
     assert.deepEqual(coerceAttachments([{ path: '  report.pdf  ' }]), [{ path: 'report.pdf' }]);
   });
+
+  // A cid is what makes a file display inside the body, and its value ends up in a MIME
+  // header, so it is vetted here rather than anywhere downstream.
+  it('accepts a plain cid token', () => {
+    assert.deepEqual(coerceAttachments([{ path: 'a.png', cid: 'logo' }]), [{ path: 'a.png', cid: 'logo' }]);
+  });
+
+  it('normalises the two spellings a caller realistically copies a cid from', () => {
+    // Out of an html reference, out of a header, and the header-quoted reference.
+    assert.deepEqual(coerceAttachments([{ path: 'a.png', cid: 'cid:logo' }]), [{ path: 'a.png', cid: 'logo' }]);
+    assert.deepEqual(coerceAttachments([{ path: 'b.png', cid: '<logo>' }]), [{ path: 'b.png', cid: 'logo' }]);
+    assert.deepEqual(coerceAttachments([{ path: 'c.png', cid: '<cid:logo>' }]), [{ path: 'c.png', cid: 'logo' }]);
+  });
+
+  it('rejects a spelling the normalisation deliberately does not chase', () => {
+    // `cid:<logo>` strips to `<logo>`, which fails the vet: chasing it would mean
+    // accepting arbitrarily nested spellings.
+    assert.throws(
+      () => coerceAttachments([{ path: 'a.png', cid: 'cid:<logo>' }]),
+      (err: unknown) => err instanceof McpError && err.code === ErrorCode.InvalidParams,
+    );
+  });
+
+  it('rejects a cid carrying a line break (header injection), naming the real index', () => {
+    assert.throws(
+      () => coerceAttachments([{ path: 'a.png' }, { path: 'b.png', cid: 'logo\r\nX-Evil: 1' }]),
+      (err: unknown) => err instanceof McpError && /attachments\[1\]\.cid/.test(err.message),
+    );
+  });
+
+  it('rejects an over-long cid and a non-string cid', () => {
+    assert.throws(() => coerceAttachments([{ path: 'a.png', cid: 'x'.repeat(65) }]), McpError);
+    assert.throws(() => coerceAttachments([{ path: 'a.png', cid: 42 }]), McpError);
+  });
 });

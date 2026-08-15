@@ -7,15 +7,23 @@ import { InvalidInputError } from './coerce.js';
 const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
 
 // A spy ComposeClient: records what each method was called with; uploadAttachments
-// returns the canned UPLOADED parts so we can assert they thread through.
-function spyClient(over: Partial<ComposeClient> = {}) {
-  const calls: any = {};
+// returns the canned UPLOADED parts so we can assert they thread through. getEmailById is
+// only ever reached by the post-save confirmation read, so its call count is itself an
+// assertion target: an ordinary draft must not pay for a round trip it has no use for.
+function spyClient(over: Partial<ComposeClient> = {}, uploadResult: any[] = UPLOADED) {
+  const calls: any = { readBacks: 0 };
   const client: ComposeClient = {
-    uploadAttachments: async (specs, dir) => { calls.upload = { specs, dir }; return UPLOADED; },
+    uploadAttachments: async (specs, dir, options) => { calls.upload = { specs, dir, options }; return uploadResult; },
     createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
+    getEmailById: async (id) => { calls.readBacks += 1; calls.readId = id; return { id, attachments: [] }; },
     ...over,
   };
   return { client, calls };
+}
+
+// An uploaded part as it comes back when the message really does display it.
+function inlinePart(cid: string, name = 'logo.png') {
+  return { blobId: 'blob-' + cid, type: 'image/png', name, disposition: 'inline', cid };
 }
 
 describe('composeDraft — creation and summary fields', () => {
@@ -72,7 +80,11 @@ describe('composeDraft — creation and summary fields', () => {
       { to: ['a@b.com'], subject: 'Hi', textBody: 'hello', attachments: [{ path: 'a.pdf' }] },
       client, '/attach/root',
     );
-    assert.deepEqual(calls.upload, { specs: [{ path: 'a.pdf' }], dir: '/attach/root' });
+    // The upload is told which Content-IDs the message displays; an ordinary attachment
+    // displays none, so the set is empty and the part is dispositioned as a file.
+    assert.deepEqual(calls.upload, {
+      specs: [{ path: 'a.pdf' }], dir: '/attach/root', options: { inlineCids: new Set() },
+    });
     assert.deepEqual(calls.draft.attachments, UPLOADED);
   });
 
@@ -140,5 +152,184 @@ describe('composeDraft — malformed bodies are rejected before the draft is cre
     const { client, calls } = spyClient();
     await composeDraft({ subject: 'Hi', htmlBody: '<pre>&lt;p&gt;paragraph&lt;/p&gt;</pre>', textBody: 'Close it with ]]> here' }, client, undefined);
     assert.equal(calls.draft.htmlBody, '<pre>&lt;p&gt;paragraph&lt;/p&gt;</pre>');
+  });
+});
+
+describe('composeDraft — embedding the caller\'s own images (#13)', () => {
+  const EMBED_ARGS = {
+    to: ['a@b.com'],
+    subject: 'Logo',
+    htmlBody: '<p>See:</p><img src="cid:logo">',
+    attachments: [{ path: 'logo.png', cid: 'logo' }],
+  };
+
+  it('tells the upload which Content-ID the body displays', async () => {
+    const { client, calls } = spyClient({}, [inlinePart('logo')]);
+    await composeDraft(EMBED_ARGS, client, '/attach/root');
+    assert.deepEqual(calls.upload.options, { inlineCids: new Set(['logo']) });
+  });
+
+  it('normalises the supplied spelling before matching it to the reference', async () => {
+    const { client, calls } = spyClient({}, [inlinePart('logo')]);
+    await composeDraft(
+      { ...EMBED_ARGS, attachments: [{ path: 'logo.png', cid: '<cid:logo>' }] },
+      client, '/attach/root',
+    );
+    assert.deepEqual(calls.upload.options, { inlineCids: new Set(['logo']) });
+  });
+
+  it('reports what the saved draft embeds, with the confirmed size', async () => {
+    let readBacks = 0;
+    const { client } = spyClient({
+      getEmailById: async (id) => {
+        readBacks += 1;
+        return { id, attachments: [{ blobId: 'blob-logo', cid: 'logo', size: 214000, disposition: 'inline' }] };
+      },
+    }, [inlinePart('logo')]);
+    const r = await composeDraft(EMBED_ARGS, client, '/attach/root');
+    assert.deepEqual(r.notes, ['This draft embeds 1 image(s) (209 KB).']);
+    assert.equal(readBacks, 1);
+  });
+
+  it('does not read the draft back when nothing was embedded', async () => {
+    const { client, calls } = spyClient();
+    const r = await composeDraft(
+      { to: ['a@b.com'], subject: 'Hi', textBody: 'hello', attachments: [{ path: 'a.pdf' }] },
+      client, '/attach/root',
+    );
+    assert.equal(calls.readBacks, 0);
+    assert.equal(r.notes, undefined);
+  });
+
+  it('says so when the saved draft could not be re-read', async () => {
+    const { client } = spyClient({
+      getEmailById: async () => { throw new Error('network'); },
+    }, [inlinePart('logo')]);
+    const r = await composeDraft(EMBED_ARGS, client, '/attach/root');
+    assert.equal(r.emailId, 'draft-9');
+    assert.ok(r.notes?.some((n) => /could not re-read it to confirm/.test(n)));
+  });
+
+  it('says so when the saved draft is short of an image this call attached', async () => {
+    const { client } = spyClient({
+      getEmailById: async (id) => ({ id, attachments: [] }),
+    }, [inlinePart('logo')]);
+    const r = await composeDraft(EMBED_ARGS, client, '/attach/root');
+    assert.ok(r.notes?.some((n) => /1 embedded image\(s\) this call attached were not found/.test(n)));
+  });
+
+  it('rejects a reference no attachment supplies, before anything is uploaded', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => composeDraft(
+        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<img src="cid:missing">', attachments: [{ path: 'a.pdf' }] },
+        client, '/attach/root',
+      ),
+      (e: any) => e instanceof InvalidInputError
+        && /references cid "missing" but no attachment supplies it/.test(e.message)
+        && /add an attachments item with cid: "missing"/.test(e.message),
+    );
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('drops the add-an-attachment repair when attachments are disabled', async () => {
+    const { client } = spyClient();
+    await assert.rejects(
+      () => composeDraft(
+        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<img src="cid:missing">' },
+        client, undefined,
+      ),
+      (e: any) => e instanceof InvalidInputError
+        && /FASTMAIL_ATTACH_DIR is not set/.test(e.message)
+        && !/add an attachments item with cid/.test(e.message),
+    );
+  });
+
+  it('rejects a reference to a server-managed identifier', async () => {
+    const { client } = spyClient();
+    await assert.rejects(
+      () => composeDraft(
+        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<img src="cid:ii-' + 'a'.repeat(32) + '@inline.invalid">' },
+        client, '/attach/root',
+      ),
+      (e: any) => e instanceof InvalidInputError && /server-managed identifier/.test(e.message),
+    );
+  });
+
+  it('rejects two attachments sharing one Content-ID, interpolating the real count', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => composeDraft({
+        to: ['a@b.com'],
+        subject: 'Hi',
+        htmlBody: '<img src="cid:logo">',
+        // Two spellings of ONE identifier: the collision is judged on the canonical value.
+        attachments: [{ path: 'a.png', cid: 'logo' }, { path: 'b.png', cid: '<logo>' }],
+      }, client, '/attach/root'),
+      (e: any) => e instanceof InvalidInputError && /2 attachments/.test(e.message) && /"logo"/.test(e.message),
+    );
+    assert.equal(calls.upload, undefined);
+  });
+
+  // The file is the caller's; a message that cannot display it still carries it.
+  it('attaches a cid-bearing file to a text-only draft and says it was not embedded', async () => {
+    const degraded = [{ blobId: 'blob-logo', type: 'image/png', name: 'logo.png', disposition: 'attachment', cid: 'logo' }];
+    const { client, calls } = spyClient({}, degraded);
+    const r = await composeDraft(
+      { to: ['a@b.com'], subject: 'Hi', textBody: 'no html here', attachments: [{ path: 'logo.png', cid: 'logo' }] },
+      client, '/attach/root',
+    );
+    assert.deepEqual(calls.upload.options, { inlineCids: new Set() });
+    assert.deepEqual(calls.draft.attachments, degraded);
+    assert.deepEqual(r.notes, ['1 of your image(s) became regular attachments (nothing in the body displays them).']);
+    assert.equal(calls.readBacks, 0);
+  });
+
+  // The second route to the same outcome: an html body DOES ship, it just displays
+  // something else. The note must not claim there was no html body.
+  it('says an unreferenced image was attached even when an html body ships', async () => {
+    const degraded = [{ blobId: 'blob-spare', type: 'image/png', name: 'spare.png', disposition: 'attachment', cid: 'spare' }];
+    const { client, calls } = spyClient({}, degraded);
+    const r = await composeDraft({
+      to: ['a@b.com'],
+      subject: 'Hi',
+      htmlBody: '<p>text, and no image reference at all</p>',
+      attachments: [{ path: 'spare.png', cid: 'spare' }],
+    }, client, '/attach/root');
+    assert.deepEqual(calls.upload.options, { inlineCids: new Set() });
+    assert.deepEqual(r.notes, ['1 of your image(s) became regular attachments (nothing in the body displays them).']);
+  });
+
+  it('notes reference-shaped text it could not act on, without refusing the message', async () => {
+    const { client, calls } = spyClient({}, [inlinePart('logo')]);
+    const r = await composeDraft({
+      ...EMBED_ARGS,
+      htmlBody: '<p>Reference it as cid:whatever in the css</p><img src="cid:logo">',
+    }, client, '/attach/root');
+    assert.equal(calls.draft.emailId, undefined);
+    assert.ok(r.notes?.some((n) => /looks like an embedded-image \(cid:\) reference/.test(n)));
+  });
+
+  // A lenient client may send the whole array as a JSON string; the checks must see the
+  // items, not an opaque string that would make every reference look unsupplied.
+  it('sees attachments supplied as a JSON string (lenient client)', async () => {
+    const { client, calls } = spyClient({}, [inlinePart('logo')]);
+    await composeDraft(
+      { ...EMBED_ARGS, attachments: '[{"path":"logo.png","cid":"logo"}]' },
+      client, '/attach/root',
+    );
+    assert.deepEqual(calls.upload.options, { inlineCids: new Set(['logo']) });
+  });
+
+  it('reports a malformed body before an attachment problem', async () => {
+    const { client } = spyClient();
+    await assert.rejects(
+      () => composeDraft(
+        { to: ['a@b.com'], subject: 'Hi', htmlBody: '<p>ok</p><img src="cid:missing"><![CDATA[x]]>' },
+        client, '/attach/root',
+      ),
+      /htmlBody contains a CDATA section/,
+    );
   });
 });

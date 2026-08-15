@@ -16,8 +16,8 @@ HTML is the source of truth; `text/plain` is a derived fallback.
   verbatim.
 - We never fabricate HTML from plain text. The reverse direction (text to html) is not
   done anywhere; a `text/plain`-only message is legitimate and ships untouched.
-- Degrade gracefully. If the HTML yields no derivable text (an image-only newsletter),
-  the message ships HTML-only rather than being rejected. Only a genuine no-body message
+- Degrade gracefully. If the HTML yields no derivable text (a newsletter that is nothing
+  but remote images), the message ships HTML-only rather than being rejected. Only a genuine no-body message
   (no readable text and no visible HTML content) is refused.
 
 The model is implemented in `src/body-format.ts`:
@@ -28,14 +28,29 @@ The model is implemented in `src/body-format.ts`:
   read as "absent" consistently.
 - `htmlToText` — converts HTML to the readable plain-text fallback. Never throws (on
   converter failure it falls back to a minimal tag-strip so a send is never blocked).
-  May legitimately return `''` for image-only / empty HTML. Emits `<img>` alt-text only
-  (not the src/filename), so an image-only no-alt newsletter converts to empty text and
-  takes the html-only path rather than emitting junk like `[logo.png]`.
+  May legitimately return `''` for image-only / empty HTML. An `<img>` contributes its
+  alt text and never its src or filename, so an image-only newsletter never emits junk
+  like `[logo.png]`. What an alt-less image contributes is the caller's choice, made per
+  call site through the image-policy parameter (below).
+- **The image policy.** `htmlToText` takes one of three policies, because the same
+  conversion serves two different jobs and they want opposite answers for an alt-less
+  image. `suppress` emits nothing for it (the historical behaviour, and what a
+  quotability probe wants, where a placeholder would make an image-only original look
+  readable). `unconditional` emits `[image]` for an alt-less EMBEDDED (`cid:`) image, and
+  is what the outgoing derivation uses: a picture-only message otherwise reaches a
+  text-only reader as a blank page. `resolve` is the same but additionally requires the
+  reference to resolve to a part the message actually carries, which is what a rebuilt
+  quote needs — a reference whose image was dropped must not leave a placeholder standing
+  for something no longer there. A remote (http/data/unknown) image with no alt contributes
+  nothing under every policy, and the literal `cid:` token is never emitted in any of them.
+  Non-image text derives byte-identically under all three.
 - `htmlHasVisibleContent` — the reject gate for the no-body case. True if the HTML
   converts to non-empty text OR carries any visible-media element (`<img>`, CSS
   `background-image`, `<svg>`, `<video>`, `<picture>`, `<object>`, `<embed>`). It errs
   toward shipping: a false positive sends a thin email, a false negative would block a
-  real one, so an imperfect scan is safe-by-direction.
+  real one, so an imperfect scan is safe-by-direction. Its own answer is unchanged by the
+  image policy: it already treats any `<img>` as visible content, so whether a placeholder
+  is derived for one cannot move the gate either way.
 - `normalizeBodies` — derives the fallback. html-present + text-absent derives the text
   from the HTML; if that derives to empty it returns html-only (an internal `htmlOnly`
   flag, not a reject). text-only and both-supplied pass through untouched.

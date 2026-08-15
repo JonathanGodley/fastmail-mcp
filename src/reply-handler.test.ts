@@ -196,11 +196,13 @@ describe('composeReply — draft-only orchestration', () => {
   // A spy ReplyClient: records what each method was called with; uploadAttachments
   // returns the canned UPLOADED parts so we can assert they thread through. The
   // interface has no transmit method at all — send_draft is the only sender.
-  function spyClient(over: Partial<ReplyClient> = {}) {
-    const calls: any = {};
+  function spyClient(over: Partial<ReplyClient> = {}, uploadResult: any[] = UPLOADED) {
+    const calls: any = { gets: [] as string[] };
     const client: ReplyClient = {
-      getEmailById: async (id) => { calls.getId = id; return makeOriginal(); },
-      uploadAttachments: async (specs, dir) => { calls.upload = { specs, dir }; return UPLOADED; },
+      // Serves two jobs: fetching the original, and the post-save confirmation read. The
+      // recorded ids are what tell the two apart.
+      getEmailById: async (id) => { calls.getId = id; calls.gets.push(id); return makeOriginal(); },
+      uploadAttachments: async (specs, dir, options) => { calls.upload = { specs, dir, options }; return uploadResult; },
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
       ...over,
     };
@@ -232,7 +234,9 @@ describe('composeReply — draft-only orchestration', () => {
       client, '/attach/root',
     );
     assert.equal(r.emailId, 'draft-9');
-    assert.deepEqual(calls.upload, { specs: [{ path: 'a.pdf' }], dir: '/attach/root' });
+    assert.deepEqual(calls.upload, {
+      specs: [{ path: 'a.pdf' }], dir: '/attach/root', options: { inlineCids: new Set() },
+    });
     assert.deepEqual(calls.draft.attachments, UPLOADED); // threaded into createDraft
   });
 
@@ -271,6 +275,77 @@ describe('composeReply — draft-only orchestration', () => {
     );
     assert.equal(calls.draft, undefined);
     assert.equal(calls.upload, undefined);
+  });
+
+  // Embedding an image in the note the caller writes above the quote (#13).
+  describe('embedded images in the caller\'s note', () => {
+    const NOTE_ARGS = {
+      originalEmailId: 'o1',
+      htmlBody: '<p>Compare with:</p><img src="cid:chart">',
+      attachments: [{ path: 'chart.png', cid: 'chart' }],
+    };
+    const CHART = { blobId: 'blob-chart', type: 'image/png', name: 'chart.png', disposition: 'inline', cid: 'chart' };
+
+    it('tells the upload which Content-ID the note displays', async () => {
+      const { client, calls } = spyClient({}, [CHART]);
+      await composeReply(NOTE_ARGS, client, '/attach/root');
+      assert.deepEqual(calls.upload.options, { inlineCids: new Set(['chart']) });
+    });
+
+    it('reports what the saved draft embeds, after re-reading it', async () => {
+      const { client, calls } = spyClient({
+        getEmailById: async (id) => {
+          if (id === 'o1') return makeOriginal();
+          return { id, attachments: [{ blobId: 'blob-chart', cid: 'chart', size: 2048, disposition: 'inline' }] };
+        },
+      }, [CHART]);
+      const r = await composeReply(NOTE_ARGS, client, '/attach/root');
+      assert.deepEqual(r.notes, ['This draft embeds 1 image(s) (2 KB).']);
+      assert.equal(calls.draft.attachments.length, 1);
+    });
+
+    // The reply wording differs from a fresh compose on purpose: a quote sits below the
+    // note, and its images arrive on their own rather than being authored.
+    it('rejects a note reference nothing supplies, in the reply wording', async () => {
+      const { client, calls } = spyClient();
+      await assert.rejects(
+        () => composeReply(
+          { originalEmailId: 'o1', htmlBody: '<img src="cid:chart">' },
+          client, '/attach/root',
+        ),
+        (e: any) => /your note/.test(e.message) && /Quoted images appear inside the quote automatically/.test(e.message),
+      );
+      assert.equal(calls.upload, undefined);
+      assert.equal(calls.draft, undefined);
+    });
+
+    // The checks read the caller's own note, never the merged body: the quote this server
+    // builds carries its own identifiers and must not be held against the caller.
+    it('does not re-read the draft for an ordinary reply', async () => {
+      const { client, calls } = spyClient();
+      await composeReply({ originalEmailId: 'o1', textBody: 'hi' }, client, undefined);
+      assert.deepEqual(calls.gets, ['o1']);
+    });
+
+    it('sees attachments supplied as a JSON string (lenient client)', async () => {
+      const { client, calls } = spyClient({}, [CHART]);
+      await composeReply(
+        { ...NOTE_ARGS, attachments: '[{"path":"chart.png","cid":"chart"}]' },
+        client, '/attach/root',
+      );
+      assert.deepEqual(calls.upload.options, { inlineCids: new Set(['chart']) });
+    });
+
+    it('reports a malformed body before an attachment problem', async () => {
+      const { client } = spyClient();
+      await assert.rejects(
+        () => composeReply(
+          { originalEmailId: 'o1', htmlBody: '<p>hi</p><img src="cid:missing"><![CDATA[x]]>' },
+          client, '/attach/root',
+        ),
+        /htmlBody contains a CDATA section/,
+      );
+    });
   });
 });
 

@@ -1,4 +1,6 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { isAuthorableCid, stripCidSpelling } from './inline-images.js';
+import { rejectUnusableCid } from './inline-notes.js';
 
 // Tagged error for filesystem-path access decisions (path confinement and the
 // attachment opt-in gate). Thrown by the path guards and attachment upload in
@@ -297,9 +299,18 @@ export interface AttachmentSpec {
   path: string;
   name?: string;
   contentType?: string;
+  // The Content-ID an html body references this file by, to display it inside the message
+  // rather than hang it off the end. Stored here in CANONICAL form: coerceAttachments
+  // normalizes the two spellings a caller realistically copies (see stripCidSpelling)
+  // before validating, so everything downstream compares one value per identifier.
+  cid?: string;
 }
 
-const ATTACHMENT_KEYS = new Set(['path', 'name', 'contentType']);
+const ATTACHMENT_KEYS = new Set(['path', 'name', 'contentType', 'cid']);
+
+// The item shape named in every whole-parameter refusal below, kept in one place so the
+// three copies cannot drift from the schema.
+const ATTACHMENT_ITEM_SHAPE = '{ path, name?, contentType?, cid? }';
 
 // Coerce the `attachments` tool param into AttachmentSpec[] | undefined. Accepts a
 // real array, or a JSON-string array from lenient clients (mirroring
@@ -318,12 +329,12 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
     try {
       arr = JSON.parse(trimmed);
     } catch {
-      throw new McpError(ErrorCode.InvalidParams, 'attachments must be an array of { path, name?, contentType? } objects.');
+      throw new McpError(ErrorCode.InvalidParams, `attachments must be an array of ${ATTACHMENT_ITEM_SHAPE} objects.`);
     }
   }
 
   if (!Array.isArray(arr)) {
-    throw new McpError(ErrorCode.InvalidParams, 'attachments must be an array of { path, name?, contentType? } objects.');
+    throw new McpError(ErrorCode.InvalidParams, `attachments must be an array of ${ATTACHMENT_ITEM_SHAPE} objects.`);
   }
 
   const specs: AttachmentSpec[] = [];
@@ -362,6 +373,20 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
     if (obj.contentType !== undefined) {
       if (typeof obj.contentType !== 'string') throw new McpError(ErrorCode.InvalidParams, `attachments[${i}].contentType must be a string.`);
       spec.contentType = obj.contentType;
+    }
+    if (obj.cid !== undefined) {
+      // Normalize before validating, then keep the NORMALIZED value: `cid:logo` copied out
+      // of an html reference and `<logo>` copied out of a header are the same identifier,
+      // and every later comparison — collision detection above all — has to see them as
+      // one. Validating the raw value instead would bounce both spellings; keeping the raw
+      // value would let two spellings of one identifier become two parts sharing a
+      // Content-ID, which makes every reference to it ambiguous.
+      const raw = typeof obj.cid === 'string' ? obj.cid : '';
+      const canonical = stripCidSpelling(raw);
+      if (!isAuthorableCid(canonical)) {
+        throw new McpError(ErrorCode.InvalidParams, rejectUnusableCid(i, obj.cid));
+      }
+      spec.cid = canonical;
     }
     specs.push(spec);
   }

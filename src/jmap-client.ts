@@ -36,6 +36,19 @@ export interface AttachmentPart {
   cid?: string;
 }
 
+/** How a compose path wants freshly uploaded files dispositioned. */
+export interface UploadAttachmentsOptions {
+  /**
+   * The Content-IDs the message being composed actually displays.
+   *
+   * A file whose Content-ID is in this set is marked `inline` — the message body shows it.
+   * Anything else, including every file when this is absent or empty, is a regular
+   * attachment. The caller owns this decision because only the caller knows what html will
+   * ship; see uploadAttachments for why guessing is not an option.
+   */
+  inlineCids?: ReadonlySet<string>;
+}
+
 // True if `child` is `parent` itself or nested beneath it. Case-fold is a parameter:
 // the read guard compares case-insensitively on Win32 (NTFS folds case, so a
 // case-sensitive startsWith is bypassable), while the write guard keeps its existing
@@ -1887,7 +1900,33 @@ export class JmapClient {
     // for the rebuilt quote. Minted parts ride their own channel to the very end so they
     // stay distinguishable from anything carried or supplied.
     let finalAttachments: AttachmentPart[] = carriedParts.slice();
-    if (updates.attachments?.length) finalAttachments = finalAttachments.concat(updates.attachments);
+    if (updates.attachments?.length) {
+      // A file the caller supplied with a Content-ID is marked inline exactly when the
+      // shipping body references it, which is only knowable here: the upload happens before
+      // this call and cannot see the body the edit ends up with (the caller's html, or the
+      // draft's own when the edit leaves the body alone). A Content-ID never makes a part
+      // inline on its own, so without this an image the caller asked to embed would arrive
+      // as an ordinary attachment. The reverse case — a supplied Content-ID nothing
+      // references — stays an attachment and is reported as such rather than dropped.
+      const displays = (p: AttachmentPart) =>
+        !isBlank(htmlBodyValue) && partCid(p) !== '' && finalHtmlRefs.includes(partCid(p));
+      finalAttachments = finalAttachments.concat(
+        updates.attachments.map((p, index) => {
+          if (displays(p)) return { ...p, disposition: 'inline' };
+          // A file supplied WITH a Content-ID that the edited body does not display is the
+          // caller asking to embed something and not getting it. It is kept — those bytes
+          // are theirs — but the outcome is recorded so the result says what became of it,
+          // exactly as the compose tools do. Keyed by position rather than by identifier,
+          // so a file the body DOES display (recorded under its identifier further down)
+          // can never be collapsed into the same record. A file supplied with no
+          // Content-ID asked for nothing and needs no sentence.
+          if (partCid(p) !== '') {
+            ledger.record({ key: `supplied:${index}`, outcome: 'degraded', name: p.name });
+          }
+          return p;
+        }),
+      );
+    }
     if (mintedParts.length) finalAttachments = finalAttachments.concat(mintedParts);
 
     // ---- Checks over the assembled state, in the order a caller can act on ----
@@ -1981,6 +2020,14 @@ export class JmapClient {
     // cleared a body, or it supplied parts. An edit that touches neither is body-invariant by
     // design, and announcing what such a draft has always embedded would be noise on every
     // subject change.
+    //
+    // The basis is REFERENCE MEMBERSHIP, not the part's stored disposition: a body displays
+    // an image by resolving its Content-ID, and a part carrying the referenced identifier is
+    // displayed whatever disposition it arrived with (the assembly above marks it inline for
+    // exactly that reason). The compose paths read the disposition instead, which is the same
+    // answer there because every part is one this call just uploaded and dispositioned. They
+    // diverge only for a part already ON the draft as a plain attachment that the edited body
+    // starts referencing — a shape compose cannot reach, and one this basis gets right.
     const reportsEmbeds = bodyTouching || !!updates.attachments?.length;
     const bytesByCid = new Map<string, number>();
     for (const part of storedParts) {
@@ -3128,13 +3175,25 @@ export class JmapClient {
    * splat into an Email. Re-checks the opt-in gate (so a caller that skipped safeReadPath
    * can't bypass it), validates the caller contentType against the MIME token grammar,
    * rejects an over-cap file via fstat.size BEFORE reading, then does a bounded read from
-   * the confined handle. Each part is a FRESH 4-key literal (NOT the carriedAttachments
-   * shape, which passes through size/cid that a strict server rejects or that would
-   * mislabel a plain file).
+   * the confined handle.
+   *
+   * Each part is a FRESH literal built here, never the carriedAttachments shape — that one
+   * passes through a server-set `size` a strict server rejects. A file with no Content-ID
+   * is a 4-key part; a file the caller gave one is a 5-key part carrying its `cid`.
+   *
+   * The DISPOSITION of a Content-ID-bearing part is the caller's decision expressed through
+   * `inlineCids`: a part is marked `inline` only when the message being composed actually
+   * displays that identifier. This is not a preference. Fastmail refuses a create that marks
+   * any part inline when the message ships no html body at all — it fails the whole call
+   * with invalidProperties:["htmlBody"] — so a file the body cannot display has to ride as a
+   * regular attachment or nothing is saved. It keeps its Content-ID either way: the caller
+   * asked for that identifier, a Content-ID never flips a part inline on its own, and
+   * keeping it is what lets a later edit add the html that displays the file.
    */
   async uploadAttachments(
-    specs: { path: string; name?: string; contentType?: string }[],
+    specs: { path: string; name?: string; contentType?: string; cid?: string }[],
     attachDir: string | undefined,
+    options: UploadAttachmentsOptions = {},
   ): Promise<AttachmentPart[]> {
     if (!attachDir) {
       throw new PathAccessError(
@@ -3148,7 +3207,8 @@ export class JmapClient {
     // uploaded. Pass 2 reads + uploads the already-validated handles. (A network failure
     // mid-upload can still orphan a blob — unavoidable without server-side transactions;
     // Fastmail garbage-collects unreferenced blobs.)
-    const opened: { handle: FileHandle; size: number; contentType: string; name: string }[] = [];
+    const inlineCids = options.inlineCids;
+    const opened: { handle: FileHandle; size: number; contentType: string; name: string; cid?: string }[] = [];
     try {
       let totalBytes = 0;
       for (let i = 0; i < specs.length; i++) {
@@ -3159,7 +3219,7 @@ export class JmapClient {
           : guessContentType(spec.path);
         const { handle, size } = await JmapClient.safeReadPath(spec.path, attachDir);
         // Push BEFORE the size checks so the finally closes this handle even if a cap throws.
-        opened.push({ handle, size, contentType, name: spec.name ?? basename(spec.path) });
+        opened.push({ handle, size, contentType, name: spec.name ?? basename(spec.path), cid: spec.cid });
         if (size > JmapClient.MAX_ATTACHMENT_BYTES) {
           throw new PathAccessError(
             `attachments[${i}] (${basename(spec.path)}) is ${size} bytes, over the ${JmapClient.MAX_ATTACHMENT_BYTES}-byte per-file guard. Fastmail's own limit ultimately governs.`
@@ -3186,7 +3246,8 @@ export class JmapClient {
           blobId: uploaded.blobId,
           type: uploaded.type,
           name: o.name,
-          disposition: 'attachment',
+          disposition: o.cid && inlineCids?.has(o.cid) ? 'inline' : 'attachment',
+          ...(o.cid && { cid: o.cid }),
         });
       }
       return parts;
