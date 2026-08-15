@@ -304,7 +304,7 @@ export function requireNonEmpty(value: unknown, fieldName: string, hint = 'omit 
 // Validate a clearFields list: every entry must be in the allowed set, and no
 // entry may also appear as a settable param (can't both set and clear a field).
 // No-op when clearFields is empty/undefined.
-export function validateClearFields(clearFields: string[] | undefined, allowed: Set<string>, provided: Set<string>): void {
+export function validateClearFields(clearFields: string[] | undefined, allowed: ReadonlySet<string>, provided: ReadonlySet<string>): void {
   if (!clearFields || clearFields.length === 0) return;
   for (const field of clearFields) {
     if (!allowed.has(field)) {
@@ -538,4 +538,245 @@ export function coerceParticipants(value: unknown): ParticipantSpec[] | undefine
     specs.push(spec);
   }
   return specs;
+}
+
+// ---------- contact write inputs ----------
+
+/** One `emails` entry of a contact write, after coercion. */
+export interface ContactEmailSpec {
+  address: string;
+  label?: string;
+}
+
+/** One `phones` entry of a contact write, after coercion. */
+export interface ContactPhoneSpec {
+  number: string;
+  label?: string;
+}
+
+/** One `addresses` entry of a contact write, after coercion. */
+export interface ContactAddressSpec {
+  full: string;
+  label?: string;
+}
+
+/** The `name` parameter of a contact write, after coercion (a bare string becomes `full`). */
+export interface ContactNameSpec {
+  given?: string;
+  surname?: string;
+  full?: string;
+}
+
+const CONTACT_NAME_KEYS = new Set(['given', 'surname', 'full']);
+const CONTACT_NAME_SHAPE = '{ given?, surname?, full? }';
+
+/**
+ * Coerce one of the contact entry-array parameters (`emails`, `phones`, `addresses`) into a
+ * validated array of fresh objects, following the same three-part discipline as
+ * coerceAttachments/coerceParticipants — and for the same reason, sharpened here by what the
+ * write does with the result: the MCP SDK does not enforce `inputSchema`, and these values
+ * are copied into a `ContactCard/set` patch, so an unvalidated object would be written onto a
+ * real card verbatim.
+ *
+ *   1. UNKNOWN KEYS are rejected, naming the index.
+ *   2. Every known key is TYPE-CHECKED, naming the index. A key allowlist alone would still
+ *      let `{address: {…}}` or `{label: []}` through to the card.
+ *   3. The value passed onward is a FRESH LITERAL built from the validated keys, never a
+ *      spread of the caller's object. That is what makes adding a key later a conscious edit
+ *      here rather than a silent widening of what reaches the server.
+ *
+ * A JSON-string array is accepted (lenient clients stringify structured params); a blank
+ * string reads as "not supplied", never as the empty array — the empty array is a rejected
+ * shape on these parameters, and resolving a blank one into it would turn a client quirk into
+ * a rejection the caller cannot explain.
+ *
+ * `allowBareString` is on for `emails` and `phones`, whose only required key is the value
+ * itself, so `["a@b.example"]` means `[{address: "a@b.example"}]` — matching how the recipient lists
+ * and `participants` already read a bare string. It is off for `addresses`, where an entry has
+ * no single obvious scalar reading.
+ *
+ * Duplicate values are REJECTED naming both positions: on `emails`/`phones` a repeat cannot be
+ * matched against the stored card twice, so it would silently surface as an unknown addition,
+ * and on any of the three it is a caller mistake with no useful reading.
+ */
+function coerceContactEntries<T extends Record<string, any>>(
+  value: unknown,
+  paramName: string,
+  keyField: 'address' | 'number' | 'full',
+  allowBareString: boolean,
+): T[] | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  const keys = new Set([keyField, 'label']);
+  const itemShape = `{ ${keyField}, label? }`;
+  const bareNote = allowBareString ? ` (or a bare ${keyField} string)` : '';
+
+  let arr: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    try {
+      arr = JSON.parse(trimmed);
+    } catch {
+      throw new InvalidInputError(`${paramName} must be an array of ${itemShape} objects${bareNote}.`);
+    }
+  }
+
+  if (!Array.isArray(arr)) {
+    throw new InvalidInputError(`${paramName} must be an array of ${itemShape} objects${bareNote}.`);
+  }
+
+  const specs: T[] = [];
+  const seen = new Map<string, number>();
+  for (let i = 0; i < arr.length; i++) {
+    let item: unknown = arr[i];
+    if (typeof item === 'string') {
+      const t = item.trim();
+      if (t.startsWith('{') && t.endsWith('}')) {
+        try {
+          item = JSON.parse(t);
+        } catch {
+          throw new InvalidInputError(
+            `${paramName}[${i}] is a string that isn't valid JSON; pass an object shaped ${itemShape}${bareNote}.`,
+          );
+        }
+      } else if (allowBareString) {
+        if (!t) {
+          throw new InvalidInputError(`${paramName}[${i}] is an empty string; pass a ${keyField} or an object shaped ${itemShape}.`);
+        }
+        item = { [keyField]: t };
+      } else {
+        throw new InvalidInputError(
+          `${paramName}[${i}] must be an object shaped ${itemShape}, not a bare string.`,
+        );
+      }
+    }
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new InvalidInputError(`${paramName}[${i}] must be an object shaped ${itemShape}${bareNote}.`);
+    }
+    const obj = item as Record<string, unknown>;
+    const unknownKeys = Object.keys(obj).filter((k) => !keys.has(k));
+    if (unknownKeys.length > 0) {
+      throw new InvalidInputError(
+        `${paramName}[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...keys].join(', ')}`,
+      );
+    }
+    if (typeof obj[keyField] !== 'string') {
+      throw new InvalidInputError(
+        `${paramName}[${i}].${keyField} must be a string, not ${
+          Array.isArray(obj[keyField]) ? 'an array' : `a ${typeof obj[keyField]}`
+        }.`,
+      );
+    }
+    const primary = (obj[keyField] as string).trim();
+    if (!primary) {
+      throw new InvalidInputError(`${paramName}[${i}] is missing a non-empty '${keyField}'.`);
+    }
+    const firstAt = seen.get(primary);
+    if (firstAt !== undefined) {
+      throw new InvalidInputError(
+        `${paramName}[${i}] repeats the ${keyField} already given at ${paramName}[${firstAt}]: "${primary}". ` +
+          `List each ${keyField} once.`,
+      );
+    }
+    seen.set(primary, i);
+
+    const spec: Record<string, any> = { [keyField]: primary };
+    if (obj.label !== undefined) {
+      if (typeof obj.label !== 'string') {
+        throw new InvalidInputError(
+          `${paramName}[${i}].label must be a string, not ${
+            Array.isArray(obj.label) ? 'an array' : `a ${typeof obj.label}`
+          }.`,
+        );
+      }
+      // A blank label is rejected like every other blank here, rather than written. On a
+      // stored card an empty `label` is what "no label" already looks like, so accepting one
+      // would write a property that reads as absent — a change with no visible effect, which
+      // is worse than an error. It is deliberately NOT repurposed as a way to remove a label:
+      // that would be a new clearing mechanism, and removing a label is not something this
+      // tool can currently express.
+      if (obj.label.trim() === '') {
+        throw new InvalidInputError(
+          `${paramName}[${i}].label cannot be empty; omit it to leave the entry's label unchanged.`,
+        );
+      }
+      spec.label = obj.label;
+    }
+    specs.push(spec as T);
+  }
+  return specs;
+}
+
+export function coerceContactEmails(value: unknown): ContactEmailSpec[] | undefined {
+  return coerceContactEntries<ContactEmailSpec>(value, 'emails', 'address', true);
+}
+
+export function coerceContactPhones(value: unknown): ContactPhoneSpec[] | undefined {
+  return coerceContactEntries<ContactPhoneSpec>(value, 'phones', 'number', true);
+}
+
+export function coerceContactAddresses(value: unknown): ContactAddressSpec[] | undefined {
+  return coerceContactEntries<ContactAddressSpec>(value, 'addresses', 'full', false);
+}
+
+/**
+ * Coerce the `name` parameter of a contact write. A bare string is the common case and reads
+ * as the full name; the structured form names the parts. Same three-part discipline as the
+ * entry arrays: unknown keys rejected, every key type-checked, and a fresh literal returned.
+ *
+ * A blank value is rejected rather than read as "clear the name": `name` is not clearable
+ * (see the tool description), so silently dropping a blank one would leave the caller thinking
+ * a name had been removed when nothing happened.
+ */
+export function coerceContactName(value: unknown): ContactNameSpec | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  let raw: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        raw = JSON.parse(trimmed);
+      } catch {
+        throw new InvalidInputError(`name must be a full-name string or an object shaped ${CONTACT_NAME_SHAPE}.`);
+      }
+    } else {
+      if (!trimmed) {
+        throw new InvalidInputError('name cannot be empty; omit it to leave the stored name unchanged.');
+      }
+      return { full: trimmed };
+    }
+  }
+
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new InvalidInputError(`name must be a full-name string or an object shaped ${CONTACT_NAME_SHAPE}.`);
+  }
+  const obj = raw as Record<string, unknown>;
+  const unknownKeys = Object.keys(obj).filter((k) => !CONTACT_NAME_KEYS.has(k));
+  if (unknownKeys.length > 0) {
+    throw new InvalidInputError(
+      `name has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...CONTACT_NAME_KEYS].join(', ')}`,
+    );
+  }
+
+  const spec: ContactNameSpec = {};
+  for (const key of CONTACT_NAME_KEYS) {
+    const supplied = obj[key];
+    if (supplied === undefined) continue;
+    if (typeof supplied !== 'string') {
+      throw new InvalidInputError(
+        `name.${key} must be a string, not ${Array.isArray(supplied) ? 'an array' : `a ${typeof supplied}`}.`,
+      );
+    }
+    const trimmed = supplied.trim();
+    if (!trimmed) {
+      throw new InvalidInputError(`name.${key} cannot be empty; omit it to leave that part of the name unchanged.`);
+    }
+    (spec as Record<string, string>)[key] = trimmed;
+  }
+  if (Object.keys(spec).length === 0) {
+    throw new InvalidInputError(`name must set at least one of ${[...CONTACT_NAME_KEYS].join(', ')}.`);
+  }
+  return spec;
 }

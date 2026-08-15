@@ -44,6 +44,7 @@ This fork adds a **response simplification system** that reduces token usage whe
 - List all contacts
 - Get specific contacts by ID
 - Search contacts by name or email
+- Create, update and delete contacts, with a per-entry merge that keeps the card fields the simplified output doesn't show, and a full echo of the card as it stood before every write
 
 ### Calendar Operations
 - List all calendars and calendar events
@@ -241,6 +242,10 @@ All data-returning tools simplify responses by default to reduce token usage. Th
 | `list_mailboxes`, `create_mailbox` | ✅ | ✅ | — |
 | `list_identities` | ✅ | ✅ | — |
 | `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ | — |
+| `create_contact`, `update_contact` | ✅ | ✅ | — |
+| `delete_contact` | — | — | — |
+
+`update_contact` returns `{contact, previousCard}` and `delete_contact` returns `{deleted, deletedCard}`. `verbose`/`raw` apply to `contact` only — both echoes are always the untransformed JMAP card, because they exist so a wrong write can be undone by hand and that needs every field. `delete_contact` therefore takes neither parameter: the only card it returns is the echo.
 
 Email list/search tools don't support `verbose` — they always return metadata and preview. Use `get_email` for full email content, or `get_thread` with `includeBodies` for a whole conversation's plain-text bodies in one call (see [Reading long threads cheaply](#reading-long-threads-cheaply)). `preview` is a truncated snippet (~256 chars max), not the full body; these tools also return `bodyTextSize` (the full text-body size in bytes) so you can tell a short snippet apart from a long message — when `bodyTextSize` is much larger than the preview, fetch `get_email` before concluding content is absent. `size` is the whole-message size (including attachments and inline images), so it is not a body-length proxy. They do support `fields`, which is how you make a wide listing fit in one response.
 
@@ -396,16 +401,52 @@ The signature fields are the identity's configured sign-off, the same text the F
 
 **Default**: `id`, `name`, `emails`, `phones`, `organization`, `notes`
 
-**Verbose adds**: `addresses`, `titles`, `online`, `photos`, `anniversaries`, plus any remaining JMAP fields
+**Verbose adds**: `addresses`, `titles`, `online`, `photos`, `anniversaries`, plus any remaining JMAP fields — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
 
 **Simplification applied:**
 - Name resolved from `name.full` or `given + surname`
-- Emails/phones flattened from JMAP's `{hash: {address}}` maps to string arrays
+- Emails and phones flattened from JMAP's Id-map to an array — see the hybrid shape below
 - Organization extracted from first entry
 - Notes extracted from JMAP's `{hash: {note}}` object format
 - Verbose: addresses as objects, titles as strings, online/URLs as URIs
 
-## Available Tools (41 Total)
+#### `emails` and `phones` are a hybrid array — handle both shapes
+
+Each entry is **either a bare string** (the address / the number) when it carries no label, **or an object** when it does:
+
+```json
+"emails": ["plain@example.com", {"address": "work@example.com", "label": "work"}],
+"phones": [{"number": "+1 555 0100", "label": "mobile"}, "+1 555 0199"]
+```
+
+Most real entries are unlabelled, so wrapping every one of them in a single-key object would cost tokens to say nothing — but dropping the label where there is one would make "home" and "work" indistinguishable.
+
+A label is resolved from the entry itself, never from its map key (the keys are opaque server ids — 40-character hashes on older cards, short 6-character ids on newer ones). Two properties can carry one, and both are in live use in the same address book: a scalar `label` string wins when it is non-empty, otherwise a single-key `contexts` set (`{"private": true}`) supplies the name. An **empty** `label` — which every entry on some older imported cards carries — counts as no label at all. A `contexts` set naming more than one context resolves to no label rather than picking one.
+
+Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is still reachable with `verbose: true` or `raw: true`.
+
+### Writing contacts
+
+`create_contact`, `update_contact` and `delete_contact` take the same entry arrays, and accept both shapes on input too: `emails` may be `["a@b.example"]` or `[{address, label}]`, `phones` may be `["+1 555 0100"]` or `[{number, label}]`. `addresses` take `{full, label?}` objects only. Any array may also arrive as a JSON string. An unknown per-item key, a key of the wrong type, or a repeated value is rejected naming its position (e.g. `emails[2]`).
+
+**`update_contact` merges per entry rather than overwriting the card.** A JMAP patch replaces a top-level property outright, so writing `emails` from a flat array alone would silently discard the `contexts` and `pref` that sit on nearly every real entry. Instead the tool reads the card first, and:
+
+- **The array you pass decides which entries exist.** An entry whose address/number matches one already stored keeps everything the simplified output does not show, under its existing entry id; only the properties you supply are written over it. Resending an entry exactly as you read it writes nothing at all.
+- **Labels are add-and-override, not a clean rewrite.** A label that differs from the one you read is written as the entry's scalar `label` property, which is what this server resolves first — but the label you read may have come from a `contexts` set, and that set is left exactly as it was. The two can then disagree outside this server, and a Fastmail client may keep showing the old context. There is no way to *remove* a label here: a labelled entry can be relabelled, not unlabelled. Writing `contexts` the way the Fastmail apps do is not implemented.
+- **A call that both drops a stored entry and adds an unknown one is rejected as ambiguous** — it reads equally as "correct this entry" and as "delete it and add an unrelated one", which produce different cards. The rejection prints the dropped entries **in full**, hidden fields included, so resending them losslessly is the cheap path. `allowEntryReplace: true` proceeds anyway, and is **scoped to the array that was actually ambiguous**: every entry of that one array is rewritten from what you supplied and **not** carrying those hidden fields over, while another array in the same call that merged cleanly still merges.
+- **`name` merges into the stored structured name.** A bare string sets the full name and keeps the given/surname components; `{given}`/`{surname}` update just that part, leaving other components (titles, middle names) alone. Several real cards carry components and no full name, which is why this is not a whole-value replace.
+- **`addresses` do NOT merge.** A postal entry has no matchable key, so supplying them replaces the whole set.
+- **An empty array is rejected**, not read as "clear". `emails: []` is indistinguishable from a mapping bug that produced no entries, and the two outcomes differ by a whole field. Use `clearFields: ['emails']`, which can only be written on purpose. Clearable: `emails`, `phones`, `addresses`, `notes`. **`name` is not clearable** — it is how the contact is identified in every listing, so delete the card and create a new one instead. Passing a field as a value *and* in `clearFields` in the same call is rejected. `create_contact` rejects `[]` on the same arrays for the same reason, except that there the fix is to omit the field — a contact being created has nothing to clear.
+- **A card storing more than one note is rejected** rather than collapsed. `notes` writes a single note, so a multi-note card would lose the others silently; the rejection names the count and leaves the card alone.
+- **A contact group cannot be updated** by this tool. Its `members` are not editable here, and none of the tool's parameters describe a group.
+
+**Both writes echo the card as it stood before them.** `update_contact` returns `previousCard` and `delete_contact` returns `deletedCard`, always the full untransformed JMAP card. That is what makes a wrong write legible: a contact delete is irreversible (a card does not go to Trash the way an email does), so the echo is the only copy left, and an update made from a stale copy is visible in the response. Neither tool has a confirmation parameter — a caller passes a confirm flag as readily as it passed the wrong id, so the echo is the mitigation that actually works.
+
+**The echo is not an undo.** This server writes a name, emails, phones, addresses and a note, and nothing else — so `create_contact` can rebuild that much of a deleted card, but **not** its photos, titles, organizations, nicknames, URLs, anniversaries, group membership, `uid`, or the per-entry `contexts`/`pref` that the merge exists to protect in the first place. The card you get back is a similar contact, not the one that was there. Keep the echo if there is any chance the write was wrong, and restore the rest in a Fastmail client.
+
+`update_contact` also returns the merged card as `contact`, read back in the same request as the write. On the rare occasion the server does not return it, `contact` is absent and the response says so rather than letting the field vanish.
+
+## Available Tools (44 Total)
 
 **🎯 Most Popular Tools:**
 - **check_function_availability**: Check what's available and get setup guidance  
@@ -643,6 +684,12 @@ Images written as `data:` URIs are dropped and counted rather than converted, as
   - Parameters: `contactId` (required), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **search_contacts**: Search contacts by name or email. Returns simplified format by default.
   - Parameters: `query` (required), `limit` (default: 20, hard cap 100 — no paging), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+- **create_contact**: Create a contact. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape `get_contact` returns. See [Writing contacts](#writing-contacts) for the accepted entry shapes.
+  - Parameters: `name` (full-name string or `{given?, surname?, full?}`), `emails` (array; bare address strings or `{address, label?}`), `phones` (array; bare number strings or `{number, label?}`), `addresses` (array of `{full, label?}` objects), `notes`, `addressBookId` (optional, defaults to the account's address book), `verbose`, `raw`
+- **update_contact**: Update a contact, **merging per entry** so the stored fields the simplified output doesn't show (`contexts`, `pref`, …) survive an edit. Returns `{contact, previousCard}`. An edit that both drops a stored entry and adds an unknown one is rejected as ambiguous unless `allowEntryReplace` is set (which is scoped to that one array); `addresses` replace wholesale; `name` merges into the stored components; a changed label is added, never removed. See [Writing contacts](#writing-contacts).
+  - Parameters: `contactId` (required), `name`, `emails`, `phones`, `addresses`, `notes` (same shapes as create; `[]` is rejected — use `clearFields`), `clearFields` (array of `"emails"`/`"phones"`/`"addresses"`/`"notes"`; `name` is not clearable), `allowEntryReplace` (boolean), `verbose`, `raw` (both apply to `contact` only — `previousCard` is always the raw card)
+- **delete_contact**: Delete a contact. **Irreversible** — a card does not go to Trash. Returns `{deleted, deletedCard}`, the id plus the full card as it stood immediately before the destroy, so a wrong delete is at least visible in full. `create_contact` can rebuild the name, emails, phones, addresses and note from it, but not the rest of the card — see [Writing contacts](#writing-contacts). There is deliberately no confirmation parameter.
+  - Parameters: `contactId` (required)
 
 ### Calendar Tools
 
@@ -753,6 +800,8 @@ src/
 ├── response-formatters.ts  # Mailbox/identity/contact simplifiers and query formatters
 ├── field-projection.ts     # `fields` output projection for the email read tools
 ├── contacts-calendar.ts    # Contacts and calendar extensions
+├── contact-card.ts         # Contact card algebra: label resolution and the per-entry merge
+├── contacts-handler.ts     # create/update/delete_contact orchestration behind an injected client
 ├── ical-limits.ts          # Size bounds on calendar text, checked before serialization
 └── caldav-client.ts        # CalDAV calendar client (fallback)
 ```

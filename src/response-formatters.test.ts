@@ -391,6 +391,48 @@ describe('simplifyContact', () => {
   });
 });
 
+// ---------- simplifyContact: the hybrid emails/phones shape ----------
+
+// The three label cases below are all live in one real address book at once, which is why
+// both label-carrying properties are read. See resolveEntryLabel for the full shape notes.
+describe('simplifyContact entry shape', () => {
+  const card = {
+    id: 'ct-hybrid',
+    emails: {
+      // A newer card: a contexts SET and no `label` key at all.
+      '506539': { '@type': 'EmailAddress', address: 'work@example.com', contexts: { work: true }, pref: 1 },
+      // An older imported card: a scalar `label` that is the empty string.
+      '0dd713ddb7cdcb0fbc17f59321f227fabcddc7da': { '@type': 'EmailAddress', address: 'plain@example.com', label: '', pref: 1 },
+      // A scalar label that actually says something.
+      ba5ddd: { '@type': 'EmailAddress', address: 'named@example.com', label: 'school' },
+    },
+    phones: {
+      p1: { number: '+1 555 0100', contexts: { mobile: true } },
+      p2: { number: '+1 555 0199' },
+    },
+  };
+
+  it('emits a bare string with no label, and {value,label} with one', () => {
+    const result = simplifyContact(card);
+    // An empty scalar label counts as NO label, so that entry is a bare string; a single
+    // contexts key and a real scalar label both produce the object form.
+    assert.deepEqual(result.emails, [
+      { address: 'work@example.com', label: 'work' },
+      'plain@example.com',
+      { address: 'named@example.com', label: 'school' },
+    ]);
+    assert.deepEqual(result.phones, [{ number: '+1 555 0100', label: 'mobile' }, '+1 555 0199']);
+  });
+
+  it('returns the whole entry objects under verbose', () => {
+    // verbose is how a caller sees the fields update_contact's merge preserves, so it has
+    // to show contexts and pref rather than the trimmed hybrid shape.
+    const result = simplifyContact(card, { verbose: true });
+    assert.deepEqual(result.emails, Object.values(card.emails));
+    assert.deepEqual(result.phones, Object.values(card.phones));
+  });
+});
+
 // ---------- formatEmailQueryResult ----------
 
 describe('formatEmailQueryResult', () => {

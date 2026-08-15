@@ -34,8 +34,15 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   `20 July 2026` but reads them as *host-local* midnight, and rolls an impossible day
   (`2026-2-31`) into the next month, so accepting them would silently shift the search
   window instead of failing. A guess the caller can't see is worse than an error they can.
+- `coerceContactEmails` / `coerceContactPhones` / `coerceContactAddresses` /
+  `coerceContactName` — the contact write inputs, following the same three-part discipline
+  as `coerceParticipants` (unknown key rejected by index, every key type-checked by index,
+  a fresh literal built from the validated keys). `emails`/`phones` accept a bare value
+  string as well as the object form; `addresses` do not, having no single obvious scalar
+  reading. A repeated value is rejected naming both positions, because the merge matches
+  entries by that value and a repeat could only surface as a phantom addition.
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
-  shared by `update_calendar_event` and `edit_draft`.
+  shared by `update_calendar_event`, `edit_draft` and `update_contact`.
 
 The calendar write path carries the same exception for the same reason.
 `validateAndFormatICalDate` (`src/caldav-client.ts`) is the single validator for
@@ -120,6 +127,93 @@ mailbox).
   future-proofing).
 - Like coercion, this is unreachable through the normal harness (a compliant client
   cannot send an undeclared key), so verify it with the same raw-JSON-RPC harness.
+
+## Writing a record the tool can only partly see
+
+`update_contact` is the worked example, but the shape generalises to any write whose tool
+surface is narrower than the stored record.
+
+**The platform facts first**, live-read off 30 real cards, because the JMAP shape is not
+what the property names suggest:
+
+- An `emails`/`phones` entry map is keyed by an **opaque server id**, never by a label.
+  Older cards carry 40-character sha1-shaped keys; cards written by the current Fastmail
+  interface carry short 6-character ones.
+- **Two different properties carry a label, and both are live in one account.** `contexts`
+  is a SET (`{"private": true}`) and is what recent cards use — they carry no `label` key
+  at all. `label` is a scalar string found on older imported cards, and on every one of
+  those observed its value was `""`. So an empty `label` means *no label*, and a
+  `contexts` set naming more than one context names no single label either.
+- `pref: 1` sits on nearly every entry, and nothing in the simplified read shape shows it.
+- A card may be `"kind": "group"`, holding a `members` map of uids and no entries at all.
+- A `name` is `{full?, components?: [{kind, value}]}`, and real cards exist with
+  `components` and **no** `full`.
+
+**The consequence:** a JMAP PatchObject replaces a top-level property outright, so writing
+`emails` from the tool's flat array would silently destroy `contexts` and `pref` on every
+entry — fields the caller was never shown and so cannot know to resend. The pattern that
+fixes it, in `src/contact-card.ts` (pure) plus `ContactsCalendarClient.updateContact`:
+
+1. **Read the whole record first** — no `properties` filter. An existence probe answers the
+   wrong question.
+2. **The caller's array decides which entries exist; the stored record decides what each
+   surviving entry still carries.** Match by the entry's identifying value, keep the stored
+   map key, and write over only the supplied properties.
+3. **Refuse the ambiguous edit rather than guessing.** A call that both drops a stored entry
+   and adds an unknown one reads equally as "correct this entry" and "delete it, add
+   another", and those produce different records. The rejection echoes the dropped entries
+   **whole**, so the lossless retry is cheaper than reaching for the override.
+4. **Echo the pre-write record, always raw.** `previousCard` (update) and `deletedCard`
+   (delete) are the untransformed card whatever `verbose`/`raw` say, because their purpose
+   is to keep visible whatever the write took away, and a simplified echo would drop
+   exactly the fields the merge exists to protect.
+
+**An echo makes a bad write legible; it does not make it undoable.** Say that plainly
+wherever the echo is documented. This server writes a name, emails, phones, addresses and a
+note, so `create_contact` rebuilds that much of a deleted card and no more — photos, titles,
+organizations, nicknames, URLs, anniversaries, group membership, the `uid` and the per-entry
+`contexts`/`pref` are all unreachable from the tool surface. A description promising a
+"recreate" would be claiming a fidelity the write path cannot deliver, which is worse than
+saying the delete is irreversible. The general rule: an echo's documented promise is bounded
+by what the tool can actually write back, not by what the echo contains.
+
+**The override is scoped to the field that was actually ambiguous**, not to the call.
+`allowEntryReplace` is checked per entry array, after that array's own merge has run — so a
+call editing `emails` ambiguously and `phones` cleanly whole-replaces `emails` only, and
+`phones` still merges. A call-wide flag would quietly strip `contexts`/`pref` off an array
+the caller never had a problem with, which is the exact loss the merge exists to prevent.
+
+**A merge that writes a value back unchanged must write nothing.** Resolving a label from
+two competing properties (§ the platform facts above) means a round-trip can *look* like an
+edit: read an entry whose label came from `contexts`, resend it verbatim, and a naive merge
+stamps a scalar `label` on a card that never had one. The merge therefore compares the
+supplied label against the *resolved* one and only writes on a genuine difference. The
+residual is documented rather than hidden: a changed label lands in `label` while the stored
+`contexts` set stays as it was, so a label here can be added or changed but never removed,
+and this server and the Fastmail apps can end up disagreeing on one entry. Writing
+`contexts` is not implemented.
+
+**A flag is an intent marker; the echo is the safety control.** `update_contact`'s
+`allowEntryReplace` and the confirmation parameter `delete_contact` deliberately does *not*
+have are the same lesson from both sides: a model retries a rejected call with a flag as
+readily as it retries with corrected arguments, so a flag records that a lossy write was
+meant — it cannot prevent one. What makes a wrong write survivable is having the previous
+state in the response. Do not "strengthen" such a flag into a confirmation handshake, and
+do not drop an echo as redundant.
+
+**Where an empty array means "clear", and where it does not.** These diverge across the
+server on purpose, and the difference is which mistake is cheaper:
+
+| Tool | `[]` on an entry array | Why |
+| --- | --- | --- |
+| `update_contact` | REJECTED, naming `clearFields` | `emails: []` is indistinguishable from a mapping bug that produced no entries, and the two outcomes differ by a whole field of the card. |
+| `create_contact` | REJECTED, naming the omission | Same read, minus the clear: a card being created has nothing to clear, so the only honest advice is to leave the field out. Accepting `[]` on create while rejecting it on update would make the pair inconsistent for no gain. |
+| `update_calendar_event` | `participants: []` REMOVES every attendee | Long-standing published behaviour, stated in the tool description; changing it would break callers that rely on it. |
+| `edit_draft` | no bare-array clear at all — `clearFields` only | Same reasoning as `update_contact`. |
+
+`clearFields` is the shape all three agree on: it can only be written deliberately. When
+adding a new mutator, follow `update_contact`/`edit_draft` — reject the empty array and
+point at `clearFields`.
 
 ## Mailbox resolution is uniform (id / role / name / path, exact)
 
@@ -239,9 +333,13 @@ calendar rejects raised in `src/caldav-client.ts` itself follow the same rule an
 format and control-character rejects, the participant-address rejects, a `calendarId` or
 `eventId` that resolves to nothing, and the recurring-exception confirmation prompt (the
 one asking for `confirmRecurring: true`). `src/contacts-calendar.ts` follows it too — its
-input rejects (a contact with neither name nor address, an update naming no field) and its
+input rejects (a contact with neither name nor address, an update naming no field, an
+empty entry array, an ambiguous entry edit, an update aimed at a contact group) and its
 not-found rejects are `InvalidInputError`, and its create/update/delete set-errors route
-through the same `throwSingleSetError` classifier the mail writes use.
+through the same `throwSingleSetError` classifier the mail writes use. That classifier puts
+a `forbidden` on the operational side, so a contacts token issued read-only surfaces as an
+`InternalError` whose message names the read-only scope — the refusal is the only place a
+caller can learn that, since the session reports an identical capability either way.
 
 Two nearby throws stay a plain `Error` **on purpose**, and both look like exceptions to the
 rule until you see what they carry. The ORGANIZER address check validates the operator's

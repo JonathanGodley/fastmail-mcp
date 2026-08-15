@@ -1340,13 +1340,28 @@ export class JmapClient {
   }
 
   /**
-   * Like getListResult, but returns [] when the method at `index` is absent
-   * instead of throwing. Used for an appended Mailbox/get (the trailing #10
-   * mailbox-name resolver): a server that drops the trailing method, or an
-   * older 2-entry test stub, degrades to "no names resolved" rather than an error.
+   * Like getListResult, but returns [] when the method at `index` did not produce a list
+   * instead of throwing. For a method appended to a batch whose OTHER calls carry the
+   * result that matters — the trailing Mailbox/get that resolves mailbox names, the
+   * read-back that rides alongside a contacts write — so a batch whose primary work
+   * succeeded is not turned into a failure by an auxiliary call.
+   *
+   * TWO shapes count as "did not produce a list", and the second is the one that is easy
+   * to miss: a JMAP response returns one entry per method call, and a method that failed
+   * comes back as an `error` ENTRY, not as an absence (RFC 8620 section 3.6.1). Guarding
+   * only the absence would leave the far likelier real-server failure throwing — and
+   * throwing here after a completed write reports a failure that did not happen.
+   *
+   * This is never-silent by construction, not by promise: it has no way to say what went
+   * wrong, so every caller must state the degradation itself (the raw ids in
+   * `unresolvedMailboxIds`, the absent-`contact` note on update_contact). A caller that
+   * swallows the [] and prints nothing is the bug this helper enables, so check the
+   * caller, not this function.
    */
   protected readListResultIfPresent(response: JmapResponse, index: number): any[] {
     if (!response.methodResponses || index >= response.methodResponses.length) return [];
+    const entry = response.methodResponses[index];
+    if (!Array.isArray(entry) || entry.length < 2 || entry[0] === 'error') return [];
     return this.getListResult(response, index);
   }
 

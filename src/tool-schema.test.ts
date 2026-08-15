@@ -37,6 +37,8 @@ const HANDLER_FILES = [
   'forward-handler.ts',
   'compose-handler.ts',
   'send-draft-handler.ts',
+  'mailbox-handler.ts',
+  'contacts-handler.ts',
 ];
 
 function readLines(file: string): string[] {

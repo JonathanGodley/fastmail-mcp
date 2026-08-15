@@ -116,6 +116,16 @@ the problem each time. This list is the sync's real cost, so keep it honest.
   automatically — `--theirs` throws that away. There is a durable test asserting
   the request objects carry no `properties` key; if it goes red after a sync,
   this is why.
+- **`src/contacts-calendar.ts`: re-apply the contact write redesign.** Upstream's
+  `updateContact` issues a `properties: ['id']` existence probe and then sends the
+  caller's flat arrays as the patch, which destroys the `contexts`/`pref` on every
+  entry; its description claims `[] clears`, which its own code does not do. The
+  fork reads the whole card, merges per entry, rejects an ambiguous drop-plus-add,
+  and rejects `[]` in favour of `clearFields`. Upstream's `deleteContact` destroys
+  without reading, so the fork's pre-destroy echo goes too. Both are whole-method
+  rewrites, so a `--theirs` resolution silently reverts a data-loss fix — the merge
+  helpers live in the fork-only `src/contact-card.ts`, which survives untouched and
+  will be left with no callers if this is missed.
 - **`src/caldav-client.ts`: restore the `coerce.js` import** and delete
   upstream's local `requireNonEmpty` / `validateClearFields`, including the
   arriving test file's import bindings of those names. The fork's versions throw
@@ -161,6 +171,9 @@ springs quietly:
 - Both attachment writes use `flag: 'wx'` (the exclusive-create TOCTOU control).
 - Contacts getters carry no `properties` filter, and all three route through
   `contactsAccountId()`.
+- `updateContact` reads the whole card before patching and merges per entry;
+  `deleteContact` reads the card in the same request as the destroy and returns it.
+  Both echoes reach tool output regardless of `verbose`/`raw`.
 - No error text reaches tool output unredacted — returned fields count, not just
   throws.
 - No new caller-fixable rejection throws a plain `Error` at the boundary.

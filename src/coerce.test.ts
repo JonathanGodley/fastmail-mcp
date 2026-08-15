@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -812,5 +812,139 @@ describe('coerceParticipants', () => {
     const out = coerceParticipants(input)!;
     assert.notEqual(out[0], input[0]);
     assert.deepEqual(out[0], { email: 'a@example.com', name: 'Ay' });
+  });
+});
+
+// ---------- contact write inputs ----------
+
+describe('contact entry coercion', () => {
+  const isInvalidInput = (pattern: RegExp) => (err: unknown) =>
+    err instanceof InvalidInputError && pattern.test(err.message);
+
+  it('returns undefined for undefined, null and a blank string', () => {
+    // A blank string reads as "not supplied", never as the empty array: the empty array is
+    // a REJECTED shape on these parameters, so resolving a client quirk into it would turn
+    // a stringification bug into a rejection the caller cannot explain.
+    for (const coerce of [coerceContactEmails, coerceContactPhones, coerceContactAddresses]) {
+      assert.equal(coerce(undefined), undefined);
+      assert.equal(coerce(null), undefined);
+      assert.equal(coerce('   '), undefined);
+    }
+  });
+
+  it('accepts both the bare-value and object shapes for emails and phones', () => {
+    assert.deepEqual(coerceContactEmails(['a@b.example', { address: 'c@d.example', label: 'work' }]), [
+      { address: 'a@b.example' },
+      { address: 'c@d.example', label: 'work' },
+    ]);
+    assert.deepEqual(coerceContactPhones(['+1 555 0100', { number: '+1 555 0199', label: 'work' }]), [
+      { number: '+1 555 0100' },
+      { number: '+1 555 0199', label: 'work' },
+    ]);
+  });
+
+  it('accepts a JSON-string array from a lenient client', () => {
+    assert.deepEqual(coerceContactEmails('[{"address":"a@b.example","label":"work"}]'), [
+      { address: 'a@b.example', label: 'work' },
+    ]);
+    assert.deepEqual(coerceContactAddresses('[{"full":"1 Road"}]'), [{ full: '1 Road' }]);
+  });
+
+  it('refuses a bare string for addresses, which has no single obvious reading', () => {
+    assert.throws(() => coerceContactAddresses(['1 Road']), isInvalidInput(/addresses\[0\].*bare string/));
+    assert.deepEqual(coerceContactAddresses([{ full: '1 Road', label: 'home' }]), [{ full: '1 Road', label: 'home' }]);
+  });
+
+  it('rejects an unknown per-item key, naming the index', () => {
+    assert.throws(() => coerceContactEmails([{ address: 'a@b.example', type: 'work' }]), isInvalidInput(/emails\[0\].*unknown key\(s\): type/));
+    assert.throws(() => coerceContactPhones([{ number: '1' }, { number: '2', pref: 1 }]), isInvalidInput(/phones\[1\].*unknown key\(s\): pref/));
+    assert.throws(() => coerceContactAddresses([{ full: '1 Road', country: 'GB' }]), isInvalidInput(/addresses\[0\].*unknown key\(s\): country/));
+  });
+
+  it('rejects a WRONG-TYPED value, naming the index', () => {
+    // A key allowlist alone is not enough. The MCP SDK does not enforce inputSchema, and
+    // these values are written into a ContactCard/set patch, so an object where a string
+    // belongs would land on a real card verbatim.
+    assert.throws(() => coerceContactEmails([{ address: { at: 'b' } }]), isInvalidInput(/emails\[0\]\.address must be a string/));
+    assert.throws(() => coerceContactEmails([{ address: 'a@b.example', label: [] }]), isInvalidInput(/emails\[0\]\.label must be a string/));
+    assert.throws(() => coerceContactPhones([{ number: 5550100 }]), isInvalidInput(/phones\[0\]\.number must be a string/));
+    assert.throws(() => coerceContactAddresses([{ full: ['1 Road'] }]), isInvalidInput(/addresses\[0\]\.full must be a string/));
+  });
+
+  it('rejects a missing or blank primary value, naming the index', () => {
+    assert.throws(() => coerceContactEmails([{ label: 'work' }]), isInvalidInput(/emails\[0\]\.address must be a string/));
+    assert.throws(() => coerceContactEmails([{ address: '   ' }]), isInvalidInput(/emails\[0\].*non-empty 'address'/));
+    assert.throws(() => coerceContactEmails(['  ']), isInvalidInput(/emails\[0\].*empty string/));
+  });
+
+  it('rejects a blank label rather than writing a property that reads as absent', () => {
+    // On a stored card `label: ""` is exactly what "no label" looks like, so writing one
+    // would be a change with no visible effect. It is deliberately not repurposed as a way
+    // to REMOVE a label either — that would be a clearing mechanism invented in the coercer.
+    assert.throws(
+      () => coerceContactEmails([{ address: 'a@b.example', label: '  ' }]),
+      isInvalidInput(/emails\[0\]\.label cannot be empty; omit it/),
+    );
+    assert.throws(
+      () => coerceContactPhones([{ number: '+1 555 0100' }, { number: '+1 555 0199', label: '' }]),
+      isInvalidInput(/phones\[1\]\.label cannot be empty/),
+    );
+  });
+
+  it('rejects a repeated value, naming both positions', () => {
+    // A repeat cannot be matched against the stored card twice, so it would silently
+    // surface as an unknown addition and trip the ambiguity guard for no reason.
+    assert.throws(
+      () => coerceContactEmails(['a@b.example', { address: 'a@b.example', label: 'work' }]),
+      isInvalidInput(/emails\[1\] repeats the address already given at emails\[0\]/),
+    );
+  });
+
+  it('rejects a non-array and a non-object element', () => {
+    assert.throws(() => coerceContactEmails(42), isInvalidInput(/must be an array/));
+    assert.throws(() => coerceContactEmails([42]), isInvalidInput(/emails\[0\]/));
+    assert.throws(() => coerceContactEmails([null]), isInvalidInput(/emails\[0\]/));
+  });
+
+  it('builds fresh objects rather than passing the caller\'s through', () => {
+    // Adding a key later has to be a conscious edit in the coercer, not something that
+    // starts flowing to the server because the caller's object was reused.
+    const input = [{ address: 'a@b.example', label: 'work' }];
+    const out = coerceContactEmails(input)!;
+    assert.notEqual(out[0], input[0]);
+    assert.deepEqual(out[0], { address: 'a@b.example', label: 'work' });
+  });
+});
+
+describe('coerceContactName', () => {
+  const isInvalidInput = (pattern: RegExp) => (err: unknown) =>
+    err instanceof InvalidInputError && pattern.test(err.message);
+
+  it('reads a bare string as the full name', () => {
+    assert.deepEqual(coerceContactName('  Ada Lovelace '), { full: 'Ada Lovelace' });
+  });
+
+  it('accepts the structured form and a JSON-string of it', () => {
+    assert.deepEqual(coerceContactName({ given: 'Ada', surname: 'Lovelace' }), { given: 'Ada', surname: 'Lovelace' });
+    assert.deepEqual(coerceContactName('{"full":"Ada Lovelace"}'), { full: 'Ada Lovelace' });
+  });
+
+  it('returns undefined for undefined/null', () => {
+    assert.equal(coerceContactName(undefined), undefined);
+    assert.equal(coerceContactName(null), undefined);
+  });
+
+  it('rejects an unknown key and a wrong-typed one', () => {
+    assert.throws(() => coerceContactName({ nickname: 'Ada' }), isInvalidInput(/unknown key\(s\): nickname/));
+    assert.throws(() => coerceContactName({ given: 42 }), isInvalidInput(/name\.given must be a string/));
+    assert.throws(() => coerceContactName(['Ada']), isInvalidInput(/full-name string or an object/));
+  });
+
+  it('rejects a blank name rather than reading it as "clear the name"', () => {
+    // `name` is not clearable, so a silently dropped blank would leave the caller believing
+    // a name had been removed when nothing happened.
+    assert.throws(() => coerceContactName('   '), isInvalidInput(/name cannot be empty/));
+    assert.throws(() => coerceContactName({ given: '  ' }), isInvalidInput(/name\.given cannot be empty/));
+    assert.throws(() => coerceContactName({}), isInvalidInput(/at least one of/));
   });
 });

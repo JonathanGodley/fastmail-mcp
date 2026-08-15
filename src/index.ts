@@ -24,6 +24,7 @@ import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
+import { createContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -511,6 +512,33 @@ const membershipReplaceDesc = (additiveTool: 'add_labels' | 'bulk_add_labels') =
   'This REPLACES the message\'s entire mailbox membership: every other label/folder it was filed under is removed. ' +
   `To file it somewhere while KEEPING its existing labels, use ${additiveTool} instead.`;
 
+// What the three contacts READ tools return, written once. All three had a hand-copied
+// duplicate of this sentence and of the `verbose` parameter text below, which is how the
+// wrong field name ("org" for `organization`) survived in all three at once.
+const CONTACT_SHAPE_DESC =
+  'Returns simplified format by default: id, name, emails, phones, organization, notes. ' +
+  'Each emails/phones entry is EITHER a bare string (the address / the number, when the entry ' +
+  'carries no label) OR an {address, label} / {number, label} object — so handle both shapes. ' +
+  'Use verbose=true for the whole entry objects (contexts, pref, …) plus addresses, titles, ' +
+  'URLs, photos and anniversaries. Use raw=true for the original JMAP response.';
+
+// The `verbose` parameter text shared by the same three tools.
+const CONTACT_VERBOSE_PARAM_DESC =
+  'Return each emails/phones entry whole (contexts, pref and any other stored field) instead ' +
+  'of the bare-string-or-{value,label} shape, and include the extra contact fields ' +
+  '(addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.';
+
+// The write tools state their success shape, because every one of them returns something a
+// caller has to parse rather than a sentence.
+const CONTACT_ECHO_DESC =
+  'The echo is the ORIGINAL JMAP card in full, never the simplified shape and never affected ' +
+  'by verbose/raw: it exists so that whatever a write took away is still visible afterwards, ' +
+  'including the per-entry fields (contexts, pref) the simplified shape folds away. Keeping ' +
+  'the card is not the same as being able to put it back — this server can rewrite a name, ' +
+  'emails, phones, addresses and the note, and nothing else, so photos, titles, ' +
+  'organizations, nicknames, URLs, anniversaries, group membership, uid and per-entry ' +
+  'contexts/pref would have to be restored in a Fastmail client.';
+
 // Single source of truth for the tool catalog. Hoisted to module scope so the
 // CallTool handler can derive each tool's declared parameter set for the
 // unknown-parameter guard (#11) — no drift from what clients see via ListTools.
@@ -981,7 +1009,7 @@ const TOOLS = [
       },
       {
         name: 'list_contacts',
-        description: 'List contacts from the address book. Returns simplified format by default (name, emails, phones, org). Use verbose=true only if you need extra fields like addresses, titles, or photos. Use raw=true for original JMAP response.',
+        description: 'List contacts from the address book. ' + CONTACT_SHAPE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -992,7 +1020,7 @@ const TOOLS = [
             },
             verbose: {
               type: ['boolean', 'string'],
-              description: lenientBool('Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.'),
+              description: lenientBool(CONTACT_VERBOSE_PARAM_DESC),
             },
             raw: {
               type: ['boolean', 'string'],
@@ -1003,7 +1031,7 @@ const TOOLS = [
       },
       {
         name: 'get_contact',
-        description: 'Get a specific contact by ID. Returns simplified format by default (name, emails, phones, org). Use verbose=true only if you need extra fields like addresses, titles, or photos. Use raw=true for original JMAP response.',
+        description: 'Get a specific contact by ID. ' + CONTACT_SHAPE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1013,7 +1041,7 @@ const TOOLS = [
             },
             verbose: {
               type: ['boolean', 'string'],
-              description: lenientBool('Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.'),
+              description: lenientBool(CONTACT_VERBOSE_PARAM_DESC),
             },
             raw: {
               type: ['boolean', 'string'],
@@ -1025,7 +1053,7 @@ const TOOLS = [
       },
       {
         name: 'search_contacts',
-        description: 'Search contacts by name or email. Returns simplified format by default (name, emails, phones, org). Use verbose=true only if you need extra fields like addresses, titles, or photos. Use raw=true for original JMAP response.',
+        description: 'Search contacts by name or email. ' + CONTACT_SHAPE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1040,7 +1068,7 @@ const TOOLS = [
             },
             verbose: {
               type: ['boolean', 'string'],
-              description: lenientBool('Include extra contact fields (addresses, titles, URLs, photos, anniversaries). Not needed for most tasks.'),
+              description: lenientBool(CONTACT_VERBOSE_PARAM_DESC),
             },
             raw: {
               type: ['boolean', 'string'],
@@ -1048,6 +1076,170 @@ const TOOLS = [
             },
           },
           required: ['query'],
+        },
+      },
+      {
+        name: 'create_contact',
+        description: 'Create a contact in the address book. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape get_contact returns (verbose/raw apply). Every entry array accepts both a bare string and an object: emails ["a@b.example"] or [{address, label}], phones ["+1…"] or [{number, label}]; addresses take objects only. An empty array is rejected in every one of them — omit the field instead, the same rule update_contact applies. An unknown per-item key, or a key of the wrong type, is rejected naming its position (e.g. emails[2]).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: {
+              type: ['object', 'string'],
+              description: 'The contact\'s name: a full-name string ("Ada Lovelace"), or an object {given?, surname?, full?}. Required unless at least one email is given.',
+              properties: {
+                given: { type: 'string', description: 'Given (first) name.' },
+                surname: { type: 'string', description: 'Surname (family name).' },
+                full: { type: 'string', description: 'The whole name as one string.' },
+              },
+            },
+            emails: {
+              type: 'array',
+              items: {
+                type: ['object', 'string'],
+                properties: {
+                  address: { type: 'string', description: 'The email address.' },
+                  label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
+                },
+              },
+              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] is rejected — omit the field instead.',
+            },
+            phones: {
+              type: 'array',
+              items: {
+                type: ['object', 'string'],
+                properties: {
+                  number: { type: 'string', description: 'The phone number.' },
+                  label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
+                },
+              },
+              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] is rejected — omit the field instead.',
+            },
+            addresses: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  full: { type: 'string', description: 'The whole postal address as one string.' },
+                  label: { type: 'string', description: 'What this address is for, e.g. "home".' },
+                },
+              },
+              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] is rejected — omit the field instead.',
+            },
+            notes: {
+              type: 'string',
+              description: 'A free-text note on the contact. An empty string is rejected — omit the field instead.',
+            },
+            addressBookId: {
+              type: 'string',
+              description: 'Address book to create the contact in. Omit to let the server use the account default.',
+            },
+            verbose: {
+              type: ['boolean', 'string'],
+              description: lenientBool(CONTACT_VERBOSE_PARAM_DESC),
+            },
+            raw: {
+              type: ['boolean', 'string'],
+              description: lenientBool('Return the original JMAP card instead of the simplified format'),
+            },
+          },
+        },
+      },
+      {
+        name: 'update_contact',
+        description:
+          'Update a contact, MERGING per entry rather than overwriting the card. Returns {contact, previousCard}: the updated card (verbose/raw apply to it) and the card exactly as it stood before the write. ' +
+          CONTACT_ECHO_DESC +
+          ' Only the fields you pass are touched; omit a field to leave it alone. emails/phones merge by value: an entry whose address/number matches one already stored keeps everything the simplified output does not show (contexts, pref, and any other stored field), and only what you supply is written over it. Resending an entry exactly as you read it changes nothing. LABELS ARE ADD-AND-OVERRIDE, NOT A CLEAN REWRITE: a label that differs from the one you read is written as this card\'s `label` property, which then wins here — but Fastmail\'s own apps commonly store the label as a `contexts` set instead, and that set is left as it was, so the two can end up disagreeing outside this server. A label cannot currently be removed at all. A single call that BOTH drops a stored entry AND adds one the card does not have is rejected as ambiguous, and the rejection prints the dropped entries in full so you can resend them losslessly; pass allowEntryReplace:true to go ahead anyway, which rewrites every entry of THAT array from what you supplied and does NOT carry those hidden fields (arrays in the same call that merged cleanly are unaffected). addresses do NOT merge (an address entry has no matchable key) — supplying them replaces the whole set. name merges into the stored structured name: a bare string sets the full name and keeps the given/surname components, and {given}/{surname} update just that part. An empty array (emails: []) is rejected — use clearFields. notes sets a single note, so a card storing more than one is rejected rather than collapsed. A contact GROUP cannot be updated by this tool.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            contactId: {
+              type: 'string',
+              description: 'ID of the contact to update',
+            },
+            name: {
+              type: ['object', 'string'],
+              description: 'New name, MERGED into the stored one: a full-name string sets the full name and keeps the stored given/surname components; an object {given?, surname?, full?} updates only the parts it names. Cannot be cleared.',
+              properties: {
+                given: { type: 'string', description: 'Given (first) name.' },
+                surname: { type: 'string', description: 'Surname (family name).' },
+                full: { type: 'string', description: 'The whole name as one string.' },
+              },
+            },
+            emails: {
+              type: 'array',
+              items: {
+                type: ['object', 'string'],
+                properties: {
+                  address: { type: 'string', description: 'The email address.' },
+                  label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
+                },
+              },
+              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] is rejected — use clearFields.',
+            },
+            phones: {
+              type: 'array',
+              items: {
+                type: ['object', 'string'],
+                properties: {
+                  number: { type: 'string', description: 'The phone number.' },
+                  label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
+                },
+              },
+              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] is rejected — use clearFields.',
+            },
+            addresses: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  full: { type: 'string', description: 'The whole postal address as one string.' },
+                  label: { type: 'string', description: 'What this address is for, e.g. "home".' },
+                },
+              },
+              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] is rejected — use clearFields.',
+            },
+            notes: {
+              type: 'string',
+              description: 'Replacement note text. An empty string is rejected — use clearFields:[\'notes\'].',
+            },
+            clearFields: {
+              type: 'array',
+              items: { type: 'string', enum: ['emails', 'phones', 'addresses', 'notes'] },
+              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected.',
+            },
+            allowEntryReplace: {
+              type: ['boolean', 'string'],
+              description: lenientBool('Proceed with an emails/phones edit that both drops a stored entry and adds an unknown one, which is otherwise rejected as ambiguous. Scoped to the array that was actually ambiguous: every entry of THAT array is then written fresh from what you supplied, so contexts, pref and any other field the simplified output does not show are NOT carried over — while another array in the same call that merged cleanly still merges. previousCard in the response is what makes that recoverable.'),
+            },
+            verbose: {
+              type: ['boolean', 'string'],
+              description: lenientBool(CONTACT_VERBOSE_PARAM_DESC + ' Applies to `contact` only; `previousCard` is always the raw card.'),
+            },
+            raw: {
+              type: ['boolean', 'string'],
+              description: lenientBool('Return the original JMAP card as `contact` instead of the simplified format. `previousCard` is the raw card either way, and the {contact, previousCard} envelope is returned in every mode.'),
+            },
+          },
+          required: ['contactId'],
+        },
+      },
+      {
+        name: 'delete_contact',
+        description:
+          'Delete a contact. Returns {deleted, deletedCard} — the id, and the full card as it stood immediately before the destroy. ' +
+          CONTACT_ECHO_DESC +
+          ' This is IRREVERSIBLE: unlike an email, a deleted contact does not go to Trash, so the echoed card is the only copy left — keep it if there is any chance the delete was wrong. create_contact can rebuild the name, emails, phones, addresses and note from it, but NOT the rest of the card (photos, titles, organizations, nicknames, URLs, anniversaries, group membership, the uid, or the per-entry contexts/pref), so recreating gives you a similar contact rather than the one that was deleted. There is deliberately no confirmation parameter.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            contactId: {
+              type: 'string',
+              description: 'ID of the contact to delete',
+            },
+          },
+          required: ['contactId'],
         },
       },
       {
@@ -1313,7 +1505,7 @@ const TOOLS = [
       },
       {
         name: 'archive_email',
-        description: 'Archive an email: file it into the account\'s Archive folder, the mailbox carrying the JMAP archive role. ' + membershipReplaceDesc('add_labels') + ' It does NOT mark the message read — archiving and reading are separate actions, so call mark_email_read as well if you want both. The destination is fixed and takes no parameter: it is found by role, never by folder name, so a folder merely NAMED "archive" is not it. To file into any other mailbox use move_email. An account with no archive-role mailbox is rejected, pointing you at move_email.',
+        description: 'Archive an email: file it into the account\'s Archive folder, the mailbox carrying the JMAP archive role. ' + membershipReplaceDesc('add_labels') + ' It does NOT mark the message read — archiving and reading are separate actions, so call mark_email_read as well if you want both. The destination is fixed and takes no parameter: it is found by role, never by folder name, so a folder merely NAMED "archive" is not it. To file into any other mailbox use move_email. An account with no archive-role mailbox is rejected, pointing you at move_email. On success it returns a one-line confirmation, not the message — re-read it with get_email if you need its new mailbox membership.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1888,6 +2080,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+
+      // The three contacts write tools are thin result wrappers: their coercion and
+      // orchestration live in src/contacts-handler.ts behind an injected client, so they are
+      // covered by npm test rather than only by running the server against a real account.
+      case 'create_contact':
+        return { content: await createContactTool(args, initializeContactsCalendarClient()) };
+
+      case 'update_contact':
+        return { content: await updateContactTool(args, initializeContactsCalendarClient()) };
+
+      case 'delete_contact':
+        return { content: await deleteContactTool(args, initializeContactsCalendarClient()) };
 
       // Calendar operations use CalDAV directly.
       // JMAP Calendars: spec not yet finalized, Fastmail has not enabled JMAP calendar support.
@@ -2501,9 +2705,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
           contacts: {
             available: contactsAvailable,
-            functions: ['list_contacts', 'get_contact', 'search_contacts'],
+            functions: ['list_contacts', 'get_contact', 'search_contacts', 'create_contact', 'update_contact', 'delete_contact'],
             note: contactsAvailable
-              ? 'Contacts are available'
+              // The session reports the contacts capability and an account for it, which is
+              // what the READS need. It says nothing about whether the token may WRITE: a
+              // read-only contacts scope looks identical here and only refuses at the
+              // ContactCard/set, so the write tools are reported available and the caveat is
+              // stated rather than implied.
+              ? 'Contacts are available. Read access is confirmed by this session; whether create_contact/update_contact/delete_contact can write is not — a read-only contacts token reports exactly the same capability and only refuses when a write is attempted. If a write comes back forbidden, re-issue the API token with read-write contacts access.'
               : contactsCapability
                 ? 'Contacts access not available - this session reports the contacts capability but no primary account for it, so there is no account for contacts operations to address'
                 : 'Contacts access not available - may require enabling in Fastmail account settings',

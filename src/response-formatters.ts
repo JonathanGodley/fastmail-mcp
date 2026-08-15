@@ -1,6 +1,7 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
 import { redactBearerTokens } from './coerce.js';
+import { simplifyEntryMap } from './contact-card.js';
 import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 
@@ -322,16 +323,27 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
     result.name = raw.name.full || [raw.name.given, raw.name.surname].filter(Boolean).join(' ') || undefined;
   }
 
-  // Emails - map from { "label": { address: "..." } } to array of strings
+  // Emails and phones are JMAP Id-maps — { <opaque server id>: { address, contexts?, pref?, … } }
+  // — whose keys carry no meaning to a caller, so they are dropped either way. What varies is
+  // how much of each ENTRY survives:
+  //
+  //   default -> a HYBRID list: a bare "a@b.example" string for an unlabelled entry (the common
+  //              case), and {address, label} only where a label actually exists. See
+  //              resolveEntryLabel for where a label really lives on a real card — it is not
+  //              the map key, which an earlier version of this comment claimed it was.
+  //   verbose -> the entries themselves, whole, so `contexts`, `pref` and anything else
+  //              Fastmail stores are all visible. This is what update_contact's merge
+  //              preserves, so verbose is how a caller inspects what it is preserving.
+  //
+  // `raw` bypasses this function entirely and returns the map keys along with everything else.
   if (raw.emails && typeof raw.emails === 'object') {
-    const emailList = Object.values(raw.emails).map((e: any) => e.address).filter(Boolean);
-    if (emailList.length) result.emails = emailList;
+    const emails = options?.verbose ? Object.values(raw.emails) : simplifyEntryMap(raw.emails, 'address');
+    if (emails?.length) result.emails = emails;
   }
 
-  // Phones - map from { "label": { number: "..." } } to array of strings
   if (raw.phones && typeof raw.phones === 'object') {
-    const phoneList = Object.values(raw.phones).map((p: any) => p.number).filter(Boolean);
-    if (phoneList.length) result.phones = phoneList;
+    const phones = options?.verbose ? Object.values(raw.phones) : simplifyEntryMap(raw.phones, 'number');
+    if (phones?.length) result.phones = phones;
   }
 
   // Organization
