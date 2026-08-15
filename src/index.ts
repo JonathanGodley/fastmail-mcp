@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildAttachmentListContent, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
@@ -23,6 +23,7 @@ import { assertBodyInputs } from './body-format.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
+import { listMailboxes, createMailbox } from './mailbox-handler.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -340,8 +341,45 @@ const SCOPE_RELIABILITY_CONTRACT =
   'A "count could not be confirmed" or "folder not found; not excluded" note means re-run to be sure. ' +
   'Setting mailbox searches only that folder (no note, by definition).';
 
+// The forms every mailbox-taking parameter accepts, written ONCE and shared by all of
+// them — the scalar ones (mailbox / targetMailbox / parent) and the mailboxIds arrays
+// alike. They resolve through a single matcher, so a form documented on one tool and not
+// another would be a documentation-only difference, and the path form is specified here
+// and nowhere else in the schemas.
+const MAILBOX_REF_FORMS =
+  'Accepts an id, a role (inbox, archive, sent, drafts, trash, junk), a folder name (e.g. Receipts), or a root-anchored path (e.g. Archive/2026/Receipts): "/"-separated, no leading or trailing slash, segments matched case-insensitively. ' +
+  'A folder name matching exactly one mailbox wins over reading the same text as a path, so a folder whose own name contains "/" stays reachable by that name. ' +
+  'A name shared by several mailboxes is rejected as ambiguous, listing their full paths — retry with one of those, or with the id. An unknown mailbox is rejected with the valid list. ' +
+  'list_mailboxes returns each mailbox\'s path, and a path it returns can be pasted straight back into this parameter.';
+
 const MAILBOX_PARAM_DESC =
-  'Mailbox to scope to: an id, a role (inbox, trash, junk, sent, drafts, archive), or a folder name (e.g. Receipts). Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion. Unknown mailbox is rejected with the valid list.';
+  'Mailbox to scope to. ' + MAILBOX_REF_FORMS +
+  ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion.';
+
+// The mailbox a draft is filed into, shared by nothing else: create_draft is the only tool
+// that picks a save destination without moving anything.
+const DRAFT_MAILBOX_PARAM_DESC =
+  'Mailbox to SAVE the draft into (optional, defaults to Drafts). Does not set From or recipients. ' + MAILBOX_REF_FORMS;
+
+const READ_MAILBOX_PARAM_DESC =
+  'Mailbox to read (default: inbox). ' + MAILBOX_REF_FORMS;
+
+const STATS_MAILBOX_PARAM_DESC =
+  'Mailbox to report on (optional, defaults to all mailboxes). ' + MAILBOX_REF_FORMS;
+
+// The parent narrowing on list_mailboxes and the nesting parent on create_mailbox are
+// different jobs, so they get separate leading sentences over the shared forms.
+const LIST_PARENT_PARAM_DESC =
+  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox. ' + MAILBOX_REF_FORMS;
+
+const CREATE_PARENT_PARAM_DESC =
+  'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
+
+// The label arrays, which take the same forms per entry. A function rather than two
+// constants so the add/remove verb is the only thing that differs.
+const labelMailboxIdsDesc = (verb: 'add' | 'remove') =>
+  `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
+  ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once.';
 
 // One canonical explanation of the simplified location + status fields, shared
 // verbatim by every read tool (get_email, get_thread, list_emails, search_emails,
@@ -460,7 +498,7 @@ const STRIP_QUOTED_DESC =
 // The destination parameter shared by move_email and bulk_move, declared once so the two
 // cannot drift on what a destination accepts or on how an unknown one is refused.
 const TARGET_MAILBOX_PARAM_DESC =
-  'Destination mailbox — id, role (e.g. archive, trash), or name. Unknown mailbox is rejected with the valid list.';
+  'Destination mailbox. ' + MAILBOX_REF_FORMS;
 
 // The membership warning carried by every tool that sets mailboxIds whole-value
 // (move_email, bulk_move, archive_email). Written once because the consequence is the
@@ -479,10 +517,21 @@ const membershipReplaceDesc = (additiveTool: 'add_labels' | 'bulk_add_labels') =
 const TOOLS = [
       {
         name: 'list_mailboxes',
-        description: 'List all mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, role, counts). Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response.',
+        // No `properties` projection parameter, deliberately. Upstream added one so that
+        // accounts with hundreds of mailboxes could trim the payload; this server does not
+        // expose it, so a client-side option would be surface nothing can reach, and a
+        // narrowed set that dropped id/name/role/parentId would silently break the path
+        // column and every path-form lookup. The full payload sits well inside the result
+        // window on this account's mailbox count; a large-account trim would be a real
+        // feature to design, not an option to leave unreachable.
+        description: 'List the mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, path, role, counts). Each mailbox carries `path`, its root-anchored "/"-separated location (e.g. Archive/2026/Receipts), which can be passed straight back to any mailbox parameter. Use parent to list one folder\'s direct children. Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response (no path — raw is untransformed JMAP).',
         inputSchema: {
           type: 'object',
           properties: {
+            parent: {
+              type: 'string',
+              description: LIST_PARENT_PARAM_DESC,
+            },
             verbose: {
               type: ['boolean', 'string'],
               description: lenientBool('Include extra mailbox fields (sortOrder, isSubscribed, myRights). Not needed for most tasks.'),
@@ -492,6 +541,32 @@ const TOOLS = [
               description: lenientBool('Return original JMAP response instead of simplified format'),
             },
           },
+        },
+      },
+      {
+        name: 'create_mailbox',
+        description: 'Create a mailbox (a Fastmail folder, which is also what a label is). Returns the created mailbox in the same shape list_mailboxes returns, including its `path`, so it can be used as a move destination or a label immediately with no follow-up lookup. `name` is a LEAF name: it must not contain "/", and nesting is expressed with parent. Use raw=true for the original JMAP object, verbose=true for the extra mailbox fields.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: {
+              type: 'string',
+              description: 'Name of the new mailbox, as a single leaf name (e.g. "Receipts"). Must not contain "/" — to nest it, pass the parent parameter.',
+            },
+            parent: {
+              type: 'string',
+              description: CREATE_PARENT_PARAM_DESC,
+            },
+            verbose: {
+              type: ['boolean', 'string'],
+              description: lenientBool('Include extra mailbox fields (sortOrder, isSubscribed, myRights). Not needed for most tasks.'),
+            },
+            raw: {
+              type: ['boolean', 'string'],
+              description: lenientBool('Return original JMAP response instead of simplified format'),
+            },
+          },
+          required: ['name'],
         },
       },
       {
@@ -704,7 +779,7 @@ const TOOLS = [
             },
             mailbox: {
               type: 'string',
-              description: 'Mailbox to SAVE the draft into — id, role, or name (optional, defaults to Drafts). Does not set From or recipients. Unknown mailbox is rejected with the valid list.',
+              description: DRAFT_MAILBOX_PARAM_DESC,
             },
             subject: {
               type: 'string',
@@ -1151,7 +1226,7 @@ const TOOLS = [
             position: positionSchemaProperty(),
             mailbox: {
               type: 'string',
-              description: 'Mailbox to read — id, role, or name (default: inbox). Unknown mailbox is rejected with the valid list.',
+              description: READ_MAILBOX_PARAM_DESC,
               default: 'inbox',
             },
             ascending: {
@@ -1220,7 +1295,7 @@ const TOOLS = [
       },
       {
         name: 'move_email',
-        description: 'Move an email to a different mailbox. ' + membershipReplaceDesc('add_labels') + ' The destination accepts an id, role, or name. An unknown destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
+        description: 'Move an email to a different mailbox. ' + membershipReplaceDesc('add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1252,7 +1327,7 @@ const TOOLS = [
       },
       {
         name: 'add_labels',
-        description: 'Add labels (mailboxes) to an email without removing existing ones. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
+        description: 'Add labels (mailboxes) to an email without removing existing ones. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1263,7 +1338,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailboxes to add as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
+              description: labelMailboxIdsDesc('add'),
             },
           },
           required: ['emailId', 'mailboxIds'],
@@ -1271,7 +1346,7 @@ const TOOLS = [
       },
       {
         name: 'remove_labels',
-        description: 'Remove specific labels (mailboxes) from an email. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
+        description: 'Remove specific labels (mailboxes) from an email. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1282,7 +1357,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailboxes to remove as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
+              description: labelMailboxIdsDesc('remove'),
             },
           },
           required: ['emailId', 'mailboxIds'],
@@ -1361,13 +1436,13 @@ const TOOLS = [
       },
       {
         name: 'get_mailbox_stats',
-        description: 'Get statistics for a mailbox (unread count, total emails, etc.). Pass mailbox as an id, role, or name; omit it for stats across all mailboxes. An unknown mailbox is rejected with the valid list.',
+        description: 'Get statistics for a mailbox (unread count, total emails, etc.). Pass mailbox as an id, role, name, or path; omit it for stats across all mailboxes. An unknown or ambiguous mailbox is rejected with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
             mailbox: {
               type: 'string',
-              description: 'Mailbox to report on — id, role, or name (optional, defaults to all mailboxes). Unknown mailbox is rejected with the valid list.',
+              description: STATS_MAILBOX_PARAM_DESC,
             },
           },
         },
@@ -1422,7 +1497,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_move',
-        description: 'Move multiple emails to a mailbox. ' + membershipReplaceDesc('bulk_add_labels') + ' The destination accepts an id, role, or name. An unknown destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
+        description: 'Move multiple emails to a mailbox. ' + membershipReplaceDesc('bulk_add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1456,7 +1531,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_add_labels',
-        description: 'Add labels to multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
+        description: 'Add labels to multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1468,7 +1543,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailboxes to add as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
+              description: labelMailboxIdsDesc('add'),
             },
           },
           required: ['emailIds', 'mailboxIds'],
@@ -1476,7 +1551,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_remove_labels',
-        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), or name; an unknown mailbox rejects the whole call with the valid list.',
+        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1488,7 +1563,7 @@ const TOOLS = [
             mailboxIds: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Array of mailboxes to remove as labels — each an id, role (e.g. archive, trash), or name. Any unresolved mailbox rejects the whole call with the valid list.',
+              description: labelMailboxIdsDesc('remove'),
             },
           },
           required: ['emailIds', 'mailboxIds'],
@@ -1552,28 +1627,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const client = initializeClient();
 
     switch (name) {
-      case 'list_mailboxes': {
-        // raw and verbose take coerceBool like every other flag on this server, not `!!`.
-        // A lenient client's stringified "false" is truthy, so `!!` on raw:"false" returned
-        // untransformed JMAP to a caller that had explicitly asked for the simplified shape
-        // — a silent response-format flip, and raw/verbose sit on nearly every read tool.
-        // Both default to false, which is what `!!undefined` already produced, so the
-        // default shape is unchanged. An unrecognised value ("1", "yes") now lands on that
-        // default instead of flipping the format. Repeated per handler rather than hoisted:
-        // each read tool destructures its own args, and the surrounding code differs. (#54)
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
-        const mailboxes = await client.getMailboxes();
-        const output = raw ? mailboxes : mailboxes.map(m => simplifyMailbox(m, { verbose }));
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(output, null, 2),
-            },
-          ],
-        };
-      }
+      // Both mailbox tools are thin result wrappers: their orchestration lives in
+      // src/mailbox-handler.ts behind an injected client, so it is covered by npm test
+      // rather than only by running the server.
+      case 'list_mailboxes':
+        return { content: await listMailboxes(args, client) };
+
+      case 'create_mailbox':
+        return { content: await createMailbox(args, client) };
 
       case 'list_emails': {
         const { mailbox, limit } = args as any;
@@ -1581,7 +1642,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // silently reverse the sort order. Defaults to false (newest first), matching the
         // documented default. Sits alongside the scope flags below, which coerce the same way.
         const ascending = coerceBool((args as any).ascending) ?? false;
-        // Same coercion for raw — see list_mailboxes for why `!!` was wrong here.
+        // raw takes coerceBool like every other flag on this server, not `!!`. A lenient
+        // client's stringified "false" is truthy, so `!!` on raw:"false" returned
+        // untransformed JMAP to a caller that had explicitly asked for the simplified shape
+        // — a silent response-format flip, and raw/verbose sit on nearly every read tool.
+        // Both default to false, which is what `!!undefined` already produced, so the
+        // default shape is unchanged. An unrecognised value ("1", "yes") now lands on that
+        // default instead of flipping the format. Repeated per handler rather than hoisted:
+        // each read tool destructures its own args, and the surrounding code differs. (#54)
         const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
@@ -1761,7 +1829,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_contacts': {
         const { limit } = args as any;
-        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        // Same coercion as list_emails - see there for why `!!` was wrong.
         const raw = coerceBool((args as any).raw) ?? false;
         const verbose = coerceBool((args as any).verbose) ?? false;
         const contactsClient = initializeContactsCalendarClient();
@@ -1780,7 +1848,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_contact': {
         const { contactId } = args as any;
-        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        // Same coercion as list_emails - see there for why `!!` was wrong.
         const raw = coerceBool((args as any).raw) ?? false;
         const verbose = coerceBool((args as any).verbose) ?? false;
         if (!contactId) {
@@ -1801,7 +1869,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_contacts': {
         const { query, limit } = args as any;
-        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        // Same coercion as list_emails - see there for why `!!` was wrong.
         const raw = coerceBool((args as any).raw) ?? false;
         const verbose = coerceBool((args as any).verbose) ?? false;
         if (!query) {
@@ -1936,7 +2004,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_identities': {
-        // Same coercion as list_mailboxes - see there for why `!!` was wrong.
+        // Same coercion as list_emails - see there for why `!!` was wrong.
         const raw = coerceBool((args as any).raw) ?? false;
         const verbose = coerceBool((args as any).verbose) ?? false;
         const client = initializeClient();
@@ -1962,7 +2030,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
         // silently reverse the sort order. Defaults to false (newest first).
         const ascending = coerceBool((args as any).ascending) ?? false;
-        // Same coercion for raw — see list_mailboxes for why `!!` was wrong here.
+        // Same coercion for raw — see list_emails for why `!!` was wrong here.
         const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
@@ -2187,7 +2255,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // silently reverse the sort order. Defaults to false (newest first), matching the
         // three-valued coerceBool the other flags on this call already use.
         const ascending = coerceBool((args as any).ascending) ?? false;
-        // Same coercion for raw — see list_mailboxes for why `!!` was wrong here.
+        // Same coercion for raw — see list_emails for why `!!` was wrong here.
         const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
@@ -2420,7 +2488,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           email: {
             available: true,
             functions: [
-              'list_mailboxes', 'list_emails', 'get_email', 'reply_email', 'forward_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
+              'list_mailboxes', 'create_mailbox', 'list_emails', 'get_email', 'reply_email', 'forward_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
               'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email', 'archive_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',

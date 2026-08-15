@@ -682,6 +682,15 @@ export interface MailboxInfo {
 // role:null — still resolve their name; default mailboxes carry names like
 // "Trash"/"Archive" AND a role. Role is lowercased here so callers get the
 // docs-promised lowercase form regardless of server casing. (#10, #49)
+//
+// This map deliberately carries NO root-anchored path, and the per-email
+// `mailboxes`/`roles` enrichment therefore does not gain one. The two `Mailbox/get`
+// calls that feed it project ['id','name','role'] to keep a listing cheap, so a path
+// would mean either widening those projections to include `parentId` on every
+// list/search page, or a second fetch per page — a real cost paid on every read to
+// name a location the reader can already resolve. Paths belong to the mailbox surface
+// (`list_mailboxes`, and the mailbox-taking parameters that accept one), where the
+// whole tree is fetched once anyway.
 export function buildMailboxInfoMap(mailboxes: any[]): Map<string, MailboxInfo> {
   const map = new Map<string, MailboxInfo>();
   for (const mb of mailboxes || []) {
@@ -757,68 +766,337 @@ export function attachMailboxInfo(emails: any[], map: Map<string, MailboxInfo>):
 // produce a huge message; the list_mailboxes pointer keeps a truncated list actionable.
 const MAILBOX_LIST_CAP = 30;
 
-// The shared "Valid: …" tail listing known mailboxes (name + role), capped so a large
+// The separator between path segments, and the bound on how far a mailbox's parent chain
+// is followed while computing its root-anchored path. A real tree is a handful of levels
+// deep; the bound exists only so a corrupt chain terminates. Hitting it is REPORTED (see
+// buildMailboxPathMap / MailboxMatch below), never silently truncated into "not found".
+//
+// The bound cuts both ways, and the other side is deliberate: a LEGITIMATELY rooted chain
+// more than 100 levels deep would also be reported as unwalkable, even though its path is
+// merely long rather than broken. That is the safe direction to be wrong in — the report
+// names the mailbox and points at the id/role/name forms, whereas a raised cap that still
+// has to end somewhere only moves the same edge further out. Fastmail's own folder UI
+// makes such a tree unreachable in practice.
+const MAILBOX_PATH_SEPARATOR = '/';
+const MAILBOX_PARENT_CHAIN_CAP = 100;
+
+// The ONE normalisation a path segment gets, applied on BOTH sides of every comparison:
+// to each name as a path is built, and to each segment of a caller's input as it is parsed.
+// Applying it on one side only is what makes a path emitted by the server fail to resolve
+// when pasted back (a mailbox named " Q1" produced "Work/ Q1", while the input "Work/ Q1"
+// was parsed as ["Work","Q1"]). Returns '' for anything that cannot serve as a segment,
+// which callers treat as "no path", never as an empty segment.
+function normalizeMailboxSegment(name: unknown): string {
+  return typeof name === 'string' ? name.trim() : '';
+}
+
+// Root-anchored path for every mailbox in the list, keyed by id ("Archive/2026/Receipts").
+// Computed by walking each mailbox's parentId chain UP to a top-level mailbox.
+//
+// A mailbox gets NO entry in `paths` — and its id is reported in `unpathable` instead —
+// when the walk cannot produce a path the resolver would accept back:
+//   - the chain never reaches a top-level mailbox within the cap (a parentId loop, or a
+//     parentId naming a mailbox absent from the list);
+//   - some mailbox on the chain has a missing, non-string or blank name, which would
+//     contribute an empty segment and yield a string ("/Kid", "A//B") that findMailboxExact
+//     explicitly rejects.
+// In neither case is the partial or padded string emitted: it would look root-anchored, be
+// wrong, and could match a different mailbox's real path.
+//
+// Exported pure: list_mailboxes builds the map once per call for its `path` column, and
+// the resolver below reuses the same computation for path input and for the candidate
+// paths in an ambiguity error, so output and input can never describe different trees.
+//
+// Deliberately NOT memoised. A label array rebuilds this once per entry, and an error path
+// rebuilds it again for the hint — but the work is one pass over a list of tens of
+// mailboxes, and the two ways to avoid it both cost more than they save: an identity-keyed
+// cache makes correctness depend on no caller ever mutating a list it was handed, and
+// threading a prebuilt map through findMailboxExact puts a performance argument into the
+// signature of the function whose whole job is to be the one place resolution happens.
+export function buildMailboxPathMap(mailboxes: any[]): { paths: Map<string, string>; unpathable: string[] } {
+  const list = (mailboxes || []).filter(mb => mb && typeof mb.id === 'string');
+  const byId = new Map<string, any>(list.map(mb => [mb.id as string, mb]));
+  const paths = new Map<string, string>();
+  const unpathable: string[] = [];
+  for (const mb of list) {
+    const segments: string[] = [];
+    let cursor: any = mb;
+    let rooted = false;
+    for (let depth = 0; depth < MAILBOX_PARENT_CHAIN_CAP; depth++) {
+      const segment = normalizeMailboxSegment(cursor.name);
+      if (segment === '') break;
+      segments.unshift(segment);
+      if (!cursor.parentId) { rooted = true; break; }
+      const parent = byId.get(cursor.parentId);
+      if (!parent) break;
+      cursor = parent;
+    }
+    if (rooted) paths.set(mb.id, segments.join(MAILBOX_PATH_SEPARATOR));
+    else unpathable.push(mb.id);
+  }
+  return { paths, unpathable };
+}
+
+// The handle a not-found/ambiguity message offers for one mailbox: its root-anchored path,
+// or — when no path could be computed — its id. Never its bare name: a name is what the
+// caller just had rejected as ambiguous, so offering it back as a candidate would send them
+// round the same loop, and it is precisely the mailboxes with no path whose name is least
+// likely to be unique. Both forms this returns are accepted input, so whatever a caller is
+// handed can be pasted straight back.
+function mailboxLabel(mb: any, paths: Map<string, string>): string {
+  return paths.get(mb?.id) ?? String(mb?.id);
+}
+
+// The shared "Valid: …" tail listing known mailboxes (path + role), capped so a large
 // account can't produce a huge message. Reused by both the single-input and the multi-input
-// (label array) not-found messages so they truncate identically and read consistently.
+// (label array) messages so they truncate identically and read consistently. The entries
+// are PATHS, not bare names: an ambiguity error hands the caller full paths, so the hint
+// has to speak the same vocabulary or the two would disagree about what to retry with.
 function mailboxListHint(mailboxes: any[]): string {
+  const { paths } = buildMailboxPathMap(mailboxes || []);
   const entries = (mailboxes || [])
     .filter(mb => mb && typeof mb.name === 'string')
-    .map(mb => (mb.role ? `${mb.name} (${mb.role})` : mb.name));
+    .map(mb => {
+      const label = mailboxLabel(mb, paths);
+      return mb.role ? `${label} (${mb.role})` : label;
+    });
   const shown = entries.slice(0, MAILBOX_LIST_CAP);
   let list = shown.join(', ');
   if (entries.length > shown.length) {
     list += `, …and ${entries.length - shown.length} more — call list_mailboxes for the full list`;
   }
-  return `Use a name, or a role (inbox/archive/sent/drafts/trash/junk). Valid: ${list}`;
+  return `Use an id, a role (inbox/archive/sent/drafts/trash/junk), a name, or a full path (Parent/Child). Valid: ${list}`;
 }
 
 function formatMailboxNotFound(input: string, mailboxes: any[]): string {
   return `Mailbox '${input}' not found. ${mailboxListHint(mailboxes)}`;
 }
 
-// Multi-input not-found variant for the label arrays: name EVERY unresolved value in one
-// message (so an agent fixes all typos in a single retry), then the same shared hint so it
-// reads as a natural superset of the single-input message. The reflected values are the
-// caller's own input (redacted at the top-level catch), but bound the volume anyway: cap
-// the count with a "…and N more" tail and clamp each value's length so a huge/long
-// mailboxIds array can't be reflected wholesale.
+// A name shared by several mailboxes is NOT a typo, so it must never render as
+// "not found" — that would send the caller off correcting spelling that was already
+// right. Name the candidates by full path, which is exactly the input form that
+// disambiguates them.
+function formatMailboxAmbiguous(input: string, candidates: string[]): string {
+  return `Mailbox '${input}' is ambiguous: ${candidates.length} mailboxes share that name. ` +
+    `Retry with one of their full paths, or with an id. Candidates: ${joinCapped(candidates)}`;
+}
+
+// Distinct from both "not found" and "ambiguous": the tree itself is unwalkable, so no
+// path input can be resolved at all. Says which mailbox broke the walk and which input
+// forms still work.
+function formatMailboxUnwalkable(input: string, id: string): string {
+  return `Mailbox '${input}' could not be resolved as a path: mailbox '${id}' has a parent chain that never reaches ` +
+    `a top-level mailbox (a loop, or a parent missing from the mailbox list), so full paths cannot be computed. ` +
+    `Refer to the mailbox by id, role, or name instead.`;
+}
+
+// Multi-input variant for the label arrays: name EVERY value that failed in one message
+// (so an agent fixes them all in a single retry), each in its own bucket, then the same
+// shared hint so it reads as a natural superset of the single-input message. The buckets
+// are separate because they call for different corrections — a typo is respelled, an
+// ambiguous name is replaced with one of its paths — and collapsing them into
+// "not found" would tell a caller their spelling was wrong when it was not. The reflected
+// values are the caller's own input (redacted at the top-level catch), but bound the
+// volume anyway: cap the count with a "…and N more" tail and clamp each value's length so
+// a huge/long mailboxIds array can't be reflected wholesale.
 const UNRESOLVED_VALUE_MAXLEN = 80;
+function clampUnresolvedValue(v: string): string {
+  return v.length > UNRESOLVED_VALUE_MAXLEN ? `${v.slice(0, UNRESOLVED_VALUE_MAXLEN)}…` : v;
+}
+
+// Join a capped list and SAY when it was capped. Every list rendered into a resolver error
+// goes through this, because a truncated list with no tail reads as a complete one — a
+// caller would take "these are the candidates" at face value and never learn the rest exist.
+function joinCapped(items: string[], separator = ', '): string {
+  const shown = items.slice(0, MAILBOX_LIST_CAP);
+  const listed = shown.join(separator);
+  return items.length > shown.length ? `${listed}${separator}…and ${items.length - shown.length} more` : listed;
+}
+
 function formatMailboxesNotFound(unresolved: string[], mailboxes: any[]): string {
-  const clamp = (v: string) => (v.length > UNRESOLVED_VALUE_MAXLEN ? `${v.slice(0, UNRESOLVED_VALUE_MAXLEN)}…` : v);
-  const shown = unresolved.slice(0, MAILBOX_LIST_CAP).map(v => `'${clamp(v)}'`);
-  let listed = shown.join(', ');
-  if (unresolved.length > shown.length) {
-    listed += `, …and ${unresolved.length - shown.length} more`;
-  }
+  const listed = joinCapped(unresolved.map(v => `'${clampUnresolvedValue(v)}'`));
   return `Mailbox(es) not found: ${listed}. ${mailboxListHint(mailboxes)}`;
 }
 
-// Exact-only mailbox match: exact id -> role (case-insensitive) -> exact name
-// (case-insensitive); returns undefined on a miss. NO substring matching (substring is an
-// injection-steering primitive on write paths and can mis-resolve). Edge: a custom mailbox
-// literally named after a role (e.g. "Archive") is shadowed by the role branch — acceptable,
-// and the reason the docs use "Receipts" not "Archive" as the name example. Input is
-// trimmed/stringified HERE so every caller (the single-mailbox params and the label arrays)
-// normalises identically. Exported pure for unit testing.
-export function findMailboxExact(mailboxes: any[], input: string): any {
+export interface MailboxResolutionFailures {
+  notFound: string[];
+  ambiguous: Array<{ input: string; candidates: string[] }>;
+  unwalkable: Array<{ input: string; id: string }>;
+}
+
+function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailboxes: any[]): string {
+  const parts: string[] = [];
+  if (failures.notFound.length > 0) {
+    const listed = joinCapped(failures.notFound.map(v => `'${clampUnresolvedValue(v)}'`));
+    parts.push(`Mailbox(es) not found: ${listed}.`);
+  }
+  if (failures.ambiguous.length > 0) {
+    const listed = joinCapped(
+      failures.ambiguous.map(a => `'${clampUnresolvedValue(a.input)}' matches ${joinCapped(a.candidates)}`),
+      '; ',
+    );
+    parts.push(`Ambiguous mailbox name(s) — retry with a full path or an id: ${listed}.`);
+  }
+  if (failures.unwalkable.length > 0) {
+    const listed = joinCapped(
+      failures.unwalkable.map(u => `'${clampUnresolvedValue(u.input)}' (blocked by mailbox '${u.id}')`),
+    );
+    parts.push(
+      `Mailbox path(s) unresolvable because a parent chain never reaches a top-level mailbox: ${listed}. ` +
+      'Refer to those by id, role, or name.',
+    );
+  }
+  return `${parts.join(' ')} ${mailboxListHint(mailboxes)}`;
+}
+
+/**
+ * The outcome of resolving ONE mailbox reference.
+ *
+ * `findMailboxExact` RETURNS this rather than throwing, because its two callers need
+ * different failure handling and only the caller knows which: `resolveMailbox` throws on
+ * the spot, while the label arrays collect every failure across the whole array into one
+ * aggregate error so a caller fixes them all in a single retry. A thrown error would force
+ * the array resolver into a try/catch per entry and would lose the structured reason.
+ *
+ *   { mailbox }              — resolved.
+ *   { ambiguous, candidates} — a flat name matched more than one mailbox; `candidates` are
+ *                              their full paths, i.e. the input that disambiguates them.
+ *   { unwalkable, id }       — a parent chain never reached a top-level mailbox, so no path
+ *                              can be computed. Reported rather than folded into "not
+ *                              found": a corrupt tree is not a caller typo, and saying so
+ *                              is what points them at the id/role/name forms that still work.
+ *   undefined                — a genuine miss.
+ */
+export type MailboxMatch =
+  | { mailbox: any }
+  | { ambiguous: string; candidates: string[] }
+  | { unwalkable: true; id: string };
+
+// Exact-only mailbox match, in resolution order:
+//   1. exact id       — case-SENSITIVE. A JMAP id is an opaque server token; folding its
+//                       case could make two distinct ids collide.
+//   2. role           — case-insensitive.
+//   3. exact flat name— case-insensitive.
+//   4. `/`-joined path— root-anchored, every segment matched case-insensitively.
+//
+// A flat name matching exactly one mailbox WINS over reading the same text as a path, so a
+// mailbox whose own name contains a "/" stays reachable by that name. A flat name matching
+// several mailboxes is reported as ambiguous rather than silently resolving to the first.
+//
+// NO substring matching (substring is an injection-steering primitive on write paths and
+// can mis-resolve). Edge: a custom mailbox literally named after a role (e.g. "Archive") is
+// shadowed by the role branch — acceptable, and the reason the docs use "Receipts" not
+// "Archive" as the name example.
+//
+// Input is trimmed/stringified HERE so every caller (the single-mailbox params and the
+// label arrays) normalises identically — which is also why the path walk lives here and not
+// in resolveMailbox: the label arrays call this directly, and a path form accepted on
+// `move_email` but not in `add_labels` would be exactly the two-vocabulary split this
+// server exists to avoid. Exported pure for unit testing.
+export function findMailboxExact(mailboxes: any[], input: string): MailboxMatch | undefined {
   const list = mailboxes || [];
   const raw = String(input).trim();
   const byId = list.find(mb => mb && mb.id === raw);
-  if (byId) return byId;
+  if (byId) return { mailbox: byId };
   const lower = raw.toLowerCase();
   const byRole = list.find(mb => mb && typeof mb.role === 'string' && mb.role.toLowerCase() === lower);
-  if (byRole) return byRole;
-  const byName = list.find(mb => mb && typeof mb.name === 'string' && mb.name.toLowerCase() === lower);
-  if (byName) return byName;
+  if (byRole) return { mailbox: byRole };
+  // Names are compared through the same normalisation the path segments get, so a mailbox
+  // whose stored name carries stray whitespace is reachable by the name a caller would
+  // type — and so the name branch and the path branch cannot disagree about what a
+  // segment is.
+  const byName = list.filter(mb => mb && normalizeMailboxSegment(mb.name).toLowerCase() === lower);
+  if (byName.length === 1) return { mailbox: byName[0] };
+  if (byName.length > 1) {
+    const { paths } = buildMailboxPathMap(list);
+    return { ambiguous: raw, candidates: byName.map(mb => mailboxLabel(mb, paths)) };
+  }
+
+  // Path form. A leading, trailing or doubled separator leaves an empty segment: that is
+  // not a path this server accepts (the documented form is root-anchored with no leading
+  // or trailing slash), and guessing which slash the caller meant is exactly the kind of
+  // unclear intent the input conventions refuse to recover.
+  if (!raw.includes(MAILBOX_PATH_SEPARATOR)) return undefined;
+  const segments = raw.split(MAILBOX_PATH_SEPARATOR).map(normalizeMailboxSegment);
+  if (segments.some(s => s === '')) return undefined;
+  const target = segments.join(MAILBOX_PATH_SEPARATOR).toLowerCase();
+
+  const { paths, unpathable } = buildMailboxPathMap(list);
+  const matches = list.filter(mb => {
+    const p = mb && paths.get(mb.id);
+    return typeof p === 'string' && p.toLowerCase() === target;
+  });
+  if (matches.length === 1) return { mailbox: matches[0] };
+  if (matches.length > 1) return { ambiguous: raw, candidates: matches.map(mb => mailboxLabel(mb, paths)) };
+
+  // The path matched nothing. A broken chain elsewhere in the account is NOT an explanation
+  // for that: blaming it would tell a caller who simply mistyped "Archive/Recepts" that
+  // paths cannot be computed, in an account where "Archive/2026" resolves perfectly well —
+  // and, through a label array, would file a typo in the bucket that tells them to stop
+  // using paths while the same sentence lists paths as valid input. So the failure is
+  // attributed only when it plausibly IS the cause: either nothing in the account has a
+  // path at all, or a mailbox the caller actually named (by one of the segments) is one of
+  // the unpathable ones. Anything else is an ordinary miss.
+  if (unpathable.length > 0) {
+    if (paths.size === 0) return { unwalkable: true, id: unpathable[0] };
+    const named = new Set(segments.map(s => s.toLowerCase()));
+    const blamed = unpathable.find(id => {
+      const mb = list.find(m => m && m.id === id);
+      return !!mb && named.has(normalizeMailboxSegment(mb.name).toLowerCase());
+    });
+    if (blamed) return { unwalkable: true, id: blamed };
+  }
   return undefined;
 }
 
-// Throwing wrapper over findMailboxExact for the single-mailbox callers: resolve one input
-// or throw InvalidInputError with the (capped) valid list. Exported pure for unit testing.
+// Throwing wrapper over findMailboxExact for the single-mailbox callers: resolve one input,
+// or throw InvalidInputError. Each failure shape gets its OWN message — an ambiguous name
+// and a typo are different mistakes with different corrections, and reporting both as
+// "not found" would send a caller re-spelling a name that was already correct. Exported
+// pure for unit testing.
 export function resolveMailbox(mailboxes: any[], input: string): any {
-  const found = findMailboxExact(mailboxes, input);
-  if (found) return found;
-  throw new InvalidInputError(formatMailboxNotFound(String(input).trim(), mailboxes || []));
+  const match = findMailboxExact(mailboxes, input);
+  if (match && 'mailbox' in match) return match.mailbox;
+  const raw = String(input).trim();
+  if (match && 'ambiguous' in match) {
+    throw new InvalidInputError(formatMailboxAmbiguous(raw, match.candidates));
+  }
+  if (match && 'unwalkable' in match) {
+    throw new InvalidInputError(formatMailboxUnwalkable(raw, match.id));
+  }
+  throw new InvalidInputError(formatMailboxNotFound(raw, mailboxes || []));
+}
+
+// Narrow a mailbox list to the DIRECT children of one parent — grandchildren are not
+// included, so the result reads like one level of a folder tree. The parent reference goes
+// through the same id/role/name/path matcher as every other mailbox parameter, so a path
+// returned by list_mailboxes can be pasted straight back in. A blank/omitted parent means
+// no filter at all, which is the default listing.
+//
+// This is a pure operation on an already-fetched list rather than an option on
+// getMailboxes, because its one consumer (the list_mailboxes handler) needs the WHOLE tree
+// to compute root-anchored paths and then narrows the list it already has — a client-level
+// option would have had no caller, and an option nothing can reach is surface that only
+// waits to drift out of step with the behaviour it claims.
+export function filterMailboxesByParent(mailboxes: any[], parent?: string): any[] {
+  const list = mailboxes || [];
+  if (parent === undefined || parent === null || String(parent).trim() === '') return list;
+  const parentId = resolveMailbox(list, parent).id;
+  return list.filter(mb => mb && mb.parentId === parentId);
+}
+
+// A mailbox name is a LEAF name. A "/" in it would either create a folder whose display
+// name contains the path separator — permanently ambiguous against the path form every
+// mailbox parameter accepts — or, far more likely, be a caller trying to express nesting
+// inline. Reject it before any round trip and point at the parameter that does express
+// nesting. Exported pure for unit testing.
+export function assertLeafMailboxName(name: string): void {
+  if (name.includes(MAILBOX_PATH_SEPARATOR)) {
+    throw new InvalidInputError(
+      `Mailbox name must not contain "${MAILBOX_PATH_SEPARATOR}": '${name}'. ` +
+      'Pass the leaf name and nest it with the parent parameter (e.g. name: "2026", parent: "Archive").',
+    );
+  }
 }
 
 // Compute the default Trash/Spam exclusion. Resolves trash/junk by EXACT role only
@@ -1203,9 +1481,15 @@ export class JmapClient {
     return resolveMailbox(list, input).id;
   }
 
+  // Fetch the account's mailboxes. `Mailbox/get` is issued for the WHOLE account with no
+  // `properties` projection — every caller here reads names, roles, counts and parentId off
+  // the same list. Narrowing to one parent's children is NOT a parameter of this method:
+  // JMAP has no parent filter on Mailbox/get, the narrowing is a pure operation on the
+  // returned list, and its one consumer needs the unnarrowed list anyway to compute
+  // root-anchored paths. It lives in the exported `filterMailboxesByParent` instead.
   async getMailboxes(): Promise<any[]> {
     const session = await this.getSession();
-    
+
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
       methodCalls: [
@@ -1215,6 +1499,72 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     return this.getListResult(response, 0);
+  }
+
+  // Create a mailbox (a Fastmail folder/label).
+  //
+  // `name` is a LEAF name and nesting is expressed with `parent`, which resolves through
+  // the same id/role/name/path matcher as every other mailbox-taking parameter — so the
+  // path a caller just read out of list_mailboxes is a valid parent.
+  //
+  // Returns three things:
+  //   - `created`: the server's `Mailbox/set` created object, UNTOUCHED, for the raw path.
+  //     RFC 8620 §5.3 means it holds only the properties the server set, often just the id.
+  //   - `mailbox`: that object merged over the create arguments, so the simplified shape
+  //     carries the name and parentId the request supplied.
+  //   - `path`: the new mailbox's root-anchored path, so it is addressable without a
+  //     follow-up list_mailboxes — OMITTED when the parent has no computable path of its
+  //     own. Concatenating a leaf onto a parent whose path is unknown would produce a
+  //     plausible string that does not resolve, which is exactly what buildMailboxPathMap
+  //     refuses to do for the same reason.
+  async createMailbox(input: { name: string; parent?: string }): Promise<{ mailbox: any; created: any; path?: string }> {
+    const name = requireNonEmpty(input?.name, 'name', 'pass the leaf name of the mailbox to create');
+    assertLeafMailboxName(name);
+
+    const session = await this.getSession();
+    const mailboxes = await this.getMailboxes();
+    const { paths } = buildMailboxPathMap(mailboxes);
+
+    let parentId: string | null = null;
+    // undefined = "the parent has no computable path", which is different from the
+    // top-level case (parentId null), where the new mailbox's path is just its own name.
+    let parentPath: string | undefined;
+    const parentInput = input.parent;
+    if (parentInput !== undefined && parentInput !== null && String(parentInput).trim() !== '') {
+      const parent = resolveMailbox(mailboxes, parentInput);
+      parentId = parent.id;
+      parentPath = paths.get(parent.id);
+    }
+
+    const request: JmapRequest = {
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Mailbox/set', {
+          accountId: session.accountId,
+          create: {
+            newMailbox: { name, parentId },
+          },
+        }, 'createMailbox']
+      ]
+    };
+
+    const response = await this.makeRequest(request);
+    const result = this.getMethodResult(response, 0);
+
+    if (result.notCreated && result.notCreated.newMailbox) {
+      this.throwSingleSetError(result.notCreated.newMailbox, 'create mailbox');
+    }
+
+    const created = result.created?.newMailbox;
+    if (!created?.id) {
+      throw new Error('Mailbox creation reported success but the server returned no mailbox id');
+    }
+    const mailbox = { name, parentId, ...created };
+    const leaf = normalizeMailboxSegment(mailbox.name) || name;
+    const path = parentId === null
+      ? leaf
+      : (parentPath === undefined ? undefined : `${parentPath}${MAILBOX_PATH_SEPARATOR}${leaf}`);
+    return { mailbox, created, path };
   }
 
   // Options-object signature (a positional add of the three scope bools would be
@@ -2929,25 +3279,37 @@ export class JmapClient {
     }
   }
 
-  // Resolve each label mailbox input to a real mailbox id by id/role/name (exact —
-  // findMailboxExact, no substring), so the label arrays accept the same id/role/name a
-  // caller learned works on every other mailbox-taking tool (fork #50). Collects EVERY
-  // unresolved input so the caller fixes all typos in one retry. All-or-nothing: if any
-  // input can't be resolved, throw InvalidInputError and apply no labels (avoids a
-  // half-applied mutation the caller must reconcile). Duplicate inputs (an id and its own
-  // name) collapse downstream since the Email/set patch keys by id. A real id absent from
-  // the live list is still rejected — accepted residual, see docs/security-model.md.
+  // Resolve each label mailbox input to a real mailbox id by id/role/name/path (exact —
+  // findMailboxExact, no substring), so the label arrays accept every form a caller
+  // learned works on every other mailbox-taking tool (fork #50, #27). Collects EVERY
+  // failure across the array so the caller fixes them all in one retry, keeping each in
+  // its own bucket: a typo and an ambiguous name need different corrections, and folding
+  // an ambiguity into "not found" would tell a caller their spelling was wrong when it was
+  // not. All-or-nothing: if any input can't be resolved, throw InvalidInputError and apply
+  // no labels (avoids a half-applied mutation the caller must reconcile). Duplicate inputs
+  // (an id and its own name) collapse downstream since the Email/set patch keys by id. A
+  // real id absent from the live list is still rejected — accepted residual, see
+  // docs/security-model.md.
   private async resolveLabelMailboxIds(inputs: string[]): Promise<string[]> {
     const mailboxes = await this.getMailboxes();
     const resolved: string[] = [];
-    const unresolved: string[] = [];
+    const failures: MailboxResolutionFailures = { notFound: [], ambiguous: [], unwalkable: [] };
     for (const input of inputs) {
-      const mb = findMailboxExact(mailboxes, input);
-      if (mb) resolved.push(mb.id);
-      else unresolved.push(String(input).trim());
+      const match = findMailboxExact(mailboxes, input);
+      const raw = String(input).trim();
+      if (match && 'mailbox' in match) resolved.push(match.mailbox.id);
+      else if (match && 'ambiguous' in match) failures.ambiguous.push({ input: raw, candidates: match.candidates });
+      else if (match && 'unwalkable' in match) failures.unwalkable.push({ input: raw, id: match.id });
+      else failures.notFound.push(raw);
     }
-    if (unresolved.length > 0) {
-      throw new InvalidInputError(formatMailboxesNotFound(unresolved, mailboxes || []));
+    const failed = failures.notFound.length + failures.ambiguous.length + failures.unwalkable.length;
+    if (failed > 0) {
+      // The single-bucket case keeps the original wording verbatim, so the common
+      // all-typos message a caller has learned to read does not change shape.
+      if (failures.notFound.length === failed) {
+        throw new InvalidInputError(formatMailboxesNotFound(failures.notFound, mailboxes || []));
+      }
+      throw new InvalidInputError(formatMailboxesNotResolved(failures, mailboxes || []));
     }
     return resolved;
   }

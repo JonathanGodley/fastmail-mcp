@@ -208,6 +208,25 @@ export function buildOmittedPartsNote(omittedCount: number): string | null {
   return `${omittedCount} body-embedded part(s) omitted (raw lists the JMAP attachments array only; omit raw to include them).`;
 }
 
+// Disclose which listed mailboxes came back without the `path` field the mailbox format
+// promises. A path is omitted only when the mailbox's parent chain never reaches a
+// top-level mailbox (a parentId loop, or a parent the account did not return), which is
+// rare and means the tree itself is unwalkable — but the field vanishing with no trace is
+// exactly the failure the never-silently-drop rule exists to prevent, so the ids are named
+// and the working handle is stated. The handler emits this as its own content item, never
+// appended to the JSON, which must stay parseable.
+//
+// Returns null when every listed mailbox has a path: silence is the "the listing is
+// complete" signal, the same discipline as the notes above.
+const UNPATHABLE_MAILBOX_ID_CAP = 20;
+export function buildUnpathableMailboxNote(ids: string[]): string | null {
+  if (!ids || ids.length === 0) return null;
+  const shown = ids.slice(0, UNPATHABLE_MAILBOX_ID_CAP);
+  const more = ids.length > shown.length ? `, …and ${ids.length - shown.length} more` : '';
+  return `${ids.length} mailbox(es) have no \`path\`: their parent chain never reaches a top-level mailbox ` +
+    `(a loop, or a parent this account did not return). Refer to these by id: ${shown.join(', ')}${more}.`;
+}
+
 // The whole response body of get_email_attachments, both modes, so the branch is
 // exercised by the test suite rather than only by a live call (#13).
 //
@@ -229,10 +248,16 @@ export function buildAttachmentListContent(
   return content;
 }
 
-export function simplifyMailbox(raw: any, options?: { verbose?: boolean }): any {
+// `path` is the mailbox's root-anchored, "/"-separated location ("Archive/2026/Receipts").
+// It is PASSED IN rather than derived here: a single Mailbox object carries only a
+// parentId, so the ancestor chain is unknowable from it alone. The caller (which holds the
+// whole tree) computes it with buildMailboxPathMap and hands it over. Omitted when the
+// caller passes none, like every other empty field.
+export function simplifyMailbox(raw: any, options?: { verbose?: boolean; path?: string }): any {
   const result: any = {
     id: raw.id,
     name: raw.name,
+    path: options?.path || undefined,
     role: raw.role || undefined,
     parentId: raw.parentId || undefined,
     totalEmails: raw.totalEmails,
@@ -241,8 +266,10 @@ export function simplifyMailbox(raw: any, options?: { verbose?: boolean }): any 
     unreadThreads: raw.unreadThreads,
   };
   if (options?.verbose) {
-    // Include all remaining mailbox properties
-    const coreKeys = new Set(['id', 'name', 'role', 'parentId', 'totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads']);
+    // Include all remaining mailbox properties. `path` is in the core set even though no
+    // JMAP Mailbox carries that property, so a server that ever added one could not
+    // overwrite the computed value with a differently-shaped field.
+    const coreKeys = new Set(['id', 'name', 'path', 'role', 'parentId', 'totalEmails', 'unreadEmails', 'totalThreads', 'unreadThreads']);
     for (const key of Object.keys(raw)) {
       if (!coreKeys.has(key) && raw[key] !== undefined) {
         result[key] = raw[key];

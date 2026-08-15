@@ -19,11 +19,12 @@ This fork adds a **response simplification system** that reduces token usage whe
 - **Forwarding** — `forward_email` reproduces the original under the Fastmail-native forwarded-message block and **carries its attachments** (the official server-side forward carries none), with an `asAttachment` mode that attaches the whole original as a lossless `.eml`. The edit-draft body guard extends to forward drafts.
 - **Quotes and forwards keep their pictures** — a reply's quote and an inline forward's block carry the images the original displayed, instead of leaving broken references or silently blank space ([#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)). This re-sends image data outward that you never attached and no `FASTMAIL_ATTACH_DIR` governs, so both tools state the bound plainly and `quoteOriginal=false` is the way to send none of it. See [Replying and forwarding with images](#replying-and-forwarding-with-images).
 - **Attachment paths** — relative `download_attachment` paths resolve inside the configured download dir, so a bare filename lands there in one step.
+- **Path-aware mailbox naming** - every mailbox parameter accepts a root-anchored path (`Archive/2026/Receipts`) alongside an id, role, or name, `list_mailboxes` returns the path it accepts, and `create_mailbox` makes the folder you want to file into ([#27](https://github.com/JonathanGodley/fastmail-mcp/issues/27), [#48](https://github.com/JonathanGodley/fastmail-mcp/issues/48)). A duplicated folder name is reported as ambiguous with its candidate paths instead of resolving to whichever one came back first. See [Naming a mailbox](#naming-a-mailbox).
 
 ## Features
 
 ### Core Email Operations
-- List mailboxes and get mailbox statistics
+- List mailboxes (each with its full path) and get mailbox statistics; create new mailboxes
 - List, search, and filter emails with advanced criteria
 - Get specific emails by ID
 - Compose emails (text and HTML) draft-first: every compose tool saves a draft, and `send_draft` is the only tool that transmits
@@ -237,7 +238,7 @@ All data-returning tools simplify responses by default to reduce token usage. Th
 | `get_email` | ✅ | ✅ | ✅ |
 | `list_emails`, `search_emails`, `get_recent_emails` | — | ✅ | ✅ |
 | `get_thread` | — | ✅ | ✅ |
-| `list_mailboxes` | ✅ | ✅ | — |
+| `list_mailboxes`, `create_mailbox` | ✅ | ✅ | — |
 | `list_identities` | ✅ | ✅ | — |
 | `list_contacts`, `get_contact`, `search_contacts` | ✅ | ✅ | — |
 
@@ -355,11 +356,33 @@ The rules:
 
 ### Mailbox fields
 
-**Default**: `id`, `name`, `role`, `parentId`, `totalEmails`, `unreadEmails`, `totalThreads`, `unreadThreads`
+**Default**: `id`, `name`, `path`, `role`, `parentId`, `totalEmails`, `unreadEmails`, `totalThreads`, `unreadThreads`
 
 **Verbose adds**: `myRights`, `sortOrder`, `isSubscribed`, `sort`, `autoLearn`, `autoPurge`, `purgeOlderThanDays`, `hidden`, `isCollapsed`, `identityRef`, `learnAsSpam`, `suppressDuplicates`, plus any other JMAP fields
 
+`path` is the mailbox's **root-anchored full path**: every ancestor's name from the top-level folder down, joined with `/`, with no leading or trailing slash - `Archive/2026/Receipts`. A top-level mailbox's path is just its name. It is computed by this server, not a JMAP field, so it is absent from `raw` output. Every mailbox-taking parameter accepts a path (matched case-insensitively, segment by segment), so a path returned here can be pasted straight back into `mailbox`, `targetMailbox`, `parent`, or a `mailboxIds` entry. See [Naming a mailbox](#naming-a-mailbox) for the full resolution order.
+
+In the rare case a mailbox's parent chain never reaches a top-level folder (a loop, or a parent the account did not return), its path cannot be computed. That mailbox is still listed, without `path`, and a trailing note names its id - the field is never dropped in silence. Refer to such a mailbox by id.
+
 Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if you need `null` values).
+
+### Naming a mailbox
+
+Every parameter that names a mailbox - `mailbox` on the read tools, `targetMailbox` on `move_email`/`bulk_move`, `parent` on `list_mailboxes`/`create_mailbox`, and each entry of a `mailboxIds` array on the label tools - resolves through one matcher, in this order:
+
+1. **Exact id**, matched case-**sensitively** (a JMAP id is an opaque server token; folding its case could make two distinct ids collide).
+2. **Role** - `inbox`, `archive`, `sent`, `drafts`, `trash`, `junk` - matched case-insensitively.
+3. **Exact folder name**, case-insensitively.
+4. **Root-anchored path**, `/`-separated with no leading or trailing slash, each segment matched case-insensitively.
+
+There is no substring matching at any step. A folder name matching exactly one mailbox wins over reading the same text as a path, so a folder whose own name contains a `/` stays reachable by that name. That tie rule bites when you write: if a top-level folder is literally named `Archive/2026` and a real `Archive` > `2026` nesting also exists, `move_email` with `targetMailbox: "Archive/2026"` files into the flat folder, and the nested one is then only reachable unambiguously by its id (which `list_mailboxes` returns next to its path).
+
+Two failures are reported distinctly rather than as "not found", because they call for different corrections:
+
+- A **name shared by several mailboxes** is rejected as ambiguous and the error lists the candidates by full path - retry with one of those, or with the id. Your spelling was not the problem.
+- A **path that cannot be walked**, because some mailbox's parent chain never reaches a top-level folder, says so and points you at the id/role/name forms that still work.
+
+On the label tools the array is all-or-nothing: no label is applied unless every entry resolves, and a single error names every failing entry, keeping typos and ambiguous names in separate buckets so one retry fixes them all.
 
 ### Identity fields
 
@@ -382,7 +405,7 @@ The signature fields are the identity's configured sign-off, the same text the F
 - Notes extracted from JMAP's `{hash: {note}}` object format
 - Verbose: addresses as objects, titles as strings, online/URLs as URIs
 
-## Available Tools (40 Total)
+## Available Tools (41 Total)
 
 **🎯 Most Popular Tools:**
 - **check_function_availability**: Check what's available and get setup guidance  
@@ -399,10 +422,12 @@ The signature fields are the identity's configured sign-off, the same text the F
 >
 > **Draft sender name:** drafts created or edited via `create_draft`/`edit_draft` carry the sending identity's display name, so the From shows your name rather than a bare address.
 
-- **list_mailboxes**: Get all mailboxes in your account
-  - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+- **list_mailboxes**: Get the mailboxes in your account. Each one carries its `path` - the root-anchored, `/`-separated location - which you can paste straight back into any mailbox parameter. Pass `parent` to list one folder's direct children instead of the whole account.
+  - Parameters: `parent` (optional - id, role, name, or path; lists that mailbox's direct children only), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response - untransformed JMAP carries no `path`)
+- **create_mailbox**: Create a mailbox (a Fastmail folder, which is also what a label is). Returns the new mailbox in the same shape `list_mailboxes` returns, `path` included, so you can use it as a move destination or a label straight away without a second lookup. `name` is a leaf name and must not contain `/`; to nest the mailbox, pass `parent` (which itself accepts an id, role, name, or path).
+  - Parameters: `name` (required - leaf name, no `/`), `parent` (optional - id, role, name, or path; omit to create at the top level), `verbose` (optional, include all fields), `raw` (optional, return original JMAP object)
 - **list_emails**: List recent emails across all mailboxes (or one, via `mailbox`). **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam` to include them); drafts are included (set `excludeDrafts` to omit them). When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing in Trash/Spam matched, and you need not re-search to check.
-  - Parameters: `mailbox` (optional — id, role, or name; scoping to a mailbox ignores the default exclusion), `limit` (default: 20, max: 100), `position` (optional offset — see [Result counts and paging](#result-counts-and-paging-position)), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
+  - Parameters: `mailbox` (optional — [id, role, name, or path](#naming-a-mailbox); scoping to a mailbox ignores the default exclusion), `limit` (default: 20, max: 100), `position` (optional offset — see [Result counts and paging](#result-counts-and-paging-position)), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
 - **get_email**: Get a specific email by ID. Returns plain text body with HTML omitted (bodyHtmlSize hint provided). Only use `verbose` if you specifically need the HTML body — it can be very large for marketing emails. To read a large HTML body without the rest of the message alongside it, use `fields: ["bodyHtml"]`.
   - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `stripQuoted` (optional, drop quoted reply history from `bodyText`), `raw` (optional, return original JMAP response)
   - `stripQuoted` is opt-in and reports what it did — see [Reading long threads cheaply](#reading-long-threads-cheaply).
@@ -442,13 +467,13 @@ The signature fields are the identity's configured sign-off, the same text the F
 - **delete_email**: Delete an email (move to trash)
   - Parameters: `emailId` (required)
 - **move_email**: Move an email to a different mailbox. **Replaces the message's entire mailbox membership** - every other label or folder it was filed under is removed. To file it somewhere while keeping those, use `add_labels`. No keyword is changed, so the message keeps its read/unread and flagged state.
-  - Parameters: `emailId` (required), `targetMailbox` (required — id, role, or name)
+  - Parameters: `emailId` (required), `targetMailbox` (required — [id, role, name, or path](#naming-a-mailbox))
 - **archive_email**: File an email into the account's Archive folder - the mailbox carrying the JMAP `archive` role. **Replaces the message's entire mailbox membership**, same as `move_email` (use `add_labels` to keep the existing labels), and it **does not mark the message read** - archiving and reading are separate actions, so call `mark_email_read` too if you want both. The destination is fixed and takes no parameter: it is found by role, never by folder name, so a folder merely *named* "archive" is not it. That is deliberate - a name-resolved destination would let text the model merely read decide where mail lands. For any other destination use `move_email`. An account with no archive-role mailbox is rejected with `InvalidParams` pointing at `move_email` ([#21](https://github.com/JonathanGodley/fastmail-mcp/issues/21)).
   - Parameters: `emailId` (required)
 - **add_labels**: Add labels (mailboxes) to an email without removing existing ones
-  - Parameters: `emailId` (required), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
+  - Parameters: `emailId` (required), `mailboxIds` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list)
 - **remove_labels**: Remove specific labels (mailboxes) from an email
-  - Parameters: `emailId` (required), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
+  - Parameters: `emailId` (required), `mailboxIds` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list)
 
 ### Advanced Email Features
 
@@ -592,7 +617,7 @@ Images written as `data:` URIs are dropped and counted rather than converted, as
 ### Email Statistics & Analytics
 
 - **get_mailbox_stats**: Get statistics for a mailbox (unread count, total emails, etc.)
-  - Parameters: `mailbox` (optional — id, role, or name; defaults to all mailboxes)
+  - Parameters: `mailbox` (optional — [id, role, name, or path](#naming-a-mailbox); defaults to all mailboxes)
 - **get_account_summary**: Get overall account summary with statistics
 
 ### Bulk Operations
@@ -602,13 +627,13 @@ Images written as `data:` URIs are dropped and counted rather than converted, as
 - **bulk_pin**: Pin or unpin multiple emails
   - Parameters: `emailIds` (required array), `pinned` (default: true)
 - **bulk_move**: Move multiple emails to a mailbox. **Replaces each message's entire mailbox membership** - every other label or folder each one was filed under is removed. To file them somewhere while keeping those, use `bulk_add_labels`. No keyword is changed, so each message keeps its read/unread and flagged state.
-  - Parameters: `emailIds` (required array), `targetMailbox` (required — id, role, or name)
+  - Parameters: `emailIds` (required array), `targetMailbox` (required — [id, role, name, or path](#naming-a-mailbox))
 - **bulk_delete**: Delete multiple emails (move to trash)
   - Parameters: `emailIds` (required array)
 - **bulk_add_labels**: Add labels to multiple emails simultaneously
-  - Parameters: `emailIds` (required array), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
+  - Parameters: `emailIds` (required array), `mailboxIds` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list)
 - **bulk_remove_labels**: Remove labels from multiple emails simultaneously
-  - Parameters: `emailIds` (required array), `mailboxIds` (required array - each entry an id, role, or name, resolved like every other mailbox tool; any unresolved entry rejects the whole call with the valid list)
+  - Parameters: `emailIds` (required array), `mailboxIds` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list)
 
 ### Contact Tools
 

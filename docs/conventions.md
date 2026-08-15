@@ -121,17 +121,59 @@ mailbox).
 - Like coercion, this is unreachable through the normal harness (a compliant client
   cannot send an undeclared key), so verify it with the same raw-JSON-RPC harness.
 
-## Mailbox resolution is uniform (id / role / name, exact)
+## Mailbox resolution is uniform (id / role / name / path, exact)
 
 Every mailbox-taking parameter resolves through one exact matcher (`findMailboxExact` in
-`src/jmap-client.ts`: exact id, then role, then name, case-insensitive, no substring). This
-now spans the label tools' `mailboxIds` arrays too (`add_labels` / `remove_labels` /
-`bulk_add_labels` / `bulk_remove_labels`), closing the last asymmetry from the #12
-single-mailbox consolidation (#50): a caller can label by the same id/role/name that works on
-`move_email`, not opaque ids only. The array resolver is **all-or-nothing** — if any entry
-can't be resolved it names every unresolved value in one error (so all typos are fixable in a
-single retry) and applies no labels, rather than half-applying a mutation the caller must
-reconcile. `resolveMailbox` is the throwing single-input wrapper over the same core.
+`src/jmap-client.ts`), in this order:
+
+1. **exact id**, case-**sensitive** - a JMAP id is an opaque server token, and folding its
+   case could make two distinct ids collide;
+2. **role**, case-insensitive;
+3. **exact flat name**, case-insensitive;
+4. **root-anchored path** (`Archive/2026/Receipts`), `/`-separated with no leading or
+   trailing slash, every segment matched case-insensitively.
+
+No substring matching at any step. A flat name matching exactly one mailbox **wins over**
+reading the same text as a path, so a mailbox whose own name contains a `/` stays reachable
+by that name. That tie has a consequence on writes: where a flat `A/B` folder and a real
+`A > B` nesting both exist, `move_email targetMailbox:"A/B"` files into the flat one and the
+nested one is only unambiguously reachable by id. It is stated rather than smoothed over, in
+`docs/security-model.md` under the path-form bullet.
+
+The walk lives in `findMailboxExact` rather than in its throwing wrapper, and that placement
+is the point: both callers inherit it. The label tools' `mailboxIds` arrays (`add_labels` /
+`remove_labels` / `bulk_add_labels` / `bulk_remove_labels`) call the matcher directly, so a
+form accepted on `move_email` but not in a `mailboxIds` entry would rebuild the split
+vocabulary that #50 closed and that made this fork decline upstream's separate
+`get_mailbox_by_name` tool. `resolveMailbox` is the throwing single-input wrapper over the
+same core, and `list_mailboxes` publishes the same paths it accepts, so a path read out of a
+listing goes straight back into any mailbox parameter.
+
+**Three failure shapes, not one.** The matcher RETURNS a discriminated result and never
+throws, because only its caller knows what to do with a failure: the single-input wrapper
+throws on the spot, while the array resolver collects failures across the whole array. The
+shapes are resolved, ambiguous (a flat name matched several mailboxes - candidates are given
+as full paths, the form that disambiguates them), unwalkable (some mailbox's `parentId` chain
+never reaches a top-level mailbox, so no path can be computed), and a genuine miss. Upstream's
+path lookup silently truncates its bounded parent walk into "not found"; reporting the
+unwalkable tree instead is what lets a caller stop hunting for a typo that was never there.
+
+The array resolver stays **all-or-nothing** - if any entry fails it applies no labels, rather
+than half-applying a mutation the caller must reconcile - and it names *every* failing entry
+in one error, keeping the shapes in separate buckets. That is what preserves the single-retry
+property: an ambiguous name and a typo need different corrections (pick a path vs re-spell),
+so folding an ambiguity into "not found" would send a caller to re-spell a name that was
+already right, costing a retry the split buckets save. When every failure is a plain miss the
+message keeps its original single-bucket wording verbatim.
+
+The `path` a mailbox is listed under is computed by walking its `parentId` chain up to a
+top-level mailbox, bounded so a corrupt chain terminates. A mailbox whose chain does not
+reach a root is listed **without** `path` and its id is named in a trailing note - the
+partial walk's shorter string is never emitted, because it would look root-anchored, be
+wrong, and could match a different mailbox's real path. Paths are a property of the mailbox
+surface only: the per-email `mailboxes`/`roles` enrichment deliberately does not gain them,
+because its two `Mailbox/get` calls project `['id','name','role']` to keep a listing cheap
+and a path would mean widening that projection on every read page.
 
 **Two destinations are deliberately NOT caller-resolvable at all**: `delete_email`/`bulk_delete`
 find Trash, and `archive_email` finds Archive, by **exact role only** (`findByExactRole`), with no

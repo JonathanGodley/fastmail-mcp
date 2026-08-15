@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildAttachmentListContent } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -209,6 +209,36 @@ describe('simplifyMailbox', () => {
     const result = simplifyMailbox({ ...raw, role: null, parentId: '' });
     assert.equal(result.role, undefined);
     assert.equal(result.parentId, undefined);
+  });
+
+  it('emits the caller-supplied path, and omits the field when none is supplied', () => {
+    assert.equal(simplifyMailbox(raw, { path: 'Archive/2026' }).path, 'Archive/2026');
+    assert.equal(simplifyMailbox(raw).path, undefined);
+    assert.ok(!('path' in JSON.parse(JSON.stringify(simplifyMailbox(raw)))));
+  });
+
+  it('keeps the computed path even when the JMAP object carries a field of that name', () => {
+    const result = simplifyMailbox({ ...raw, path: { unexpected: true } }, { verbose: true, path: 'Archive/2026' });
+    assert.equal(result.path, 'Archive/2026');
+  });
+});
+
+// ---------- buildUnpathableMailboxNote ----------
+
+describe('buildUnpathableMailboxNote', () => {
+  it('returns null when every listed mailbox has a path', () => {
+    assert.equal(buildUnpathableMailboxNote([]), null);
+  });
+
+  it('names the ids whose path could not be computed and states the working handle', () => {
+    const note = buildUnpathableMailboxNote(['mb-a', 'mb-b']);
+    assert.match(note!, /2 mailbox\(es\) have no `path`/);
+    assert.match(note!, /Refer to these by id: mb-a, mb-b\./);
+  });
+
+  it('caps the reflected ids with a "…and N more" tail', () => {
+    const note = buildUnpathableMailboxNote(Array.from({ length: 25 }, (_, i) => `mb-${i}`));
+    assert.match(note!, /…and 5 more/);
   });
 });
 

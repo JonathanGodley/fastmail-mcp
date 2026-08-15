@@ -370,15 +370,33 @@ than overclaimed:
 - **Exact resolution hardens *mis-resolution*, NOT deliberate steering.** Switching every
   read/delete/move target from substring (`findMailboxByRoleOrName`'s name fallback, which could
   mis-hit e.g. a custom "Junk mail rules" mailbox and silently hide real mail) to exact id/role/
-  name removes *fuzzy* mis-targeting. It does **not** close *deliberate* steering: an injected
+  name/path removes *fuzzy* mis-targeting. It does **not** close *deliberate* steering: an injected
   agent with `move_email`/`bulk_move` access can still aim mail at `"trash"`/`"Archive"` by exact
   name. Move-to-any stays open **by design** (a move-target restriction is tracked as fork #43).
   Name/role resolution also **lowers the steering bar** from "must know a valid opaque id (needs a
   prior `list_mailboxes`)" to "blind one-shot by literal name" — a real, if modest, escalation.
   **The label tools join this class (#50):** `add_labels`/`remove_labels`/`bulk_add_labels`/
-  `bulk_remove_labels` now resolve their `mailboxIds` arrays by exact id/role/name too, so an
+  `bulk_remove_labels` now resolve their `mailboxIds` arrays by exact id/role/name/path too, so an
   injected agent can label a message into e.g. `"trash"` blind-one-shot-by-name, the same modest
   escalation as move. Accepted on the same footing; not a new capability class.
+- **The path form (#27), and where it can send a write somewhere the caller did not mean.**
+  A root-anchored path is still exact matching over mailboxes a bare name could already reach, so
+  it mostly just disambiguates. But the tie rule has a real consequence on write paths, and it is
+  stated here rather than argued away: **an exact flat name wins over reading the same text as a
+  path.** So if a top-level folder is literally named `A/B` while a real `A > B` nesting also
+  exists, `move_email targetMailbox:"A/B"` files the message into the flat folder, silently, even
+  though the same text describes the nesting. A folder whose own name contains the separator
+  therefore takes precedence over the nesting that text describes, on every write that names a
+  destination. In that situation the nested folder's only unambiguous handle is its id, which is
+  why this is called out here rather than treated as covered. Anyone who can create a folder can
+  set the collision up, so treat it as reachable by a caller who wants it.
+- **`create_mailbox` adds no concealment reach.** It lets a caller mint a destination rather than
+  pick one, but concealment comes from the *move*, and `move_email` into an existing folder already
+  conceals with zero disclosure (the bullet below). Creating the folder first only decides where
+  the mail lands; nothing about whether it is reported changes either way. The one genuinely new
+  thing is minting a mailbox *named* after a role ("Archive", "Trash"): that is why the fixed
+  destinations resolve by exact role only (`archive_email`, `delete_email`) and remain unreachable
+  this way.
 - **The hidden-count note covers ONLY Trash/Spam.** It does **not** disclose a `move_email` to
   `Archive` or a custom folder — that conceals mail with **zero disclosure**. So move concealment
   is not "mitigated by the note" for non-Trash/Spam destinations; this is stated plainly rather
@@ -401,21 +419,24 @@ than overclaimed:
   running an innocuous instruction is steered by a folder someone else created.
 - **Resolver error message is an information oracle, reachable account-wide.** A bad `mailbox`/
   `targetMailbox`/`mailboxIds` to *any* swept tool (search, list, stats, move, compose, labels)
-  reflects the caller's input and a capped list of mailbox names **reachable by the configured
-  token** (the real boundary is the token's reach, not "the user's own account" — a delegated/
-  scoped token sees only its slice). `InvalidInputError` messages are run through
+  reflects the caller's input and a capped list of mailbox **paths** reachable by the configured
+  token - since #27 these are full paths rather than bare names, so the oracle now also discloses
+  the *shape* of the folder tree (which folder nests under which), not just the set of names. That
+  is a slightly richer disclosure of the same material, accepted for the same reason: it is what
+  makes the error recoverable, and it is the caller's own reachable tree. The real boundary is the
+  token's reach, not "the user's own account" — a delegated/scoped token sees only its slice. `InvalidInputError` messages are run through
   `redactBearerTokens` as defense-in-depth (a token can't actually appear in them), but that is
   **not** what makes the oracle acceptable — recoverability (naming valid mailboxes so a caller
-  can retry) is, and it's the caller's own reachable names. Accepted, capped, framed honestly.
+  can retry) is, and it's the caller's own reachable tree. Accepted, capped, framed honestly.
 - **`get_mailbox_stats` and the label tools reject a real id that is absent from the fetched
   list.** Reading stats off the shared `getMailboxes()` list (and resolving label `mailboxIds`
   against it) means a hidden/role-less mailbox's id now throws `InvalidInputError` rather than
-  returning data. Accepted; "resolvable" is defined as "matches some `mailbox.id`/role/name in
-  the fetched list."
+  returning data. Accepted; "resolvable" is defined as "matches some `mailbox.id`/role/name, or a
+  path built from that same fetched list."
 - **Per-message id-existence is a distinct oracle class.** A not-found id on `get_email`,
   `get_thread`, or `originalEmailId` now returns `InvalidParams` (a crisper signal than the prior
   `InternalError`), so it confirms whether a given *message/thread id* exists. This is a different
-  class from the mailbox-resolver oracle above (which reflects reachable mailbox *names*) — it is
+  class from the mailbox-resolver oracle above (which reflects the reachable mailbox *tree*) — it is
   per-message existence, and is likewise bounded by the **token's reach**, not "the user's own
   account." Accepted on the same footing: recoverability is the point, and it is dominated by the
   existing `get_email` read (the same probe already exists), so it adds no capability a caller with

@@ -1,11 +1,11 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, resolveMailbox, computeExclusion, readSourceReferences, fillUrlTemplate } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, computeExclusion, readSourceReferences, fillUrlTemplate } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { buildExclusionNote } from './response-formatters.js';
+import { buildExclusionNote, simplifyMailbox } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
 import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -2181,21 +2181,496 @@ describe('label mailboxId resolution (#50)', () => {
   });
 });
 
-// The single-input not-found message must stay byte-identical after factoring the shared
-// mailboxListHint out of formatMailboxNotFound (the label array message is a superset of it).
-describe('resolveMailbox not-found message (byte-stable after hint refactor)', () => {
+// The label arrays call the matcher directly rather than going through resolveMailbox, so
+// the path form has to be asserted here too: a form accepted on move_email but not in a
+// mailboxIds entry would be exactly the split vocabulary this server resolves against one
+// matcher to avoid.
+describe('label mailboxId resolution accepts a path, and reports failures in separate buckets', () => {
+  let client: JmapClient;
+
+  // Two "Receipts" folders under different parents, plus one unambiguous nested folder.
+  const NESTED_LABEL_MAILBOXES = [
+    ...DEFAULT_MAILBOXES,
+    { id: 'mb-personal', name: 'Personal' },
+    { id: 'mb-work', name: 'Work' },
+    { id: 'mb-personal-receipts', name: 'Receipts', parentId: 'mb-personal' },
+    { id: 'mb-work-receipts', name: 'Receipts', parentId: 'mb-work' },
+  ];
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client, NESTED_LABEL_MAILBOXES);
+  });
+
+  it('resolves a full path given as a mailboxIds entry', async () => {
+    const makeReq = stubRequests(client, async () =>
+      ({ methodResponses: [['Email/set', { updated: { e1: null } }, 'addLabels']] }));
+    await client.addLabels('e1', ['Work/Receipts']);
+    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
+    assert.equal(update.e1['mailboxIds/mb-work-receipts'], true);
+  });
+
+  it('reports an ambiguous entry as ambiguous, never as "not found"', async () => {
+    await assert.rejects(
+      () => client.addLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Ambiguous mailbox name\(s\)/);
+        assert.match(err.message, /Personal\/Receipts, Work\/Receipts/);
+        assert.doesNotMatch(err.message, /not found/);
+        return true;
+      },
+    );
+  });
+
+  it('folds an ambiguous entry and a typo into ONE error, each in its own bucket', async () => {
+    const makeReq = stubRequests(client, async () => { throw new Error('should not be called'); });
+    await assert.rejects(
+      () => client.addLabels('e1', ['Receipts', 'nope']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Mailbox\(es\) not found: 'nope'\./);
+        assert.match(err.message, /Ambiguous mailbox name\(s\)[^.]*'Receipts' matches Personal\/Receipts, Work\/Receipts/);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 0); // still all-or-nothing
+  });
+
+  it('says when a bucket list was truncated, so a capped list never reads as complete', async () => {
+    // 31 mailboxes sharing one name: the candidate list is capped at 30 and has to say so.
+    const many = Array.from({ length: 31 }, (_, i) => [
+      { id: `mb-p${i}`, name: `P${i}` },
+      { id: `mb-r${i}`, name: 'Receipts', parentId: `mb-p${i}` },
+    ]).flat();
+    client = makeClient();
+    stubMailboxes(client, many);
+    await assert.rejects(
+      () => client.addLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /Ambiguous mailbox name\(s\)/);
+        assert.match(err.message, /…and 1 more/);
+        return true;
+      },
+    );
+  });
+
+  it('reports an unwalkable path entry in its own bucket', async () => {
+    client = makeClient();
+    stubMailboxes(client, [...DEFAULT_MAILBOXES, ...LOOPED_TREE]);
+    await assert.rejects(
+      () => client.addLabels('e1', ['A/B']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /never reaches a top-level mailbox/);
+        assert.match(err.message, /mb-loop-a/);
+        return true;
+      },
+    );
+  });
+});
+
+// The single-input not-found message is pinned byte-for-byte, because it is the recovery
+// instruction a caller acts on: it has to enumerate every input form the resolver actually
+// accepts (id, role, name, path), and its "Valid:" list has to be written in the same
+// vocabulary the ambiguity error uses, which is full paths. The label-array message is a
+// superset of this one.
+describe('resolveMailbox not-found message', () => {
   it('produces the exact single-input message', () => {
     assert.throws(
       () => resolveMailbox(DEFAULT_MAILBOXES, 'nope'),
       (err: Error) => {
         assert.equal(
           err.message,
-          "Mailbox 'nope' not found. Use a name, or a role (inbox/archive/sent/drafts/trash/junk). " +
+          "Mailbox 'nope' not found. Use an id, a role (inbox/archive/sent/drafts/trash/junk), a name, or a full path (Parent/Child). " +
           'Valid: Inbox (inbox), Drafts (drafts), Trash (trash), Sent (sent), Archive (archive), Spam (junk)',
         );
         return true;
       },
     );
+  });
+
+  it('lists a nested mailbox by full path, so the hint speaks the form the ambiguity error hands back', () => {
+    assert.throws(
+      () => resolveMailbox(
+        [
+          { id: 'mb-archive', name: 'Archive', role: 'archive' },
+          { id: 'mb-2026', name: '2026', parentId: 'mb-archive' },
+        ],
+        'nope',
+      ),
+      (err: Error) => {
+        assert.match(err.message, /Valid: Archive \(archive\), Archive\/2026$/);
+        return true;
+      },
+    );
+  });
+});
+
+// ---------- findMailboxExact: the shared matcher both callers inherit ----------
+
+// Every mailbox-taking parameter and every mailboxIds entry goes through this one
+// function, so its resolution order and its failure shapes are asserted directly rather
+// than only through whichever tool happens to call it.
+
+// Two folders of the same name under different parents: the shape that makes a bare name
+// ambiguous and a full path the only unique handle.
+const DUPLICATE_NAME_TREE = [
+  { id: 'mb-personal', name: 'Personal' },
+  { id: 'mb-work', name: 'Work' },
+  { id: 'mb-personal-receipts', name: 'Receipts', parentId: 'mb-personal' },
+  { id: 'mb-work-receipts', name: 'Receipts', parentId: 'mb-work' },
+];
+
+// A parentId loop: no mailbox in it can be given a root-anchored path.
+const LOOPED_TREE = [
+  { id: 'mb-loop-a', name: 'A', parentId: 'mb-loop-b' },
+  { id: 'mb-loop-b', name: 'B', parentId: 'mb-loop-a' },
+];
+
+describe('findMailboxExact', () => {
+  it('resolves a nested mailbox by its root-anchored path', () => {
+    const match = findMailboxExact(DUPLICATE_NAME_TREE, 'Personal/Receipts');
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-personal-receipts');
+  });
+
+  it('matches path segments case-insensitively', () => {
+    const match = findMailboxExact(DUPLICATE_NAME_TREE, 'personal/RECEIPTS');
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-personal-receipts');
+  });
+
+  it('matches an id case-sensitively, so a case-folded id is not treated as a match', () => {
+    const match = findMailboxExact(DEFAULT_MAILBOXES, 'MB-INBOX');
+    assert.equal(match, undefined);
+  });
+
+  it('lets a unique flat name win over reading the same text as a path', () => {
+    // A folder literally named "A/B" alongside a real A > B nesting. The flat name has to
+    // win or the folder becomes unreachable by the only name its owner knows it by.
+    const tree = [
+      { id: 'mb-literal', name: 'A/B' },
+      { id: 'mb-a', name: 'A' },
+      { id: 'mb-b', name: 'B', parentId: 'mb-a' },
+    ];
+    const match = findMailboxExact(tree, 'A/B');
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-literal');
+  });
+
+  it('reports a duplicated flat name as ambiguous, with the candidates as full paths', () => {
+    const match = findMailboxExact(DUPLICATE_NAME_TREE, 'Receipts');
+    assert.ok(match && 'ambiguous' in match);
+    assert.equal(match.ambiguous, 'Receipts');
+    assert.deepEqual(match.candidates, ['Personal/Receipts', 'Work/Receipts']);
+  });
+
+  it('reports an unwalkable parent chain rather than silently answering "not found"', () => {
+    const match = findMailboxExact(LOOPED_TREE, 'A/B');
+    assert.ok(match && 'unwalkable' in match);
+    assert.equal(match.id, 'mb-loop-a');
+  });
+
+  it('reports an unwalkable chain when a parentId names a mailbox the account did not return', () => {
+    const match = findMailboxExact([{ id: 'mb-orphan', name: 'Orphan', parentId: 'mb-gone' }], 'Gone/Orphan');
+    assert.ok(match && 'unwalkable' in match);
+    assert.equal(match.id, 'mb-orphan');
+  });
+
+  it('answers a healthy branch even while another branch is unwalkable', () => {
+    const match = findMailboxExact([...DUPLICATE_NAME_TREE, ...LOOPED_TREE], 'Work/Receipts');
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-work-receipts');
+  });
+
+  it('rejects a path with a leading, trailing or doubled separator as a miss', () => {
+    for (const input of ['/Personal/Receipts', 'Personal/Receipts/', 'Personal//Receipts']) {
+      assert.equal(findMailboxExact(DUPLICATE_NAME_TREE, input), undefined, input);
+    }
+  });
+
+  it('returns undefined for a genuine miss', () => {
+    assert.equal(findMailboxExact(DUPLICATE_NAME_TREE, 'Nope/Nowhere'), undefined);
+  });
+
+  it('offers the ID, never the bare name, for a candidate that has no path', () => {
+    // The name is what the caller just had rejected as ambiguous, so handing it back as a
+    // candidate would send them round the same failure forever.
+    const tree = [
+      { id: 'mb-personal', name: 'Personal' },
+      { id: 'mb-personal-receipts', name: 'Receipts', parentId: 'mb-personal' },
+      { id: 'mb-loose', name: 'Receipts', parentId: 'mb-gone' },
+    ];
+    const match = findMailboxExact(tree, 'Receipts');
+    assert.ok(match && 'ambiguous' in match);
+    assert.deepEqual(match.candidates, ['Personal/Receipts', 'mb-loose']);
+    // Every candidate offered has to resolve when pasted back.
+    for (const candidate of match.candidates) {
+      const again = findMailboxExact(tree, candidate);
+      assert.ok(again && 'mailbox' in again, candidate);
+    }
+  });
+
+  it('does not blame an unrelated broken chain for an ordinary path typo', () => {
+    // One orphan elsewhere in the account must not turn every path miss into "paths cannot
+    // be computed" — in this very tree, Archive/2026 resolves.
+    const tree = [
+      { id: 'mb-archive', name: 'Archive', role: 'archive' },
+      { id: 'mb-2026', name: '2026', parentId: 'mb-archive' },
+      { id: 'mb-orphan', name: 'Orphan', parentId: 'mb-gone' },
+    ];
+    assert.equal(findMailboxExact(tree, 'Archive/Recepts'), undefined);
+    const good = findMailboxExact(tree, 'Archive/2026');
+    assert.ok(good && 'mailbox' in good);
+    assert.throws(
+      () => resolveMailbox(tree, 'Archive/Recepts'),
+      (err: Error) => {
+        assert.match(err.message, /not found/);
+        assert.doesNotMatch(err.message, /cannot be computed|never reaches/);
+        return true;
+      },
+    );
+  });
+
+  it('blames the broken chain when the caller actually named the unpathable mailbox', () => {
+    const tree = [
+      { id: 'mb-archive', name: 'Archive', role: 'archive' },
+      { id: 'mb-orphan', name: 'Orphan', parentId: 'mb-gone' },
+    ];
+    const match = findMailboxExact(tree, 'Archive/Orphan');
+    assert.ok(match && 'unwalkable' in match);
+    assert.equal(match.id, 'mb-orphan');
+  });
+
+  it('round-trips a path through a name carrying stray whitespace', () => {
+    const tree = [
+      { id: 'mb-work', name: 'Work' },
+      { id: 'mb-q1', name: ' Q1', parentId: 'mb-work' },
+    ];
+    const { paths } = buildMailboxPathMap(tree);
+    assert.equal(paths.get('mb-q1'), 'Work/Q1');
+    const match = findMailboxExact(tree, paths.get('mb-q1')!);
+    assert.ok(match && 'mailbox' in match);
+    assert.equal(match.mailbox.id, 'mb-q1');
+    // The same normalisation reaches the flat-name branch, so the name a caller would type
+    // matches the padded name the server stores.
+    const byName = findMailboxExact(tree, 'Q1');
+    assert.ok(byName && 'mailbox' in byName);
+    assert.equal(byName.mailbox.id, 'mb-q1');
+  });
+
+  it('treats a blank or missing name as unpathable rather than emitting an empty segment', () => {
+    // A blank root would otherwise yield "/Kid", which the path parser rejects outright —
+    // an emitted path that the resolver will not take back.
+    const tree = [
+      { id: 'mb-root', name: '   ' },
+      { id: 'mb-kid', name: 'Kid', parentId: 'mb-root' },
+      { id: 'mb-nameless', parentId: null },
+    ];
+    const { paths, unpathable } = buildMailboxPathMap(tree);
+    assert.equal(paths.size, 0);
+    assert.deepEqual(unpathable.sort(), ['mb-kid', 'mb-nameless', 'mb-root']);
+    for (const emitted of paths.values()) {
+      assert.doesNotMatch(emitted, /(^\/)|(\/\/)|(\/$)/);
+    }
+  });
+});
+
+describe('resolveMailbox failure shapes', () => {
+  it('gives an ambiguous name its own message naming the candidate paths', () => {
+    assert.throws(
+      () => resolveMailbox(DUPLICATE_NAME_TREE, 'Receipts'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /is ambiguous: 2 mailboxes share that name/);
+        assert.match(err.message, /Candidates: Personal\/Receipts, Work\/Receipts/);
+        // A caller told "not found" would go re-spell a name that was already right.
+        assert.doesNotMatch(err.message, /not found/);
+        return true;
+      },
+    );
+  });
+
+  it('gives an unwalkable tree a message distinct from both ambiguity and a miss', () => {
+    assert.throws(
+      () => resolveMailbox(LOOPED_TREE, 'A/B'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /never reaches a top-level mailbox/);
+        assert.match(err.message, /mb-loop-a/);
+        assert.doesNotMatch(err.message, /not found/);
+        assert.doesNotMatch(err.message, /ambiguous/);
+        return true;
+      },
+    );
+  });
+});
+
+// ---------- the path a listing returns is the path a parameter accepts ----------
+
+describe('mailbox path round-trip', () => {
+  it('resolves a path taken straight out of the simplified listing back to that mailbox', () => {
+    const { paths } = buildMailboxPathMap(DUPLICATE_NAME_TREE);
+    for (const mb of DUPLICATE_NAME_TREE) {
+      const listed = simplifyMailbox(mb, { path: paths.get(mb.id) });
+      assert.ok(listed.path, `no path emitted for ${mb.id}`);
+      assert.equal(resolveMailbox(DUPLICATE_NAME_TREE, listed.path).id, mb.id);
+    }
+  });
+});
+
+// ---------- filterMailboxesByParent ----------
+
+describe('filterMailboxesByParent', () => {
+  const TREE = [
+    { id: 'mb-archive', name: 'Archive', role: 'archive' },
+    { id: 'mb-2026', name: '2026', parentId: 'mb-archive' },
+    { id: 'mb-2025', name: '2025', parentId: 'mb-archive' },
+    { id: 'mb-q1', name: 'Q1', parentId: 'mb-2026' },
+  ];
+
+  it('returns the whole list when no parent is given', () => {
+    assert.equal(filterMailboxesByParent(TREE).length, 4);
+    assert.equal(filterMailboxesByParent(TREE, '   ').length, 4);
+  });
+
+  it('narrows to DIRECT children only, by any accepted parent form', () => {
+    for (const form of ['mb-archive', 'archive', 'Archive']) {
+      assert.deepEqual(filterMailboxesByParent(TREE, form).map(mb => mb.id), ['mb-2026', 'mb-2025'], form);
+    }
+    assert.deepEqual(filterMailboxesByParent(TREE, 'Archive/2026').map(mb => mb.id), ['mb-q1']);
+  });
+
+  it('rejects an unknown parent rather than listing everything', () => {
+    assert.throws(() => filterMailboxesByParent(TREE, 'nope'), InvalidInputError);
+  });
+});
+
+// ---------- createMailbox ----------
+
+describe('createMailbox', () => {
+  let client: JmapClient;
+
+  const TREE = [
+    ARCHIVE_MAILBOX,
+    { id: 'mb-2026', name: '2026', parentId: 'mb-archive' },
+  ];
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  function stubCreate(setResult: any = { created: { newMailbox: { id: 'mb-new' } } }) {
+    stubMailboxes(client, TREE);
+    return stubRequests(client, async () =>
+      ({ methodResponses: [['Mailbox/set', setResult, 'createMailbox']] }));
+  }
+
+  function createArgs(makeReq: ReturnType<typeof stubRequests>) {
+    return callArguments(makeReq)[0].methodCalls[0][1].create.newMailbox;
+  }
+
+  it('creates at the top level when no parent is given, and returns the mailbox with its path', async () => {
+    const makeReq = stubCreate();
+    const result = await client.createMailbox({ name: 'Receipts' });
+    assert.deepEqual(createArgs(makeReq), { name: 'Receipts', parentId: null });
+    assert.equal(result.mailbox.id, 'mb-new');
+    assert.equal(result.mailbox.name, 'Receipts');
+    assert.equal(result.path, 'Receipts');
+  });
+
+  it('resolves the parent by id, role, name or path', async () => {
+    for (const [form, expectedParent, expectedPath] of [
+      ['mb-archive', 'mb-archive', 'Archive/Receipts'],
+      ['archive', 'mb-archive', 'Archive/Receipts'],
+      ['Archive', 'mb-archive', 'Archive/Receipts'],
+      ['Archive/2026', 'mb-2026', 'Archive/2026/Receipts'],
+    ] as const) {
+      client = makeClient();
+      const makeReq = stubCreate();
+      const result = await client.createMailbox({ name: 'Receipts', parent: form });
+      assert.equal(createArgs(makeReq).parentId, expectedParent, form);
+      assert.equal(result.path, expectedPath, form);
+    }
+  });
+
+  it('rejects a name containing the path separator and points at the parent parameter', async () => {
+    stubCreate();
+    await assert.rejects(
+      () => client.createMailbox({ name: 'Archive/Receipts' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /must not contain "\/"/);
+        assert.match(err.message, /parent parameter/);
+        return true;
+      },
+    );
+  });
+
+  it('rejects an empty name', async () => {
+    stubCreate();
+    await assert.rejects(() => client.createMailbox({ name: '   ' }), InvalidInputError);
+  });
+
+  it('rejects an unknown parent', async () => {
+    stubCreate();
+    await assert.rejects(() => client.createMailbox({ name: 'Receipts', parent: 'nope' }), InvalidInputError);
+  });
+
+  it('routes a caller-fixable set error to InvalidInputError, carrying the server reason', async () => {
+    stubCreate({ notCreated: { newMailbox: { type: 'invalidProperties', description: 'name already in use' } } });
+    await assert.rejects(
+      () => client.createMailbox({ name: 'Receipts' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Failed to create mailbox: invalidProperties/);
+        assert.match(err.message, /name already in use/);
+        return true;
+      },
+    );
+  });
+
+  it('routes an operational set error to a plain Error', async () => {
+    stubCreate({ notCreated: { newMailbox: { type: 'forbidden' } } });
+    await assert.rejects(
+      () => client.createMailbox({ name: 'Receipts' }),
+      (err: Error) => {
+        assert.ok(!(err instanceof InvalidInputError));
+        assert.match(err.message, /Failed to create mailbox: forbidden/);
+        return true;
+      },
+    );
+  });
+
+  it('fails loudly when the server reports success but returns no id', async () => {
+    stubCreate({ created: { newMailbox: {} } });
+    await assert.rejects(() => client.createMailbox({ name: 'Receipts' }), /returned no mailbox id/);
+  });
+
+  it('returns the server created object untouched, alongside the merged mailbox', async () => {
+    // `created` is what the raw path emits, so it must stay exactly what Mailbox/set sent
+    // back (RFC 8620 §5.3: only the properties the server set) with nothing merged in.
+    stubCreate({ created: { newMailbox: { id: 'mb-new', sortOrder: 7 } } });
+    const result = await client.createMailbox({ name: 'Receipts' });
+    assert.deepEqual(result.created, { id: 'mb-new', sortOrder: 7 });
+    assert.equal(result.mailbox.name, 'Receipts');
+    assert.equal(result.mailbox.parentId, null);
+  });
+
+  it('omits path rather than fabricating one when the parent has no computable path', async () => {
+    // The parent sits in a loop, so no root-anchored path exists for it. Concatenating the
+    // leaf onto its bare name would produce a plausible string that does not resolve.
+    client = makeClient();
+    stubMailboxes(client, [
+      { id: 'mb-loop-a', name: 'Loop', parentId: 'mb-loop-b' },
+      { id: 'mb-loop-b', name: 'Other', parentId: 'mb-loop-a' },
+    ]);
+    stubRequests(client, async () =>
+      ({ methodResponses: [['Mailbox/set', { created: { newMailbox: { id: 'mb-new' } } }, 'createMailbox']] }));
+    const result = await client.createMailbox({ name: 'Receipts', parent: 'mb-loop-a' });
+    assert.equal(result.path, undefined);
+    assert.equal(result.mailbox.parentId, 'mb-loop-a');
   });
 });
 
