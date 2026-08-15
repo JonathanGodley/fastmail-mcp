@@ -25,7 +25,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // The reusable JSON-RPC client, rather than a hand-rolled one: it matches responses
 // by JSON-RPC id and settles every failure path, which a fresh client re-bugs.
@@ -176,10 +176,13 @@ describe('every error path reaching tool output is redacted', () => {
 describe('tsdav credential logging is suppressed', () => {
   before(() => assertDistIsCurrent());
 
-  // Credential-shaped, and on a placeholder domain. The base64 of "user:pass" is
-  // exactly what tsdav prints, so it is computed here rather than hardcoded.
+  // Credential-shaped, and on a placeholder domain.
   const PROBE_USER = 'probe-user@example.com';
   const PROBE_PASSPHRASE = 'probe-pass-value-0123456789';
+  // tsdav 2.1.x printed the whole Basic credential as bare base64. 2.3.1 replaced
+  // that with the username alone. Both forms are asserted absent under the
+  // suppression: the base64 is what a regression would look like, the username is
+  // what the current version actually prints. Computed, never hardcoded.
   const LEAKED_FORM = Buffer.from(`${PROBE_USER}:${PROBE_PASSPHRASE}`).toString('base64');
 
   // Run tsdav's real credential-header function in a child with DEBUG turned fully
@@ -204,24 +207,31 @@ describe('tsdav credential logging is suppressed', () => {
     });
   }
 
-  it('leaks the credential without the suppression (control)', () => {
+  it('logs the account identity without the suppression (control)', () => {
     // Without this control the suppression test would silently go vacuous the day
-    // tsdav stops logging credentials, and would keep passing while a real
-    // regression elsewhere went unnoticed.
+    // tsdav stops logging anything from the auth helper, and would keep passing
+    // while a real regression elsewhere went unnoticed. It deliberately asserts on
+    // the account identity rather than the passphrase: which of the two tsdav
+    // prints is tsdav's choice and has already changed once, so pinning the exact
+    // secret form would make a routine bump red for no security reason.
     const child = runTsdavCall({ loadServer: false });
     assert.equal(child.status, 0, `probe failed: ${child.stderr}`);
     assert.ok(
-      child.stderr.includes(LEAKED_FORM),
-      'tsdav no longer logs the Basic credential under DEBUG — the suppression below is now proving nothing; re-derive it against the installed version.',
+      child.stderr.includes(PROBE_USER),
+      'tsdav no longer logs the account identity under DEBUG — the suppression below is now proving nothing; re-derive it against the installed version.',
     );
   });
 
-  it('does not leak the credential once the built server has loaded', () => {
+  it('does not leak the credential or the account identity once the built server has loaded', () => {
     const child = runTsdavCall({ loadServer: true });
     assert.equal(child.status, 0, `probe failed: ${child.stderr}`);
     assert.ok(
       !child.stderr.includes(LEAKED_FORM),
       `tsdav logged the Basic credential to stderr despite the suppression: ${child.stderr}`,
+    );
+    assert.ok(
+      !child.stderr.includes(PROBE_USER),
+      `tsdav logged the account identity to stderr despite the suppression: ${child.stderr}`,
     );
   });
 
@@ -242,15 +252,25 @@ describe('tsdav credential logging is suppressed', () => {
     // Read the namespaces out of the tsdav build Node loads, rather than asserting
     // against a hardcoded list: a tsdav upgrade that renames or adds a namespace
     // outside the skip glob has to turn this red, not quietly reopen the leak.
-    const entry = require.resolve('tsdav');
+    //
+    // The ESM build specifically. `require.resolve('tsdav')` returns the CommonJS
+    // entry, which this server never loads and which spells the namespaces
+    // differently — reading it produced zero namespaces and a vacuous pass.
+    const pkgPath = require.resolve('tsdav/package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    const esmRelative = pkg.exports?.['.']?.import ?? pkg.module;
+    assert.ok(esmRelative, `tsdav declares no ESM entry point in ${pkgPath}`);
+    const entry = resolve(dirname(pkgPath), esmRelative);
     const source = readFileSync(entry, 'utf8');
 
     // Find whatever identifier tsdav binds the debug factory to, then collect every
     // string literal it is called with. Keyed off the import rather than off the
     // string "tsdav", so a namespace renamed to something else is still collected.
+    // Both binding forms stay recognised: the ESM build imports, and a future build
+    // shape could go back to a require.
     const binding =
-      source.match(/(?:var|const|let)\s+(\w+)\s*=\s*require\(['"]debug['"]\)/) ??
-      source.match(/import\s+(\w+)\s+from\s*['"]debug['"]/);
+      source.match(/import\s+(\w+)\s+from\s*['"]debug['"]/) ??
+      source.match(/(?:var|const|let)\s+(\w+)\s*=\s*require\(['"]debug['"]\)/);
     assert.ok(binding, `could not find tsdav's debug import in ${entry}`);
 
     const callRe = new RegExp(`\\b${binding[1]}\\(\\s*['"\`]([^'"\`]+)['"\`]\\s*\\)`, 'g');

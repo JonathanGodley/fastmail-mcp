@@ -1178,6 +1178,13 @@ export class CalDAVCalendarClient {
       },
       authMethod: 'Basic',
       defaultAccountType: 'caldav',
+      // Every request this client makes carries the CalDAV Basic credential, and
+      // the destination is a configured host. A redirect is therefore never
+      // legitimate: following one would replay the credential at whatever host the
+      // response names. The JMAP side applies the same rule to its own fetches.
+      // tsdav merges this into the init of each underlying fetch, so it covers
+      // every method rather than the ones called explicitly.
+      fetchOptions: { redirect: 'error' },
     });
 
     await this.client.login();

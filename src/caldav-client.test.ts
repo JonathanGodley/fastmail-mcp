@@ -27,7 +27,9 @@ import {
   quoteParamValue,
   CalDAVCalendarClient,
 } from './caldav-client.js';
-import type { DAVClient } from 'tsdav';
+// A value import, not `import type`: the redirect test below stubs a method on the
+// prototype, which needs the class itself. It still serves the type positions.
+import { DAVClient } from 'tsdav';
 import { callArguments } from './testing/mock-calls.js';
 
 // The mocked DAVClient methods below declare these parameter lists rather than
@@ -3337,5 +3339,59 @@ describe('recurring-exception confirmation is a caller-fixable rejection', () =>
         return true;
       }
     );
+  });
+});
+
+// Every CalDAV request carries the account's Basic credential, so following a
+// redirect would replay that credential at whatever host the response names. The
+// client is built with redirect: 'error' to make that impossible.
+//
+// Both halves of that are asserted, because either one alone can go green while the
+// protection is gone: the option being set proves nothing if tsdav stops carrying it
+// onto requests, and a request carrying it proves nothing about the client the
+// production path builds. So the test takes the real client out of getClient(), then
+// drives a real tsdav method through it and inspects the init that reaches fetch.
+//
+// The spy is installed as the client's own fetch override rather than by patching
+// globalThis: tsdav resolves globalThis.fetch when its module is first evaluated, so
+// a later patch is never consulted.
+describe('CalDAV requests refuse to follow redirects', () => {
+  it("carries redirect: 'error' from the constructed client onto the requests it makes", async () => {
+    const realLogin = DAVClient.prototype.login;
+    // login() is the one call getClient() makes that touches the network. Stubbing it
+    // on the prototype leaves the constructor - the part under test - untouched.
+    DAVClient.prototype.login = (async function (this: DAVClient) {}) as typeof realLogin;
+
+    try {
+      const wrapper = new CalDAVCalendarClient({ username: 'test@example.com', password: 'pw' });
+      // getClient() is private and is where the option is wired in; going through a
+      // public method would make this depend on that method's behaviour as well.
+      const dav = (await (wrapper as any).getClient()) as DAVClient;
+
+      assert.deepEqual(
+        dav.fetchOptions,
+        { redirect: 'error' },
+        "the DAV client was built without redirect: 'error', so a redirect would replay the CalDAV credential at the host that sent it"
+      );
+
+      const seen: RequestInit[] = [];
+      dav.fetchOverride = (async (_url: any, init?: RequestInit) => {
+        seen.push(init ?? {});
+        return new Response('', { status: 207 });
+      }) as typeof globalThis.fetch;
+
+      // createObject is the cheapest real request method: it hands the response back
+      // untouched, so nothing here depends on parsing a plausible DAV body.
+      await dav.createObject({ url: 'https://caldav.example.com/x', data: 'x', headers: {} });
+
+      assert.equal(seen.length, 1, 'expected the DAV method to issue exactly one request');
+      assert.equal(
+        seen[0].redirect,
+        'error',
+        "the request reached fetch without redirect: 'error' - tsdav is no longer carrying fetchOptions onto requests, so the credential would follow a redirect"
+      );
+    } finally {
+      DAVClient.prototype.login = realLogin;
+    }
   });
 });

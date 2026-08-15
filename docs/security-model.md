@@ -446,24 +446,48 @@ hosts — `phl.www.fastmail.com` is still rejected.
 drops host checking wholesale. It is not the answer to a regional Fastmail host, and using it
 for that would disable the check for every URL in the session response.
 
+### No request follows a redirect
+
+An allowlist that only checks the URL the client *aims at* is defeated by a 302: the
+runtime would replay the credential at whatever host the response named, and no check ever
+sees that host. So every credential-bearing request in this server is made with
+`redirect: 'error'` — the JMAP fetches (session discovery, `makeRequest`, blob upload and
+attachment download, all carrying the bearer token) and the CalDAV requests (all carrying
+HTTP Basic).
+
+On the CalDAV side the option is set once, on the `DAVClient` constructor
+(`fetchOptions: { redirect: 'error' }` in `src/caldav-client.ts`), rather than per call.
+tsdav merges its client-level `fetchOptions` into the init of every underlying fetch, so
+one setting covers every method — including the ones this code never calls explicitly but
+tsdav issues during its own login and discovery handshake. `src/caldav-client.test.ts`
+asserts both halves, because either alone can pass while the protection is gone: that the
+client the production path builds carries the option, and that the option still reaches
+`fetch` when a real tsdav method runs.
+
 ## Credential logging is suppressed at the source (`DEBUG` and tsdav)
 
 **Operator-visible behaviour: setting `DEBUG` no longer produces any tsdav output.** Every
 other package's `DEBUG` logging is untouched, including under `DEBUG=*`. This is deliberate
 and is not a knob.
 
-tsdav (the CalDAV client) logs the HTTP Basic credential as bare base64 the moment `DEBUG`
-is on:
+tsdav (the CalDAV client) writes account details to stderr the moment `DEBUG` is on. Up to
+2.1.x that included the whole HTTP Basic credential as bare base64:
 
 ```
 tsdav:authHelper Basic auth token generated: <base64 of username:password>
 ```
 
-That write goes straight to stderr from inside the library. It never passes through the
+tsdav 2.3.1 narrowed that line to the account name alone (`Basic auth token generated for
+user "<username>"`), which for a Fastmail account is the user's email address. The
+suppression is kept at full strength regardless: the passphrase leak is one release away
+from returning, the surrounding namespaces still log collection URLs and calendar names,
+and the account identity is itself worth not printing.
+
+Those writes go straight to stderr from inside the library. They never pass through the
 CallTool boundary in `src/index.ts`, so the redaction that covers every error egress
-(`redactBearerTokens`, see `src/coerce.ts`) cannot reach it. Nothing downstream can scrub
-it either, because the operator's own terminal or log collector is the destination.
-Suppressing the logger at the source is the only control.
+(`redactBearerTokens`, see `src/coerce.ts`) cannot reach them. Nothing downstream can
+scrub them either, because the operator's own terminal or log collector is the
+destination. Suppressing the logger at the source is the only control.
 
 ### The mechanism that actually ships
 
@@ -500,8 +524,11 @@ Four things about that line are load-bearing, each established by running it:
   applying with no other symptom.
 
 `src/built-server.test.ts` holds this down against the real library rather than a mock: a
-control case asserts the credential *does* leak from a bare tsdav call under `DEBUG=*` (so
-the suppression test cannot go vacuous the day tsdav stops logging it), a paired case
-asserts it does not once the built server has loaded, and two further cases assert that
-tsdav resolves the same `debug` copy and that the skip glob covers every namespace the
-installed build actually creates.
+control case asserts the account identity *does* reach stderr from a bare tsdav call under
+`DEBUG=*` (so the suppression test cannot go vacuous the day tsdav stops logging), a paired
+case asserts that neither the identity nor the base64 credential appears once the built
+server has loaded, and two further cases assert that tsdav resolves the same `debug` copy
+and that the skip glob covers every namespace the installed build actually creates. The
+control keys on the identity rather than the passphrase deliberately — which of the two
+tsdav prints is tsdav's choice and has already changed once, so pinning the exact secret
+form would turn a routine dependency bump red for no security reason.
