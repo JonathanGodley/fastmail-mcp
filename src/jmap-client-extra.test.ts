@@ -1238,6 +1238,16 @@ describe('JMAP property consistency', () => {
     assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('attachments'));
   });
 
+  it('verbose fetches both draft provenance headers; compact fetches neither', () => {
+    // Get-path reads must surface which message a forward names (forwardedMessageId)
+    // and which stored copy send_draft will mark (sourceEmailId); list items show
+    // forward-ness via isForwarded instead.
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('header:X-Forwarded-Message-Id:asMessageIds'));
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('header:X-Fastmail-MCP-Source-Id:asText'));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('header:X-Forwarded-Message-Id:asMessageIds' as any));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('header:X-Fastmail-MCP-Source-Id:asText' as any));
+  });
+
   it('compact includes textBody structure (part sizes) for the bodyTextSize hint (#59)', () => {
     // textBody is a compact property: it fetches the part *structure* (partId/type/size),
     // not content, so the response stays "no bodies" while exposing the text part size.
@@ -2334,5 +2344,370 @@ describe('downloadAttachmentToFile write flags', () => {
       hooks.deregister();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+// ---------- attachment reads: the part listing and the download forms (#13) ----------
+
+// A Fastmail-shaped host is required, not cosmetic: the built URL is re-validated
+// against the allowlist after substitution, before it would carry the bearer token, so
+// a made-up host would fail every case below for the wrong reason. The path and query
+// are kept minimal so the assertions read as URL shape rather than as Fastmail trivia.
+const DOWNLOAD_TEMPLATE =
+  'https://www.fastmailusercontent.com/{accountId}/{blobId}?type={type}&name={name}';
+
+// A client whose session advertises a download URL template, so the built URL can be
+// asserted end to end.
+function makeDownloadClient(): JmapClient {
+  const client = makeClient();
+  mock.method(client, 'getSession', async () => ({
+    apiUrl: 'https://api.example.com/jmap/api/',
+    accountId: ACCOUNT_ID,
+    capabilities: {},
+    downloadUrl: DOWNLOAD_TEMPLATE,
+  }));
+  return client;
+}
+
+// The message shape these tests read: a text body, an html body, an embedded image the
+// server routed into the body lists only, and one genuinely attached file.
+const TEXT_PART = { partId: '1', type: 'text/plain', size: 12 };
+const HTML_PART = { partId: '2', type: 'text/html', size: 40 };
+const EMBEDDED_IMAGE = {
+  partId: '3', type: 'image/png', size: 2048, blobId: 'blob-logo', cid: 'logo@example.com',
+};
+const ATTACHED_FILE = {
+  partId: '4', type: 'application/pdf', size: 900, blobId: 'blob-pdf', name: 'report.pdf',
+};
+
+function stubEmail(client: JmapClient, email: any) {
+  return mock.method(client, 'makeRequest', async () => ({
+    methodResponses: [['Email/get', { list: email ? [email] : [] }, 'getEmail']],
+  }));
+}
+
+function mixedShapeEmail() {
+  return {
+    id: 'e1',
+    attachments: [ATTACHED_FILE],
+    textBody: [TEXT_PART, EMBEDDED_IMAGE],
+    htmlBody: [HTML_PART, EMBEDDED_IMAGE],
+  };
+}
+
+describe('getEmailAttachments', () => {
+  it('fetches both body lists alongside attachments', async () => {
+    const client = makeClient();
+    const makeReq = stubEmail(client, mixedShapeEmail());
+    await client.getEmailAttachments('e1');
+    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.deepEqual(params.properties, ['attachments', 'textBody', 'htmlBody']);
+    assert.deepEqual(params.bodyProperties, [...EMAIL_BODY_PROPERTIES]);
+  });
+
+  it('lists the body-routed image alongside the attached file', async () => {
+    const client = makeClient();
+    stubEmail(client, mixedShapeEmail());
+    const { attachments } = await client.getEmailAttachments('e1');
+    assert.deepEqual(attachments.map((a: any) => a.partId), ['4', '3']);
+  });
+
+  it('returns raw JMAP part objects, not a simplified shape', async () => {
+    const client = makeClient();
+    stubEmail(client, mixedShapeEmail());
+    const { attachments } = await client.getEmailAttachments('e1');
+    assert.equal(attachments[1], EMBEDDED_IMAGE);
+    assert.equal(attachments[1].cid, 'logo@example.com');
+    assert.equal('isInline' in attachments[1], false);
+  });
+
+  it('reports the untouched JMAP array separately, so the withheld set is countable', async () => {
+    const client = makeClient();
+    stubEmail(client, mixedShapeEmail());
+    const { attachments, rawAttachments } = await client.getEmailAttachments('e1');
+    assert.deepEqual(rawAttachments, [ATTACHED_FILE]);
+    assert.equal(attachments.length - rawAttachments.length, 1);
+  });
+
+  it('withholds nothing when every part is already in the JMAP array', async () => {
+    const client = makeClient();
+    stubEmail(client, { id: 'e1', attachments: [ATTACHED_FILE], textBody: [TEXT_PART] });
+    const { attachments, rawAttachments } = await client.getEmailAttachments('e1');
+    assert.equal(attachments.length, rawAttachments.length);
+  });
+
+  it('returns empty lists for a message that is not found', async () => {
+    const client = makeClient();
+    stubEmail(client, null);
+    const result = await client.getEmailAttachments('missing');
+    assert.deepEqual(result, { attachments: [], rawAttachments: [], omittedFromRaw: 0 });
+  });
+});
+
+describe('downloadAttachment — fetch shape', () => {
+  it('fetches both body lists so an embedded image is downloadable at all', async () => {
+    const client = makeDownloadClient();
+    const makeReq = stubEmail(client, mixedShapeEmail());
+    await client.downloadAttachment('e1', '3');
+    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.deepEqual(params.properties, ['attachments', 'textBody', 'htmlBody']);
+  });
+
+  it('requests the full body property set, including disposition and cid', async () => {
+    const client = makeDownloadClient();
+    const makeReq = stubEmail(client, mixedShapeEmail());
+    await client.downloadAttachment('e1', '3');
+    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.deepEqual(params.bodyProperties, [...EMAIL_BODY_PROPERTIES]);
+  });
+
+  it('no longer requests bodyValues, which it never read', async () => {
+    const client = makeDownloadClient();
+    const makeReq = stubEmail(client, mixedShapeEmail());
+    await client.downloadAttachment('e1', '3');
+    const params = makeReq.mock.calls[0].arguments[0].methodCalls[0][1];
+    assert.equal(params.properties.includes('bodyValues'), false);
+  });
+});
+
+describe('downloadAttachment — reference forms', () => {
+  it('resolves a partId', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    assert.match(await client.downloadAttachment('e1', '4'), /blob-pdf/);
+  });
+
+  it('resolves a blobId', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    assert.match(await client.downloadAttachment('e1', 'blob-logo'), /blob-logo/);
+  });
+
+  it('resolves a prefixed cid', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    assert.match(await client.downloadAttachment('e1', 'cid:logo@example.com'), /blob-logo/);
+  });
+
+  it('accepts the cid: prefix in any case', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    assert.match(await client.downloadAttachment('e1', 'CID:logo@example.com'), /blob-logo/);
+  });
+
+  it('resolves an entry number against the full listing, not the JMAP array', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    // Entry 0 is the attached file; entry 1 is the body-routed image, which the JMAP
+    // attachments array does not contain at all — so indexing it proves the union is
+    // what the entry-number form counts from.
+    assert.match(await client.downloadAttachment('e1', '0'), /blob-pdf/);
+    assert.match(await client.downloadAttachment('e1', '1'), /blob-logo/);
+  });
+
+  it('gives a partId precedence over the entry-number reading of the same digits', async () => {
+    // Fastmail partIds are digit strings, so "1" must mean the part with partId "1"
+    // whenever one exists — never the second entry.
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [ATTACHED_FILE, { partId: '1', type: 'image/png', size: 5, blobId: 'blob-one' }],
+      textBody: [],
+    });
+    assert.match(await client.downloadAttachment('e1', '1'), /blob-one/);
+  });
+
+  it('falls back to the entry number only when no part claims those digits', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'a', type: 'image/png', size: 5, blobId: 'blob-a' },
+                    { partId: 'b', type: 'image/png', size: 5, blobId: 'blob-b' }],
+    });
+    assert.match(await client.downloadAttachment('e1', '1'), /blob-b/);
+  });
+
+  it('never lets a bare digit string alias a cid', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'p', type: 'image/png', size: 5, blobId: 'blob-x', cid: '7' }],
+    });
+    // "7" is a Content-ID here, but the cid form requires the prefix, so a bare 7 is an
+    // out-of-range entry number, not this part.
+    await assert.rejects(() => client.downloadAttachment('e1', '7'), /Attachment not found/);
+    assert.match(await client.downloadAttachment('e1', 'cid:7'), /blob-x/);
+  });
+
+  it('strips only the first cid: prefix, so a Content-ID beginning with cid: is reachable', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'p', type: 'image/png', size: 5, blobId: 'blob-odd', cid: 'cid:x' }],
+    });
+    assert.match(await client.downloadAttachment('e1', 'cid:cid:x'), /blob-odd/);
+  });
+
+  it('matches a cid literally before trying the decoded form', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [
+        { partId: 'p1', type: 'image/png', size: 5, blobId: 'blob-literal', cid: '%78' },
+        { partId: 'p2', type: 'image/png', size: 5, blobId: 'blob-decoded', cid: 'x' },
+      ],
+    });
+    // The handle round-trips from get_email's verbatim echo, so a literal hit wins and
+    // the decode never runs.
+    assert.match(await client.downloadAttachment('e1', 'cid:%78'), /blob-literal/);
+  });
+
+  it('falls back to the decoded cid only when the literal matches nothing', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'p2', type: 'image/png', size: 5, blobId: 'blob-decoded', cid: 'x' }],
+    });
+    assert.match(await client.downloadAttachment('e1', 'cid:%78'), /blob-decoded/);
+  });
+});
+
+describe('downloadAttachment — input errors stay actionable, lookups stay generic', () => {
+  it('rejects an ambiguous cid instead of guessing at one part', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [
+        { partId: 'p1', type: 'image/png', size: 5, blobId: 'b1', cid: 'dupe@host' },
+        { partId: 'p2', type: 'image/png', size: 5, blobId: 'b2', cid: 'dupe@host' },
+      ],
+    });
+    await assert.rejects(
+      () => client.downloadAttachment('e1', 'cid:dupe@host'),
+      (error: unknown) => {
+        assert.ok(error instanceof InvalidInputError);
+        assert.equal(
+          (error as Error).message,
+          'attachmentId "cid:dupe@host" matches more than one part. ' +
+          "Pass the part's blobId or partId from get_email_attachments instead.",
+        );
+        return true;
+      },
+    );
+  });
+
+  it('names no blobIds in the ambiguity message', async () => {
+    // The tool's no-metadata-leak posture: an input error may say what to pass, never
+    // what the mailbox contains.
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [
+        { partId: 'p1', type: 'image/png', size: 5, blobId: 'secret-blob-1', cid: 'd@h' },
+        { partId: 'p2', type: 'image/png', size: 5, blobId: 'secret-blob-2', cid: 'd@h' },
+      ],
+    });
+    await assert.rejects(
+      () => client.downloadAttachment('e1', 'cid:d@h'),
+      (error: unknown) => !/secret-blob/.test((error as Error).message),
+    );
+  });
+
+  it('renders a hostile cid as bounded quoted data', async () => {
+    const client = makeDownloadClient();
+    const hostile = `${'a'.repeat(200)}‮"`;
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [
+        { partId: 'p1', type: 'image/png', size: 5, blobId: 'b1', cid: hostile },
+        { partId: 'p2', type: 'image/png', size: 5, blobId: 'b2', cid: hostile },
+      ],
+    });
+    await assert.rejects(
+      () => client.downloadAttachment('e1', `cid:${hostile}`),
+      (error: unknown) => {
+        const message = (error as Error).message;
+        assert.ok(message.length < 300);
+        assert.equal(message.includes('‮'), false);
+        return true;
+      },
+    );
+  });
+
+  it('rejects a bare cid: with no value', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    await assert.rejects(
+      () => client.downloadAttachment('e1', 'cid:'),
+      (error: unknown) => error instanceof InvalidInputError && /names no Content-ID/.test((error as Error).message),
+    );
+  });
+
+  it('rejects a number with junk in it instead of silently indexing', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    for (const bad of ['3a', '-1', '1.5', ' 1']) {
+      await assert.rejects(
+        () => client.downloadAttachment('e1', bad),
+        (error: unknown) => error instanceof InvalidInputError,
+        `expected ${JSON.stringify(bad)} to be rejected as an input error`,
+      );
+    }
+  });
+
+  it('rejects a part that carries no downloadable blob', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'p1', type: 'image/png', size: 5, cid: 'no-blob@host' }],
+    });
+    await assert.rejects(
+      () => client.downloadAttachment('e1', 'p1'),
+      (error: unknown) => error instanceof InvalidInputError && /no blobId/.test((error as Error).message),
+    );
+  });
+
+  it('keeps a reference that simply matches nothing generic', async () => {
+    // An existence failure must not become an actionable input error: that is how the
+    // tool avoids confirming what a mailbox holds.
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    for (const missing of ['nope', 'cid:absent@host', '99']) {
+      await assert.rejects(
+        () => client.downloadAttachment('e1', missing),
+        (error: unknown) => !(error instanceof InvalidInputError) && /Attachment not found/.test((error as Error).message),
+        `expected ${JSON.stringify(missing)} to stay a generic not-found`,
+      );
+    }
+  });
+});
+
+describe('downloadAttachment — declared filename', () => {
+  it('sanitizes the sender-supplied name without appending .eml', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'p1', type: 'image/png', size: 5, blobId: 'b1', name: 'lo‮go.png' }],
+    });
+    const url = await client.downloadAttachment('e1', 'p1');
+    assert.match(url, /name=logo\.png$/);
+    assert.equal(url.includes('.eml'), false);
+  });
+
+  it('falls back to a usable name when the part has none', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'p1', type: 'image/png', size: 5, blobId: 'b1' }],
+    });
+    assert.match(await client.downloadAttachment('e1', 'p1'), /name=attachment$/);
+  });
+
+  it('defuses a Windows device name', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, {
+      id: 'e1',
+      attachments: [{ partId: 'p1', type: 'image/png', size: 5, blobId: 'b1', name: 'CON.png' }],
+    });
+    assert.match(await client.downloadAttachment('e1', 'p1'), /name=CON_\.png$/);
   });
 });

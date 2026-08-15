@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, buildOmittedPartsNote, buildAttachmentListContent } from './response-formatters.js';
 
 // ---------- formatEditDraftResult ----------
 
@@ -843,5 +843,64 @@ describe('simplifyIdentity missing verbose fields', () => {
   it('includes verificationCheckTime in verbose mode', () => {
     const result = simplifyIdentity(raw, { verbose: true });
     assert.equal(result.verificationCheckTime, '2026-03-01T00:00:00Z');
+  });
+});
+
+// ---------- buildOmittedPartsNote ----------
+
+describe('buildOmittedPartsNote', () => {
+  it('states how many parts the raw listing withheld', () => {
+    assert.equal(
+      buildOmittedPartsNote(2),
+      '2 body-embedded part(s) omitted (raw lists the JMAP attachments array only; omit raw to include them).',
+    );
+  });
+
+  it('says nothing when the raw listing is already complete', () => {
+    // Silence is the "this is the whole listing" signal, as with the Trash/Spam note.
+    assert.equal(buildOmittedPartsNote(0), null);
+  });
+
+  it('says nothing for an impossible negative count rather than inventing a number', () => {
+    assert.equal(buildOmittedPartsNote(-1), null);
+  });
+});
+
+// ---------- buildAttachmentListContent ----------
+
+describe('buildAttachmentListContent', () => {
+  const UNION_ENTRY = { contentType: 'image/png', size: 100, blobId: 'blob-logo', isInline: true, cid: 'logo@x' };
+  const RAW_ENTRY = { type: 'application/pdf', size: 900, blobId: 'blob-pdf', name: 'report.pdf' };
+  const RESULT = { attachments: [RAW_ENTRY, UNION_ENTRY], rawAttachments: [RAW_ENTRY], omittedFromRaw: 1 };
+
+  it('returns the full listing as a single JSON item when raw is off', () => {
+    const content = buildAttachmentListContent(RESULT, false);
+    assert.equal(content.length, 1);
+    assert.deepEqual(JSON.parse(content[0].text), [RAW_ENTRY, UNION_ENTRY]);
+  });
+
+  it('returns the untouched JMAP array as parseable JSON when raw is on', () => {
+    const content = buildAttachmentListContent(RESULT, true);
+    // The first item must parse on its own: bypassing simplification is the entire
+    // point of the flag, so nothing may be concatenated onto the JSON.
+    assert.deepEqual(JSON.parse(content[0].text), [RAW_ENTRY]);
+  });
+
+  it('reports what raw withheld as a separate content item, never inside the JSON', () => {
+    const content = buildAttachmentListContent(RESULT, true);
+    assert.equal(content.length, 2);
+    assert.equal(content[1].text, buildOmittedPartsNote(1));
+    assert.ok(!content[0].text.includes('omitted'));
+    assert.doesNotThrow(() => JSON.parse(content[0].text));
+  });
+
+  it('emits no note when raw withheld nothing', () => {
+    const complete = { attachments: [RAW_ENTRY], rawAttachments: [RAW_ENTRY], omittedFromRaw: 0 };
+    assert.equal(buildAttachmentListContent(complete, true).length, 1);
+  });
+
+  it('never notes omissions on the non-raw path, which withholds nothing', () => {
+    const content = buildAttachmentListContent(RESULT, false);
+    assert.equal(content.length, 1);
   });
 });

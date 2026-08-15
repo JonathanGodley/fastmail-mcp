@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildAttachmentListContent, simplifyMailbox, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult } from './response-formatters.js';
 import { coerceRecipients, coerceStringArray, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceAttachments, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
@@ -324,7 +324,7 @@ const FIELDS_TOOL_DESC =
   'Use `fields` to return ONLY the fields you need (e.g. fields:["id","subject","from","date","threadId"]) when the default shape would be too large for one response.';
 
 const FIELDS_PARAM_DESC =
-  'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId) is a valid name on list_emails/search_emails/get_recent_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden. On get_thread, `bodyText` IS populated when includeBodies:true (`bodyHtml` never is), and a projected bodyText keeps its signals (quotedBytesStripped/quotedStripSkipped/bodyTextUnavailable) uninvited — without them a stripped body would read as verbatim.';
+  'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId, sourceEmailId) is a valid name on list_emails/search_emails/get_recent_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden. On get_thread, `bodyText` IS populated when includeBodies:true (`bodyHtml` never is), and a projected bodyText keeps its signals (quotedBytesStripped/quotedStripSkipped/bodyTextUnavailable) uninvited — without them a stripped body would read as verbatim.';
 
 // The `fields` parameter, declared identically on every read tool that offers it.
 // The string alternative is advertised because lenient clients stringify arrays
@@ -358,6 +358,29 @@ function positionSchemaProperty() {
   };
 }
 
+// One canonical statement that the attachment listing is not just "attached files",
+// shared verbatim by every tool that emits one (get_email, get_email_attachments, and
+// get_thread under includeBodies) so they can't drift on what the listing covers (#13).
+const UNION_SCOPE_DESC =
+  'Attachment entries include images embedded in the message body, not only "attached" files.';
+
+// The two keys a simplified attachment entry gains for embedded images, shared verbatim
+// by the tools that emit simplified entries (get_email, and get_thread under
+// includeBodies, whose messages carry the same entry shape). get_email_attachments
+// deliberately does NOT carry this: it returns raw JMAP parts, which have no derived
+// flag to describe. The sender-declared caveat travels with the keys because both
+// values come from the message itself. (#13)
+const INLINE_PAIR_DESC =
+  'Attachment entries carry two extra keys for embedded images. isInline:true means EITHER the server routed the part into the message body OR the sender marked it Content-Disposition: inline — so it covers body-displayed images, and also an ordinary file the sender merely labelled inline. `cid` is that part\'s Content-ID: the value a cid: reference in the HTML body points at, and the handle download_attachment accepts as cid:<value>; a part the body actually references has one. Both keys are omitted when they do not apply (isInline never appears as false). Both are SENDER-DECLARED metadata, exactly like `name` and `contentType`: a sender chooses whether a part is marked inline and what it is called, so isInline is a rendering hint, never a reason to treat a part as harmless or to skip inspecting it.';
+
+// Shared verbatim by the compact list/search reads (list_emails, search_emails,
+// get_recent_emails) and by get_thread's default mode, which fetch no attachment parts
+// at all. Without this, hasAttachment:false reads as "no images" — and Fastmail's
+// hasAttachment heuristic answers "content or decoration", so an embedded logo or a
+// small pasted image is exactly what it filters out. (#13)
+const COMPACT_ATTACHMENT_DESC =
+  'These results carry hasAttachment but never the attachment entries themselves, and hasAttachment is a server heuristic that deliberately ignores small decorative images — so a message whose only picture is embedded in its body can read as hasAttachment:false here. Fetch get_email (or get_thread with includeBodies) to see the actual parts.';
+
 // Shared by get_email and get_thread so the two can't drift on what stripping does,
 // what it does NOT touch, and how to read the signal it returns (#73).
 const STRIP_QUOTED_DESC =
@@ -390,7 +413,7 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Spans all mailboxes; for just the Inbox\'s newest use get_recent_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -430,7 +453,7 @@ const TOOLS = [
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -457,7 +480,7 @@ const TOOLS = [
       },
       {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the reply, it marks the original answered and read, resolved from the draft\'s In-Reply-To. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address.',
+        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept; inline cid: images omitted) and is re-sent under your From address.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -512,7 +535,7 @@ const TOOLS = [
       },
       {
         name: 'forward_email',
-        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the forward, it marks the original forwarded and read, resolved from the recorded X-Forwarded-Message-Id (recorded on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'.',
+        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that sends mail). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default, but embedded inline (cid:) images are NOT carried by an inline forward (their references are stripped from the reproduced HTML) — use asAttachment for full fidelity. The subject defaults to \'Fwd: <original subject>\'.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -702,7 +725,7 @@ const TOOLS = [
       },
       {
         name: 'send_draft',
-        description: 'Send an existing draft email. This is the ONLY tool that transmits mail: every compose tool (create_draft, reply_email, forward_email) saves a draft as stored, inspectable bytes, and this tool submits it. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content (e.g. an image-only message) sends as-is; only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by forward_email) marks it forwarded and read. Best-effort — the original is found from the Message-ID recorded on the draft; when it succeeds the result says so, and when that message cannot be identified the result says it was not marked and why. A draft that records neither header marks nothing (an ordinary compose).',
+        description: 'Send an existing draft email. This is the ONLY tool that transmits mail: every compose tool (create_draft, reply_email, forward_email) saves a draft as stored, inspectable bytes, and this tool submits it. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content (e.g. an image-only message) sends as-is; only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by forward_email) marks it forwarded and read. Drafts made by reply_email/forward_email also record WHICH stored copy they were composed from, so when several copies of the original exist (e.g. a self-addressed message filed in two folders) exactly that copy is marked. Best-effort — on a draft without that record the original is found from the Message-ID; when the mark succeeds the result says so, and when the message cannot be identified (no match, or several copies and no record of which) the result says it was not marked and why. A draft that records neither header marks nothing (an ordinary compose).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -716,7 +739,7 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' Recovery example: if a search returns a "2 in Trash excluded" note, re-run with mailbox:"trash" (or includeTrash:true) to find the deleted message. Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -746,7 +769,7 @@ const TOOLS = [
             },
             hasAttachment: {
               type: ['boolean', 'string'],
-              description: lenientBool('Filter emails with attachments'),
+              description: lenientBool('Filter emails with attachments. This is the server\'s own hasAttachment property, compared directly (RFC 8621 §4.4.1) — the same heuristic value the results report, not a count of parts. It answers "is there content attached", so a message whose only image is a small embedded one (a signature logo) is filtered OUT by hasAttachment:true. There is no server-side filter for embedded images; to find those, fetch candidates with get_email and read the attachment entries.'),
             },
             isUnread: {
               type: ['boolean', 'string'],
@@ -1051,7 +1074,7 @@ const TOOLS = [
       },
       {
         name: 'get_recent_emails',
-        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'Get the most recent emails from a single mailbox (defaults to Inbox), max 50. Pass mailbox:"trash" (or any id/role/name) to read that folder directly. This is Inbox-only with no Trash/Spam/draft flags; for an all-folder view (with the default Trash/Spam exclusion and a hidden-count note) use list_emails. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1188,13 +1211,17 @@ const TOOLS = [
       },
       {
         name: 'get_email_attachments',
-        description: 'Get list of attachments for an email',
+        description: 'List an email\'s parts, as raw JMAP part objects (partId, blobId, type, size, name, disposition, cid) rather than the simplified shape the read tools return. ' + UNION_SCOPE_DESC + ' A body-embedded part usually reports disposition:null rather than "inline", and nothing in this raw listing tells it apart from a genuinely attached file — the derived isInline flag lives only in get_email (and get_thread with includeBodies), so cross-check there before acting on an entry, e.g. before handing its blobId to edit_draft removeAttachments, which would strip an image the body still displays. This listing is also what download_attachment counts from: its first entry is attachmentId "0".',
         inputSchema: {
           type: 'object',
           properties: {
             emailId: {
               type: 'string',
               description: 'ID of the email',
+            },
+            raw: {
+              type: ['boolean', 'string'],
+              description: lenientBool('Return the JMAP attachments array alone. This is a SET escape, not a shape escape: the entries here are already raw JMAP objects, so raw changes only WHICH parts are listed — it drops the body-embedded parts that the JMAP attachments array does not contain. How many were withheld is reported as a separate second message, so the JSON itself stays parseable. download_attachment entry numbers always count from the full listing, so a raw listing is not an index basis.'),
             },
           },
           required: ['emailId'],
@@ -1212,7 +1239,7 @@ const TOOLS = [
             },
             attachmentId: {
               type: 'string',
-              description: 'ID of the attachment',
+              description: 'Which part to download. Four accepted forms, resolved in this fixed order: (1) a partId from get_email_attachments; (2) a blobId; (3) cid:<value> for an embedded image, using the cid from get_email — the cid: prefix is REQUIRED for this form, only the first one is stripped (cid:cid:x looks up the Content-ID "cid:x"), and a value matching more than one part is rejected rather than guessed at; (4) a plain entry number (0, 1, 2, ...) counting from the start of the get_email_attachments listing. Digits resolve as a partId FIRST — Fastmail partIds are themselves digit strings — so the entry-number form applies only when no part claims that value. A number with anything else in it (3a, -1, 1.5) is rejected rather than silently read as an entry number. Entry numbers are positional: they shift whenever the listing does, so prefer a partId, blobId or cid when you will reuse the reference.',
             },
             path: {
               type: 'string',
@@ -1224,7 +1251,7 @@ const TOOLS = [
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them. ' + FIELDS_TOOL_DESC,
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them. By default this tool fetches no attachment parts. ' + COMPACT_ATTACHMENT_DESC + ' Under includeBodies each message gains its attachment entries too. ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + FIELDS_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1238,7 +1265,7 @@ const TOOLS = [
             },
             includeBodies: {
               type: ['boolean', 'string'],
-              description: lenientBool('Return each message\'s plain-text body (bodyText) alongside its metadata, turning an N-message conversation read into one call. HTML bodies are never returned here (that is where the size risk lives) — a message with no plain-text part is flagged bodyTextUnavailable:true, fetch that one with get_email verbose=true. Hidden drafts are excluded before bodies are read, so an in-progress reply never lands in a transcription. The combined bodies are capped at 100000 bytes: over that the call fails with a message naming the largest messages and telling you to add stripQuoted=true or fetch them individually, rather than silently truncating a body.'),
+              description: lenientBool('Return each message\'s plain-text body (bodyText) alongside its metadata, turning an N-message conversation read into one call. HTML bodies are never returned here (that is where the size risk lives) — a message with no plain-text part is flagged bodyTextUnavailable:true, fetch that one with get_email verbose=true. Hidden drafts are excluded before bodies are read, so an in-progress reply never lands in a transcription. The combined bodies are capped at 100000 bytes: over that the call fails with a message naming the largest messages and telling you to add stripQuoted=true or fetch them individually, rather than silently truncating a body. This mode also adds each message\'s attachment entries, which are extra payload the cap does NOT measure — it counts bodies only. Attachment bytes are never inlined, but the entries themselves carry sender-supplied names and Content-IDs of unbounded length, so on a thread with many attachment-heavy messages project them away with fields (e.g. fields:["id","from","date","bodyText"]).'),
             },
             stripQuoted: {
               type: ['boolean', 'string'],
@@ -1970,16 +1997,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
+        // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
+        // hand back the raw JMAP shape to a caller who asked for the simplified one.
+        const raw = coerceBool((args as any).raw) ?? false;
         const client = initializeClient();
-        const attachments = await client.getEmailAttachments(emailId);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(attachments, null, 2),
-            },
-          ],
-        };
+        const result = await client.getEmailAttachments(emailId);
+        return { content: buildAttachmentListContent(result, raw) };
       }
 
       case 'download_attachment': {
@@ -2019,6 +2042,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // the no-exemptions audit to hold.
           if (error instanceof PathAccessError) {
             throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
+          }
+          // An unusable attachmentId (a malformed cid: handle, a value that matches
+          // several parts, a number with junk in it, a part with no blob) is a caller
+          // input error, not a lookup result, so it survives the generic message below —
+          // it names what to pass instead and reveals nothing about the mailbox. A
+          // reference that is well-formed but simply matches nothing stays generic.
+          // Re-thrown rather than mapped locally so the top-level branch applies its
+          // InvalidParams mapping WITH redaction (these messages echo caller input).
+          if (error instanceof InvalidInputError) {
+            throw error;
           }
           // Sanitize other errors to avoid leaking attachment metadata. This branch is
           // retained deliberately: redactBearerTokens at the top level would not suppress

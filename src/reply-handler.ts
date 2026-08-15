@@ -19,6 +19,10 @@ export interface ReplyParams {
   inReplyTo: string[];
   references: string[];
   replyTo?: string[];
+  // The JMAP id of the exact stored instance being replied to, recorded on the draft
+  // as X-Fastmail-MCP-Source-Id so send_draft can mark precisely that copy answered —
+  // In-Reply-To alone names the message, which can exist as several stored copies.
+  sourceEmailId?: string;
   // Set by the reply_email handler AFTER buildReplyParams (which stays pure / no I/O).
   attachments?: AttachmentPart[];
 }
@@ -90,6 +94,8 @@ export function buildReplyParams(
       inReplyTo,
       references,
       replyTo,
+      // The caller named this exact instance; record it (createDraft vets the value).
+      ...(typeof originalEmail?.id === 'string' && originalEmail.id !== '' && { sourceEmailId: originalEmail.id }),
     },
   };
 }
@@ -111,8 +117,9 @@ export interface ComposeReplyResult {
 // Orchestrate a reply end to end: fetch the original, assemble the (pure) reply params,
 // upload any attachments, then save the reply as a draft. This tool only ever drafts —
 // send_draft is the single tool that transmits mail, and it also does the thread-state
-// maintenance (marking the original answered + read), resolved from the draft's
-// In-Reply-To header (#60; see docs/conventions.md "Draft provenance"). Extracted from
+// maintenance (marking the original answered + read), targeting the exact instance
+// recorded on the draft, with the In-Reply-To Message-ID as the fallback (#60; see
+// docs/conventions.md "Draft provenance"). Extracted from
 // the index tool handler so the attachment-threading seam (the one piece that touches
 // I/O via the injected client) is unit-testable without the MCP server or a live
 // account — the handler is a thin wrapper over this. attachDir is passed in (resolved

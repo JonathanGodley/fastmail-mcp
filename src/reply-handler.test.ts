@@ -273,3 +273,21 @@ describe('composeReply — draft-only orchestration', () => {
     assert.equal(calls.upload, undefined);
   });
 });
+
+describe('buildReplyParams — recorded source instance', () => {
+  it("records the original's JMAP id as sourceEmailId (the exact copy send_draft marks)", () => {
+    const { replyParams } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'my reply' },
+      makeOriginal({ id: 'orig-1' }),
+    );
+    assert.equal(replyParams.sourceEmailId, 'orig-1');
+  });
+
+  it('omits sourceEmailId when the fetched original carries no id', () => {
+    const { replyParams } = buildReplyParams(
+      { originalEmailId: 'e1', textBody: 'my reply' },
+      makeOriginal(),
+    );
+    assert.equal(replyParams.sourceEmailId, undefined);
+  });
+});

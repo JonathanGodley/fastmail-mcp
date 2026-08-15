@@ -36,6 +36,35 @@ as opt-in capability, not a default:
   The attach dir is resolved independently, via the same env-alias key set as the
   download dir.
 
+### Filenames derived from message content
+
+`download_attachment` builds a download URL whose `{name}` slot declares a filename, and
+that name comes from the part's **sender-supplied** `name` — attacker-controlled on any
+received message, and a value a receiving client may reuse as a save name. It goes
+through `sanitizeDownloadFilename` (`src/inline-images.ts`) first: control and format
+characters are stripped (a bidi override such as U+202E can otherwise make `exe.txt`
+render as `txt.exe`), path separators and the Windows drive/ADS colon become underscores,
+leading dots are dropped along with any whitespace shielding them (so ` .hidden` cannot
+smuggle a dotfile name past the strip), the length is capped by code point so a surrogate
+pair is never split, and a Windows device name gains an underscore on its stem (`CON.png`
+→ `CON_.png`) — including one padded with the trailing spaces and dots Win32 strips before
+it matches device names, so `CON .png` is defused too. A name that sanitizes to nothing
+becomes `attachment`, so the value is never an empty path segment.
+
+This is deliberately stricter than `forward_email`'s `sanitizeEmlFilename`, which applies
+a similar character treatment but lets device names through: that helper always appends
+`.eml`, which neutralizes them, and its output is a name a *remote* recipient's client
+saves. This one is a name a local client may write, so the inherited posture does not
+transfer. That helper also still trims after dropping leading dots, so whitespace can
+shield one there; its unconditional `.eml` suffix means the result is a named file either
+way, and changing it would alter what forwarded mail declares on the wire. The two are
+kept as separate functions for exactly these divergences.
+
+The guarantee stops at the name. The **path** an attachment is written to is never
+derived from message content — `download_attachment` writes only where the caller's
+`path` says, under the confinement rules above, and there is no "save with the sender's
+filename" default. That is what keeps a hostile `name` from being a path decision at all.
+
 ## The read-shaped `safeReadPath` (built, issue #1)
 
 The attachment-send feature reads a local file and emails it out, so it needs a
@@ -157,14 +186,38 @@ in-account message may be quoted.
 Transmission also **writes two keyword flags** (`$answered`+`$seen`, or
 `$forwarded`+`$seen`) after a send succeeds (#52/#54, #30, #60). The compose surface is
 draft-first, so this write lives in `send_draft`: the target is resolved from the draft's
-recorded provenance header (`In-Reply-To` / `X-Forwarded-Message-Id` — see
-`docs/conventions.md` "Draft provenance"), an attacker-influenceable value on a foreign
-draft, but the resolution only ever marks the unique message that *owns* that Message-ID
-(no match, or more than one, marks nothing). Either way it adds no capability class: two
-boolean keyword sets, no move/delete/body write, scoped to `session.accountId`, and
-dominated by `mark_email_read`, which already grants a standalone `$seen` write to any id.
-The write is best-effort (a failure is swallowed so it can't mask the already-sent mail).
+recorded provenance headers (see `docs/conventions.md` "Draft provenance"), which are
+attacker-influenceable values on a foreign draft — but neither path marks an arbitrary
+id. The exact-instance pointer (`X-Fastmail-MCP-Source-Id`) is honoured only after
+validating that the named instance still carries the Message-ID the draft's kind header
+names (a mismatched or dangling pointer falls back), and the Message-ID fallback only
+ever marks the unique message that *owns* that Message-ID (no match, or more than one,
+marks nothing). Either way it adds no capability class: two boolean keyword sets, no
+move/delete/body write, scoped to `session.accountId`, and dominated by
+`mark_email_read`, which already grants a standalone `$seen` write to any id. The write
+is best-effort (a failure is swallowed so it can't mask the already-sent mail).
 Accepted on the same footing as the read-and-embed primitive.
+
+### `X-Fastmail-MCP-Source-Id` is transmitted to recipients (accepted, deliberate)
+
+The exact-instance header that `reply_email`/`forward_email` stamp on a draft is **not
+stripped at send** — EmailSubmission transmits stored headers verbatim (probed live
+2026-08-14; see `docs/conventions.md` "Draft provenance" for the probe facts), so the
+recipient's copy carries it. This was considered and consciously declined rather than
+overlooked:
+
+- **What it discloses:** an opaque, account-scoped JMAP id. It is meaningless outside
+  the sending account's own session — it names no host, no folder, no address, and
+  cannot be dereferenced by anyone but the account holder. The `In-Reply-To` header on
+  the very same message already discloses strictly more (a globally meaningful
+  Message-ID including the originating domain).
+- **Precedent:** Fastmail's own mobile app transmits its private `X-PersonalityId`
+  (an internal identity id) on sent replies — same class of value, shipped by the
+  platform vendor.
+- **Why not strip:** removing the header at send would mean recreating the message
+  before submission (JMAP emails are immutable), turning every send into a
+  destroy+recreate with its own failure modes, solely to withhold a value with no
+  disclosure weight. The cure was strictly worse than the disease.
 
 ## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
 

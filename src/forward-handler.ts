@@ -21,6 +21,11 @@ export interface ForwardParams {
   // on BOTH forward shapes, including asAttachment; omitted only when the original
   // has no settable Message-ID.
   forwardedMessageId?: string[];
+  // The JMAP id of the exact stored instance being forwarded, recorded on the draft
+  // as X-Fastmail-MCP-Source-Id so send_draft can mark precisely that copy forwarded
+  // — the Message-ID above names the message, which can exist as several stored
+  // copies. Recorded on both forward shapes.
+  sourceEmailId?: string;
   attachments?: AttachmentPart[];
 }
 
@@ -132,6 +137,14 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
   const originalMessageId = originalEmail?.messageId?.[0];
   if (isSettableMessageId(originalMessageId)) {
     params.forwardedMessageId = [originalMessageId];
+  }
+  // The caller named this exact instance; record it too (createDraft vets the value).
+  // Recorded even when the original has no settable Message-ID (the JMAP id is real
+  // either way, and the draft self-documents its source) — though send_draft keys its
+  // marking off the provenance HEADERS (they classify reply-vs-forward), so a draft
+  // with no recorded Message-ID still sends unmarked; the id only refines WHICH copy.
+  if (typeof originalEmail?.id === 'string' && originalEmail.id !== '') {
+    params.sourceEmailId = originalEmail.id;
   }
 
   // A part without a blobId can't be re-referenced on a new Email at all (JMAP carry
