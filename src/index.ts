@@ -152,10 +152,14 @@ function initializeCalDAVClient(): CalDAVCalendarClient | null {
   const username = findEnvValue([
     'FASTMAIL_CALDAV_USERNAME',
     'USER_CONFIG_FASTMAIL_CALDAV_USERNAME',
+    'USER_CONFIG_fastmail_caldav_username',
+    'fastmail_caldav_username',
   ]).value;
   const password = findEnvValue([
     'FASTMAIL_CALDAV_PASSWORD',
     'USER_CONFIG_FASTMAIL_CALDAV_PASSWORD',
+    'USER_CONFIG_fastmail_caldav_password',
+    'fastmail_caldav_password',
   ]).value;
 
   if (!username || !password) return null;
@@ -172,7 +176,18 @@ function initializeCalDAVClient(): CalDAVCalendarClient | null {
   // form as its own literal secret.
   registerSecret(Buffer.from(`${username}:${password}`).toString('base64'));
 
-  caldavClient = new CalDAVCalendarClient({ username, password });
+  // The ORGANIZER display name is resolved here, not read from process.env inside the
+  // CalDAV client, so every env-derived setting goes through the one four-name lookup
+  // that lets a DXT user_config key reach the server. An unset value leaves it
+  // undefined and the client falls back to the CalDAV username.
+  const displayName = findEnvValue([
+    'FASTMAIL_CALDAV_DISPLAY_NAME',
+    'USER_CONFIG_FASTMAIL_CALDAV_DISPLAY_NAME',
+    'USER_CONFIG_fastmail_caldav_display_name',
+    'fastmail_caldav_display_name',
+  ]).value;
+
+  caldavClient = new CalDAVCalendarClient({ username, password, displayName });
   return caldavClient;
 }
 

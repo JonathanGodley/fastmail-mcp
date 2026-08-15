@@ -18,17 +18,49 @@
 /test-live*
 /.secret-scan-local.txt
 
+# Previously packed extensions. Packing into the repository root leaves a .dxt
+# behind, and the next pack would otherwise nest it inside the new archive —
+# doubling the size for a copy nothing reads. Left unanchored on purpose: this
+# matches files, not directories, so it cannot strip a dependency's entry point
+# the way an unanchored directory pattern can.
+*.dxt
+
 # Tooling / CI / repo scaffolding — not needed at runtime
 /scripts/
+/.git/
 /.github/
 /.githooks/
 /.gitignore
 /.dxtignore
 /.mcp.json
 /tsconfig.json
+/coverage/
 .env
 .env.*
 
+# Build and tool droppings. All gitignored, so none are present in a clean
+# checkout — but the .dxt is packed from a working tree, and a local build or a
+# stray run leaves these behind where they would be packed silently.
+*.tsbuildinfo
+*.log
+/bun.lock
+.DS_Store
+
+# Local agent/config state, which .gitignore flags as possibly holding
+# credentials. /.claude/ below covers the usual location; this stays unanchored
+# so a copy anywhere else in the tree is caught too (a file glob, so it carries
+# none of the directory-pattern hazard described at the top).
+settings.local.json
+
+# package-lock.json deliberately still ships: it is not needed at runtime, but
+# some packers and registry validators read it, and the cost of shipping it is
+# a few KB against a failure mode that is not obvious from inside the archive.
+
 # Dev docs / meta
 /CLAUDE.md
+/AGENTS.md
+/CONTRIBUTING.md
+/docs/
+/.claude/
+/.agents/
 /.secret-scan-local.txt.example

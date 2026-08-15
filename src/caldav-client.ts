@@ -18,6 +18,10 @@ export interface CalDAVConfig {
   username: string;
   password: string;
   serverUrl?: string;
+  // Display name for the ORGANIZER this client emits. Resolved by the caller from the
+  // environment (the server does that through its shared multi-name lookup, so a DXT
+  // user_config spelling reaches it); left unset it falls back to the username.
+  displayName?: string;
 }
 
 export interface CalendarInfo {
@@ -54,10 +58,14 @@ export interface CalendarEvent {
  * This avoids matching properties from VTIMEZONE or other components.
  */
 /**
- * Resolve the ORGANIZER display name from a raw env value, falling back when
+ * Resolve the ORGANIZER display name from the configured value, falling back when
  * it is unset, blank, or an unresolved DXT config placeholder like
- * "${user_config.fastmail_caldav_display_name}" — a raw process.env read here
- * would otherwise embed the literal placeholder into generated iCal.
+ * "${user_config.fastmail_caldav_display_name}" — without that check the literal
+ * placeholder would be embedded into generated iCal.
+ *
+ * The server resolves the value from the environment before constructing the client,
+ * and its lookup rejects placeholders too. This stays the client's own guard so a
+ * directly-constructed client (tests, embedders) cannot emit a placeholder CN either.
  */
 export function resolveDisplayName(raw: string | undefined, fallback: string): string {
   const trimmed = raw?.trim();
@@ -1342,7 +1350,7 @@ export class CalDAVCalendarClient {
       // into the ORGANIZER line when embedded below.
       const caldavUsername = this.config.username;
       validateOrganizerUsername(caldavUsername);
-      const displayName = resolveDisplayName(process.env.FASTMAIL_CALDAV_DISPLAY_NAME, caldavUsername);
+      const displayName = resolveDisplayName(this.config.displayName, caldavUsername);
       const cnPart = `;CN=${quoteParamValue(displayName)}`;
       icalLines.push(foldICalLine(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
 
@@ -1625,8 +1633,10 @@ export class CalDAVCalendarClient {
         // the ORGANIZER line built below — the two paths emit the identical line
         // from the identical value, so they validate it identically.
         validateOrganizerUsername(caldavUsername);
-        const displayName = resolveDisplayName(process.env.FASTMAIL_CALDAV_DISPLAY_NAME, caldavUsername);
-        const cnPart = displayName ? `;CN=${quoteParamValue(displayName)}` : '';
+        const displayName = resolveDisplayName(this.config.displayName, caldavUsername);
+        // Always a CN: resolveDisplayName falls back to the username, which the check
+        // above has just proved is a usable address, so it can never be empty.
+        const cnPart = `;CN=${quoteParamValue(displayName)}`;
         data = replaceICalProperty(data, 'ORGANIZER', fold(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
       }
     }

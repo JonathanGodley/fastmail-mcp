@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "fastmail-mcp",
   "version": "1.9.4-fork.11",
-  "description": "MCP server for Fastmail API integration",
+  "description": "Unofficial MCP server for Fastmail API integration (not affiliated with or endorsed by Fastmail)",
   "author": {
     "name": "Jeremy Gill"
   },
@@ -18,7 +18,11 @@
         "FASTMAIL_API_TOKEN": "${user_config.fastmail_api_token}",
         "FASTMAIL_BASE_URL": "${user_config.fastmail_base_url}",
         "FASTMAIL_DOWNLOAD_DIR": "${user_config.fastmail_download_dir}",
-        "FASTMAIL_TIMEZONE": "${user_config.fastmail_timezone}"
+        "FASTMAIL_ATTACH_DIR": "${user_config.fastmail_attach_dir}",
+        "FASTMAIL_TIMEZONE": "${user_config.fastmail_timezone}",
+        "FASTMAIL_CALDAV_USERNAME": "${user_config.fastmail_caldav_username}",
+        "FASTMAIL_CALDAV_PASSWORD": "${user_config.fastmail_caldav_password}",
+        "FASTMAIL_CALDAV_DISPLAY_NAME": "${user_config.fastmail_caldav_display_name}"
       }
     }
   },
@@ -40,13 +44,38 @@
     "fastmail_download_dir": {
       "title": "Attachment Download Directory",
       "type": "string",
-      "description": "Directory for saving email attachments (defaults to ~/Downloads/fastmail-mcp/). Path traversal protection is enforced within this directory.",
+      "description": "Incoming direction: the directory download_attachment WRITES saved attachments into (defaults to ~/Downloads/fastmail-mcp/). Every write is confined to this directory and cannot escape it. This setting has no effect on sending — files attached to outgoing mail are read from the separate Attachment Send Directory.",
+      "required": false
+    },
+    "fastmail_attach_dir": {
+      "title": "Attachment Send Directory",
+      "type": "string",
+      "description": "Outgoing direction: the directory files attached to outgoing mail are READ from, the mirror image of the Attachment Download Directory. Leave it unset and the send-an-attachment capability is disabled entirely — there is no default and no directory is created for you; the compose tools reject an attachment path until this is set. When set, it is a confinement boundary rather than a convenience default: a bare filename or relative path resolves inside it, and an absolute path outside it is rejected. Keep it separate from the download directory unless you deliberately want a downloaded file to be emailable straight back out; the two are resolved independently on purpose.",
       "required": false
     },
     "fastmail_timezone": {
       "title": "Email Date Timezone",
       "type": "string",
       "description": "IANA timezone name (e.g. America/New_York) used to render email date fields in local time with a UTC offset. Defaults to the server host's timezone. Set this if the server runs in a different timezone than you.",
+      "required": false
+    },
+    "fastmail_caldav_username": {
+      "title": "CalDAV Username",
+      "type": "string",
+      "description": "Your Fastmail account email address, used for CalDAV calendar access. Optional, but every calendar tool needs it together with the CalDAV app password: with either one missing the calendar tools are unavailable and report how to configure them. Mail, contact and attachment tools are unaffected.",
+      "required": false
+    },
+    "fastmail_caldav_password": {
+      "title": "CalDAV App Password",
+      "type": "string",
+      "description": "App-specific password for CalDAV (Settings → Privacy & Security → Manage app passwords), used with the CalDAV username. Not your account login password, and not the JMAP API token. Optional: without it the calendar tools are unavailable.",
+      "sensitive": true,
+      "required": false
+    },
+    "fastmail_caldav_display_name": {
+      "title": "Calendar Organizer Display Name",
+      "type": "string",
+      "description": "Display name shown as the ORGANIZER on calendar events you create with participants. Defaults to the CalDAV username when unset.",
       "required": false
     }
   },

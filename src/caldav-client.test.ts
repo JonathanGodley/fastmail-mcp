@@ -2723,6 +2723,112 @@ describe('resolveDisplayName', () => {
   });
 });
 
+// The display name is supplied through the constructor config, not read from the
+// environment inside this module, so it travels the same path as every other setting
+// the server resolves for its clients. These cover both places an ORGANIZER line is
+// emitted: building a new event, and adding participants to an event that has none.
+describe('ORGANIZER display name comes from the client config', () => {
+  function mockedCreateClient(displayName?: string) {
+    const client = new CalDAVCalendarClient({
+      username: 'me@fastmail.com',
+      password: 'test',
+      displayName,
+    });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      createCalendarObject: mock.fn(async () => ({})),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function createWithParticipant(client: CalDAVCalendarClient) {
+    return client.createCalendarEvent({
+      calendarId: 'Personal',
+      title: 'Meeting',
+      start: '2026-04-07T14:00:00Z',
+      end: '2026-04-07T15:00:00Z',
+      participants: [{ email: 'alice@example.com' }],
+    });
+  }
+
+  const NO_ORGANIZER_ICAL = [
+    'BEGIN:VCALENDAR',
+    'BEGIN:VEVENT',
+    'UID:noorg-cn@fm',
+    'DTSTART:20260401T100000Z',
+    'DTEND:20260401T110000Z',
+    'SUMMARY:Simple Event',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+
+  function mockedPatchClient(displayName?: string) {
+    const client = new CalDAVCalendarClient({
+      username: 'me@fastmail.com',
+      password: 'test',
+      displayName,
+    });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async () => [{ data: NO_ORGANIZER_ICAL, url: '/cal/noorg-cn.ics' }]),
+      updateCalendarObject: mock.fn(async () => ({})),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function addParticipant(client: CalDAVCalendarClient) {
+    return client.updateCalendarEvent('noorg-cn@fm', {
+      participants: [{ email: 'alice@example.com' }],
+    });
+  }
+
+  it('uses the configured display name as the ORGANIZER CN on a created event', async () => {
+    const { client, mockDAVClient } = mockedCreateClient('Jeremy G');
+    await createWithParticipant(client);
+
+    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    assert.ok(ical.includes('ORGANIZER;CN=Jeremy G:mailto:me@fastmail.com'), ical);
+  });
+
+  it('falls back to the CalDAV username when no display name is configured', async () => {
+    const { client, mockDAVClient } = mockedCreateClient();
+    await createWithParticipant(client);
+
+    const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+    assert.ok(ical.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), ical);
+  });
+
+  it('falls back when the configured display name is blank or an unresolved placeholder', async () => {
+    for (const configured of ['   ', '${user_config.fastmail_caldav_display_name}']) {
+      const { client, mockDAVClient } = mockedCreateClient(configured);
+      await createWithParticipant(client);
+
+      const ical = mockDAVClient.createCalendarObject.mock.calls[0].arguments[0].iCalString;
+      assert.ok(ical.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), ical);
+    }
+  });
+
+  it('uses the configured display name when adding an ORGANIZER on update', async () => {
+    const { client, mockDAVClient } = mockedPatchClient('Jeremy G');
+    await addParticipant(client);
+
+    const data = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(data.includes('ORGANIZER;CN=Jeremy G:mailto:me@fastmail.com'), data);
+  });
+
+  it('falls back to the username when adding an ORGANIZER on update with none configured', async () => {
+    const { client, mockDAVClient } = mockedPatchClient();
+    await addParticipant(client);
+
+    const data = mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.data;
+    assert.ok(data.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), data);
+  });
+});
+
 // ---------- DTSTART/DTEND time-frame and ordering agreement ----------
 
 describe('createCalendarEvent start/end frame and ordering agreement', () => {
