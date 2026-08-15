@@ -510,6 +510,19 @@ export interface SanitizeQuoteResult {
   droppedDataImages: number;
   /** Embedded-image `<img>` elements this pass emitted no src for. */
   droppedCidImages: number;
+  /**
+   * MAP MODE ONLY. `<img>` elements carrying a real src that is neither an embedded-image
+   * reference nor an http(s) URL — a relative or scheme-less path, a protocol-relative
+   * `//host/…`, or an exotic scheme. Map mode is default-deny, so it drops these; the
+   * collecting pass leaves them to the sanitizer and never counts any (a relative path is
+   * not a scheme violation, so the scheme filter passes it through).
+   *
+   * That difference is the reason this is counted rather than dropped quietly: what ships
+   * loses an image the other pass would have kept, and a reference relative to the
+   * original's own origin cannot resolve from a message sent by someone else anyway.
+   * An `<img>` with no src at all is not counted — there was no image to lose.
+   */
+  droppedUnsupportedImages: number;
 }
 
 /** Notified as the traversal walks each `<img>`. */
@@ -571,6 +584,7 @@ export function sanitizeQuoteHtml(
   const seenEmbedded = new Set<string>();
   let droppedDataImages = 0;
   let droppedCidImages = 0;
+  let droppedUnsupportedImages = 0;
 
   const recordRef = (key: string): void => {
     if (seenRefs.has(key)) return;
@@ -613,6 +627,10 @@ export function sanitizeQuoteHtml(
         next.src = typeof attribs.src === 'string' ? attribs.src : '';
       } else {
         if (classified.kind === 'data') droppedDataImages++;
+        // A src this pass will not emit, but that named SOMETHING: counted so the drop is
+        // visible. An <img> with no src (or a blank one) had no image to lose, and the
+        // sanitizer's own srcless filter takes it either way.
+        else if (hasWrittenSrc(attribs?.src)) droppedUnsupportedImages++;
         delete next.src;
       }
       return { tagName, attribs: next };
@@ -634,7 +652,15 @@ export function sanitizeQuoteHtml(
     exclusiveFilter: dropSrclessImages,
   });
 
-  return { html: sanitized, refs, embedded, droppedDataImages, droppedCidImages };
+  return {
+    html: sanitized, refs, embedded, droppedDataImages, droppedCidImages, droppedUnsupportedImages,
+  };
+}
+
+// Whether an `<img src>` names anything at all, read after the same laundering the scheme
+// gate applies so a value made of control characters is not mistaken for a real reference.
+function hasWrittenSrc(src: unknown): boolean {
+  return typeof src === 'string' && launderUrlValue(src).trim() !== '';
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +763,21 @@ export interface CidPart {
   disposition?: string | null;
 }
 
+/**
+ * Whether a part declares itself an image, which is the only kind this server carries into a
+ * body it composes.
+ *
+ * A bound worth stating precisely because it is weaker than it looks: the content type is
+ * SENDER-DECLARED, exactly like a filename, so it says what the sender called the bytes and
+ * nothing about what they are. Nothing is sniffed, and nothing verifies the claim. The gate
+ * is still worth having — it keeps a reference from pulling an arbitrary file into a message
+ * the recipient never asked for — but it is a declaration filter, not a content check. See
+ * docs/security-model.md.
+ */
+export function isImageType(type: unknown): boolean {
+  return classifyType(type).startsWith('image/');
+}
+
 /** A part this call newly attaches so the body it writes can display it. */
 export interface MintedInlinePart {
   blobId: string;
@@ -756,6 +797,82 @@ export interface CidMapping {
   reused: boolean;
   /** The part the reference resolved to. */
   source: CidPart;
+}
+
+/** What a set of references resolved to, before anything is minted or rewritten. */
+export interface CidRefResolution {
+  /** The references, deduped, in first-seen order. */
+  distinctRefs: string[];
+  /** Reference key to the first part carrying that Content-ID. */
+  byRef: Map<string, CidPart>;
+  /** Content-IDs carried by more than one part; no reference can identify one of them. */
+  ambiguousCids: Set<string>;
+  /**
+   * Distinct parts the references resolved to, in first-reference order.
+   *
+   * A reference onto a Content-ID two parts share resolves to BOTH of them, not to the
+   * first: neither can be embedded, and a count that named only one would report a single
+   * lost image where the reader lost two.
+   */
+  resolvedParts: CidPart[];
+  /** References that matched no part at all. Counted separately from parts, never summed. */
+  unresolvedRefs: string[];
+  /**
+   * References that would really embed: they resolved to exactly one part, that part declares
+   * itself an image, and it has a blob to re-reference.
+   *
+   * Separate from `resolvedParts` because a body whose only content is embedded images is
+   * worth quoting only if at least one of them can actually be carried — quoting on
+   * "resolved" alone would emit an attribution over a quote that shows nothing.
+   */
+  embeddableRefs: string[];
+}
+
+/**
+ * Match a body's embedded-image references against the parts of the message that carries it.
+ *
+ * Pure and mint-free, so a caller can ask what a quote WOULD carry before deciding whether to
+ * quote at all — the decision that has to be made before any identifier is minted, since a
+ * minted part with nothing referencing it is a loose attachment on the finished message.
+ */
+export function resolveCidRefs(refs: string[], sourceParts: CidPart[]): CidRefResolution {
+  const distinctRefs = [...new Set(refs ?? [])];
+  const parts = sourceParts ?? [];
+
+  const groups = new Map<string, CidPart[]>();
+  const byRef = new Map<string, CidPart>();
+  for (const part of parts) {
+    if (typeof part?.cid !== 'string' || !part.cid) continue;
+    const group = groups.get(part.cid);
+    if (group) group.push(part);
+    else groups.set(part.cid, [part]);
+    if (!byRef.has(part.cid)) byRef.set(part.cid, part);
+  }
+  const ambiguousCids = new Set(
+    [...groups.entries()].filter(([, g]) => g.length > 1).map(([cid]) => cid),
+  );
+
+  const resolvedParts: CidPart[] = [];
+  const seen = new Set<CidPart>();
+  const unresolvedRefs: string[] = [];
+  const embeddableRefs: string[] = [];
+  for (const ref of distinctRefs) {
+    const group = groups.get(ref);
+    if (!group) {
+      unresolvedRefs.push(ref);
+      continue;
+    }
+    for (const part of group) {
+      if (seen.has(part)) continue;
+      seen.add(part);
+      resolvedParts.push(part);
+    }
+    const part = group[0];
+    const blobId = typeof part.blobId === 'string' && part.blobId ? part.blobId : null;
+    if (blobId && isImageType(part.type) && !ambiguousCids.has(ref)) embeddableRefs.push(ref);
+  }
+
+  return { distinctRefs, byRef, ambiguousCids, resolvedParts, unresolvedRefs, embeddableRefs };
 }
 
 export interface BuildCidMapInput {
@@ -791,13 +908,6 @@ export interface BuildCidMapResult {
   resolvedPartCount: number;
 }
 
-// A carried part is re-referenced by blob, so a part the server reported without a content
-// type still needs one to send. The generic binary type is the honest placeholder: it is
-// never written back over the part's own stored type, which stays whatever the server said.
-function inlineTypeOf(part: CidPart): string {
-  return typeof part.type === 'string' && part.type ? part.type : 'application/octet-stream';
-}
-
 /**
  * Decide, for every reference in a body about to be quoted, which part supplies it and
  * under which Content-ID.
@@ -820,24 +930,16 @@ export function buildCidMap(input: BuildCidMapInput): BuildCidMapResult {
   const mint = input.mint ?? mintCid;
   const sourceParts = input.sourceParts ?? [];
 
-  // Distinct references, first-seen order. The collecting pass already dedupes, so this is
-  // belt and braces — but a repeated reference would claim two survivors for one image and
-  // leave the second reused part attached with nothing pointing at it, and the closure
-  // check covers only freshly minted identifiers, so nothing downstream would notice.
-  const refs = [...new Set(input.refs ?? [])];
-
-  // Content-IDs that name more than one part. Such a reference is ambiguous, so every part
-  // sharing the value is treated as unembeddable rather than one being picked arbitrarily.
-  const cidCounts = new Map<string, number>();
-  for (const part of sourceParts) {
-    if (typeof part?.cid !== 'string' || !part.cid) continue;
-    cidCounts.set(part.cid, (cidCounts.get(part.cid) ?? 0) + 1);
-  }
-  const byCid = new Map<string, CidPart>();
-  for (const part of sourceParts) {
-    if (typeof part?.cid !== 'string' || !part.cid) continue;
-    if (!byCid.has(part.cid)) byCid.set(part.cid, part);
-  }
+  // The reference-to-part match, and with it the ambiguous-Content-ID set. Shared with the
+  // callers that have to decide whether an original is worth quoting BEFORE anything is
+  // minted, so the quotability decision and this mapping can never disagree about which
+  // references resolve. Distinct references, first-seen order: the collecting pass already
+  // dedupes, but a repeated reference would claim two survivors for one image and leave the
+  // second reused part attached with nothing pointing at it, and the closure check covers
+  // only freshly minted identifiers, so nothing downstream would notice.
+  const resolution = resolveCidRefs(input.refs ?? [], sourceParts);
+  const refs = resolution.distinctRefs;
+  const byCid = resolution.byRef;
 
   // Only a survivor carrying an identifier of this server's own shape is a reuse candidate.
   // Reusing a foreign one would write someone else's identifier into a body this server
@@ -849,32 +951,20 @@ export function buildCidMap(input: BuildCidMapInput): BuildCidMapResult {
   const mappings: CidMapping[] = [];
   const minted: MintedInlinePart[] = [];
   const reusedCids: string[] = [];
-  const unresolvedRefs: string[] = [];
-  const unembeddableParts: CidPart[] = [];
-  const resolvedParts = new Set<CidPart>();
-  const seenUnembeddable = new Set<CidPart>();
 
   for (const ref of refs) {
     const part = byCid.get(ref);
-    if (!part) {
-      unresolvedRefs.push(ref);
-      continue;
-    }
-    resolvedParts.add(part);
+    // A reference that matched no part is already recorded by the resolution above.
+    if (!part) continue;
 
-    // The only two ways a reference that DID find a part still fails to embed: a
-    // Content-ID naming more than one part cannot identify any one of them, and a part
-    // with no blob cannot be re-referenced on a new message. Naming them here is what
-    // makes a shortfall report explicable rather than mysterious.
-    const ambiguous = (cidCounts.get(ref) ?? 0) > 1;
+    // The three ways a reference that DID find a part still fails to embed: a Content-ID
+    // naming more than one part cannot identify any one of them; a part with no blob cannot
+    // be re-referenced on a new message; and a part that does not declare itself an image is
+    // not something this server pulls into a body it composes, whatever an <img> claims about
+    // it. Naming them here is what makes a shortfall report explicable rather than mysterious.
+    const ambiguous = resolution.ambiguousCids.has(ref);
     const blobId = typeof part.blobId === 'string' && part.blobId ? part.blobId : null;
-    if (ambiguous || !blobId) {
-      if (!seenUnembeddable.has(part)) {
-        seenUnembeddable.add(part);
-        unembeddableParts.push(part);
-      }
-      continue;
-    }
+    if (ambiguous || !blobId || !isImageType(part.type)) continue;
 
     let cid: string | null = null;
     let reused = false;
@@ -892,7 +982,8 @@ export function buildCidMap(input: BuildCidMapInput): BuildCidMapResult {
       cid = mint();
       minted.push({
         blobId,
-        type: inlineTypeOf(part),
+        // Non-empty by construction: the gate above admits only a declared image type.
+        type: part.type as string,
         ...(typeof part.name === 'string' && part.name ? { name: part.name } : {}),
         cid,
         disposition: 'inline',
@@ -905,15 +996,21 @@ export function buildCidMap(input: BuildCidMapInput): BuildCidMapResult {
 
   const unclaimedSurvivors = survivors.filter((_, i) => !claimed.has(i));
 
+  // Derived from the resolution rather than accumulated in the loop above, so it cannot
+  // disagree with the count it is the shortfall against: every part a reference landed on,
+  // less the ones a mapping actually embedded.
+  const embeddedSources = new Set(mappings.map((m) => m.source));
+  const unembeddableParts = resolution.resolvedParts.filter((p) => !embeddedSources.has(p));
+
   return {
     cidMap,
     mappings,
     minted,
     reusedCids,
     unclaimedSurvivors,
-    unresolvedRefs,
+    unresolvedRefs: resolution.unresolvedRefs,
     unembeddableParts,
-    resolvedPartCount: resolvedParts.size,
+    resolvedPartCount: resolution.resolvedParts.length,
   };
 }
 

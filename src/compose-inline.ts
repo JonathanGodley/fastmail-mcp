@@ -15,6 +15,8 @@ import { isBlank } from './body-format.js';
 import {
   buildUnionParts, extractCidRefs, isReservedCid, sanitizeQuoteHtml,
 } from './inline-images.js';
+import type { CidPart } from './inline-images.js';
+import type { QuoteImageOutcome } from './reply-quote.js';
 import {
   InlineNoteLedger, noteEmbedMissingAfterSave, noteEmbedUnconfirmed,
   rejectCidCollisionInCall, rejectDanglingCidRef, rejectNoteCidRef, rejectReservedCidRef,
@@ -148,6 +150,15 @@ export interface AuthoredInlineReport {
   /** The parts uploadAttachments returned for this call's specs, in the same order. */
   uploaded?: AttachmentPart[];
   plan: AuthoredInlinePlan;
+  /**
+   * Content-IDs this call minted so a quote or forwarded block could display the ORIGINAL's
+   * images. They are embedded content this call put on the draft just as an uploaded file
+   * is, so the confirmation read covers them: a reply whose only images come from the quote
+   * is the ordinary case of that feature, and gating the read on uploads alone would make it
+   * the one case that never gets checked. Their sizes are already known from the original's
+   * own parts, so the read is here for the did-it-survive question, not for bytes.
+   */
+  mintedCids?: string[];
   /** The draft this call saved, for the confirmation read. */
   emailId: string;
   /** The client's getEmailById, injected so this stays testable without a network. */
@@ -181,9 +192,12 @@ export async function reportAuthoredInlineImages(
   const uploaded = input.uploaded ?? [];
   const followUp: string[] = [];
 
-  const embeddedCids = uploaded
-    .filter((p) => p.disposition === 'inline' && typeof p.cid === 'string')
-    .map((p) => p.cid as string);
+  const embeddedCids = [
+    ...uploaded
+      .filter((p) => p.disposition === 'inline' && typeof p.cid === 'string')
+      .map((p) => p.cid as string),
+    ...(input.mintedCids ?? []),
+  ];
 
   const bytesByCid = new Map<string, number>();
   if (embeddedCids.length > 0) {
@@ -223,4 +237,91 @@ export async function reportAuthoredInlineImages(
     ...ledger.emit({ surface: 'draft', unparsableCidText: input.plan.unparsableCidText }),
     ...followUp,
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Images carried out of a quoted or forwarded original
+// ---------------------------------------------------------------------------
+
+/** What a compose path must attach so the block it wrote can display the original's images. */
+export interface QuoteCarry {
+  /**
+   * Parts to attach, each under a freshly minted Content-ID.
+   *
+   * APPENDED to whatever the caller's own attachments produced, never assigned over them:
+   * a reply that carries a file AND quotes an original with an embedded image has to ship
+   * both. Empty whenever no html quote ships.
+   */
+  minted: AttachmentPart[];
+  /** The Content-IDs of those parts, for the closure check. */
+  mintedCids: string[];
+  /**
+   * The original's parts this call embedded.
+   *
+   * Compared by object identity, because that is what the resolution actually returned —
+   * a forward walks the same parts afterwards to decide what else to carry, and matching
+   * on a Content-ID would re-derive a decision that has already been made.
+   */
+  embedded: Set<CidPart>;
+  /**
+   * How many distinct parts the quote's references resolved to, when a shortfall is
+   * possible. Undefined on a branch that ships no html quote, where nothing embedded and
+   * the parts are accounted for individually instead — see the contract on
+   * InlineNoteContext.resolvedPartCount.
+   */
+  resolvedPartCount?: number;
+}
+
+/**
+ * Record what a quote or forwarded block did with the original's embedded images, and hand
+ * back the parts the draft has to carry for it.
+ *
+ * Shared by reply and forward because the embed side is identical and the counts have to
+ * agree; the two differ only in what becomes of an image that could NOT be embedded, and
+ * that difference stays with the caller. A reply drops such an image (a reply is a new
+ * message quoting an original, and there is no body to display it), so this records the
+ * drop. A forward carries it as a regular attachment, so this records nothing and the
+ * forward pools the part alongside the original's other files.
+ *
+ * On a branch that ships an html quote, a resolved part that did not embed is reported ONLY
+ * through the shortfall denominator — never also as a dropped part, which would count one
+ * lost image twice.
+ */
+export function recordQuoteImages(
+  ledger: InlineNoteLedger,
+  outcome: QuoteImageOutcome | undefined,
+  surface: 'reply' | 'forward',
+): QuoteCarry {
+  const embedded = new Set<CidPart>();
+  if (!outcome) return { minted: [], mintedCids: [], embedded };
+
+  for (const mapping of outcome.mappings) {
+    embedded.add(mapping.source);
+    ledger.record({
+      // The emitted Content-ID: minted fresh or claimed from one survivor, so unique per
+      // mapping either way.
+      key: `quote:${mapping.cid}`,
+      outcome: 'embedded',
+      bytes: typeof mapping.source.size === 'number' ? mapping.source.size : 0,
+      name: mapping.source.name,
+      isImage: true,
+    });
+  }
+
+  if (surface === 'reply' && !outcome.htmlQuoteShips) {
+    outcome.resolvedParts.forEach((part, index) => {
+      ledger.record({ key: `quote-drop:${index}`, outcome: 'dropped', name: part.name, isImage: true });
+    });
+  }
+
+  ledger.countRefs('unresolvedRefs', outcome.unresolvedRefs.length);
+  ledger.countRefs('droppedDataImages', outcome.droppedDataImages);
+  ledger.countRefs('droppedUnsupportedImages', outcome.droppedUnsupportedImages);
+
+  return {
+    minted: outcome.minted.map((part) => ({ ...part })),
+    mintedCids: outcome.minted.map((part) => part.cid),
+    embedded,
+    ...(outcome.htmlQuoteShips && { resolvedPartCount: outcome.resolvedParts.length }),
+  };
 }

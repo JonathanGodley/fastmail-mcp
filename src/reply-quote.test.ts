@@ -217,7 +217,7 @@ describe('buildReplyBodies — no quotable original', () => {
   });
 });
 
-describe('buildReplyBodies — sanitizeForQuote (via html quote output)', () => {
+describe('buildReplyBodies — sanitizeQuoteHtml (via html quote output)', () => {
   const quote = (html: string) =>
     buildReplyBodies({ original: makeOriginal({ html, name: 'Jon', sentAt: '2026-06-15T03:29:02Z' }), htmlBody: '<p>r</p>', quoteOriginal: true, timezone: TZ }).htmlBody!;
 

@@ -780,28 +780,74 @@ Date rendering for humans (`toLocalIso` and `formatReplyDate` in
   ASCII space before returning. Do not "simplify" the normalisation away: it is
   invisible in a diff and breaks exact-match / byte-compare verification.
 
-## Re-sending sanitised content: `sanitizeForQuote`
+## Re-sending sanitised content: the two-pass quote sanitiser
 
 `reply_email` re-sends the original message's HTML as a quote under the user's own
 `From`, so the quoted HTML is active content we originate, not passive display. The
-`sanitizeForQuote` choices in `src/reply-quote.ts` are load-bearing security, not
+`sanitizeQuoteHtml` choices in `src/inline-images.ts` are load-bearing security, not
 incidental config:
 
 - **No global `'*'` attribute key.** Drops `style=` / `class=` / `on*=` on every tag.
   `style` is the classic CSS-exfil / mXSS vector.
 - **`allowedSchemes: ['http','https','mailto']` + `allowProtocolRelative: false`.** The
   library defaults add `ftp` and allow `//host`.
-- **`exclusiveFilter` drops any `<img>` whose `src` did not survive sanitising.** A
-  `cid:` / `data:` image gets scheme-stripped to an empty `src` and would otherwise
-  render as a broken-image placeholder; inline `cid:` logos and signatures are very
-  common in replies. This filter is intentionally narrow (drop unusable-src images); it
-  is not a tracker-pixel arms race (mainstream clients do not strip trackers from quotes
-  either, and a partial filter just makes the quote less faithful).
+- **`exclusiveFilter` drops any `<img>` whose `src` did not survive sanitising**, so a
+  quote never renders a broken-image placeholder. Intentionally narrow (drop
+  unusable-src images); it is not a tracker-pixel arms race — mainstream clients do not
+  strip trackers from quotes either, and a partial filter just makes the quote less
+  faithful.
+
+### Why two passes, and why in that order
+
+Embedded (`cid:`) images used to die in the sanitiser: `cid` is not an allowed scheme, so
+the `src` was stripped to empty and `exclusiveFilter` removed the element. Carrying those
+images into the quote (#13) means the same html has to be sanitised twice, in two modes:
+
+- **`collect`** reports which references the html makes and rewrites nothing. Its output is
+  byte-for-byte what the sanitiser alone would emit — `cid` is still not admitted — so it is
+  exactly the string a quotability check should read.
+- **`map`** rewrites each reference that resolved to a part into the Content-ID this draft
+  attaches for it, with `allowedSchemesByTag` admitting `cid` **on `<img>` and nowhere
+  else** (a per-tag list replaces the global one for that tag, so no other attribute can
+  ever carry a `cid:` URL).
+
+The order is the whole point: minting an identifier commits the call to attaching a part,
+and a part nothing references is a stray file on the finished message. So pass one decides
+whether an html quote ships at all, and pass two runs only on a branch that really ships
+one. A text-only reply mints nothing.
+
+`map` mode is **default-deny**: an `<img>` survives only when the transform affirmatively
+emits a `src` — a mapped identifier, or a value whose normalised scheme is http/https.
+Everything else has its `src` deleted and the element removed. That matters because the
+classifier reimplements the sanitiser's own URL normalisation (see the launder note under
+*Dependency / build gotchas*): if the two ever drift, an unrecognised spelling lands in the
+"not affirmatively emitted" bucket and is dropped, rather than sliding through as the
+scheme-less URL the sanitiser would have passed. A visible consequence, deliberately
+accepted: a relative or scheme-less `<img src>` no longer survives a quote. Such a
+reference is already broken in mail — there is no base URL to resolve it against — and
+admitting it would mean trusting the classifier's *negative* answer, which is the thing
+this design refuses to do. The drop is counted, never silent: `droppedUnsupportedImages` is
+its own counter with its own sentence, kept apart from a `data:` image (content this server
+declines to re-encode) and from an unmatched embedded-image reference (which named a part
+that was not there). It is a **map-mode-only** count, because the collecting pass drops none
+of these — it leaves them to the sanitiser, which passes a relative URL through. That
+asymmetry is precisely why the count exists: the pass that ships the quote loses an image
+the other pass would have kept. An `<img>` with no `src` at all is not counted; there was no
+image to lose.
+
+Quotability follows from the same pass. An original whose only content is embedded images
+sanitises in `collect` mode to something visually empty (`<div></div>`), so it is judged
+quotable by whether at least one of its references would really embed — resolved to exactly
+one part, that part declaring itself an image and carrying a blob. Testing mere *resolution*
+would open an attribution over a quote showing nothing; testing the sanitised string would
+call an image-only message unquotable, which is what it used to be.
 
 Accepted threat floor (documented in README): `sanitize-html` is a string-to-string
 sanitiser (roughly the bar Gmail / Apple Mail emit) and does not fully eliminate exotic
 mutation-XSS. Stripping script / `on*` / `style` / unscoped wrappers plus pinned schemes
-is the deliberate safety floor, not an oversight.
+is the deliberate safety floor, not an oversight. It governs the markup this server writes
+and says nothing about the bytes of a part carried by reference — see
+`docs/security-model.md` for what carrying an image discloses.
 
 ## Process lifecycle: the exit on stdin EOF is implicit
 
@@ -844,3 +890,16 @@ latency) is in the README's embedding section.
 - **`sanitize-html` uses `export =`.** Import it as a default: `import sanitizeHtml from
   'sanitize-html'` (works under the repo's NodeNext / esModuleInterop), not
   `import * as`.
+- **The URL normalisation is reimplemented, not imported.** `launderUrlValue` in
+  `src/inline-images.ts` mirrors what `sanitize-html` does to a URL attribute before its
+  scheme gate runs: strip every character of code 0x20 and below (browsers ignore those
+  inside URLs in more places than is comfortable), then clobber embedded `<!--…-->`
+  comments. That logic lives in `launder`, which reaches this project only as a
+  **transitive dependency** of `sanitize-html` — `package.json` declares `sanitize-html`
+  alone — so importing it directly would take a hard dependency on another package's
+  dependency tree. The mirror can therefore drift when either package updates. The
+  tripwire is the obfuscated-spelling property tests, which assert that `c id:x`,
+  `cid&#9;:x` and `c<!--z-->id:x` classify the same way a plain `cid:x` does and that no
+  such spelling survives sanitisation unmapped. Do not weaken them, and do not "simplify"
+  the character class to `\s` — that excludes NUL and the other C0 controls, which are
+  exactly what an obfuscated spelling would use.
