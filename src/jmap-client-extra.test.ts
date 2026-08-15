@@ -3809,7 +3809,7 @@ describe('downloadAttachment — reference forms', () => {
   });
 });
 
-describe('downloadAttachment — input errors stay actionable, lookups stay generic', () => {
+describe('downloadAttachment — every bad reference is reported as caller-fixable input', () => {
   it('rejects an ambiguous cid instead of guessing at one part', async () => {
     const client = makeDownloadClient();
     stubEmail(client, {
@@ -3834,8 +3834,9 @@ describe('downloadAttachment — input errors stay actionable, lookups stay gene
   });
 
   it('names no blobIds in the ambiguity message', async () => {
-    // The tool's no-metadata-leak posture: an input error may say what to pass, never
-    // what the mailbox contains.
+    // An error says what to pass, not what else is in the message. Listing the matching
+    // parts' blobIds would put a listing in a diagnostic, where a pointer to
+    // get_email_attachments does the job and stays readable.
     const client = makeDownloadClient();
     stubEmail(client, {
       id: 'e1',
@@ -3866,6 +3867,31 @@ describe('downloadAttachment — input errors stay actionable, lookups stay gene
         const message = (error as Error).message;
         assert.ok(message.length < 300);
         assert.equal(message.includes('‮'), false);
+        return true;
+      },
+    );
+  });
+
+  it('renders a hostile unmatched attachmentId as bounded quoted data', async () => {
+    // The not-found message quotes the caller's own reference back so they can see which
+    // one missed, and that value is entirely attacker-controlled when the caller is acting
+    // on instructions found in a message. Same bounded echo as the ambiguity message.
+    const client = makeDownloadClient();
+    stubEmail(client, mixedShapeEmail());
+    // The quote and the bidi override sit inside the first DESCRIBE_PART_MAX code points,
+    // so neither is removed by the length cap — the neutralisation has to be what handles
+    // them. A hostile value long enough to need truncating as well follows behind.
+    const hostile = `a"b‮c${'d'.repeat(200)}`;
+    await assert.rejects(
+      () => client.downloadAttachment('e1', hostile),
+      (error: unknown) => {
+        const message = (error as Error).message;
+        assert.ok(error instanceof InvalidInputError);
+        assert.ok(message.length < 300, `unbounded echo: ${message.length} chars`);
+        assert.equal(message.includes('‮'), false);
+        // The echo is wrapped in double quotes, so an unneutralised one would close the
+        // quoted span early and let the rest of the value read as sentence text.
+        assert.ok(message.includes("a'b"), `quote not neutralised in: ${message}`);
         return true;
       },
     );
@@ -3904,18 +3930,31 @@ describe('downloadAttachment — input errors stay actionable, lookups stay gene
     );
   });
 
-  it('keeps a reference that simply matches nothing generic', async () => {
-    // An existence failure must not become an actionable input error: that is how the
-    // tool avoids confirming what a mailbox holds.
+  it('reports a reference that matches nothing as caller input, in every form', async () => {
+    // A reference that resolves to no part is fixable by passing a different one, so it
+    // is classified like any other bad input and the message says where a usable handle
+    // comes from. The three forms are covered together because the miss happens in three
+    // different places in the resolver.
     const client = makeDownloadClient();
     stubEmail(client, mixedShapeEmail());
     for (const missing of ['nope', 'cid:absent@host', '99']) {
       await assert.rejects(
         () => client.downloadAttachment('e1', missing),
-        (error: unknown) => !(error instanceof InvalidInputError) && /Attachment not found/.test((error as Error).message),
-        `expected ${JSON.stringify(missing)} to stay a generic not-found`,
+        (error: unknown) => error instanceof InvalidInputError
+          && /matches no part of that message/.test((error as Error).message)
+          && /get_email_attachments/.test((error as Error).message),
+        `expected ${JSON.stringify(missing)} to be reported as bad input`,
       );
     }
+  });
+
+  it('reports an emailId that matches no message as caller input', async () => {
+    const client = makeDownloadClient();
+    stubEmail(client, undefined);
+    await assert.rejects(
+      () => client.downloadAttachment('gone', 'p1'),
+      (error: unknown) => error instanceof InvalidInputError && /Email not found/.test((error as Error).message),
+    );
   });
 });
 

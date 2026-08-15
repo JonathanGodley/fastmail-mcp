@@ -34,25 +34,6 @@ export class InvalidInputError extends Error {
   }
 }
 
-// Tagged error for a well-formed reference that simply matched nothing — a missing email,
-// or an attachmentId no part claims. It is deliberately NOT an InvalidInputError: this is
-// the class download_attachment collapses into its generic "Attachment download failed"
-// message so a read cannot be used to confirm what a mailbox holds (see
-// docs/conventions.md, "INPUT-FORM errors vs EXISTENCE errors").
-//
-// It exists so a caller that must NOT collapse it can tell an existence failure apart from
-// a transport failure by class rather than by matching message text — the compose path
-// attaching part of an existing message needs that, because there a plain Error would
-// surface as "server bug" for what is squarely the caller's own mistake. Anything left
-// unhandled maps to InternalError exactly as a plain Error did, so adding the tag changed
-// no existing behaviour.
-export class NotFoundError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'NotFoundError';
-  }
-}
-
 // Some MCP clients (e.g. Claude Cowork as of 2026-04-08, issue #54) stringify
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.

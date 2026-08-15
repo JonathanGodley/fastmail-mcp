@@ -224,9 +224,20 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 2. Install into Claude Desktop:
    - Open the `.dxt` file, or drag it into Claude Desktop
-   - When prompted:
-     - Fastmail API Token: paste your token (stored encrypted by Claude)
-     - Fastmail Base URL: leave blank to use `https://api.fastmail.com` (default)
+   - Fill in the settings it prompts for. These are the same settings the environment variables in [Setup](#setup) carry, so the descriptions there apply; only the API token is required.
+
+   | Prompt | Environment equivalent | Notes |
+   |---|---|---|
+   | Fastmail API Token | `FASTMAIL_API_TOKEN` | Required. Stored encrypted by Claude Desktop. |
+   | Fastmail Base URL | `FASTMAIL_BASE_URL` | Leave as the default `https://api.fastmail.com` unless you run your own JMAP server. |
+   | Attachment Download Directory | `FASTMAIL_DOWNLOAD_DIR` | Where `download_attachment` writes. Blank uses `~/Downloads/fastmail-mcp/`. |
+   | Attachment Send Directory | `FASTMAIL_ATTACH_DIR` | Blank leaves **sending** attachments off entirely. Set it only if you want it. |
+   | Allow Attaching Content Already In The Account | `FASTMAIL_ALLOW_BLOB_ATTACH` | A checkbox, **unchecked** by default. Ticking it lets outgoing mail attach a `blobId` or one part of an existing message. Separate gate from the send directory — see [Sending attachments](#sending-attachments). |
+   | Email Date Timezone | `FASTMAIL_TIMEZONE` | Blank uses the host's zone. |
+   | CalDAV Username / CalDAV App Password | `FASTMAIL_CALDAV_USERNAME` / `FASTMAIL_CALDAV_PASSWORD` | Both needed for the calendar tools; without them those tools report themselves unavailable and the rest are unaffected. |
+   | Calendar Organizer Display Name | `FASTMAIL_CALDAV_DISPLAY_NAME` | Blank falls back to the CalDAV username. |
+
+   `FASTMAIL_ALLOW_UNSAFE_BASE_URL` is deliberately not offered here — it decides where your API token may be sent, so it stays an environment variable you set on purpose.
 
 3. Use any of the tools (e.g. `get_recent_emails`).
 
@@ -272,7 +283,7 @@ Error codes follow the same recoverability logic: a failure you can fix by chang
 
 When the refusal comes from the server rather than from this server's own checks, the JMAP error type decides which of the two you get. A type you can act on — the id matched nothing (`notFound`), a property value was rejected (`invalidProperties`), an argument or patch was malformed (`invalidArguments`, `invalidPatch`), the object was over the size limit (`tooLarge`), the target's type forbids the operation (`singleton`) — returns `InvalidParams`, because re-forming the call is the route to success. A type describing the server, the account or its state — `forbidden`, `overQuota`, `rateLimit`, `serverFail`, `stateMismatch`, `accountReadOnly` and anything unrecognised — returns `InternalError`. A bulk operation is `InvalidParams` only when *every* failure in the batch is one of the first kind. The message text is the same either way (it always carries the server's `type` and description); only the code differs. Per-type reasoning: `docs/conventions.md`.
 
-The one exception is `download_attachment`, which returns `InternalError` for a bad id to avoid leaking attachment metadata. It draws one line inside that exception: an unusable *reference form* (a bare `cid:` with no value, a `cid:` value matching several parts, a number with junk in it, a part carrying no blob) is `InvalidParams` and says what to pass instead, because that is fixable from the input alone and reveals nothing about the mailbox; a well-formed reference that simply matches nothing stays the generic `InternalError`. Full rule: `docs/conventions.md`.
+`download_attachment` is no exception: a bad `emailId`/`attachmentId` is `InvalidParams` there too, whether the reference is an unusable *form* (a bare `cid:` with no value, a `cid:` value matching several parts, a number with junk in it, a part carrying no blob) or a well-formed one that simply matches nothing. Either way the message names what to pass instead — a partId or blobId from `get_email_attachments`. Full rule: `docs/conventions.md`.
 
 ### Email fields
 
@@ -668,7 +679,7 @@ On `edit_draft`, `attachments` **appends** (existing attachments are kept). Use 
 >
 > **`path` needs `FASTMAIL_ATTACH_DIR`.** Attaching a local file reads it off the disk and emails it out — an exfiltration vector — so that source is **disabled until you set `FASTMAIL_ATTACH_DIR`** (see [Setup](#setup)); until then every attempt fails with a self-documenting error and no file is read. Files are confined to that directory: a path outside it, a missing file, or a symlink escaping the root is rejected. The attach directory is resolved **independently** of `FASTMAIL_DOWNLOAD_DIR` — pointing both at the same directory re-opens a download-then-email round-trip, so that is your explicit choice, not a default. The confinement narrows time-of-check/time-of-use races and blocks symlink escapes, but a same-inode swap race and hardlinks inside the root are residual.
 >
-> **`blobId` and `emailId` + `attachmentId` need `FASTMAIL_ALLOW_BLOB_ATTACH`.** They cross a different boundary: nothing is read off your disk, so the directory opt-in has nothing to say about them and they get their own flag, off by default and parsed strictly — only `true` or `1` enables it, so a literal `"false"` leaves it off rather than reading as "a value was set". What this gate protects is **provenance more than reach**: you could already put another message's attachment in front of an arbitrary recipient by forwarding it and sending the draft, but a forward carries a visible forwarded-message block and an `X-Forwarded-Message-Id` header, while a blob-attached part carries neither. Note also that a message's own `blobId` appears in ordinary read output, so with this gate open a caller can attach a **complete raw message** — transport headers and all — to a fresh draft; prefer `emailId` + `attachmentId`, which can only ever name one part.
+> **`blobId` and `emailId` + `attachmentId` need `FASTMAIL_ALLOW_BLOB_ATTACH`.** They cross a different boundary: nothing is read off your disk, so the directory opt-in has nothing to say about them and they get their own flag, off by default and parsed strictly — only `true` or `1` enables it, so a literal `"false"` leaves it off rather than reading as "a value was set". A Desktop Extension install offers the same gate as an unchecked "Allow Attaching Content Already In The Account" box, which is that strict parse doing its job: the `"false"` an unchecked box sends is not an enable. What this gate protects is **provenance more than reach**: you could already put another message's attachment in front of an arbitrary recipient by forwarding it and sending the draft, but a forward carries a visible forwarded-message block and an `X-Forwarded-Message-Id` header, while a blob-attached part carries neither. Note also that a message's own `blobId` appears in ordinary read output, so with this gate open a caller can attach a **complete raw message** — transport headers and all — to a fresh draft; prefer `emailId` + `attachmentId`, which can only ever name one part.
 >
 > Full posture, including why `blobId` is not restricted to ids this server handed out, in [`docs/security-model.md`](docs/security-model.md).
 

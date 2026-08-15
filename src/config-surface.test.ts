@@ -24,7 +24,7 @@ const INDEX_URL = new URL('./index.ts', import.meta.url);
 
 interface Manifest {
   server: { mcp_config: { env: Record<string, string> } };
-  user_config: Record<string, unknown>;
+  user_config: Record<string, { type?: unknown; default?: unknown }>;
 }
 
 function readManifest(): Manifest {
@@ -132,6 +132,31 @@ describe('DXT configuration surface', () => {
     // Deliberately one-directional. The server also reads names the manifest does not
     // declare — the USER_CONFIG_* fallback spellings some hosts use, and the base-URL
     // kill switch below — and that is correct, so the reverse is not asserted.
+  });
+
+  it('offers FASTMAIL_ALLOW_BLOB_ATTACH as an installer setting that defaults to off', () => {
+    // The mirror image of the check below, and it needs its own test for the same reason:
+    // the three checks above are one-directional (manifest -> server), so deleting BOTH
+    // halves of this setting would pass every one of them, leaving the flag reachable only
+    // by hand-editing an environment. That is a posture decision either way, so both
+    // postures are pinned rather than only the one that says "keep it out".
+    //
+    // Attaching content the account already holds is a send capability, not a control over
+    // where the API token may be sent, so it belongs in an installer UI. What makes that
+    // safe is the pairing asserted here: the declared default is false, and the parse in
+    // getAllowBlobAttach accepts only "true"/"1" — so the "false" a host hands over for an
+    // unchecked box leaves the capability off, and so does a host that forwards nothing.
+    const manifest = readManifest();
+    const entry = manifest.user_config.fastmail_allow_blob_attach;
+
+    assert.ok(entry, 'fastmail_allow_blob_attach is not declared in user_config');
+    assert.equal(entry.type, 'boolean', 'declare it as a boolean so a host renders a checkbox');
+    assert.equal(entry.default, false, 'the capability must be off until the operator opts in');
+    assert.equal(
+      manifest.server.mcp_config.env.FASTMAIL_ALLOW_BLOB_ATTACH,
+      userConfigReference('fastmail_allow_blob_attach'),
+      'the declared key must be mapped into the environment or the installer answer reaches nothing',
+    );
   });
 
   it('keeps FASTMAIL_ALLOW_UNSAFE_BASE_URL out of the manifest', () => {

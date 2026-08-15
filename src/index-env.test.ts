@@ -145,15 +145,11 @@ describe('env-resolution convention', () => {
     // install configured CalDAV and got calendar tools that reported themselves
     // unavailable with nothing to explain why.
     const source = readFileSync(join(SRC_DIR, 'index.ts'), 'utf8');
-    // allow_blob_attach rides along here rather than in its own test, but note what this
-    // pins and what it does not: the four-name resolution means the flag WOULD be settable
-    // through a DXT user_config key, not that it is one today. There is no manifest.json
-    // entry for it, so a DXT install currently cannot set it at all — the flag is
-    // environment-only on purpose, the same posture as the base-URL kill switch, and
-    // adding the manifest key is the one-line change that would make the reach real.
-    // The resolution is uniform anyway so the flag cannot become the odd one out later.
-    // (The base-URL kill switch is deliberately NOT in this list — it resolves one name
-    // on purpose; see getAuthConfig.)
+    // allow_blob_attach rides along here rather than in its own test: it is a declared
+    // manifest.json user_config key like the three CalDAV settings, so the same four-name
+    // resolution is what carries a DXT host's answer through to the server, whichever
+    // spelling that host uses. (The base-URL kill switch is deliberately NOT in this list —
+    // it resolves one name on purpose, and is not in the manifest either; see getAuthConfig.)
     for (const setting of ['caldav_username', 'caldav_password', 'caldav_display_name', 'allow_blob_attach']) {
       const upper = setting.toUpperCase();
       for (const name of [

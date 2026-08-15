@@ -504,57 +504,28 @@ whole point of the bound is that the work it refuses is expensive (see **Boundin
 quadratic serializer** below), so an `InternalError` would not merely be inaccurate, it
 would invite the bare retry that repeats the cost.
 
-**One deliberate carve-out:** `download_attachment` returns `InternalError` for a bad
-`emailId`/`attachmentId` — `download_attachment` alone, not every consumer of the lookup
-underneath it (see the compose re-raise below). Its local catch collapses non-path errors to a generic message
-on purpose, so it does not leak attachment metadata (see `docs/security-model.md`). So a
-bad id is `InvalidParams` on `get_email`/`get_thread` but `InternalError` on
-`download_attachment` — an accepted, documented asymmetry.
+**`download_attachment` follows the rule with no exception.** A bad `emailId`/`attachmentId`
+is caller-fixable input there exactly as it is on `get_email`/`get_thread`, whichever way it
+is bad: an unusable reference *form* (a bare `cid:` with no value, a `cid:` value matching
+several parts, a number with junk in it, a part carrying no blob) and a well-formed reference
+that simply *matches nothing* both throw `InvalidInputError` and reach the caller naming what
+to pass instead. Messages quote back only the caller's own input, through `describePart`, so
+a hostile value cannot overrun the sentence.
 
-**Inside that carve-out, one further line: INPUT-FORM errors vs EXISTENCE errors.** The
-generic message exists to avoid confirming what a mailbox contains. That reasoning covers
-"this reference matched nothing" and nothing else — it does not cover "this reference is
-not a shape this tool accepts", which is answerable from the caller's own string. So
-`attachmentId` splits:
+Naming the failure confirms that a message exists and that a reference does or does not
+resolve, and that is fine here: `get_email_attachments` enumerates a message's parts on
+request and `get_email` confirms the message exists, to the same caller holding the same
+token. There is nothing for the download to withhold that the tool beside it does not answer.
+So its local `catch` maps `PathAccessError` — a filesystem-confinement decision, a different
+control — and re-throws everything else to the top-level catch, which applies the
+`InvalidParams` mapping *with* `redactBearerTokens`, and turns a transport or JMAP failure
+into an `InternalError` carrying the server's own reason.
 
-- **Input-form failures** — a bare `cid:` with no value, a number with junk in it (`3a`,
-  `-1`, `1.5`) — throw `InvalidInputError` and reach the caller intact, naming what to
-  pass instead. They quote back only the caller's own input (through `describePart`, so
-  a hostile value cannot overrun the sentence) and never enumerate blobIds or names.
-- **Two more throw `InvalidInputError` on a weaker justification, stated honestly:** a
-  `cid:` value matching more than one part, and a resolved part carrying no blobId.
-  Neither is answerable from the caller's string alone — both depend on message content,
-  so each is a narrow existence oracle (it confirms that a reference resolves, and in the
-  first case that at least two parts share that Content-ID). They are classified as input
-  errors anyway because the alternative is worse: a generic failure on a reference that
-  DOES resolve leaves the caller retrying a request that can never succeed, with no way
-  to learn that a different reference form is required. Neither message reveals a blobId,
-  a filename, or a count.
-- **Existence failures** — a well-formed reference that simply matches nothing — throw
-  `NotFoundError` and collapse to the generic "Attachment download failed" message.
-
-**That split is `download_attachment`'s contract, not a promise to every caller**, and the
-difference became load-bearing when `getAttachmentInfo` gained a third caller: an
-`attachments` item naming `emailId` + `attachmentId`. There the generic collapse is wrong.
-The carve-out is justified by a READ not confirming what a mailbox holds, and a compose is
-not a read: the ids came from this same caller moments earlier, so a mistyped one is
-squarely caller-fixable, while an `InternalError` says "server bug" and invites a retry that
-can never succeed. `uploadAttachments` therefore re-raises `NotFoundError` as
-`InvalidInputError`, naming the attachments index and echoing only the caller's own ids —
-which `get_email` and `get_email_attachments` would answer for anyway.
-
-`NotFoundError` exists so that re-raise can be made **by class**. Matching the message text
-would reintroduce exactly the string-coupling this file records removing elsewhere, and
-would catch a transport failure that happened to read "not found". A plain `Error` cannot be
-told apart from a socket failure at all. Anything that does not catch the tag still maps to
-`InternalError`, so adding it changed no existing behaviour — it only made the distinction
-available to a caller that needs it. **A new caller must make the same call consciously**:
-neither class is a default to inherit by accident.
-
-Mechanically, `download_attachment`'s local catch **re-throws** `InvalidInputError`
-rather than mapping it there, so the top-level branch applies the `InvalidParams` mapping
-*with* `redactBearerTokens`. A verbatim local re-throw would skip redaction the way the
-`PathAccessError` route does, and unlike path messages these echo caller input.
+`getAttachmentInfo` is shared by that read and by an `attachments` item naming
+`emailId` + `attachmentId`, and one class serves both. `uploadAttachments` wraps what it
+catches, but only to add context the lookup cannot know — the attachments index, since a
+batch rejects on one bad entry. It wraps **by class**, so a transport failure is not relabelled
+as a caller mistake.
 
 **Redaction at that boundary is unconditional.** Every branch of the CallTool catch runs
 its message through `redactBearerTokens`: the `McpError` rethrow (redacted in place, since

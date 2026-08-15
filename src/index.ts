@@ -227,10 +227,12 @@ function getAttachDir(): string | undefined {
 // four-name fallback the configurable settings use, not that one's deliberate single name,
 // so a host that only forwards USER_CONFIG_* spellings can still set it.
 //
-// ENVIRONMENT-ONLY for now: there is deliberately no manifest.json user_config entry, so a
-// DXT install cannot offer this as a checkbox — exposing a capability gate in an installer
-// UI is a posture call, not an implementation detail. The four names above mean adding that
-// entry is the only change needed if the posture changes; nothing here would move.
+// Settable from a DXT install too: manifest.json declares `fastmail_allow_blob_attach` as a
+// boolean in both user_config and server.mcp_config.env, so a host renders it as a checkbox
+// and hands the answer over as "true"/"false". "false" is exactly what the strict parse
+// above reads as off, so the unchecked box means what it looks like. The base-URL kill
+// switch stays out of the manifest; this is a send capability, not a security control that
+// decides where the token may be sent.
 function getAllowBlobAttach(): boolean {
   const info = findEnvValue([
     'FASTMAIL_ALLOW_BLOB_ATTACH',
@@ -2553,24 +2555,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (error instanceof PathAccessError) {
             throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
           }
-          // An unusable attachmentId (a malformed cid: handle, a value that matches
-          // several parts, a number with junk in it, a part with no blob) is a caller
-          // input error, not a lookup result, so it survives the generic message below —
-          // it names what to pass instead and reveals nothing about the mailbox. A
-          // reference that is well-formed but simply matches nothing stays generic.
-          // Re-thrown rather than mapped locally so the top-level branch applies its
-          // InvalidParams mapping WITH redaction (these messages echo caller input).
-          if (error instanceof InvalidInputError) {
-            throw error;
-          }
-          // Sanitize other errors to avoid leaking attachment metadata. This branch is
-          // retained deliberately: redactBearerTokens at the top level would not suppress
-          // attachment metadata in a transport/JMAP error message, so we keep the local
-          // generic message instead of letting such errors reach the top-level catch.
-          throw new McpError(
-            ErrorCode.InternalError,
-            'Attachment download failed. Verify emailId and attachmentId and try again.'
-          );
+          // Everything else goes to the top-level catch, which maps a bad emailId /
+          // attachmentId to InvalidParams naming what to pass instead, and a transport or
+          // JMAP failure to InternalError carrying the server's own reason. Both are
+          // redacted there, so this tool needs no error handling of its own beyond the
+          // path branch above.
+          throw error;
         }
       }
 

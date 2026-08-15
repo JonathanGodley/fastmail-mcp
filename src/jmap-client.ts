@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, PathAccessError, InvalidInputError, NotFoundError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml } from './reply-quote.js';
@@ -409,10 +409,10 @@ export interface EmailAttachmentsResult {
  * ARE digit strings, so resolving digits as an index first would make "1" ambiguous
  * between "the part whose partId is 1" and "the second entry". A part always wins.
  *
- * Malformed INPUT throws InvalidInputError, which download_attachment lets through to
- * the caller; a well-formed reference that simply matches nothing returns undefined
- * and becomes the tool's generic not-found, which deliberately reveals no mailbox
- * metadata. That input-vs-existence split is documented in docs/conventions.md.
+ * Malformed INPUT throws InvalidInputError; a well-formed reference that simply matches
+ * nothing returns undefined, and getAttachmentInfo turns that into an InvalidInputError of
+ * its own. Either way the caller is told what to pass instead — both failures are fixable
+ * from the caller's own input.
  *
  * WHICH form matched is returned alongside the part, because one consumer has to refuse the
  * positional form: attaching a part to outgoing mail (uploadAttachments) rejects a match
@@ -3655,21 +3655,12 @@ export class JmapClient {
    * the resolved info around, so a message's metadata and its bytes can never come from
    * two different reads of the same email.
    *
-   * The error split is deliberate. A malformed REFERENCE (and a part carrying no blob)
-   * throws InvalidInputError, which download_attachment lets through so the caller can
-   * correct what it passed. A well-formed reference that simply matches nothing, and a
-   * missing email, throw NotFoundError, which download_attachment collapses into its
-   * generic message — that is how a READ avoids confirming what a mailbox holds.
-   *
-   * That split is download_attachment's contract, not a promise to every caller, and the
-   * distinction became load-bearing once this method gained a third caller. The classes
-   * above say WHAT happened; each call site decides what its own tool should say about it.
-   * uploadAttachments therefore re-raises NotFoundError as an InvalidInputError naming the
-   * attachments index: on the compose path the generic collapse would report a caller's
-   * mistyped id as a server fault, and the ids it echoes are the caller's own — a message
-   * this server would answer for anyway through get_email / get_email_attachments. A NEW
-   * caller must make the same call consciously; inheriting either class by accident is the
-   * failure mode this comment exists to stop.
+   * Every failure here is InvalidInputError: a malformed reference, a part carrying no
+   * blob, an attachmentId no part claims, and an emailId that matches no message are all
+   * fixable by changing what the caller passed, so each message names what to pass instead.
+   * Callers add their own context on the way out (uploadAttachments prefixes the attachments
+   * index) rather than reclassifying — the class already says whose mistake it was, and a
+   * transport failure, which is not one, stays a plain Error and maps to InternalError.
    */
   async getAttachmentInfo(emailId: string, attachmentId: string): Promise<AttachmentInfo> {
     const session = await this.getSession();
@@ -3695,14 +3686,20 @@ export class JmapClient {
     const email = this.getListResult(response, 0)[0];
 
     if (!email) {
-      throw new NotFoundError('Email not found');
+      throw new InvalidInputError(
+        'Email not found: that emailId matches no message. ' +
+        'Pass an id from list_emails, search_emails or get_thread.'
+      );
     }
 
     const parts = buildUnionParts(email).map((u) => u.part);
     const resolved = resolveAttachmentRef(parts, attachmentId);
 
     if (!resolved) {
-      throw new NotFoundError('Attachment not found.');
+      throw new InvalidInputError(
+        `Attachment not found: attachmentId "${describePart(attachmentId)}" matches no part of that message. ` +
+        'List its parts with get_email_attachments and pass a partId or blobId from it.'
+      );
     }
     const attachment = resolved.part;
 
@@ -4064,22 +4061,19 @@ export class JmapClient {
 
         if (spec.emailId !== undefined) {
           assertBlobAttachEnabled(allowBlobAttach, i, 'emailId + attachmentId');
-          // getAttachmentInfo's not-found class is tuned for download_attachment, which
-          // collapses it to a generic message so a READ cannot confirm what a mailbox
-          // holds. That is wrong for a compose: here the ids came from this same caller
-          // moments ago, so a mistyped one is squarely caller-fixable and the collapse
-          // would report it as a server fault (an InternalError the caller can only
-          // retry). Re-raised by CLASS, never by matching the message text — a transport
-          // failure is not a NotFoundError and still propagates untouched.
+          // getAttachmentInfo already reports a bad id as caller input; what it cannot know
+          // is WHICH attachments item asked for it. A batch rejects on one bad entry, so the
+          // index is the difference between a fixable message and a caller re-checking every
+          // item. Wrapped by CLASS — a transport failure is not an InvalidInputError and
+          // propagates untouched rather than being relabelled as a caller mistake.
           let info: AttachmentInfo;
           try {
             info = await this.getAttachmentInfo(spec.emailId, spec.attachmentId as string);
           } catch (e) {
-            if (e instanceof NotFoundError) {
+            if (e instanceof InvalidInputError) {
               throw new InvalidInputError(
                 `attachments[${i}] names emailId "${describePart(spec.emailId)}" and attachmentId ` +
-                `"${describePart(spec.attachmentId as string)}", which did not resolve to a part of an existing message. ` +
-                'List the message with get_email_attachments and pass a partId or blobId from it.'
+                `"${describePart(spec.attachmentId as string)}". ${e.message}`
               );
             }
             throw e;

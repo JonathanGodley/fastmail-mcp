@@ -5,7 +5,7 @@ import { resolve, join, basename, sep } from 'path';
 import { JmapClient } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
-import { InvalidInputError, NotFoundError, PathAccessError } from './coerce.js';
+import { InvalidInputError, PathAccessError } from './coerce.js';
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
 
 // ---------- helpers ----------
@@ -2939,25 +2939,27 @@ describe('uploadAttachments', () => {
     assert.equal(parts[0].blobId, 'G-part');
   });
 
-  // getAttachmentInfo's not-found class is tuned for download_attachment, which collapses it
-  // to a generic message so a read cannot confirm what a mailbox holds. Inheriting that here
-  // would report a mistyped id — the caller's own, supplied moments earlier — as an
-  // InternalError, i.e. a server bug the caller can only retry.
-  it('reports an unresolvable message part as caller input, not as a server fault', async (t) => {
+  // A batch rejects on one bad entry, so the wrap has to say WHICH entry was bad and keep
+  // the lookup's own advice about what to pass instead — a caller that gets neither is left
+  // re-checking every item by hand.
+  it('names the attachments index when a part does not resolve, keeping the advice', async (t) => {
     const client = clientWithUpload();
     t.mock.method(client, 'getAttachmentInfo', async () => {
-      throw new NotFoundError('Attachment not found.');
+      throw new InvalidInputError(
+        'Attachment not found: attachmentId "p404" matches no part of that message. ' +
+        'List its parts with get_email_attachments and pass a partId or blobId from it.'
+      );
     });
     await assert.rejects(
       () => client.uploadAttachments([{ emailId: 'M1', attachmentId: 'p404' }], undefined, true),
       (e: unknown) => e instanceof InvalidInputError
         && /attachments\[0\]/.test((e as Error).message)
-        && /did not resolve to a part of an existing message/.test((e as Error).message)
+        && /matches no part of that message/.test((e as Error).message)
         && /get_email_attachments/.test((e as Error).message),
     );
   });
 
-  // The re-raise is by CLASS. A transport failure is not a caller mistake and must not be
+  // The wrap is by CLASS. A transport failure is not a caller mistake and must not be
   // relabelled as one — that would send the caller off correcting ids that were fine.
   it('does not relabel a transport failure as bad caller input', async (t) => {
     const client = clientWithUpload();

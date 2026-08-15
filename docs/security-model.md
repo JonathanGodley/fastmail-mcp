@@ -255,7 +255,10 @@ boundary the source crosses, not by which tool is calling:
   guard over a boundary they never cross. They are gated on `FASTMAIL_ALLOW_BLOB_ATTACH`
   instead, off by default, parsed strictly (`true`/`1` only, so a literal `"false"` cannot
   enable what the operator wrote it to refuse), and refused per source with a message naming
-  the variable.
+  the variable. It is a declared `manifest.json` setting as well as an environment variable,
+  so a DXT install offers it as an unchecked box — the strict parse is what makes an unchecked
+  box (`"false"`) mean off. The endpoint-allowlist kill switch stays environment-only; that one
+  decides where the API token may be sent, which is not a capability to put behind a checkbox.
 
 **What `emailId` + `attachmentId` actually adds is provenance loss, not reach.** The reach
 is already available with the gate closed: `forward_email` produces a draft carrying the
@@ -527,9 +530,9 @@ than overclaimed:
   per-message existence, and is likewise bounded by the **token's reach**, not "the user's own
   account." Accepted on the same footing: recoverability is the point, and it is dominated by the
   existing `get_email` read (the same probe already exists), so it adds no capability a caller with
-  these tools lacked. The one read path that deliberately does NOT expose this is
-  `download_attachment`, whose local catch keeps a generic `InternalError` for a bad
-  `emailId`/`attachmentId` so it leaks no attachment metadata.
+  these tools lacked. `download_attachment` is on the same footing and says so: a bad
+  `emailId`/`attachmentId` there is `InvalidParams` naming what to pass instead, because
+  `get_email_attachments` enumerates the same parts on request for the same caller.
 - **The same per-id oracle now extends to calendar events and contacts.** `update_calendar_event`,
   `delete_calendar_event`, `update_contact` and `delete_contact` return `InvalidParams` for an id
   that resolves to nothing, so each confirms whether that event or contact exists. `create_calendar_event`
