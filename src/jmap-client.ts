@@ -178,19 +178,22 @@ export const EMAIL_PROPERTIES_COMPACT = [
 // `textBody` is already in COMPACT (structure); VERBOSE adds the content (`bodyValues`)
 // and the html/attachment parts. `sentAt` is a get-path superset addition (allowed by the
 // property-consistency rule) for reply-quote attribution (when the original was written).
-// The X-Forwarded-Message-Id header (what forward_email records as the forwarded
-// original's Message-ID) is deliberately VERBOSE-tier, not COMPACT: list items already
-// show forward-ness via the isForwarded keyword flag; the header VALUE is needed only
-// when operating on a specific draft (the edit guard's recovery), a get_email context.
+// The two provenance headers this server records on drafts are deliberately
+// VERBOSE-tier, not COMPACT: list items already show forward-ness via the isForwarded
+// keyword flag, and the header VALUES are needed only when operating on a specific
+// draft — the edit guard's recovery (X-Forwarded-Message-Id) and inspecting which
+// stored copy send_draft will mark (X-Fastmail-MCP-Source-Id, see SOURCE_ID_HEADER
+// below) — both get_email contexts.
 // Corollary, not a gap: getThread uses EMAIL_PROPERTIES_COMPACT by default, so an
-// ordinary thread read (including raw:true) doesn't surface forwardedMessageId —
-// consistent with this decision. getThread's includeBodies mode (#74) switches to this
-// same VERBOSE superset rather than inventing a third property list, so a thread read
-// with bodies is a get-path read and does carry it.
+// ordinary thread read (including raw:true) doesn't surface forwardedMessageId or
+// sourceEmailId — consistent with this decision. getThread's includeBodies mode (#74)
+// switches to this same VERBOSE superset rather than inventing a third property list,
+// so a thread read with bodies is a get-path read and does carry them.
 export const EMAIL_PROPERTIES_VERBOSE = [
   ...EMAIL_PROPERTIES_COMPACT,
   'htmlBody', 'attachments', 'bodyValues', 'sentAt',
   'header:X-Forwarded-Message-Id:asMessageIds',
+  'header:X-Fastmail-MCP-Source-Id:asText',
 ] as const;
 
 // The provenance headers a draft carries about the message it was composed from:

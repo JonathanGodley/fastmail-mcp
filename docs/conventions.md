@@ -341,7 +341,9 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
   copy the caller composed from — matching Fastmail's own client, which marks the
   instance replied to and leaves other copies of the same Message-ID untouched
   (observed live, 2026-08-14: replying to the Archive copy of a self-addressed message
-  set `$answered` on that copy only, never the Sent twin).
+  set `$answered` on that copy only, never the Sent twin). The recorded id is surfaced
+  by `get_email` (and `get_thread` with `includeBodies`) as `sourceEmailId`, so which
+  copy will be marked is inspectable before the send.
 - **The exact id is validated before use; the Message-ID lookup is the fallback, not a
   peer.** `send_draft` checks that the recorded instance still exists and still carries
   the Message-ID the kind header names. A destroyed instance, a mismatch (a stale or

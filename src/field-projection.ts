@@ -39,6 +39,7 @@ const EMAIL_FIELD_MAP: Record<keyof SimplifiedEmail, true> = {
   inReplyTo: true,
   isReply: true,
   forwardedMessageId: true,
+  sourceEmailId: true,
   isRead: true,
   isFlagged: true,
   isDraft: true,

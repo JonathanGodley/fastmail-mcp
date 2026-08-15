@@ -26,6 +26,11 @@ export interface SimplifiedEmail {
   // present on get_email/verbose reads; list items show forward-ness via
   // isForwarded instead.
   forwardedMessageId?: string[];
+  // The JMAP id of the exact stored copy a reply/forward draft was composed from
+  // (from X-Fastmail-MCP-Source-Id, recorded by reply_email/forward_email). This is
+  // the copy send_draft will mark answered/forwarded, so it's inspectable pre-send.
+  // VERBOSE-tier like forwardedMessageId; absent on drafts made by other clients.
+  sourceEmailId?: string;
   isRead?: boolean;
   isFlagged?: boolean;
   isDraft?: boolean;
@@ -259,6 +264,10 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   addIf(result, 'inReplyTo', raw.inReplyTo);
   addFlag(result, 'isReply', !!(raw.inReplyTo?.length));
   addIf(result, 'forwardedMessageId', raw['header:X-Forwarded-Message-Id:asMessageIds']);
+  // asText header values can carry folding whitespace; trim, and treat blank as absent
+  // (mirrors readSourceReferences in jmap-client.ts).
+  const rawSourceId = raw['header:X-Fastmail-MCP-Source-Id:asText'];
+  addIf(result, 'sourceEmailId', typeof rawSourceId === 'string' && rawSourceId.trim() !== '' ? rawSourceId.trim() : undefined);
   // Promote the canonical message-state keywords to `is*` flags from the single
   // KEYWORD_FLAGS map (subsumes the old hand-written isRead/isFlagged/isDraft lines
   // and adds isAnswered/isForwarded for free). DROP_WHEN_FALSE then decides which

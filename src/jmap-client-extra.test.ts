@@ -1235,6 +1235,16 @@ describe('JMAP property consistency', () => {
     assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('attachments'));
   });
 
+  it('verbose fetches both draft provenance headers; compact fetches neither', () => {
+    // Get-path reads must surface which message a forward names (forwardedMessageId)
+    // and which stored copy send_draft will mark (sourceEmailId); list items show
+    // forward-ness via isForwarded instead.
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('header:X-Forwarded-Message-Id:asMessageIds'));
+    assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('header:X-Fastmail-MCP-Source-Id:asText'));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('header:X-Forwarded-Message-Id:asMessageIds' as any));
+    assert.ok(!EMAIL_PROPERTIES_COMPACT.includes('header:X-Fastmail-MCP-Source-Id:asText' as any));
+  });
+
   it('compact includes textBody structure (part sizes) for the bodyTextSize hint (#59)', () => {
     // textBody is a compact property: it fetches the part *structure* (partId/type/size),
     // not content, so the response stays "no bodies" while exposing the text part size.

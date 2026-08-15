@@ -795,6 +795,19 @@ describe('simplifyEmail — forwardedMessageId (#30)', () => {
   });
 });
 
+describe('simplifyEmail — sourceEmailId', () => {
+  const SRC = 'header:X-Fastmail-MCP-Source-Id:asText';
+  it('surfaces the X-Fastmail-MCP-Source-Id header as sourceEmailId, trimmed', () => {
+    const raw = { id: 'd1', subject: 'Re: x', from: [{ email: 'a@b.com' }], [SRC]: ' Mabc123 ' };
+    assert.equal(simplifyEmail(raw).sourceEmailId, 'Mabc123');
+  });
+  it('omits it when the header is absent, null, or blank (never an empty field)', () => {
+    assert.equal(simplifyEmail({ id: 'd1', subject: 's', from: [] }).sourceEmailId, undefined);
+    assert.equal(simplifyEmail({ id: 'd1', subject: 's', from: [], [SRC]: null }).sourceEmailId, undefined);
+    assert.equal(simplifyEmail({ id: 'd1', subject: 's', from: [], [SRC]: '   ' }).sourceEmailId, undefined);
+  });
+});
+
 describe('simplifyEmail — stripQuoted (#73)', () => {
   const withBodies = (text: string | null, html?: string) => {
     const raw: any = { id: 'e1', subject: 's', from: [{ email: 'a@b.com' }], bodyValues: {} };
