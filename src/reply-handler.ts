@@ -1,11 +1,15 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
-import { assertBodyInputs } from './body-format.js';
+import { assertBodyInputs, isBlank } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
 import { buildReplyBodies } from './reply-quote.js';
 import { formatAddress } from './email-formatter.js';
-import type { AttachmentPart } from './jmap-client.js';
+import {
+  DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, reportAuthoredInlineImages,
+} from './compose-inline.js';
+import type { AuthoredInlineContext, AuthoredInlinePlan } from './compose-inline.js';
+import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // Parameters passed to createDraft for a reply (matches its input shape).
 export interface ReplyParams {
@@ -36,10 +40,16 @@ export interface ReplyParams {
 // allowed (it can be filled in via edit_draft before send_draft transmits it).
 // createDraft adds the auto text/plain fallback downstream for an html-only reply.
 // Throws McpError on invalid input.
+//
+// `inline` carries the caller's already-coerced attachments for the embedded-image checks
+// (see AuthoredInlineContext for why they are passed in rather than read from args). The
+// specs are used for validation only — the uploaded parts are threaded onto the result by
+// the orchestration, which owns the I/O.
 export function buildReplyParams(
   args: any,
   originalEmail: any,
-): { quoteOriginal: boolean; replyParams: ReplyParams } {
+  inline: AuthoredInlineContext = DEFAULT_INLINE_CONTEXT,
+): { quoteOriginal: boolean; replyParams: ReplyParams; inlinePlan: AuthoredInlinePlan } {
   const a = args ?? {};
   // Validate the caller's own bodies FIRST — before the quote is appended below. Once the
   // quoted original is merged in, a malformed new message is masked by it: the quote
@@ -79,10 +89,23 @@ export function buildReplyParams(
     throw new McpError(ErrorCode.InvalidParams, 'Could not determine reply recipient. Please provide "to" explicitly.');
   }
 
+  // Checked against the caller's OWN note, BEFORE the quote is merged in below. The quote is
+  // this server's own markup and carries its own identifiers; scanning the merged body would
+  // hold those against the caller. An html note ships whenever the caller supplied one, so
+  // that is also what decides whether their images can be displayed at all.
+  const inlinePlan = planAuthoredInlineImages({
+    callerHtml: htmlBody,
+    htmlShips: !isBlank(htmlBody),
+    specs: inline.specs,
+    attachmentsEnabled: inline.attachmentsEnabled,
+    surface: 'note',
+  });
+
   const quoted = buildReplyBodies({ original: originalEmail, textBody, htmlBody, quoteOriginal });
 
   return {
     quoteOriginal,
+    inlinePlan,
     replyParams: {
       to,
       cc,
@@ -105,13 +128,19 @@ export function buildReplyParams(
 // testable with a mock and free of a hard dependency on the concrete client.
 export interface ReplyClient {
   getEmailById(id: string): Promise<any>;
-  uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
+  uploadAttachments(
+    specs: AttachmentSpec[],
+    attachDir: string | undefined,
+    options?: UploadAttachmentsOptions,
+  ): Promise<AttachmentPart[]>;
   createDraft(params: ReplyParams): Promise<string>;
 }
 
 export interface ComposeReplyResult {
   subject: string;
   emailId: string;
+  /** What the draft ended up embedding, or could not (#13). Absent when there is nothing to say. */
+  notes?: string[];
 }
 
 // Orchestrate a reply end to end: fetch the original, assemble the (pure) reply params,
@@ -137,15 +166,33 @@ export async function composeReply(
   // Fetch the original, then assemble the reply (threading headers, Re: subject, recipient
   // defaulting, the attributed quote, body validation) via the pure, unit-tested builder.
   const originalEmail = await client.getEmailById(originalEmailId);
-  const { replyParams } = buildReplyParams(args, originalEmail);
+
+  // The caller's bodies are validated before their attachments are even coerced, so a
+  // malformed body is reported as a body problem rather than as whatever the attachments
+  // list happens to be wrong about too. The builder re-runs this check as its own first
+  // step; running it here as well is an ordering belt, not a second authority.
+  assertBodyInputs(args ?? {});
+  const specs = coerceAttachments(args?.attachments);
+
+  const { replyParams, inlinePlan } = buildReplyParams(args, originalEmail, {
+    specs,
+    attachmentsEnabled: !!attachDir,
+  });
 
   // Upload attachments (if any) after the pure builder, then thread the parts into
   // the draft.
-  const specs = coerceAttachments(args?.attachments);
   if (specs?.length) {
-    replyParams.attachments = await client.uploadAttachments(specs, attachDir);
+    replyParams.attachments = await client.uploadAttachments(specs, attachDir, {
+      inlineCids: inlinePlan.inlineCids,
+    });
   }
 
   const emailId = await client.createDraft(replyParams);
-  return { subject: replyParams.subject, emailId };
+  const notes = await reportAuthoredInlineImages({
+    uploaded: replyParams.attachments,
+    plan: inlinePlan,
+    emailId,
+    readBack: (id) => client.getEmailById(id),
+  });
+  return { subject: replyParams.subject, emailId, ...(notes.length > 0 && { notes }) };
 }

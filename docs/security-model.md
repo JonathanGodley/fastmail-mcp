@@ -152,6 +152,31 @@ refusals above: **a draft this server declines to edit is still perfectly sendab
 refusals say "this server cannot rebuild that shape faithfully", never "this message is
 unsafe to send".
 
+### Authored Content-IDs are vetted where the message is assembled (#13)
+
+A caller may name a Content-ID on an `attachments` item to embed that file in the body. The
+value lands in a MIME header, so it is vetted at coercion down to a simple token (letters,
+digits, dot, dash, underscore, 64 characters) with the `cid:`/`<>` spellings pre-stripped,
+and every later comparison uses that canonical form. The vet is the block on header
+injection, not a cosmetic tidy-up: a value carrying CR or LF stores as a genuinely injected
+header and does not show up in the JMAP read-back.
+
+The compose tools then decide which of those files the body displays, and that decision is
+the whole of this server's say over what a message embeds. It is made **before anything is
+uploaded**, so a refused call leaves no orphaned blob behind, and it is made against the
+caller's OWN html rather than the merged body, so a rebuilt quote's server-managed
+identifiers are never held against them. Consistent with the split above, nothing is
+re-checked at send time.
+
+Two directions, two different answers, both deliberate: a body reference with no matching
+file is **refused** (it would ship visibly broken and the caller can fix it from the message
+alone), while a supplied file nothing displays is **attached anyway and reported as such**
+(those bytes are the caller's, and dropping them silently would be the worse failure).
+
+The refusals stay honest about the opt-in. When `FASTMAIL_ATTACH_DIR` is unset there is no
+way to supply the missing file at all, so the "add it to attachments" repair is dropped from
+the wording rather than pointing the caller at a parameter that cannot work on this server.
+
 ### forward_email attachment postures (#30)
 
 - **Carried attachment names are relayed faithfully.** The original's attachment names are

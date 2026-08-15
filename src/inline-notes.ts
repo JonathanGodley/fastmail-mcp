@@ -146,9 +146,18 @@ export function noteRemovedEmbedded(count: number, keepNoun: string): string {
   return `Removed ${count} image(s) that were embedded in ${keepNoun}.`;
 }
 
-/** The caller's images could not be embedded, so they ride as ordinary attachments. */
+/**
+ * The caller's images could not be embedded, so they ride as ordinary attachments.
+ *
+ * The reason is stated in the one form that is true of every route here, because there are
+ * several and the note has no way to tell them apart: the message ships no html body at
+ * all; it ships one that references some other identifier; or an edit's new body stopped
+ * referencing a part the draft already carried. Naming only the first would state a false
+ * reason for the others, and the promise made on the attachments parameter is an honest
+ * account of what happened to the file, not a guess at why.
+ */
 export function noteDegradedToAttachments(count: number): string {
-  return `${count} of your image(s) became regular attachments (no html body ships them).`;
+  return `${count} of your image(s) became regular attachments (nothing in the body displays them).`;
 }
 
 /**
@@ -297,6 +306,22 @@ export function rejectClearAttachmentsDanglingRefs(): string {
   return (
     'clearFields: ["attachments"] would strip image(s) the surviving body still references. ' +
     'Rewrite or clear that body in the same call, or keep the attachments.'
+  );
+}
+
+/**
+ * A caller asked for an identifier this server will not author.
+ *
+ * Names the real item index, matching every other per-item refusal on the attachments
+ * parameter, and shows the value as quoted data — this refusal is raised before any
+ * redaction layer, so the echo has to be bounded here. The example is spelled the way the
+ * parameter takes it, so the fix is a copy away.
+ */
+export function rejectUnusableCid(index: number, value: unknown): string {
+  return (
+    `attachments[${index}].cid "${describePart(value)}" isn't usable here. This server ` +
+    'accepts a simple token (up to 64 characters) of letters, digits, dot, dash, ' +
+    'underscore (e.g. cid: "logo").'
   );
 }
 

@@ -4,7 +4,11 @@ import type { AttachmentSpec } from './coerce.js';
 import { isBlank, assertBodyInputs } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
 import { buildForwardBodies } from './reply-quote.js';
-import type { AttachmentPart } from './jmap-client.js';
+import {
+  DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, reportAuthoredInlineImages,
+} from './compose-inline.js';
+import type { AuthoredInlineContext, AuthoredInlinePlan } from './compose-inline.js';
+import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // Parameters passed to createDraft for a forward (matches its input shape).
 export interface ForwardParams {
@@ -82,6 +86,9 @@ function carryPart(a: any): AttachmentPart {
 export interface BuiltForward {
   asAttachment: boolean;
   forwardParams: ForwardParams;
+  // What the caller's own note asks this server to embed, and whether the forward will
+  // actually be able to display it (#13).
+  inlinePlan: AuthoredInlinePlan;
   // Count of the original's true-inline (cid-referenced) image parts NOT carried by
   // an inline forward — the loud runtime degrade for the inline-image gap. Computed
   // from the SOURCE message regardless of includeOriginalAttachments (the body's
@@ -97,7 +104,14 @@ export interface BuiltForward {
 // attachments (all-or-none; per-part subsetting goes through the draft +
 // edit_draft's removeAttachments). Caller uploads are appended later by
 // composeForward (the I/O boundary). Throws McpError on invalid input.
-export function buildForwardParams(args: any, originalEmail: any): BuiltForward {
+//
+// `inline` carries the caller's already-coerced attachments for the embedded-image checks
+// (see AuthoredInlineContext for why they are passed in rather than read from args).
+export function buildForwardParams(
+  args: any,
+  originalEmail: any,
+  inline: AuthoredInlineContext = DEFAULT_INLINE_CONTEXT,
+): BuiltForward {
   const a = args ?? {};
   // Validate the caller's note FIRST — before the forwarded-message block is assembled
   // below, which would otherwise mask a malformed note the same way a reply quote does
@@ -124,6 +138,19 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
     const orig = originalEmail?.subject || '';
     subject = /^fwd?:/i.test(orig.trim()) ? orig : `Fwd: ${orig}`;
   }
+
+  // Checked against the caller's OWN note, BEFORE the forwarded-message block is assembled
+  // below — the block is this server's own markup and legitimately carries identifiers the
+  // caller never wrote. An image the caller supplies can only be displayed if their note
+  // ships as html; with no html note there is nothing to reference it, whatever format the
+  // forwarded block itself ends up in.
+  const inlinePlan = planAuthoredInlineImages({
+    callerHtml: htmlBody,
+    htmlShips: !isBlank(htmlBody),
+    specs: inline.specs,
+    attachmentsEnabled: inline.attachmentsEnabled,
+    surface: 'note',
+  });
 
   const params: ForwardParams = { to, cc, bcc, from, subject, replyTo };
 
@@ -178,7 +205,7 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
       name: sanitizeEmlFilename(originalEmail?.subject),
       disposition: 'attachment',
     }];
-    return { asAttachment, forwardParams: params };
+    return { asAttachment, forwardParams: params, inlinePlan };
   }
 
   // Inline forward: reproduce the original under the forwarded-message block.
@@ -204,7 +231,7 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
       });
   }
 
-  return { asAttachment, forwardParams: params, droppedInlineImages };
+  return { asAttachment, forwardParams: params, droppedInlineImages, inlinePlan };
 }
 
 // The minimal client surface composeForward needs; JmapClient satisfies it
@@ -212,7 +239,11 @@ export function buildForwardParams(args: any, originalEmail: any): BuiltForward 
 // unit-testable with a mock and free of a hard dependency on the concrete client.
 export interface ForwardClient {
   getEmailById(id: string): Promise<any>;
-  uploadAttachments(specs: AttachmentSpec[], attachDir: string | undefined): Promise<AttachmentPart[]>;
+  uploadAttachments(
+    specs: AttachmentSpec[],
+    attachDir: string | undefined,
+    options?: UploadAttachmentsOptions,
+  ): Promise<AttachmentPart[]>;
   createDraft(params: ForwardParams): Promise<string>;
 }
 
@@ -220,6 +251,8 @@ export interface ComposeForwardResult {
   subject: string;
   emailId: string;
   droppedInlineImages?: number; // see BuiltForward
+  /** What the draft ended up embedding, or could not (#13). Absent when there is nothing to say. */
+  notes?: string[];
 }
 
 // Orchestrate a forward end to end: fetch the original, assemble the (pure) forward
@@ -242,16 +275,39 @@ export async function composeForward(
   }
 
   const originalEmail = await client.getEmailById(originalEmailId);
-  const { forwardParams, droppedInlineImages } = buildForwardParams(args, originalEmail);
+
+  // The caller's note is validated before their attachments are even coerced, so a malformed
+  // note is reported as a note problem rather than as whatever the attachments list happens
+  // to be wrong about too. The builder re-runs this check as its own first step; running it
+  // here as well is an ordering belt, not a second authority.
+  assertBodyInputs(args ?? {});
+  const specs = coerceAttachments(args?.attachments);
+
+  const { forwardParams, droppedInlineImages, inlinePlan } = buildForwardParams(
+    args,
+    originalEmail,
+    { specs, attachmentsEnabled: !!attachDir },
+  );
 
   // Upload NEW attachments (if any) after the pure builder and append them behind
   // the carried/.eml parts.
-  const specs = coerceAttachments(args?.attachments);
+  let uploaded: AttachmentPart[] | undefined;
   if (specs?.length) {
-    const uploaded = await client.uploadAttachments(specs, attachDir);
+    uploaded = await client.uploadAttachments(specs, attachDir, { inlineCids: inlinePlan.inlineCids });
     forwardParams.attachments = [...(forwardParams.attachments ?? []), ...uploaded];
   }
 
   const emailId = await client.createDraft(forwardParams);
-  return { subject: forwardParams.subject, emailId, droppedInlineImages };
+  const notes = await reportAuthoredInlineImages({
+    uploaded,
+    plan: inlinePlan,
+    emailId,
+    readBack: (id) => client.getEmailById(id),
+  });
+  return {
+    subject: forwardParams.subject,
+    emailId,
+    droppedInlineImages,
+    ...(notes.length > 0 && { notes }),
+  };
 }

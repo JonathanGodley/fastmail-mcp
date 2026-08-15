@@ -104,7 +104,7 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
 // The embedded-image sentences a call produced, appended to its result text (#13). They are
 // already whole sentences, composed in one place so their counts agree, so this only joins
 // them; an empty channel adds nothing.
-function formatInlineNotes(notes?: string[]): string {
+export function formatInlineNotes(notes?: string[]): string {
   return notes?.length ? ` ${notes.join(' ')}` : '';
 }
 

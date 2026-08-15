@@ -64,8 +64,12 @@ function sanitizeForQuote(html: string, cidMap?: Map<string, string>): string {
 // (http/https) <img>. Content-based, NOT a string trim: a cid:-image-only original
 // sanitizes to e.g. <div></div> (non-empty as a string, visually empty), which must NOT
 // count as quotable or we'd emit an orphan "On … wrote:" over an empty blockquote.
+// Placeholder-suppressed on purpose: this reads the SANITIZED html, where an embedded image
+// that was not mapped has already been dropped. A placeholder here would count an image the
+// quote does not carry as quotable content, and produce an attribution line over a quote
+// that shows nothing.
 function isQuotable(sanitized: string): boolean {
-  if (!isBlank(htmlToText(sanitized))) return true;
+  if (!isBlank(htmlToText(sanitized, 'suppress'))) return true;
   return /<img\b[^>]*\bsrc\s*=/i.test(sanitized);
 }
 
@@ -192,9 +196,21 @@ export function buildReplyBodies(input: {
 
   const out: { textBody?: string; htmlBody?: string } = {};
 
+  // Whether this reply ships an html quote at all — the text side's image policy turns on
+  // it. When it does, an embedded image the quote carries is something the reader can look
+  // at, so the text alternative may say an image is there; when it does not, nothing carries
+  // the image and a placeholder would describe an absent thing.
+  const htmlQuoteShips = htmlBody !== undefined;
+
   if (textBody !== undefined) {
-    // text quote source: the original's text, else a readable conversion of its html.
-    const textSource = pick(origText, htmlToText(origHtml));
+    // text quote source: the original's text, else a readable conversion of its html. The
+    // conversion runs over the RAW original html, exactly as it always has — deriving from
+    // the sanitized output instead would silently change the derived text of every html
+    // original, embedded images or not, because the quote floor drops tags that carry text.
+    const textSource = pick(
+      origText,
+      htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', cidMap),
+    );
     out.textBody = `${textBody ?? ''}\n\n${attribution}\n${quoteText(textSource)}`;
   }
 
@@ -281,7 +297,14 @@ export function buildForwardBodies(input: {
   // readable conversion of its html; may be blank (attachment-only original),
   // in which case the block stands alone. HTML form: the sanitized original
   // html, else the original text escaped — never fabricated from nothing.
-  const textSource = pick(origText, htmlToText(origHtml));
+  // Which formats this forward emits is decided at the bottom of this function; the text
+  // side's image policy needs the html half of that decision up front, for the same reason
+  // the reply builder does — a placeholder must not describe an image no format carries.
+  const htmlBlockShips = htmlBody !== undefined || (textBody === undefined && htmlQuotable);
+  const textSource = pick(
+    origText,
+    htmlToText(origHtml, htmlBlockShips ? 'resolve' : 'suppress', cidMap),
+  );
   const htmlSource = htmlQuotable ? sanitizedHtml : (textQuotable ? textToHtmlBlock(origText) : '');
 
   const composeText = (note: string | undefined): string => {

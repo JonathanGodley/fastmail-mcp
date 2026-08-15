@@ -1,5 +1,6 @@
 import { convert } from 'html-to-text';
 import { InvalidInputError } from './coerce.js';
+import { classifyImgSrc } from './inline-images.js';
 
 // Body-format rule applied across every compose path: never ship an HTML body without a
 // readable text/plain alternative. The text part is a DERIVED fallback, auto-generated
@@ -112,32 +113,90 @@ export function assertBodyInputs(bodies: { textBody?: unknown; htmlBody?: unknow
   }
 }
 
-// Custom <img> formatter: emit the alt text only (nothing when there is no alt). The
-// stock html-to-text image formatter falls back to the src/filename (e.g. "[logo.png]")
-// when alt is absent, which would (a) emit junk as the "fallback" and (b) make an
-// image-only, no-alt newsletter convert to non-empty text — defeating the html-only
-// degrade path. Alt-only keeps accessible text where it exists and yields '' otherwise.
-const HTML_TO_TEXT_OPTS = {
-  wordwrap: false as const,
-  formatters: {
-    imgAltOnly: (elem: any, _walk: any, builder: any) => {
-      const alt = elem?.attribs?.alt;
-      if (alt && alt.trim()) builder.addInline(alt);
+/**
+ * What the plain-text derivation writes for an image that carries no alt text.
+ *
+ * Alt text always wins and is emitted verbatim in every mode — this only decides what
+ * happens in its ABSENCE, and only for images the message actually embeds. A remote
+ * (http/https) image with no alt writes nothing under every mode: it is decoration by
+ * default, and inventing a placeholder for it would put "[image]" into the text
+ * alternative of every tracking pixel and spacer gif on the web.
+ *
+ *  - `suppress`      — write nothing. The historical behaviour, and what a text-only
+ *                      branch wants: if no html ships, no image ships either, so a
+ *                      placeholder would describe something the recipient never gets.
+ *  - `unconditional` — write `[image]` for ANY embedded (cid:) image. For the contexts
+ *                      that derive the text alternative of a body that is about to ship:
+ *                      an embedded image IS content, and deriving '' for a body whose
+ *                      only content is one would leave the message with no readable
+ *                      text part at all.
+ *  - `resolve`       — write `[image]` only for embedded images the caller-supplied map
+ *                      resolves to a part that ships. For quote derivations, where a
+ *                      reference that was dropped rather than carried must not be
+ *                      described as an image the reader can look at.
+ *
+ * A literal `cid:` reference is NEVER written into the derived text under any mode — it
+ * is a MIME-internal handle and means nothing to a person reading the plain-text part.
+ */
+export type ImagePlaceholderPolicy = 'suppress' | 'unconditional' | 'resolve';
+
+// The placeholder itself: bare, and deliberately not the filename. The stock html-to-text
+// image formatter falls back to the src/filename (e.g. "[logo.png]") when alt is absent,
+// which would (a) emit junk as the "fallback", (b) leak a cid: handle into readable text,
+// and (c) make an image-only, no-alt newsletter convert to non-empty text — defeating the
+// html-only degrade path for remote images.
+const IMAGE_PLACEHOLDER = '[image]';
+
+// Custom <img> formatter: alt text when there is any, else the policy's answer for this
+// image (see ImagePlaceholderPolicy).
+function imageFormatter(policy: ImagePlaceholderPolicy, cidMap?: ReadonlyMap<string, string>) {
+  return (elem: any, _walk: any, builder: any) => {
+    const alt = elem?.attribs?.alt;
+    if (alt && alt.trim()) {
+      builder.addInline(alt);
+      return;
+    }
+    if (policy === 'suppress') return;
+    const classified = classifyImgSrc(elem?.attribs?.src);
+    if (classified.kind !== 'cid') return;
+    if (policy === 'resolve' && !cidMap?.get(classified.key)) return;
+    builder.addInline(IMAGE_PLACEHOLDER);
+  };
+}
+
+function htmlToTextOptions(policy: ImagePlaceholderPolicy, cidMap?: ReadonlyMap<string, string>) {
+  return {
+    wordwrap: false as const,
+    formatters: {
+      imgAltOrPlaceholder: imageFormatter(policy, cidMap),
     },
-  },
-  selectors: [
-    { selector: 'a', options: { hideLinkHrefIfSameAsText: true } },
-    { selector: 'img', format: 'imgAltOnly' },
-  ],
-};
+    selectors: [
+      { selector: 'a', options: { hideLinkHrefIfSameAsText: true } },
+      { selector: 'img', format: 'imgAltOrPlaceholder' },
+    ],
+  };
+}
 
 // Convert HTML to a readable plain-text fallback. NEVER throws — on a converter
 // failure, fall back to a minimal tag-strip so a send is never blocked. May
 // legitimately return '' for image-only / empty HTML. The emptiness checks elsewhere
 // run on whatever this returns, INCLUDING the catch-path output.
-export function htmlToText(html: string): string {
+//
+// The default policy is the historical one, so a caller that expresses no opinion gets
+// exactly the text this function has always produced; every production call site states
+// its policy explicitly. NOTE the catch path emits no placeholder at all — it is a bare
+// tag strip with no element formatting — so on a converter failure a body whose only
+// content is an embedded image still derives '', and the no-readable-body gates that the
+// unconditional policy normally keeps out of reach are reached after all. An accepted
+// degrade: the fallback exists so a send is never blocked by a converter fault, and it
+// cannot be made image-aware without becoming a second HTML parser.
+export function htmlToText(
+  html: string,
+  policy: ImagePlaceholderPolicy = 'suppress',
+  cidMap?: ReadonlyMap<string, string>,
+): string {
   try {
-    return convert(html, HTML_TO_TEXT_OPTS);
+    return convert(html, htmlToTextOptions(policy, cidMap));
   } catch {
     return html
       .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -159,8 +218,12 @@ export function htmlToText(html: string): string {
 // thin email; a false negative would block a real one), so an imperfect scan is
 // safe-by-direction. Comments + CDATA are stripped first so a commented-out tag or
 // prose mention doesn't trip it.
+//
+// The unconditional image policy changes no answer here — the element scan below already
+// returns true for any <img>, so an embedded-image-only body was always visible. It is
+// stated anyway so this gate and the derivation it guards read the same body the same way.
 export function htmlHasVisibleContent(html: string): boolean {
-  if (!isBlank(htmlToText(html))) return true;
+  if (!isBlank(htmlToText(html, 'unconditional'))) return true;
   const stripped = html
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
@@ -175,13 +238,18 @@ export function htmlHasVisibleContent(html: string): boolean {
 // and flag htmlOnly (an INTERNAL signal the authoring guard consumes — NOT a reject by
 // itself, and not surfaced to the consumer). text-only and both-supplied pass through
 // untouched (distinct content preserved). Presence uses the shared isBlank predicate.
+//
+// The derivation is UNCONDITIONAL about embedded images: this is the body that is about to
+// ship, and a body whose only content is an embedded image has real content. Deriving ''
+// for it would flag the message html-only and hand it to the no-readable-body gates, which
+// would refuse a message that displays perfectly well.
 export function normalizeBodies(input: { textBody?: string; htmlBody?: string }): {
   textBody?: string; htmlBody?: string; htmlOnly?: boolean;
 } {
   const text = !isBlank(input.textBody) ? input.textBody : undefined;
   const html = !isBlank(input.htmlBody) ? input.htmlBody : undefined;
   if (html && !text) {
-    const derived = htmlToText(html);
+    const derived = htmlToText(html, 'unconditional');
     if (isBlank(derived)) return { htmlBody: html, htmlOnly: true };
     return { textBody: derived, htmlBody: html };
   }

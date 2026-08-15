@@ -190,7 +190,7 @@ describe('the notes a call emits', () => {
   it('reports the caller\'s own images that could not be embedded', () => {
     assert.equal(
       noteDegradedToAttachments(3),
-      '3 of your image(s) became regular attachments (no html body ships them).',
+      '3 of your image(s) became regular attachments (nothing in the body displays them).',
     );
   });
 
@@ -604,7 +604,7 @@ describe('emitInlineNotes', () => {
       'includeOriginalAttachments is false. Body-embedded images were still carried — ' +
       'they are part of the message body.',
       'Removed 1 image(s) that were embedded in the forwarded block.',
-      '1 of your image(s) became regular attachments (no html body ships them).',
+      '1 of your image(s) became regular attachments (nothing in the body displays them).',
       '1 image(s) from the quoted message were dropped and are not part of this draft.',
       '1 data:-URI image(s) in the quoted message were dropped (not supported); ' +
       'the rest of the quote was kept.',

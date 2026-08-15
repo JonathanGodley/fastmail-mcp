@@ -441,11 +441,10 @@ staged differently. Do not "unify" them.
 
 - **A reference in HTML** (`<img src="cid:...">`) is a URL, so per RFC 2392 its value is
   percent-encoded. It must be DECODED FIRST and the decoded key compared against part
-  Content-IDs. `cidKey` (`src/inline-images.ts`) is that key function. *No consumer of
-  this direction has shipped yet* — matching body references to parts arrives with the
-  quote-carry work; today `cidKey`'s only production caller is the download path below,
-  as its fallback. The rule is recorded here now because the two directions share the
-  helper and the staging is the thing that must not be unified.
+  Content-IDs. `cidKey` (`src/inline-images.ts`) is that key function; the collecting
+  sanitizer pass reports references already in that decoded form, so the compose and edit
+  paths that match body references to parts inherit the staging rather than re-deriving
+  it. `cidKey`'s other production caller is the download path below, as its fallback.
 - **`download_attachment`'s `cid:<value>` parameter** is a handle that round-tripped from
   `get_email`'s output, where the `cid` is echoed VERBATIM. It is therefore compared
   LITERALLY first, and only falls back to the same `cidKey` decode when the literal
@@ -460,6 +459,36 @@ form, ambiguity is rejected rather than resolved by falling through to the next 
 two parts sharing a Content-ID are genuinely different content, so picking one would be
 a guess. That rule is specific to `cid` — the `blobId` form takes the first match on
 purpose, because blobs are content-addressed and parts sharing one ARE the same bytes.
+
+## Authoring a cid: what a caller may supply, and where it is decided
+
+An `attachments` item may carry a `cid`, which is what makes the file display inside the
+body instead of hanging off the end (#13). That value is a third provenance, and it is
+neither of the two above: it is not a URL to decode, and it is not a handle that
+round-tripped from this server's own output. It is caller-chosen text that ends up in a
+MIME header, so it is the one direction that gets a vet rather than a comparison rule.
+
+- **Vetted at coercion, in `coerceAttachments`.** A spelling copied out of HTML
+  (`cid:logo`) or out of a header (`<logo>`) is pre-stripped to the same canonical value,
+  then that value must be a simple token: letters, digits, dot, dash, underscore, up to
+  64 characters. Everything else is refused by index, naming the item. The narrow shape is
+  not decoration — a value carrying CR or LF stores as a genuinely injected MIME header
+  and is invisible in the JMAP read-back (see `security-model.md`).
+- **Canonical from that point on.** Every later comparison — collision between two items,
+  a body reference resolving to a part, the reserved-shape check — uses the post-strip
+  value, so `cid:logo`, `<logo>` and `logo` are one identifier and cannot collide with
+  each other by spelling.
+- **Matched against the body at compose time, not at send time.** The compose tools decide
+  which supplied files the message displays and mark exactly those `inline`; `send_draft`
+  submits a draft by reference and never re-validates its images.
+- **Never a silent demotion.** A supplied file whose identifier nothing displays — no html
+  body ships, or the body references something else — is still attached as an ordinary
+  file, and the result says so. A body reference with no matching item is the reverse case
+  and is refused outright, because that one ships visibly broken.
+- **The refusal is honest about the opt-in.** When `FASTMAIL_ATTACH_DIR` is unset there is
+  no way to supply the missing file at all, so the wording drops the "add it to
+  attachments" repair rather than pointing at a parameter that cannot work. The flag is
+  threaded into the refusal builders for exactly that reason.
 
 ## Index tightening: `download_attachment`'s entry-number form
 

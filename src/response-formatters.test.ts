@@ -1,6 +1,21 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, buildOmittedPartsNote, buildAttachmentListContent } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildAttachmentListContent } from './response-formatters.js';
+
+// ---------- formatInlineNotes ----------
+
+// The compose tools build their own result text and append this, so the joining lives in
+// one place and a tool that has nothing to say adds nothing at all.
+describe('formatInlineNotes', () => {
+  it('adds nothing when there is nothing to say', () => {
+    assert.equal(formatInlineNotes(undefined), '');
+    assert.equal(formatInlineNotes([]), '');
+  });
+
+  it('joins the sentences behind a single leading space', () => {
+    assert.equal(formatInlineNotes(['One.', 'Two.']), ' One. Two.');
+  });
+});
 
 // ---------- formatEditDraftResult ----------
 
