@@ -1148,11 +1148,11 @@ describe('formatArchiveResult', () => {
 
   it('groups failures by reason and redacts server text', () => {
     const text = build([
-      { id: 'a', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: 'Bearer fmu1-abcdefghijklmnopqrstuvwxyz rejected' } },
-      { id: 'b', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: 'Bearer fmu1-abcdefghijklmnopqrstuvwxyz rejected' } },
+      { id: 'a', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: 'Bearer fmu1-abcdefghijklmnopqrstuvwxyz rejected' } }, // allowlist-secret (synthetic: the literal alphabet, never a real token)
+      { id: 'b', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: 'Bearer fmu1-abcdefghijklmnopqrstuvwxyz rejected' } }, // allowlist-secret (synthetic: the literal alphabet, never a real token)
     ]);
     assert.match(text, /2 failed \(forbidden - Bearer \[REDACTED\] rejected\): a, b/);
-    assert.ok(!text.includes('fmu1-abcdefghijklmnopqrstuvwxyz'));
+    assert.ok(!text.includes('fmu1-abcdefghijklmnopqrstuvwxyz')); // allowlist-secret (synthetic)
   });
 
   it('redacts a token sitting past the truncation cap, not just a short one', () => {
@@ -1161,7 +1161,7 @@ describe('formatArchiveResult', () => {
     // length-sensitive (the token pattern needs 20+ characters after the prefix), so
     // truncating BEFORE redacting hands the matcher a string the token no longer fits in
     // and a usable prefix goes out verbatim. This positions the token past the cap.
-    const secret = 'fmu1-abcdefghijklmnopqrstuvwxyz012345';
+    const secret = 'fmu1-abcdefghijklmnopqrstuvwxyz012345'; // allowlist-secret (synthetic: the literal alphabet, never a real token)
     const text = build([
       {
         id: 'a',
@@ -1400,7 +1400,7 @@ describe('formatArchiveResult', () => {
     // response and verbatim in the other. Redaction runs FIRST because the token pattern is
     // length-sensitive and describePart truncates at 64 code points.
     const text = formatArchiveResult({
-      results: [{ id: 'fmu1-abcdefghijklmnopqrstuvwxyz012345', action: 'notFound' }],
+      results: [{ id: 'fmu1-abcdefghijklmnopqrstuvwxyz012345', action: 'notFound' }], // allowlist-secret (synthetic)
       counts: { movedToArchive: 0, removedFromInbox: 0, notInInbox: 0, refused: 0, notFound: 1, failed: 0 },
     });
     assert.doesNotMatch(text, /fmu1-\w/);
@@ -1416,7 +1416,7 @@ describe('formatArchiveResult', () => {
       results: [{
         id: 'e1',
         action: 'removedFromInbox',
-        mailboxes: ['x'.repeat(40) + ' fmu1-abcdefghijklmnopqrstuvwxyz012345'],
+        mailboxes: ['x'.repeat(40) + ' fmu1-abcdefghijklmnopqrstuvwxyz012345'], // allowlist-secret (synthetic)
       }],
       counts: { movedToArchive: 0, removedFromInbox: 1, notInInbox: 0, refused: 0, notFound: 0, failed: 0 },
     });
