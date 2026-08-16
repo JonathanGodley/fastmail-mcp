@@ -10,20 +10,25 @@ on:
       - 'v*'
 
 # Read-only by default. The job below opts up to contents: write because it
-# publishes the release asset. Permissions are granted per job, so that scope
-# bounds every step — but the token itself is NOT ambient: Actions does not put
-# GITHUB_TOKEN into a run: step's environment, it materializes only where a step
-# references secrets.GITHUB_TOKEN or github.token. In this file that is exactly
-# one place, the release step's env:, so npm ci and the pack step hold no
-# write-capable credential at all. The checkout also carries no pushable git
-# credential (persist-credentials: false), and the artifact is gated on the test
-# suite and the secret scan before anything is packed.
+# publishes the release asset, and that scope bounds every step in the job.
 #
-# The residual worth knowing is therefore about artifact content, not token
-# reach: npm ci runs third-party install scripts in the same workspace that is
-# about to be packed, so a compromised dependency could alter dist/ before pack.
-# Splitting the jobs would not change that — it is why the pack tool is pinned
-# by exact version and the release is gated behind the scan.
+# GITHUB_TOKEN is not ambient in a run: step — Actions does not put it into the
+# environment, so npm ci and the pack step hold no credential. It is NOT confined
+# to the release step's env:, though: actions/checkout and actions/setup-node
+# both declare token as a default input (github.token, and github.token when the
+# server is github.com, respectively), so at the SHAs pinned below it reaches
+# three places, two of them implicitly. Those two run write-scoped today only
+# because this job asks for contents: write; under a build/release job split they
+# would run read-scoped. That narrowing is the open request in issue #103.
+# The checkout at least leaves no pushable git credential behind
+# (persist-credentials: false), and the artifact is gated on the test suite and
+# the secret scan before anything is packed.
+#
+# A separate residual, which the split does not address, is artifact content
+# rather than token reach: npm ci runs third-party install scripts in the same
+# workspace that is about to be packed, so a compromised dependency could alter
+# dist/ before pack. That is why the pack tool is pinned by exact version and the
+# release is gated behind the scan.
 permissions:
   contents: read
 
