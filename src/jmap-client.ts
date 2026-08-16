@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml } from './reply-quote.js';
@@ -607,7 +607,13 @@ export function resolveAttachmentRemovals(
       survivors = byBlob;
       continue;
     }
-    const nameMatches = survivors.filter((p) => p.name != null && p.name === ref);
+    // Both sides trimmed. The ref arrives through coerceStringArray, which trims every
+    // element, so an attachment whose MIME filename legally carries surrounding spaces would
+    // otherwise be unreachable by name — the caller types the name they can see, it is
+    // trimmed on the way in, and it no longer equals the stored one. Trimming the stored side
+    // too keeps the two ends of one comparison normalised the same way. Blob ids are matched
+    // untrimmed above because they are server-minted and cannot carry stray whitespace.
+    const nameMatches = survivors.filter((p) => p.name != null && String(p.name).trim() === ref);
     if (nameMatches.length === 1) {
       removed.push(nameMatches[0]);
       survivors = survivors.filter((p) => p !== nameMatches[0]);
@@ -792,6 +798,187 @@ export function attachMailboxInfo(emails: any[], map: Map<string, MailboxInfo>):
       Object.defineProperty(email, '_unresolvedMailboxIds', { value: unresolved, enumerable: false, configurable: true });
     }
   }
+}
+
+// ---------- archive ----------
+
+/** What archiving decided to do to one message, before the write is attempted. */
+export type ArchiveBranch = 'movedToArchive' | 'removedFromInbox' | 'notInInbox' | 'refused';
+
+/** What archiving actually did to one message. The two extra buckets are write outcomes. */
+export type ArchiveAction = ArchiveBranch | 'notFound' | 'failed';
+
+export interface ArchiveEmailResult {
+  id: string;
+  action: ArchiveAction;
+  /**
+   * Where the message is filed, as resolved names. PROJECTED (computed from the pre-write
+   * read) for movedToArchive and removedFromInbox; OBSERVED AND UNCHANGED for notInInbox
+   * and refused, which issue no write at all. For failed it is weaker still, and splits in
+   * two: where a write was attempted this is the filing as it was BEFORE that attempt (and
+   * for an id the server acknowledged in neither map, nothing confirmed the outcome either
+   * way), while the sub-case where the filing could not be read carries NEITHER field,
+   * because it was never observed at all — which is the reason it failed. Absent
+   * for notFound too, which has no filing to report.
+   *
+   * `mailboxes` and `roles` are INDEPENDENT sets, not parallel arrays — a label contributes
+   * a name but no role — so read "did it reach Archive" off roles.includes('archive'),
+   * never off the array positions and never off the branch name (an Inbox+Archive message
+   * takes the removedFromInbox branch yet does end in Archive).
+   */
+  mailboxes?: string[];
+  roles?: string[];
+  /** Ids that could not be resolved to a name. Never omitted silently (#53). */
+  unresolvedMailboxIds?: string[];
+  reason?: {
+    role?: string;
+    setErrorType?: string;
+    description?: string;
+    /**
+     * The write was dispatched and the server acknowledged this id in NEITHER its `updated`
+     * nor its `notUpdated` map, so nothing confirmed the outcome either way.
+     *
+     * This is a STRUCTURAL marker rather than something a reader infers from `description`,
+     * and that is the whole point of it. The renderer has to hedge its headline for this
+     * case (a caller reading only the first line must not be told "0 changed" when nothing
+     * confirmed that), and keying that off the wording of `description` couples two files
+     * through a sentence: rewording it here would silently delete the hedge with every test
+     * still green, and a server-supplied set-error description that happened to contain the
+     * same phrase would falsely trigger it. A field cannot drift or be spoofed that way.
+     */
+    outcomeUnknown?: boolean;
+  };
+}
+
+export interface ArchiveResult {
+  results: ArchiveEmailResult[];
+  /** One entry per action, always all six. Sums to the number of DISTINCT ids passed in. */
+  counts: Record<ArchiveAction, number>;
+}
+
+/**
+ * The roles where Fastmail's client offers no Archive action at all, in the fixed order
+ * used to pick one when a message sits in two of them (real on this account: messages
+ * filed in both snoozed and sent).
+ *
+ * This is exactly the set measured to omit Archive from the client's toolbar IN EACH
+ * ROLE'S OWN VIEW. Note what that does and does not cover: this server applies the refusal
+ * to a message with no Inbox membership viewed from anywhere, and the only role measured
+ * from inside a LABEL view is `snoozed` (see the table in
+ * docs/fastmail-action-availability.md, which marks the other five unmeasured there). The
+ * extrapolation is deliberate and small, but it is an extrapolation. The only
+ * way to extend it is to measure another view — never to infer from a role's name. It is
+ * also deliberately not a general "system mailbox" predicate: nothing else in this file
+ * groups role mailboxes, and widening it into one would silently change what other tools
+ * refuse.
+ */
+export const ARCHIVE_REFUSING_ROLES = ['trash', 'junk', 'drafts', 'scheduled', 'sent', 'snoozed'] as const;
+
+/**
+ * How many unaccounted-for ids the fail-closed read error names before it summarises the
+ * rest. Named for the same reason the renderer names its caps: a bare 10 written twice in
+ * one expression is two places to disagree, and the count in the "…and N more" tail is
+ * derived from it rather than restated.
+ */
+const UNACCOUNTED_ID_CAP = 10;
+
+/**
+ * Whether a value returned inside a JMAP method response can be read as an id-keyed map.
+ *
+ * Array.isArray as well as the typeof test, because `typeof [] === 'object'`: an array-shaped
+ * `updated`/`notUpdated` would otherwise answer hasOwnProperty for the ids "0", "1", ... and a
+ * caller whose ids happen to look like indices gets a fabricated answer about its write. A
+ * string is worse still — `Object.prototype.hasOwnProperty.call('oops', '0')` is TRUE, so a
+ * non-compliant server sending a bare string turns a confirmed-successful write into a
+ * reported failure.
+ */
+function isPlainResponseMap(value: any): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * An `Email/set` `update` map keyed by CALLER-SUPPLIED email ids.
+ *
+ * Object.create(null), not `{}`, and this is a correctness fix rather than hygiene.
+ * `updates['__proto__'] = patch` on an ordinary object invokes the prototype SETTER instead
+ * of creating an own key, so the entry never reaches the request. The server is then never
+ * asked about that id, cannot list it in `notUpdated`, and every tool here infers success
+ * from the absence of a set-error — so the message is REPORTED AS DONE while nothing touched
+ * it. Underscores are in the base64url alphabet JMAP ids are drawn from, so `__proto__` is a
+ * legal id rather than a contrived one.
+ *
+ * Reading such a map back needs Object.prototype.hasOwnProperty.call for the mirror-image
+ * reason: an id of `constructor` or `toString` would otherwise pick a function off the
+ * prototype and be read as a server response that never arrived. JSON.stringify serialises a
+ * null-prototype object normally, so nothing downstream changes.
+ */
+function newUpdateMap(): Record<string, any> {
+  return Object.create(null);
+}
+
+/**
+ * Decide what archiving does to one message, from its current membership alone.
+ *
+ * The order of the tests is the rule, and it is the order that was measured: Inbox
+ * membership is checked FIRST, because the client offers Archive on a message that is in
+ * the Inbox and in Trash simultaneously. The refusal set is only reached once a message
+ * has left the Inbox.
+ *
+ * Nothing is added when the surviving memberships are all refusing roles — an Inbox+Trash
+ * message keeps Trash and gains nothing, which is what the client does. Adding Archive
+ * there as a "rescue" would be this server inventing a destructive-destination guard that
+ * exists nowhere else in the codebase (fork #43 owns that whole class).
+ */
+export function decideArchiveBranch(
+  currentIds: string[],
+  inboxId: string,
+  roleById: Map<string, string | null>,
+): { branch: ArchiveBranch; keptIds: string[]; refusingRole?: string } {
+  if (currentIds.includes(inboxId)) {
+    const keptIds = currentIds.filter(id => id !== inboxId);
+    return keptIds.length > 0
+      ? { branch: 'removedFromInbox', keptIds }
+      : { branch: 'movedToArchive', keptIds: [] };
+  }
+
+  const presentRoles = new Set(currentIds.map(id => roleById.get(id)).filter((r): r is string => !!r));
+  const refusingRole = ARCHIVE_REFUSING_ROLES.find(role => presentRoles.has(role));
+  return refusingRole
+    ? { branch: 'refused', keptIds: [], refusingRole }
+    : { branch: 'notInInbox', keptIds: [] };
+}
+
+/**
+ * Resolve a set of mailbox ids to names/roles for an archive report, following
+ * attachMailboxInfo's never-silent rule (resolved -> name and role, unresolved -> the raw
+ * id in unresolvedMailboxIds) but as ORDINARY ENUMERABLE fields.
+ *
+ * Reusing attachMailboxInfo's non-enumerable carrier here would be #53 through a new door:
+ * those properties exist so JSON.stringify drops them on the raw:true paths, and this
+ * result object IS serialized, so the location fields would silently vanish from the
+ * output that promises them.
+ */
+function describeMailboxIds(
+  ids: string[],
+  map: Map<string, MailboxInfo>,
+): { mailboxes: string[]; roles?: string[]; unresolvedMailboxIds?: string[] } {
+  const mailboxes: string[] = [];
+  const roles: string[] = [];
+  const unresolvedMailboxIds: string[] = [];
+  for (const id of ids) {
+    const info = map.get(id);
+    if (info) {
+      mailboxes.push(info.name);
+      if (info.role) roles.push(info.role);
+    } else {
+      unresolvedMailboxIds.push(id);
+    }
+  }
+  return {
+    mailboxes,
+    ...(roles.length > 0 ? { roles } : {}),
+    ...(unresolvedMailboxIds.length > 0 ? { unresolvedMailboxIds } : {}),
+  };
 }
 
 // Cap the mailbox names listed in a not-found error so a large account doesn't
@@ -1611,9 +1798,43 @@ export class JmapClient {
   // (case-insensitive) — used by both searchEmails and getEmails. Fixed-role lookup
   // with a private helper to share the resolved id between the visible filter and the
   // hidden-count query.
+  //
+  // A USABLE id is part of the match, not a separate check each caller repeats. Every caller
+  // of this helper goes straight on to read `.id`, so a record that carries the role with a
+  // missing or non-string id satisfies a bare `!!mailbox` and then produces the literal
+  // string "undefined" where an id belongs — as a whole-value `mailboxIds: {undefined: true}`
+  // in the trash writes, or as a patch key `mailboxIds/undefined` in the archive write. Both
+  // are silently corrupt writes, which is a far worse outcome for the caller than the
+  // "no mailbox with that role" error they get instead. Requiring the id here is what keeps
+  // that from having to be remembered at each of the six call sites.
   private findByExactRole(mailboxes: any[], role: string): any | undefined {
     const target = role.toLowerCase();
-    return (mailboxes || []).find(mb => mb && typeof mb.role === 'string' && mb.role.toLowerCase() === target);
+    return (mailboxes || []).find(mb =>
+      mb && typeof mb.role === 'string' && mb.role.toLowerCase() === target
+      && typeof mb.id === 'string' && !!mb.id
+    );
+  }
+
+  // A per-id set-error out of a JMAP `notUpdated` map, or undefined when the server did not
+  // list that id. Every caller treats a returned value as "the server refused this write".
+  //
+  // Three readings, each of which a bare `notUpdated[id]` gets wrong:
+  //
+  // 1. hasOwnProperty, not an index, because the id is CALLER-supplied. `notUpdated` is parsed
+  //    from the response, so it is an ordinary object with Object.prototype behind it, and an
+  //    id of "constructor" or "toString" indexes straight through to a function on the
+  //    prototype. That function is truthy, so the tool throws a FABRICATED failure for an
+  //    operation the server performed. Cyrus returns `notUpdated: {}` on a clean write, which
+  //    is exactly where this misfires.
+  // 2. KEY PRESENCE is the refusal, not the value's truthiness. A server that lists an id with
+  //    a null value has still explicitly said it did not update that record, so a raw return
+  //    would let `if (setError)` read an explicit refusal as success — the same mutation
+  //    reported as done when the server said it was not. Hence the `?? {}`.
+  // 3. Array.isArray, because `typeof [] === 'object'`: an array-shaped notUpdated would
+  //    otherwise answer for the id "0", turning a successful write into a reported failure.
+  private setErrorFor(notUpdated: any, id: string): any | undefined {
+    if (!isPlainResponseMap(notUpdated)) return undefined;
+    return Object.prototype.hasOwnProperty.call(notUpdated, id) ? (notUpdated[id] ?? {}) : undefined;
   }
 
   // Resolve an optional mailbox input to an id. undefined/blank -> undefined (no filter).
@@ -2846,9 +3067,10 @@ export class JmapClient {
         // id -> object|null, so the null case makes a truthiness test wrong; test for
         // the key.
         const trashResult = this.getMethodResult(trashResponse, 0);
-        if (trashResult.notUpdated?.[emailId]) {
+        const trashSetError = this.setErrorFor(trashResult.notUpdated, emailId);
+        if (trashSetError) {
           orphanedOldDraftId = emailId;
-          orphanedOldDraftReason = this.describeSetError(trashResult.notUpdated[emailId]);
+          orphanedOldDraftReason = this.describeSetError(trashSetError);
         } else if (Object.prototype.hasOwnProperty.call(trashResult.updated ?? {}, emailId)) {
           trashedOldDraftId = emailId;
         } else {
@@ -3219,7 +3441,7 @@ export class JmapClient {
   async markEmailRead(emailId: string, read: boolean = true): Promise<void> {
     const session = await this.getSession();
 
-    const update: Record<string, any> = {};
+    const update: Record<string, any> = newUpdateMap();
     update[emailId] = read
       ? { 'keywords/$seen': true }
       : { 'keywords/$seen': null };
@@ -3237,8 +3459,9 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], `mark email as ${read ? 'read' : 'unread'}`);
+    const setError = this.setErrorFor(result.notUpdated, emailId);
+    if (setError) {
+      this.throwSingleSetError(setError, `mark email as ${read ? 'read' : 'unread'}`);
     }
   }
 
@@ -3269,15 +3492,16 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], 'add keywords to email');
+    const setError = this.setErrorFor(result.notUpdated, emailId);
+    if (setError) {
+      this.throwSingleSetError(setError, 'add keywords to email');
     }
   }
 
   async pinEmail(emailId: string, pinned: boolean = true): Promise<void> {
     const session = await this.getSession();
 
-    const update: Record<string, any> = {};
+    const update: Record<string, any> = newUpdateMap();
     update[emailId] = pinned
       ? { 'keywords/$flagged': true }
       : { 'keywords/$flagged': null };
@@ -3295,8 +3519,9 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], `${pinned ? 'pin' : 'unpin'} email`);
+    const setError = this.setErrorFor(result.notUpdated, emailId);
+    if (setError) {
+      this.throwSingleSetError(setError, `${pinned ? 'pin' : 'unpin'} email`);
     }
   }
 
@@ -3334,8 +3559,9 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
     
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], 'delete email');
+    const setError = this.setErrorFor(result.notUpdated, emailId);
+    if (setError) {
+      this.throwSingleSetError(setError, 'delete email');
     }
   }
 
@@ -3372,61 +3598,428 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], 'move email');
+    const setError = this.setErrorFor(result.notUpdated, emailId);
+    if (setError) {
+      this.throwSingleSetError(setError, 'move email');
     }
   }
 
   /**
-   * File an email into the account's Archive folder. A pure move: it replaces the
-   * message's whole mailbox membership and writes no keywords, so an unread message stays
-   * unread. Marking read is a separate call to markEmailRead. Folding the two together
-   * would leave a caller who wanted only the filing with no way to get it, while a caller
-   * who wanted both can always make the second call.
+   * Archive one or more emails the way the Fastmail client does: REMOVE the Inbox
+   * membership and leave everything else alone, adding the Archive mailbox only when
+   * removing the Inbox would otherwise leave the message filed nowhere.
    *
-   * The destination is resolved by EXACT ROLE ONLY, and there is deliberately no
-   * destination parameter — moveEmail owns custom destinations. Both halves of that are
-   * the point: this tool's whole job is a fixed, membership-replacing default, and a
-   * caller (or text a model merely read) can create a mailbox literally NAMED "archive".
-   * Resolving the name would hand that text a lever over where mail is filed; a role is
-   * assigned by the server and cannot be minted the same way. Same reasoning as
-   * deleteEmail's exact-role Trash lookup.
+   * This is NOT a whole-value membership replace, and the difference is the whole point.
+   * Measured against the live client: archiving a message filed in Inbox + a label keeps
+   * the label and does NOT add Archive; archiving an Inbox-only message moves it to
+   * Archive; archiving a message that has already left the Inbox does nothing and reports
+   * success. See docs/fastmail-action-availability.md for the measurements and the
+   * account-wide query that corroborates them.
+   *
+   * The Archive destination is resolved by EXACT ROLE ONLY, and there is deliberately no
+   * destination parameter — moveEmail owns custom destinations. A caller (or text a model
+   * merely read) can create a mailbox literally NAMED "archive"; resolving the name would
+   * hand that text a lever over where mail is filed, while a role is assigned by the
+   * server and cannot be minted the same way. Same reasoning as deleteEmail's exact-role
+   * Trash lookup.
+   *
+   * NO keyword is written. That is not the same as "read state unchanged": $seen is
+   * aggregated across a message's per-mailbox records and reported only when EVERY record
+   * carries it, so dropping an unread Inbox record from a message whose other copy is
+   * already read flips the message to read with no keyword write anywhere.
+   *
+   * Never throws on a per-message failure — every id lands in one of the six buckets of
+   * the returned report. It throws only when the whole call cannot be trusted, which is
+   * four conditions, all of them account-wide rather than per-message. Three abort before
+   * anything is written, and all three say "Nothing was archived":
+   *
+   * 1. The read failed or came back incomplete — a Mailbox/get or Email/get error, an empty
+   *    mailbox list, or an id the server accounted for in neither `list` nor `notFound`.
+   * 2. The account has no mailbox carrying the `inbox` role. A plain Error, so it surfaces
+   *    as InternalError: there is no substitute call for "take this out of the Inbox", so
+   *    unlike the next one it is not something the caller can route around.
+   * 3. At least one message is filed ONLY in the Inbox and the account has no mailbox
+   *    carrying the `archive` role. An InvalidInputError naming move_email, and raised only
+   *    when a message actually reaches that branch — the Inbox-plus-others branch never
+   *    touches Archive, so an unconditional check would reject a batch this tool can serve.
+   *
+   * The fourth fires AFTER the write is dispatched, so it cannot promise nothing was
+   * archived: an Email/set that failed outright (a transport error or a method-level `error`
+   * entry, as opposed to a per-id entry in `notUpdated`). It aborts the batch because a
+   * write whose response never arrived leaves EVERY id in it with an unknown outcome, so
+   * there is nothing truthful to put in a bucket.
    */
-  async archiveEmail(emailId: string): Promise<void> {
+  async archiveEmails(emailIds: string[]): Promise<ArchiveResult> {
     const session = await this.getSession();
 
-    const mailboxes = await this.getMailboxes();
-    const archiveMailbox = this.findByExactRole(mailboxes, 'archive');
+    // De-duplicate on entry so the counts sum to the number of DISTINCT ids and one id
+    // cannot occupy two buckets. Order is the caller's, first occurrence winning.
+    const ids = [...new Set(emailIds)];
 
-    // Classified as caller-fixable (unlike deleteEmail's missing-Trash, which is a plain
-    // Error): the caller has a real route out of it without a server-side change — name
-    // any destination they like on move_email. "Archive" is a filing convention, so a
-    // substitute folder is theirs to choose; there is no substitute for Trash.
-    if (!archiveMailbox) {
-      throw new InvalidInputError(
-        'This account has no mailbox with the archive role, so there is nowhere to archive to. ' +
-        'Use move_email with a destination of your choice instead.'
+    // One batch for both reads. getMailboxes() is deliberately not used: it issues its own
+    // request, which would make this three round trips instead of two.
+    const readRequest: JmapRequest = {
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Mailbox/get', {
+          accountId: session.accountId,
+          // Exactly what buildMailboxInfoMap and the role lookups below consume.
+          properties: ['id', 'name', 'role'],
+        }, 'mailboxes'],
+        ['Email/get', {
+          accountId: session.accountId,
+          ids,
+          properties: ['id', 'mailboxIds'],
+        }, 'emails'],
+      ],
+    };
+
+    // Everything from dispatching the read to extracting both results is wrapped so that
+    // EVERY pre-write abort carries the "Nothing was archived." tell, not just the guards
+    // written below. The tool description tells a caller to key off that phrase to decide
+    // whether to re-read the messages, and without this the commonest failures of all — a
+    // method-level `error` entry, which surfaces from getMethodResult as "JMAP error:
+    // serverFail", and a transport failure out of makeRequest — throw without it. A promised
+    // signal that is absent exactly when things go wrong is worse than no signal, because the
+    // caller reads its absence as "the write may have happened".
+    //
+    // The message is appended rather than replaced, so the server's own diagnosis survives.
+    // The InvalidInputError re-throw is defensive rather than reachable today: every failure
+    // this block can currently catch is a plain Error (getMethodResult and makeRequest both
+    // throw plain Errors; InvalidInputError is raised only from set-error classification,
+    // which no read path reaches). It is here so that a read helper which later learns to
+    // classify a caller-fixable JMAP error keeps that class, instead of being flattened to
+    // InternalError and telling the caller to retry what they should re-form.
+    let readResponse: JmapResponse;
+    let mailboxes: any[];
+    let emailsResult: any;
+    try {
+      readResponse = await this.makeRequest(readRequest);
+      // getListResult throws on a missing index or an `error` entry, but returns [] for a
+      // method that SUCCEEDED without a list — so both reads are checked explicitly below.
+      // readListResultIfPresent would be wrong here: the tolerant read is for a trailing
+      // optional enrichment, and neither of these is optional.
+      // Array.isArray on top of getListResult: that helper returns `result.list || []`, so a
+      // non-array `list` is handed straight back and would die later on `.find is not a
+      // function` — outside this block, and so without the tell. Normalising to [] here sends
+      // it into the empty-list guard below, which is the right answer for it anyway.
+      const rawMailboxes = this.getListResult(readResponse, 0);
+      mailboxes = Array.isArray(rawMailboxes) ? rawMailboxes : [];
+      emailsResult = this.getMethodResult(readResponse, 1);
+    } catch (error: any) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const suffixed = `${detail} Nothing was archived.`;
+      if (error instanceof InvalidInputError) throw new InvalidInputError(suffixed);
+      throw new Error(suffixed);
+    }
+    if (mailboxes.length === 0) {
+      throw new Error(
+        'Could not read this account\'s mailboxes, so there is no way to tell which messages are in the Inbox. Nothing was archived.'
       );
     }
 
-    const request: JmapRequest = {
-      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-      methodCalls: [
-        ['Email/set', {
-          accountId: session.accountId,
-          update: {
-            [emailId]: { mailboxIds: { [archiveMailbox.id]: true } }
-          }
-        }, 'archiveEmail']
-      ]
-    };
-
-    const response = await this.makeRequest(request);
-    const result = this.getMethodResult(response, 0);
-
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], 'archive email');
+    const inboxMailbox = this.findByExactRole(mailboxes, 'inbox');
+    // A plain Error, not InvalidInputError: unlike a missing Archive there is no
+    // substitute call a caller could make instead — nothing else in this server removes a
+    // message from the Inbox. The guard itself is necessary rather than defensive: the
+    // whole rule keys on this id, findByExactRole is typed `any | undefined` so the
+    // compiler will not catch its absence, and both failure modes are SILENT — every
+    // message would fall to the no-Inbox branch and the tool would become a universal
+    // no-op reporting success, or the patch key would become "mailboxIds/undefined".
+    // findByExactRole requires a usable id as part of the match, so a role record with a
+    // missing id arrives here as undefined and is caught by the same test.
+    if (!inboxMailbox) {
+      throw new Error(
+        'This account has no mailbox with the inbox role, so there is no Inbox membership to remove. Nothing was archived.'
+      );
     }
+    const inboxId: string = inboxMailbox.id;
+    const archiveMailbox = this.findByExactRole(mailboxes, 'archive');
+
+    // Read off the result already extracted inside the guarded block above, so an `error`
+    // entry on Email/get is caught there with the tell rather than thrown bare from here.
+    const emails: any[] = Array.isArray(emailsResult?.list) ? emailsResult.list : [];
+    // Array.isArray rather than `|| []`: a non-array notFound is truthy, and spreading it into
+    // a Set throws a bare TypeError ("object is not iterable") that says nothing useful.
+    // Treating it as empty is not a silent swallow: every id it would have held is then
+    // unaccounted for, and the throw below reports exactly that, with the tell.
+    const rawNotFound = emailsResult?.notFound;
+    const notFoundIds: string[] = Array.isArray(rawNotFound) ? rawNotFound : [];
+    const byId = new Map<string, any>();
+    for (const email of emails) {
+      if (email && typeof email.id === 'string') byId.set(email.id, email);
+    }
+    const notFound = new Set<string>(notFoundIds);
+    // Fail closed on an id the server accounted for in neither list. Proceeding would
+    // report a message as archived that was never looked at.
+    const unaccounted = ids.filter(id => !byId.has(id) && !notFound.has(id));
+    if (unaccounted.length > 0) {
+      // The ids are sanitised and capped for the same reason the rendered summary does it:
+      // they are CALLER-supplied strings that have passed only "non-empty string", this text
+      // reaches an agent's transcript, and the CallTool catch applies redaction but not
+      // describePart. An unbounded join would also put every id of a large batch into one
+      // error message.
+      //
+      // Redact BEFORE describePart, never after: describePart truncates at 64 code points and
+      // both redaction rules are length-sensitive, so truncating first lets a partial secret
+      // through. Same order, and the same reason, as the failure renderer in
+      // response-formatters.ts.
+      const shown = unaccounted.slice(0, UNACCOUNTED_ID_CAP).map(id => describePart(redactBearerTokens(id))).join(', ');
+      const more = unaccounted.length > UNACCOUNTED_ID_CAP ? `, …and ${unaccounted.length - UNACCOUNTED_ID_CAP} more` : '';
+      throw new Error(
+        `The server returned neither a result nor a not-found entry for ${unaccounted.length} of the ${ids.length} requested email(s): ${shown}${more}. Nothing was archived.`
+      );
+    }
+
+    const roleById = new Map<string, string | null>();
+    for (const mb of mailboxes) {
+      if (mb && typeof mb.id === 'string') {
+        roleById.set(mb.id, typeof mb.role === 'string' && mb.role ? mb.role.toLowerCase() : null);
+      }
+    }
+
+    // Decide every branch BEFORE writing anything, so the missing-Archive guard below can
+    // ask whether any message actually needs Archive.
+    const decisions = new Map<string, { branch: ArchiveBranch; keptIds: string[]; refusingRole?: string; currentIds: string[] }>();
+    // Ids whose filing could not be read, mapped to the sentence that says WHY. Kept separate
+    // from `decisions` so they never reach the write, and reported as `failed` rather than
+    // throwing: this is a per-message condition, which is exactly what the six buckets exist
+    // for. The reason travels with the id because the two ways in are different facts about
+    // the server's response, and one sentence covering both would be false for one of them —
+    // telling a caller a property is missing when it was present and was read sends them
+    // looking for the wrong thing.
+    const unreadableFiling = new Map<string, string>();
+    for (const id of ids) {
+      const email = byId.get(id);
+      if (!email) continue;
+      // `mailboxIds` was requested explicitly, so a compliant server always returns an
+      // object here. Defaulting a missing one to {} would be the worst possible reading:
+      // an empty membership has no Inbox and no refusing role, so decideArchiveBranch
+      // returns `notInInbox` and the message is reported as "already archived, nothing to
+      // do" — a confident success statement about filing this server never saw. Fail closed
+      // on the id instead.
+      //
+      // Array.isArray, because `typeof [] === 'object'`: an array-shaped mailboxIds would
+      // otherwise pass this guard and Object.keys would turn it into the INDICES ["0","1"],
+      // which contain no Inbox and no refusing role — landing the message in `notInInbox`
+      // and producing the exact false "already archived" this guard was written to stop, by
+      // the one shape it did not test. A non-compliant server is this guard's entire
+      // audience, so the shape it emits is not out of scope.
+      const filing = email.mailboxIds;
+      if (!filing || typeof filing !== 'object' || Array.isArray(filing)) {
+        unreadableFiling.set(id, 'The server returned this message with no readable mailboxIds object, so its current filing is unknown. Nothing was written for it.');
+        continue;
+      }
+      // Truthy values only. A JMAP mailboxIds map is `{id: true}` and Cyrus emits nothing
+      // else, but taking Object.keys wholesale would let a `{"mb-label": false}` become a
+      // membership this message does not have — and every writing branch RE-ASSERTS the
+      // memberships it read, so that false entry would be written back as
+      // `mailboxIds/mb-label: true` and file the message somewhere it never was. Reading
+      // the value is what keeps the re-assert faithful to what was actually there.
+      const currentIds = Object.keys(filing).filter(mbId => filing[mbId]);
+      // An empty membership goes the same way as an absent one, and for the same reason:
+      // JMAP models a message as filed in at least one mailbox, so `{}` is a server fault
+      // rather than a state a message can be in. decideArchiveBranch would answer
+      // `notInInbox` for it — no Inbox, no refusing role — and the tool would report
+      // "already archived, nothing to do" about a message whose filing it never learned.
+      // The helper is right to be total; deciding that an empty map is not a real answer is
+      // this caller's job, which is why the guard is here and not in the branch rule.
+      if (currentIds.length === 0) {
+        // Two shapes reach here and they are different facts, so they get different sentences:
+        // a genuinely empty map, and a map with entries that all say false. Telling a caller
+        // the map was "empty" when it had entries sends them looking for the wrong thing —
+        // the same defect that splitting the absent-vs-empty pair was meant to remove, and it
+        // would just have moved one shape further along.
+        const hadEntries = Object.keys(filing).length > 0;
+        unreadableFiling.set(id, hadEntries
+          ? 'The server returned a mailboxIds for this message in which no entry is set to true, so it is filed in no mailbox — which is not a state a message can be in. Its current filing is unknown and nothing was written for it.'
+          : 'The server returned an empty mailboxIds for this message, which is not a filing a message can have, so its current filing is unknown. Nothing was written for it.');
+        continue;
+      }
+      decisions.set(id, { ...decideArchiveBranch(currentIds, inboxId, roleById), currentIds });
+    }
+
+    // The missing-Archive guard is raised only when a message actually reaches the
+    // Inbox-only branch. Under this rule the Inbox-plus-others branch never touches
+    // Archive, so an unconditional guard would reject a batch the tool can serve perfectly.
+    //
+    // Resolving Archive INTO keptIds here is what leaves one destination set per message
+    // for both the write and the report to read. Every writing branch then has the same
+    // shape and there is no second place where the archive id could go missing.
+    // This throw rejects the WHOLE batch rather than failing the messages that need Archive
+    // and serving the rest, and that is deliberate. A Fastmail account always has an
+    // archive-role mailbox, so this is a can't-happen path, and a can't-happen path does not
+    // earn per-message failure machinery — the never-throw contract exists for conditions
+    // that vary per message (an unknown id, a server refusal), not for a whole-account
+    // misconfiguration that is either true for every message or false for all of them.
+    //
+    // DO NOT delete the check on the strength of that. It is not really guarding against a
+    // missing folder: `findByExactRole` returns `any | undefined`, so without it
+    // `archiveMailbox.id` is `undefined` and the patch key below becomes the literal string
+    // "mailboxIds/undefined" — a silently corrupt write, which is a far worse outcome than a
+    // rejected call. The guard is one comparison and it closes that.
+    if ([...decisions.values()].some(d => d.branch === 'movedToArchive')) {
+      if (!archiveMailbox) {
+        throw new InvalidInputError(
+          'This account has no mailbox with the archive role, and at least one of these messages is filed ONLY in the Inbox, so removing it from the Inbox would leave it filed nowhere. Nothing was archived. ' +
+          'Use move_email with a destination of your choice instead.'
+        );
+      }
+      for (const decision of decisions.values()) {
+        if (decision.branch === 'movedToArchive') decision.keptIds = [archiveMailbox.id];
+      }
+    }
+
+    const update: Record<string, any> = newUpdateMap();
+    for (const [id, decision] of decisions) {
+      // Every writing branch has the same shape: remove Inbox, then ASSERT a non-empty
+      // destination set. Re-asserting the mailboxes the message already sits in is a
+      // safety requirement, not redundancy, and it needs no concurrency to matter.
+      //
+      // Cyrus's patch-path emptiness guard counts mailboxes the message merely has a
+      // conversations record in, including ones it was expunged from days ago; the executor
+      // then filters those out. So a bare {"mailboxIds/<inbox>": null} can pass a guard that
+      // believes the message stays filed somewhere while the executor expunges its last live
+      // record and destroys it. Do not simplify this back to a lone null on the grounds that
+      // a single-user server has no concurrency; concurrency was never what made it
+      // reachable.
+      //
+      // The patch form is also a deliberate deviation from move_email/bulk_move, which write
+      // a whole value. Both the derivation above and that reversal are set out in full, with
+      // Cyrus line references, under "archive_email reverses that convention, deliberately"
+      // in docs/conventions.md.
+      if (decision.branch !== 'removedFromInbox' && decision.branch !== 'movedToArchive') continue;
+      const patch: Record<string, any> = { [`mailboxIds/${inboxId}`]: null };
+      for (const keptId of decision.keptIds) patch[`mailboxIds/${keptId}`] = true;
+      update[id] = patch;
+    }
+
+    let notUpdated: Record<string, any> = {};
+    let updated: Record<string, any> = {};
+    const wrote = Object.keys(update).length > 0;
+    if (wrote) {
+      const writeResponse = await this.makeRequest({
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+        methodCalls: [
+          ['Email/set', { accountId: session.accountId, update }, 'archiveEmails'],
+        ],
+      });
+      const setResult = this.getMethodResult(writeResponse, 0);
+      // isPlainResponseMap, not `|| {}`: a truthy non-map slips through, and for a STRING
+      // `hasOwnProperty.call('oops', '0')` is true — so an id of "0" reads a character out of
+      // it as a set-error and a write the server confirmed in `updated` is reported as failed.
+      // That is the fabricated-failure class setErrorFor exists to close; this path cannot
+      // call it (it needs key presence separated from the value) but it shares the shape test.
+      notUpdated = isPlainResponseMap(setResult?.notUpdated) ? setResult.notUpdated : {};
+      // `updated` is read for the SAME reason the read path refuses to proceed on an id it
+      // saw in neither list nor notFound: an id the server acknowledged in neither map has
+      // no known outcome, and reporting it from our own plan would state as fact something
+      // nothing confirmed. RFC 8620 §5.3 requires every id to land in exactly one map, and
+      // Cyrus does (jmap_mail.c:13422-13432, with the open-failure fallback at :13541-13548),
+      // so this is unreachable against Fastmail today — it exists so a server that stops
+      // honouring that degrades into a reported failure rather than a false success.
+      updated = isPlainResponseMap(setResult?.updated) ? setResult.updated : {};
+    }
+
+    const infoMap = buildMailboxInfoMap(mailboxes);
+    const results: ArchiveEmailResult[] = [];
+    for (const id of ids) {
+      const unreadable = unreadableFiling.get(id);
+      if (unreadable) {
+        results.push({ id, action: 'failed', reason: { description: unreadable } });
+        continue;
+      }
+
+      const decision = decisions.get(id);
+      if (!decision) {
+        // Email/get put it in notFound; there is no filing to report.
+        results.push({ id, action: 'notFound' });
+        continue;
+      }
+
+      // Only an id this call actually asked the server to write can carry a set-error. A
+      // server that returns one for an id absent from the update map is describing an
+      // operation that was never attempted, and letting that flip a refused or notInInbox
+      // message to `failed` would report a failure of something we did not do.
+      //
+      // hasOwnProperty, not a bare index, on both maps: ids are caller-supplied strings, so
+      // an id of "constructor" or "toString" would otherwise pick a function off
+      // Object.prototype and be reported as a set-error the server never sent.
+      //
+      // The KEY's presence is the refusal, not the value's truthiness — the same reading
+      // `updated` gets below, and for the same reason. A server that lists an id under
+      // notUpdated with a null or otherwise falsy value has still explicitly said it did not
+      // update that record; branching on truthiness would drop it through to the
+      // acknowledgement check and report "nothing confirmed the outcome" about an id the
+      // server confirmed it refused.
+      const wasWritten = Object.prototype.hasOwnProperty.call(update, id);
+      const wasRefused = wasWritten && Object.prototype.hasOwnProperty.call(notUpdated, id);
+      const setError = wasRefused ? (notUpdated[id] || {}) : undefined;
+      if (setError) {
+        // A write-time `notFound` means the server had no record of the guid AT ALL when it
+        // came to apply the patch: Cyrus raises it at jmap_mail.c:13505-13508 when the
+        // current mailbox map is empty, and again at :12949-12952 for an email with no
+        // uidrecs. It is the same condition Email/get reports by leaving an id out of
+        // `list`, only observed a round trip later, so it routes to the same bucket rather
+        // than getting a second name.
+        //
+        // It is NOT the empty-after-patch case. That is jmap_parser_invalid(&parser,
+        // "mailboxIds") at :13511-13512, which surfaces as a set-error of type
+        // `invalidProperties` carrying `properties: ["mailboxIds"]`, and lands in `failed`.
+        // Those two strings are what a caller sees in `reason` if the re-assert above ever
+        // fails to keep a message filed somewhere.
+        const action: ArchiveAction = setError.type === 'notFound' ? 'notFound' : 'failed';
+        if (action === 'notFound') {
+          results.push({ id, action, reason: { setErrorType: setError.type, description: setError.description } });
+        } else {
+          results.push({
+            id,
+            action,
+            ...describeMailboxIds(decision.currentIds, infoMap),
+            reason: { setErrorType: setError.type, description: setError.description },
+          });
+        }
+        continue;
+      }
+
+      if (decision.branch === 'removedFromInbox' || decision.branch === 'movedToArchive') {
+        // hasOwnProperty, not truthiness: RFC 8620 §5.3 lets the server report a record it
+        // updated with no server-side changes as a null value, so `updated[id]` is falsy for
+        // a perfectly successful write. The key's presence is the acknowledgement.
+        if (!Object.prototype.hasOwnProperty.call(updated, id)) {
+          // Acknowledged in neither map. See the comment on reading `updated` above.
+          results.push({
+            id,
+            action: 'failed',
+            ...describeMailboxIds(decision.currentIds, infoMap),
+            reason: {
+              outcomeUnknown: true,
+              description: 'The server acknowledged this id in neither the updated nor the notUpdated map, so the outcome of the write is unknown. The filing shown is what was read BEFORE the write.',
+            },
+          });
+          continue;
+        }
+        // PROJECTED filing, computed from the pre-write read. Not read back — that would
+        // cost a third round trip to restate what the write just asserted.
+        results.push({ id, action: decision.branch, ...describeMailboxIds(decision.keptIds, infoMap) });
+        continue;
+      }
+
+      // OBSERVED filing, unchanged — nothing was written for these.
+      results.push({
+        id,
+        action: decision.branch,
+        ...describeMailboxIds(decision.currentIds, infoMap),
+        ...(decision.refusingRole ? { reason: { role: decision.refusingRole } } : {}),
+      });
+    }
+
+    const counts: Record<ArchiveAction, number> = {
+      movedToArchive: 0, removedFromInbox: 0, notInInbox: 0, refused: 0, notFound: 0, failed: 0,
+    };
+    for (const result of results) counts[result.action]++;
+
+    return { results, counts };
   }
 
   // Resolve an ARRAY of mailbox inputs to real mailbox ids by id/role/name/path (exact —
@@ -3507,8 +4100,9 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], 'add labels to email');
+    const setError = this.setErrorFor(result.notUpdated, emailId);
+    if (setError) {
+      this.throwSingleSetError(setError, 'add labels to email');
     }
   }
 
@@ -3537,8 +4131,9 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && result.notUpdated[emailId]) {
-      this.throwSingleSetError(result.notUpdated[emailId], 'remove labels from email');
+    const setError = this.setErrorFor(result.notUpdated, emailId);
+    if (setError) {
+      this.throwSingleSetError(setError, 'remove labels from email');
     }
   }
 
@@ -3552,7 +4147,7 @@ export class JmapClient {
       patch[`mailboxIds/${mailboxId}`] = true;
     });
 
-    const updates: Record<string, any> = {};
+    const updates: Record<string, any> = newUpdateMap();
     emailIds.forEach(id => {
       updates[id] = patch;
     });
@@ -3585,7 +4180,7 @@ export class JmapClient {
       patch[`mailboxIds/${mailboxId}`] = null;
     });
 
-    const updates: Record<string, any> = {};
+    const updates: Record<string, any> = newUpdateMap();
     emailIds.forEach(id => {
       updates[id] = patch;
     });
@@ -4640,7 +5235,7 @@ export class JmapClient {
   async bulkMarkRead(emailIds: string[], read: boolean = true): Promise<void> {
     const session = await this.getSession();
 
-    const updates: Record<string, any> = {};
+    const updates: Record<string, any> = newUpdateMap();
     emailIds.forEach(id => {
       updates[id] = read
         ? { 'keywords/$seen': true }
@@ -4668,7 +5263,7 @@ export class JmapClient {
   async bulkPinEmails(emailIds: string[], pinned: boolean = true): Promise<void> {
     const session = await this.getSession();
 
-    const updates: Record<string, any> = {};
+    const updates: Record<string, any> = newUpdateMap();
     emailIds.forEach(id => {
       updates[id] = pinned
         ? { 'keywords/$flagged': true }
@@ -4703,7 +5298,7 @@ export class JmapClient {
 
     // Whole-value mailboxIds per email — see moveEmail for why this replaces the
     // read-then-patch (one call, no read/write race, and no keyword is written).
-    const updates: Record<string, any> = {};
+    const updates: Record<string, any> = newUpdateMap();
     emailIds.forEach(id => {
       updates[id] = { mailboxIds: { [targetMailboxId]: true } };
     });
@@ -4740,7 +5335,7 @@ export class JmapClient {
     const trashMailboxIds: Record<string, boolean> = {};
     trashMailboxIds[trashMailbox.id] = true;
 
-    const updates: Record<string, any> = {};
+    const updates: Record<string, any> = newUpdateMap();
     emailIds.forEach(id => {
       updates[id] = { mailboxIds: trashMailboxIds };
     });

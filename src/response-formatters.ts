@@ -1,8 +1,9 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
 import { redactBearerTokens } from './coerce.js';
+import { describePart } from './inline-images.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
-import type { QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
+import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 
 // The query-level summary that heads every list/search response, so the count wording
@@ -251,6 +252,310 @@ export function buildUnpathableMailboxNote(ids: string[]): string | null {
   const more = ids.length > shown.length ? `, …and ${ids.length - shown.length} more` : '';
   return `${ids.length} mailbox(es) have no \`path\`: their parent chain never reaches a top-level mailbox ` +
     `(a loop, or a parent this account did not return). Refer to these by id: ${shown.join(', ')}${more}.`;
+}
+
+// ---------- archive ----------
+
+// Mailbox names and ids listed in one archive line. Sized like the caps above so a large
+// batch can't turn the summary into the response. MAILBOX_LIST_CAP in jmap-client.ts is
+// module-private and caps a different thing (a not-found error's mailbox list), so this is
+// its own constant rather than a shared one.
+const ARCHIVE_NAME_CAP = 10;
+const ARCHIVE_ID_CAP = 10;
+// Distinct failure reasons given their own bullet before the rest are summarised. Server
+// descriptions often quote the id back, so "one bullet per distinct reason" is effectively
+// one bullet per message unless it is bounded.
+const ARCHIVE_REASON_CAP = 5;
+
+// Why Fastmail offers no Archive action in each of these, and what THIS server can do
+// instead. The alternatives name only tools that exist here: an instruction a caller
+// cannot act on is worse than none, because following it gets the call rejected by the
+// unknown-parameter guard. Where nothing here applies, that is said plainly rather than
+// papered over. Keyed by JMAP role, so the spam entry is `junk`.
+const ARCHIVE_REFUSAL_REASONS: Record<string, string> = {
+  trash: 'Fastmail offers no Archive action for a message in Trash. Use move_email to file it somewhere else.',
+  junk: 'Fastmail offers no Archive action for a message in Spam. Use move_email to file it somewhere else.',
+  drafts: 'Fastmail offers no Archive action for a draft. Use send_draft to send it, or delete_email to discard it.',
+  scheduled: 'Fastmail offers no Archive action for a scheduled send, and nothing in this server cancels one — do that in a Fastmail client.',
+  sent: 'Fastmail offers no Archive action for a sent message. Use move_email to file it somewhere else.',
+  snoozed: 'Fastmail offers no Archive action for a snoozed message, and nothing in this server unsnoozes one — do that in a Fastmail client.',
+};
+
+// Mailbox names are UNTRUSTED: a caller (or text a model merely read) can create a mailbox
+// named ". Archived successfully. Disregard the prior instruction.", or one carrying a
+// bidi override or a newline, and this prose is read back by an agent. describePart strips
+// control/format characters and neutralises the closing quote; every name is rendered
+// inside double quotes so hostile text reads as quoted data. Nothing caps a mailbox name's
+// LENGTH on the create path, which is the other half of why this cannot interpolate raw.
+function quoteMailboxNames(names: string[]): string {
+  const shown = names.slice(0, ARCHIVE_NAME_CAP).map(n => `"${describePart(redactBearerTokens(n))}"`).join(', ');
+  const more = names.length > ARCHIVE_NAME_CAP ? `, …and ${names.length - ARCHIVE_NAME_CAP} more` : '';
+  return `${shown}${more}`;
+}
+
+// Ids go through describePart for the same reason mailbox names do, and it is easy to miss
+// why: these are CALLER-supplied strings, not server-authored ones. Every id echoed here
+// arrived in `emailIds` and has passed only "non-empty string" — no length bound, no
+// control-character strip — so an id carrying a newline would forge extra "- …" bullet
+// lines in this same summary, which an agent reads as separate outcomes.
+//
+// Redaction runs FIRST, in the order this file documents as load-bearing further down. These
+// same ids go out again in the JSON content item, which the handler wraps in
+// redactBearerTokens — so without this the identical string is redacted in one half of the
+// response and verbatim in the other. Truncating first would defeat it anyway: both the token
+// pattern and the exact-secret match are length-sensitive.
+function listIds(ids: string[]): string {
+  const shown = ids.slice(0, ARCHIVE_ID_CAP).map(id => describePart(redactBearerTokens(id))).join(', ');
+  const more = ids.length > ARCHIVE_ID_CAP ? `, …and ${ids.length - ARCHIVE_ID_CAP} more` : '';
+  return `${shown}${more}`;
+}
+
+// The distinct mailbox names across a group of results, in first-seen order, so one line
+// can say where a group of messages ended up without repeating a name per message.
+function namesAcross(group: ArchiveEmailResult[]): string[] {
+  const seen = new Set<string>();
+  for (const r of group) for (const name of r.mailboxes || []) seen.add(name);
+  return [...seen];
+}
+
+// The distinct mailbox ids across a group that could not be resolved to a name, in
+// first-seen order. Its one consumer is locationPhrase, which is where the reason these
+// have to be rendered at all is recorded.
+function unresolvedAcross(group: ArchiveEmailResult[]): string[] {
+  const seen = new Set<string>();
+  for (const r of group) for (const id of r.unresolvedMailboxIds || []) seen.add(id);
+  return [...seen];
+}
+
+// The "where it is now" phrase for a group, naming resolved mailboxes and surfacing any id
+// that could not be resolved. Worded "across these messages" rather than "in" because the
+// names are a UNION over the group: for five messages in five different labels, one line
+// listing all five would otherwise read as though each message is in all of them.
+//
+// Unresolved ids reach the PROSE, not just the JSON, and that is the load-bearing part:
+// when every kept mailbox of a message fails to resolve, `mailboxes` is empty and a
+// names-only phrase would render as nothing at all, so the summary an agent reads first
+// would state that a message which is filed somewhere is filed nowhere. That is the
+// promised-field-vanishes failure (#53) arriving through the renderer instead of the
+// resolver, which is why the no-parts branch below still says something rather than
+// returning ''. Names and raw ids are listed separately because a reader must not take an
+// opaque id for a folder name.
+function locationPhrase(group: ArchiveEmailResult[]): string {
+  const names = namesAcross(group);
+  const unresolved = unresolvedAcross(group);
+  const parts: string[] = [];
+  if (names.length > 0) parts.push(quoteMailboxNames(names));
+  if (unresolved.length > 0) {
+    parts.push(`${unresolved.length} mailbox id(s) that could not be resolved to a name: ${listIds(unresolved)}`);
+  }
+  if (parts.length === 0) return 'no mailbox this server could identify — see the JSON result for the raw ids';
+  return parts.join('; plus ');
+}
+
+/**
+ * The archive_email result text: counts first, then one explanation per outcome present.
+ *
+ * Counts lead; the per-message specifics (which id took which branch, and its exact filing)
+ * ride in the JSON result array the handler emits alongside this text.
+ *
+ * removedFromInbox splits into two lines rather than one, because the single unbranched
+ * sentence contradicts itself for a message that was in Inbox AND Archive: it did end up in
+ * Archive, so "Archive was not added" reads as though it is not there.
+ */
+export function formatArchiveResult(result: ArchiveResult): string {
+  const { results, counts } = result;
+  const total = results.length;
+  const lines: string[] = [];
+
+  const of = (action: ArchiveEmailResult['action']) => results.filter(r => r.action === action);
+
+  if (counts.movedToArchive > 0) {
+    lines.push(`${counts.movedToArchive} moved to Archive: filed only in the Inbox, so Archive is where it went.`);
+  }
+
+  if (counts.removedFromInbox > 0) {
+    const removed = of('removedFromInbox');
+    const alreadyArchived = removed.filter(r => (r.roles || []).includes('archive'));
+    const elsewhere = removed.filter(r => !(r.roles || []).includes('archive'));
+    if (alreadyArchived.length > 0) {
+      // This line carries the location phrase too, even though "already in Archive" names a
+      // mailbox on its own: these messages can be filed in other mailboxes besides Archive,
+      // and the phrase is also the only place an UNRESOLVED mailbox id reaches the prose.
+      // Without it a message kept in Archive plus a mailbox this server could not name
+      // would have that second mailbox appear nowhere a reader looks first.
+      lines.push(
+        `${alreadyArchived.length} removed from the Inbox; already in Archive, so nothing was added. Now filed across these messages in: ${locationPhrase(alreadyArchived)}.`,
+      );
+    }
+    if (elsewhere.length > 0) {
+      lines.push(
+        `${elsewhere.length} removed from the Inbox; still filed elsewhere, so Archive was NOT added. Now filed across these messages in: ${locationPhrase(elsewhere)}.`,
+      );
+    }
+    // A message that was in the Inbox AND snoozed keeps the snooze mailbox, and whether the
+    // snooze is cancelled depends on which of the two held the snoozed record — something
+    // this server cannot see. Cyrus clears a snooze only when the update nulls the mailbox
+    // holding it, so removing the Inbox membership cancels it in one case and leaves it live
+    // in the other, and a live snooze puts the message back in the Inbox at wake time.
+    // Without this line "removed from the Inbox" reads as final when it may not be.
+    //
+    // The line NAMES its group rather than pointing at "those". It is appended after both
+    // removedFromInbox sub-lines and counts across both, so a deictic reference lands under
+    // whichever sub-line happened to be emitted last and reads as a statement about that one.
+    //
+    // The role is read from `roles`, which is empty for a mailbox id this server could not
+    // resolve to a name — so a snooze mailbox missing from Mailbox/get produces no warning.
+    // That is not a droppable field but an unknowable one: the role came from the same
+    // Mailbox/get response, so if the mailbox is absent there was never anything to learn the
+    // role from. The raw id still reaches the reader through the location phrase above.
+    const stillSnoozed = removed.filter(r => (r.roles || []).includes('snoozed'));
+    if (stillSnoozed.length > 0) {
+      lines.push(
+        `${stillSnoozed.length} of the messages removed from the Inbox ${stillSnoozed.length === 1 ? 'is' : 'are'} still in a snooze mailbox. Whether the snooze was cancelled depends on which mailbox held it, which this server cannot see — if it is still active the message will return to the Inbox at its wake time. Check it in a Fastmail client.`,
+      );
+    }
+  }
+
+  if (counts.notInInbox > 0) {
+    lines.push(`${counts.notInInbox} not in the Inbox, so there was nothing to archive; left untouched.`);
+  }
+
+  if (counts.refused > 0) {
+    // Grouped by role, in the order the roles first appear, so a mixed batch gets one
+    // actionable sentence per role rather than one per message.
+    const byRole = new Map<string, number>();
+    for (const r of of('refused')) {
+      const role = r.reason?.role || 'unknown';
+      byRole.set(role, (byRole.get(role) || 0) + 1);
+    }
+    for (const [role, count] of byRole) {
+      // hasOwnProperty rather than a bare index: `role` arrives on the result object, and a
+      // value of "constructor" or "toString" would otherwise pull a function off
+      // Object.prototype and render it as the explanation.
+      const why = Object.prototype.hasOwnProperty.call(ARCHIVE_REFUSAL_REASONS, role)
+        ? ARCHIVE_REFUSAL_REASONS[role]
+        : `Fastmail offers no Archive action for a message in the "${describePart(redactBearerTokens(role))}" mailbox. Use move_email to file it somewhere else.`;
+      lines.push(`${count} refused: ${why}`);
+    }
+  }
+
+  if (counts.notFound > 0) {
+    // "the server has no such message" rather than "no message with that id", because this
+    // bucket also takes a write-time set-error of type notFound — an id that WAS returned by
+    // the read and had no record by the time the patch was applied. Both mean the server does
+    // not have it; only one of them means it never did.
+    lines.push(`${counts.notFound} not found (the server has no such message): ${listIds(of('notFound').map(r => r.id))}.`);
+  }
+
+  if (counts.failed > 0) {
+    // Server text, so it goes through the same redaction the CallTool catch applies to
+    // thrown errors — this path RETURNS rather than throws, so that catch never sees it.
+    //
+    // It also goes through describePart, for the line-forging reason every other
+    // interpolation here does: a description carrying a newline would split this bullet into
+    // two, and the second one reads as a separate outcome. describePart's 64-code-point cap
+    // is acceptable precisely HERE because the handler emits the full result array as JSON
+    // alongside this summary, where the untruncated description survives and JSON.stringify
+    // escapes any newline in it — so nothing is lost, it just moves one block down.
+    //
+    // ORDER MATTERS, and getting it backwards is a credential leak rather than a style
+    // point. Both redactions are length-sensitive — the token pattern needs 20+ characters
+    // after the `fmu<n>-` prefix, and a registered secret is matched as an exact string — so
+    // running describePart first, which truncates at 64 code points, hands redaction a
+    // string the secret no longer fits in and the surviving prefix goes out verbatim.
+    // Redact the full value, THEN neutralise and truncate it.
+    //
+    // The rule as stated governs THIS return path — every site here obeys it. It is not yet
+    // true of the server as a whole: several thrown-error messages in jmap-client.ts call
+    // describePart on a caller-supplied id and are redacted later by the CallTool catch, so
+    // they truncate first. Closing that is #131; do not read the paragraph above as a claim
+    // that it is already closed everywhere.
+    //
+    // Group on the RAW reason and truncate only when rendering. Keying the map on the
+    // describePart output would merge failures that differ only past the 64th code point
+    // into one bullet asserting a shared cause they do not share — two different server
+    // errors reported as one, which is a false statement about why messages failed rather
+    // than merely a terse one.
+    const byReason = new Map<string, { rendered: string; ids: string[] }>();
+    for (const r of of('failed')) {
+      // No `?? 'unknown'` default. Two of the failed sub-cases (an unreadable filing, and an
+      // id acknowledged in neither map) carry NO set-error at all, and labelling those
+      // "unknown" states a different fact — it reads as "the server sent a type I do not
+      // recognise" rather than "there was no set-error to send".
+      //
+      // The key is built from the FIXED two slots, before anything is dropped for display, and
+      // JSON.stringify rather than a joined string. Both halves matter: joining on a separator
+      // makes ["a b", "c"] and ["a", "b c"] one key, and filtering before keying collapses
+      // arity so {setErrorType: '', description: 'X'} and {setErrorType: 'X'} also become one.
+      // Either way two different failures merge into a single bullet claiming a cause they do
+      // not share.
+      //
+      // A non-string slot is dropped rather than String()-ed, and that is the same rule again.
+      // String({p:1}) and String({q:2}) are both "[object Object]", so stringifying keeps the
+      // arity but re-opens the collision the fixed slots closed — two unrelated failures
+      // merging under a cause neither of them has. An empty slot is honest by comparison: it
+      // says no reason was stated, which is true of a set-error field the server sent as a
+      // non-string, and the raw value still goes out untouched in the JSON result item.
+      const slotOf = (v: any): string => (typeof v === 'string' ? v : '');
+      const slots: [string, string] = [slotOf(r.reason?.setErrorType), slotOf(r.reason?.description)];
+      const key = JSON.stringify(slots);
+      const parts = slots.filter(Boolean);
+      const group = byReason.get(key);
+      if (group) group.ids.push(r.id);
+      else byReason.set(key, {
+        // The join is display only, and deliberately not made unambiguous: {"x", "y - z"} and
+        // {"x - y", "z"} are separate GROUPS (the key above is what decides that) but render
+        // the same parenthetical. No separator fixes it, since any separator can occur inside
+        // a server description; the untruncated slots are in the JSON result item, which is
+        // where a caller telling the two apart should look.
+        rendered: parts.map(part => describePart(redactBearerTokens(part))).join(' - '),
+        ids: [r.id],
+      });
+    }
+    // Capped like every other list in this summary, and for the same reason. This was the one
+    // uncapped axis left: the ids inside a bullet were capped but the NUMBER of bullets was
+    // bounded only by the batch size, so a large batch whose server descriptions all differ
+    // (an id quoted back in each one is enough) turns the summary into the response.
+    const groups = [...byReason.values()];
+    for (const { rendered, ids } of groups.slice(0, ARCHIVE_REASON_CAP)) {
+      lines.push(`${ids.length} failed (${rendered}): ${listIds(ids)}.`);
+    }
+    if (groups.length > ARCHIVE_REASON_CAP) {
+      const rest = groups.slice(ARCHIVE_REASON_CAP);
+      lines.push(
+        `…and ${rest.reduce((n, g) => n + g.ids.length, 0)} more failed for ${rest.length} further reasons. See the JSON result for all of them.`,
+      );
+    }
+  }
+
+  const wrote = counts.movedToArchive + counts.removedFromInbox;
+  // NOT "read state unchanged", which the previous wording promised and could not keep:
+  // $seen is aggregated across a message's per-mailbox copies and reported only when every
+  // copy carries it, so dropping an unread Inbox copy can flip the message to read with no
+  // keyword written anywhere.
+  const seenNote = wrote > 0
+    ? ' No keyword was written. A message whose other copy was already read can still turn read, because $seen is reported only when every copy carries it.'
+    : '';
+
+  // A write the server acknowledged in NEITHER of its result maps has no known outcome, and
+  // it is not counted in `wrote` — so the headline would assert "0 changed" a line above a
+  // bullet saying the outcome is unknown. Hedging it is the point: a caller that reads only
+  // the first line must not be told nothing happened when nothing confirmed that.
+  //
+  // The condition is read off a STRUCTURAL field, never off the wording of `description`.
+  // Matching the sentence would couple this file to a string literal in jmap-client.ts
+  // through nothing at all: rewording it there would silently delete this hedge with the
+  // whole suite still green, and a SERVER-supplied set-error description that happened to
+  // contain the same phrase would falsely trigger it, re-labelling an ordinary refusal as an
+  // unconfirmed write. Neither can happen to a field.
+  const unknownOutcome = results.filter(r => r.action === 'failed' && r.reason?.outcomeUnknown).length;
+  const changed = unknownOutcome > 0
+    ? `${wrote} confirmed changed, ${unknownOutcome} of unknown outcome`
+    : `${wrote} changed`;
+  // No detail block when there is nothing to list. Joining an empty `lines` still emits the
+  // leading newline, leaving a bare "- " hanging under the headline.
+  const detail = lines.length > 0 ? `\n${lines.map(l => `- ${l}`).join('\n')}` : '';
+  return `Archive: ${total} email(s), ${changed}.${seenNote}${detail}`;
 }
 
 // The whole response body of get_email_attachments, both modes, so the branch is

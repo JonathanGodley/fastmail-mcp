@@ -12,8 +12,8 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult } from './response-formatters.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -61,7 +61,7 @@ createDebug.enable([process.env.DEBUG, '-tsdav*'].filter(Boolean).join(','));
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.13.4-fork.1',
+    version: '1.13.4-fork.2',
   },
   {
     capabilities: {
@@ -624,11 +624,21 @@ const STRIP_QUOTED_DESC =
 
 // The destination parameter shared by move_email and bulk_move, declared once so the two
 // cannot drift on what a destination accepts or on how an unknown one is refused.
-const TARGET_MAILBOX_PARAM_DESC =
-  'Destination mailbox. ' + MAILBOX_REF_FORMS;
+//
+// The delete tool is a PARAMETER for the same reason membershipReplaceDesc's additive tool
+// is: this text is attached to a bulk tool as well as a single-message one, and a bulk
+// caller sent to the single-email `delete_email` would find it rejects their `emailIds`.
+// `archive_email` needs no such treatment — it takes an array and serves both callers.
+const targetMailboxParamDesc = (deleteTool: 'delete_email' | 'bulk_delete') =>
+  'Destination mailbox. ' + MAILBOX_REF_FORMS +
+  ' A role name resolves to the mailbox carrying that ROLE whenever the account has one, so a user-created folder of the same name does not capture it. That folder is then reachable by its id, or by its full path if it is nested — a TOP-LEVEL folder sharing a role name has a path identical to its name, and the path form is only tried for an input containing a separator, so its id is the only way to reach it. But the role branch is tried FIRST, not exclusively — on an account with no mailbox carrying the role, the name branch runs and a folder of that name is what you get. ' +
+  `The dedicated verbs do not have that fall-through: archive_email and ${deleteTool} resolve by role and nothing else, so they never fall back to a folder of that name. ` +
+  'For ARCHIVE there is a second reason: moving to the archive role replaces the whole membership and drops every other label, which is not what archiving means — archive_email patches the Inbox membership away and keeps the rest. Deleting has no such difference: delete_email and bulk_delete replace the whole membership too, exactly as moving to trash does, because that is what Fastmail\'s own Delete does.';
 
 // The membership warning carried by every tool that sets mailboxIds whole-value
-// (move_email, bulk_move, archive_email). Written once because the consequence is the
+// (move_email, bulk_move). archive_email is deliberately NOT one of them — it patches the
+// Inbox membership away and re-asserts the rest, so it never drops other filing. Written
+// once because the consequence is the
 // same on each: a message filed under several labels keeps only the destination, and the
 // additive alternative is the one a caller usually wants. The additive tool is a
 // parameter rather than a fixed word — a bulk caller sent to the single-email
@@ -1666,7 +1676,7 @@ const TOOLS = [
             },
             targetMailbox: {
               type: 'string',
-              description: TARGET_MAILBOX_PARAM_DESC,
+              description: targetMailboxParamDesc('delete_email'),
             },
           },
           required: ['emailId', 'targetMailbox'],
@@ -1674,16 +1684,31 @@ const TOOLS = [
       },
       {
         name: 'archive_email',
-        description: 'Archive an email: file it into the account\'s Archive folder, the mailbox carrying the JMAP archive role. ' + membershipReplaceDesc('add_labels') + ' It does NOT mark the message read — archiving and reading are separate actions, so call mark_email_read as well if you want both. The destination is fixed and takes no parameter: it is found by role, never by folder name, so a folder merely NAMED "archive" is not it. To file into any other mailbox use move_email. An account with no archive-role mailbox is rejected, pointing you at move_email. On success it returns a one-line confirmation, not the message — re-read it with get_email if you need its new mailbox membership.',
+        description:
+          'Archive one or more emails the way the Fastmail client does. Takes an ARRAY (`emailIds`), so it handles one message or a batch — there is no separate bulk_archive. ' +
+          'It archives exactly the messages you name and nothing else. Fastmail\'s own Archive button acts on a single message or on the whole conversation depending on a per-user display setting this server cannot see, so to archive a CONVERSATION pass every message id in it (get_thread lists them) rather than just one; passing one leaves the rest of the thread in the Inbox. ' +
+          'What it actually does: it REMOVES the message from the Inbox and leaves every other folder and label in place, adding the Archive folder only when removing the Inbox would otherwise leave the message filed nowhere. ' +
+          'So a message filed in the Inbox plus a label keeps the label and does NOT go to Archive; a message filed only in the Inbox moves to Archive; a message that already left the Inbox is left completely untouched. ' +
+          'A no-op is a legitimate, successful outcome here, not a failure. ' +
+          'Once a message has LEFT the Inbox, it REFUSES one in Trash, Spam, Drafts, Scheduled, Sent or Snoozed, because the Fastmail client offers no Archive action there either; the refusal says why, and names an alternative in this server where one exists (for a scheduled send or a snooze there is none, and it says so). The Inbox is tested first, so a message somehow in the Inbox AND one of those is archived rather than refused, keeping that membership and gaining nothing — except that a message also in Scheduled may come back as `failed`, because the server appears to reject re-asserting a scheduled membership outside a send request; that combination has not been measured yet. ' +
+          'Never throws on a partial failure: the result reports each id separately as movedToArchive, removedFromInbox, notInInbox, refused, notFound or failed, with counts that sum to the number of distinct ids you passed (duplicates are collapsed). The JSON beside the summary is `{ counts, results }`, so both the per-id detail and the counts are parseable. ' +
+          'Each entry\'s `mailboxes`/`roles` are the PROJECTED filing for the two branches that wrote, the OBSERVED unchanged filing for notInInbox and refused (which write nothing), and for failed either the filing as OBSERVED BEFORE the write was attempted or, when no write was attempted for it, nothing at all; read roles for "archive" to tell whether a message is in Archive, since the branch name alone will not say. Both fields are ABSENT on a notFound entry (there is no filing to report) and on the failed sub-case where the current filing could not be READ (the server returned no mailboxIds object, or an empty one, which is not a filing a message can have; its filing was never observed, which is why it failed), and `roles` is absent whenever nothing the message is filed in has a role. A `unresolvedMailboxIds` on an entry means a mailbox id could not be resolved to a name, so `mailboxes`/`roles` are incomplete for that message and those raw ids are the remainder — which is also what tells you how to read an absent `roles`: absent with no `unresolvedMailboxIds` means no role mailboxes, absent WITH them means the roles are unknown for the ids listed there. ' +
+          'The Archive destination is found by JMAP role, never by folder name, so a folder merely NAMED "archive" is not it, and there is no destination parameter — use move_email to file into anything else. ' +
+          'The whole call throws, rather than reporting per message, in four account-wide cases. Three happen BEFORE anything is written, so nothing was archived and the message says so: a read that failed or came back incomplete, an account with no inbox-role mailbox, and an account with no archive-role mailbox when a message actually needed Archive (use move_email instead). The fourth is the write itself failing, which happens AFTER it was dispatched — there the outcome of the batch is unknown and you should re-read the messages rather than assume nothing changed. A per-message problem never throws. ' +
+          'No keyword is written, but that is not the same as the read state being untouched: $seen is reported only when every one of a message\'s per-mailbox copies carries it, so dropping an unread Inbox copy can flip a message to read. ' +
+          'This describes an account in LABELS mode. In folders mode a message has a single membership, so every archive is the move-to-Archive case.',
         inputSchema: {
           type: 'object',
           properties: {
-            emailId: {
-              type: 'string',
-              description: 'ID of the email to archive',
+            emailIds: {
+              // Declared array-OR-string so a validating client cannot reject the
+              // stringified form before the lenient coercion runs (#98).
+              type: ['array', 'string'],
+              items: { type: 'string' },
+              description: 'IDs of the emails to archive — message ids, NOT thread ids. Pass an array even for a single message; duplicates are collapsed. To archive a whole conversation, pass every message id in the thread.',
             },
           },
-          required: ['emailId'],
+          required: ['emailIds'],
         },
       },
       {
@@ -1869,7 +1894,7 @@ const TOOLS = [
             },
             targetMailbox: {
               type: 'string',
-              description: TARGET_MAILBOX_PARAM_DESC,
+              description: targetMailboxParamDesc('bulk_delete'),
             },
           },
           required: ['emailIds', 'targetMailbox'],
@@ -2476,18 +2501,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'archive_email': {
-        const { emailId } = args as any;
-        if (!emailId) {
-          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
+        // Strict, not the lenient coerceStringArray: that one maps every element through
+        // String(), so `emailIds: [null]` would reach Email/get as the literal id "null"
+        // and come back reported as notFound — a type error wearing a not-found error's
+        // clothes, which would falsify this tool's promise that notFound means the server
+        // did not know the id.
+        const emailIds = coerceStringArrayStrict((args as any).emailIds, 'emailIds');
+        if (!emailIds || emailIds.length === 0) {
+          throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
         const client = initializeClient();
-        await client.archiveEmail(emailId);
+        const result = await client.archiveEmails(emailIds);
         return {
           content: [
-            {
-              type: 'text',
-              text: 'Email archived successfully (moved to Archive; read state unchanged)',
-            },
+            { type: 'text', text: formatArchiveResult(result) },
+            // The whole result as its own item, so the summary prose never has to be parsed
+            // and the JSON stays parseable. `counts` rides along with `results` because both
+            // descriptions promise counts that sum to the distinct id count, and a caller
+            // cannot check that invariant against prose — a bucket with no entries produces
+            // no line at all.
+            //
+            // Redacted like the prose beside it. This path RETURNS rather than throws, so the
+            // CallTool catch never sees it, and the renderer's own redaction of a set-error
+            // description would be decorative if the same server string then went out verbatim
+            // one content item later. Applied to every string VALUE, so it covers descriptions,
+            // mailbox names and ids alike rather than a field list that has to be kept in step
+            // with the type.
+            //
+            // Redaction is ALL this item gets, and that is a deliberate difference from the
+            // prose: the renderer passes mailbox names through describePart, which also strips
+            // format characters such as a bidi override. Here the defence is JSON quoting,
+            // which escapes quotes and control characters but leaves a bidi override intact.
+            // This item is DATA — a caller parses it rather than reading it as the server
+            // speaking — and truncating or rewriting names inside it would corrupt the values
+            // it exists to convey. The prose is the neutralised surface; this one is verbatim
+            // by design.
+            // redactedJson, NOT redactBearerTokens(JSON.stringify(...)): redacting a finished
+            // JSON document lets the bearer pattern eat the delimiters that terminate a value,
+            // and this item's whole promise is that it parses. See its definition in coerce.ts.
+            { type: 'text', text: redactedJson({ counts: result.counts, results: result.results }, 2) },
           ],
         };
       }

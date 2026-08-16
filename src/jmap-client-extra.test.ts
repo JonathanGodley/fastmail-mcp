@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, computeExclusion, readSourceReferences, fillUrlTemplate } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
@@ -644,124 +644,785 @@ describe('moveEmail', () => {
   }
 });
 
-// ---------- archiveEmail ----------
+// ---------- archiveEmails ----------
 
-describe('archiveEmail', () => {
+const SNOOZED_MAILBOX = { id: 'mb-snoozed', name: 'Snoozed', role: 'snoozed' };
+const SCHEDULED_MAILBOX = { id: 'mb-scheduled', name: 'Scheduled', role: 'scheduled' };
+const MEMOS_MAILBOX = { id: 'mb-memos', name: 'Notes', role: 'memos' };
+// A LABEL: role null, which is what every user-created folder looks like.
+const LABEL_MAILBOX = { id: 'mb-label', name: 'Gmail', role: null };
+
+const ARCHIVE_MAILBOXES = [
+  INBOX_MAILBOX, ARCHIVE_MAILBOX, TRASH_MAILBOX, JUNK_MAILBOX, DRAFTS_MAILBOX,
+  SCHEDULED_MAILBOX, SENT_MAILBOX, SNOOZED_MAILBOX, MEMOS_MAILBOX, LABEL_MAILBOX,
+];
+
+/**
+ * A request-aware stub for the two-request archive shape. getMailboxes() is no longer
+ * used by this path — Mailbox/get rides in the read batch — so stubMailboxes would
+ * intercept nothing here, and a test that relied on it would attempt a real network call.
+ * The branch is on the FIRST method name, mirroring queryResponse's request-shape switch.
+ */
+function stubArchive(
+  client: JmapClient,
+  opts: { mailboxes?: any[]; emails?: any[]; notFound?: string[]; set?: any; readResponse?: any } = {},
+) {
+  return stubRequests(client, async (request: JmapRequest) => {
+    if (request.methodCalls[0][0] === 'Mailbox/get') {
+      return opts.readResponse ?? {
+        methodResponses: [
+          ['Mailbox/get', { list: opts.mailboxes ?? ARCHIVE_MAILBOXES }, 'mailboxes'],
+          ['Email/get', { list: opts.emails ?? [], notFound: opts.notFound ?? [] }, 'emails'],
+        ],
+      };
+    }
+    // A compliant server reports every id it was handed in exactly one of `updated` /
+    // `notUpdated` (RFC 8620 §5.3), so the default stub acknowledges everything the client
+    // actually asked it to write rather than returning a bare `{ updated: {} }` — which
+    // would model a server that silently swallowed the batch, and archiveEmails now reports
+    // that as a failure. A test can still hand in its own `set` to model either map,
+    // including the non-compliant no-acknowledgement case.
+    const written = Object.keys((request.methodCalls[0][1] as any)?.update ?? {});
+    const notUpdatedIds = new Set(Object.keys((opts.set as any)?.notUpdated ?? {}));
+    const updated = Object.fromEntries(written.filter(id => !notUpdatedIds.has(id)).map(id => [id, null]));
+    return { methodResponses: [['Email/set', { updated, ...(opts.set ?? {}) }, 'archiveEmails']] };
+  });
+}
+
+const email = (id: string, ...mailboxIds: string[]) => ({
+  id,
+  mailboxIds: Object.fromEntries(mailboxIds.map(m => [m, true])),
+});
+
+// The Email/set update map, or undefined when no write was issued at all.
+function writtenUpdate(makeReq: ReturnType<typeof stubRequests>): any | undefined {
+  for (let i = 0; i < makeReq.mock.callCount(); i++) {
+    const call = callArguments(makeReq, i)[0];
+    if (call.methodCalls[0][0] === 'Email/set') return call.methodCalls[0][1].update;
+  }
+  return undefined;
+}
+
+describe('archiveEmails', () => {
   let client: JmapClient;
 
   beforeEach(() => {
     client = makeClient();
-    stubMailboxes(client);
   });
 
-  it('replaces membership with the archive mailbox alone, and writes no keywords', async () => {
-    // A pure move: exactly one destination id, set whole-value, and no keywords key at
-    // all. The read state is deliberately untouched — archiving a message does not read it
-    // (mark_email_read is the separate call), so a $seen write here would be a silent
-    // second effect.
-    const makeReq = stubRequests(client, async () => ({
-      methodResponses: [['Email/set', { updated: { e1: null } }, 'archiveEmail']],
-    }));
+  it('removes the Inbox and KEEPS other filing, without adding Archive', async () => {
+    // The behaviour the whole rewrite exists for, measured against the live client: a
+    // message in Inbox + a label comes out holding the label alone. The previous
+    // whole-value replace destroyed the label.
+    const makeReq = stubArchive(client, { emails: [email('e1', 'mb-inbox', 'mb-label')] });
 
-    await client.archiveEmail('e1');
+    const result = await client.archiveEmails(['e1']);
 
-    assert.equal(makeReq.mock.callCount(), 1, 'no pre-read round trip');
-    const methodCalls = callArguments(makeReq, 0)[0].methodCalls;
-    assert.equal(methodCalls.length, 1);
-    assert.equal(methodCalls[0][0], 'Email/set');
-    const update = methodCalls[0][1].update.e1;
-    assert.deepEqual(update, { mailboxIds: { 'mb-archive': true } });
-    assert.deepEqual(Object.keys(update), ['mailboxIds']);
-    assert.equal(Object.keys(update.mailboxIds).length, 1);
+    assert.deepEqual(result.results, [{ id: 'e1', action: 'removedFromInbox', mailboxes: ['Gmail'] }]);
+    assert.deepEqual(writtenUpdate(makeReq).e1, {
+      'mailboxIds/mb-inbox': null,
+      'mailboxIds/mb-label': true,
+    });
   });
 
-  it('prefers the archive ROLE over a folder that merely carries the name', async () => {
-    // Half of the guard: with both present, the role wins. On its own this case cannot
-    // tell an exact-role lookup apart from a role-then-name fallback, because a
-    // role-first fallback picks the same mailbox — the case below is the one that
-    // separates them, and the two are only meaningful together.
-    stubMailboxes(client, [
-      INBOX_MAILBOX,
-      { id: 'mb-imposter', name: 'archive' },
-      { id: 'mb-real-archive', name: 'Old mail', role: 'archive' },
+  it('moves an Inbox-ONLY message to Archive', async () => {
+    const makeReq = stubArchive(client, { emails: [email('e1', 'mb-inbox')] });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.deepEqual(result.results, [
+      { id: 'e1', action: 'movedToArchive', mailboxes: ['Archive'], roles: ['archive'] },
     ]);
-    const makeReq = stubRequests(client, async () => ({
-      methodResponses: [['Email/set', { updated: { e1: null } }, 'archiveEmail']],
-    }));
-
-    await client.archiveEmail('e1');
-
-    const update = callArguments(makeReq, 0)[0].methodCalls[0][1].update.e1;
-    assert.deepEqual(update.mailboxIds, { 'mb-real-archive': true });
+    assert.deepEqual(writtenUpdate(makeReq).e1, {
+      'mailboxIds/mb-inbox': null,
+      'mailboxIds/mb-archive': true,
+    });
   });
 
-  it('refuses a folder named "archive" when no mailbox carries the role', async () => {
-    // The case the whole role-only rule exists for, and the only one that discriminates:
-    // a name fallback would file the mail into a folder ANY caller can create, under an
-    // innocuous verb. Nothing may be sent at all here — the assertion on makeRequest is
-    // the substantive half, since a wrong destination would still look like a success.
-    stubMailboxes(client, [INBOX_MAILBOX, TRASH_MAILBOX, { id: 'mb-imposter', name: 'Archive' }]);
-    const makeReq = stubRequests(client, async () => ({
-      methodResponses: [['Email/set', { updated: { e1: null } }, 'archiveEmail']],
-    }));
+  it('reports a message already out of the Inbox as a no-op and writes NOTHING', async () => {
+    const makeReq = stubArchive(client, { emails: [email('e1', 'mb-label')] });
 
+    const result = await client.archiveEmails(['e1']);
+
+    assert.deepEqual(result.results, [{ id: 'e1', action: 'notInInbox', mailboxes: ['Gmail'] }]);
+    assert.equal(writtenUpdate(makeReq), undefined, 'a no-op must not issue an Email/set');
+    assert.equal(makeReq.mock.callCount(), 1, 'and must not cost a second round trip');
+  });
+
+  it('keeps the Inbox test FIRST: an Inbox+Trash message is archived, keeping Trash and gaining nothing', async () => {
+    // Measured: the client offers Archive on a message viewed from the Inbox even when it
+    // also carries Trash. Nothing is added to rescue it — that would be a
+    // destructive-destination guard this codebase deliberately does not have anywhere.
+    // This is the case a later "surely we should not leave it only in Trash" tidy-up would
+    // most plausibly break.
+    const makeReq = stubArchive(client, { emails: [email('e1', 'mb-inbox', 'mb-trash')] });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.deepEqual(result.results, [
+      { id: 'e1', action: 'removedFromInbox', mailboxes: ['Trash'], roles: ['trash'] },
+    ]);
+    assert.deepEqual(writtenUpdate(makeReq).e1, {
+      'mailboxIds/mb-inbox': null,
+      'mailboxIds/mb-trash': true,
+    });
+  });
+
+  for (const [role, mailbox] of [
+    ['trash', TRASH_MAILBOX], ['junk', JUNK_MAILBOX], ['drafts', DRAFTS_MAILBOX],
+    ['scheduled', SCHEDULED_MAILBOX], ['sent', SENT_MAILBOX], ['snoozed', SNOOZED_MAILBOX],
+  ] as const) {
+    it(`refuses a message in ${role}, which the Fastmail client offers no Archive action for`, async () => {
+      const makeReq = stubArchive(client, { emails: [email('e1', mailbox.id)] });
+
+      const result = await client.archiveEmails(['e1']);
+
+      assert.deepEqual(result.results, [
+        { id: 'e1', action: 'refused', mailboxes: [mailbox.name], roles: [role], reason: { role } },
+      ]);
+      assert.equal(writtenUpdate(makeReq), undefined, 'a refusal must not write');
+    });
+  }
+
+  it('picks the refusal role deterministically when a message is in two of them', async () => {
+    // Real on this account: messages filed in both Snoozed and Sent. The constant's fixed
+    // order decides, so the reported role does not depend on mailboxIds key order.
+    stubArchive(client, { emails: [email('e1', 'mb-snoozed', 'mb-sent')] });
+    const first = await client.archiveEmails(['e1']);
+
+    client = makeClient();
+    stubArchive(client, { emails: [email('e2', 'mb-sent', 'mb-snoozed')] });
+    const second = await client.archiveEmails(['e2']);
+
+    assert.equal(first.results[0].reason?.role, 'sent');
+    assert.equal(second.results[0].reason?.role, 'sent');
+  });
+
+  it('does NOT refuse a user folder merely NAMED "Trash" when it carries no role', async () => {
+    // The resolve-by-role rule, from the refusal side: a folder anyone can create must not
+    // acquire a system mailbox's behaviour by wearing its name.
+    stubArchive(client, {
+      mailboxes: [INBOX_MAILBOX, ARCHIVE_MAILBOX, { id: 'mb-fake-trash', name: 'Trash', role: null }],
+      emails: [email('e1', 'mb-fake-trash')],
+    });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.equal(result.results[0].action, 'notInInbox');
+  });
+
+  it('treats a role outside the measured refusal set as an ordinary no-op', async () => {
+    // memos is a real role on this account and was never measured, so it must fall through
+    // rather than be guessed into the refusal set from its name.
+    stubArchive(client, { emails: [email('e1', 'mb-memos')] });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.deepEqual(result.results, [
+      { id: 'e1', action: 'notInInbox', mailboxes: ['Notes'], roles: ['memos'] },
+    ]);
+  });
+
+  it('reports an Inbox+Archive message as removedFromInbox but still IN Archive', async () => {
+    // Why a caller must read roles rather than the branch name: this took the branch whose
+    // name says Archive was not added, and it is in Archive.
+    const result = await (() => {
+      stubArchive(client, { emails: [email('e1', 'mb-inbox', 'mb-archive')] });
+      return client.archiveEmails(['e1']);
+    })();
+
+    assert.equal(result.results[0].action, 'removedFromInbox');
+    assert.ok(result.results[0].roles?.includes('archive'));
+  });
+
+  it('surfaces an unresolvable mailbox id rather than dropping the location silently', async () => {
+    stubArchive(client, { emails: [email('e1', 'mb-inbox', 'mb-vanished')] });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.deepEqual(result.results, [
+      { id: 'e1', action: 'removedFromInbox', mailboxes: [], unresolvedMailboxIds: ['mb-vanished'] },
+    ]);
+  });
+
+  // ---- failing closed on the reads ----
+
+  it('fails closed when Mailbox/get errors', async () => {
+    stubArchive(client, {
+      readResponse: {
+        methodResponses: [
+          ['error', { type: 'serverFail' }, 'mailboxes'],
+          ['Email/get', { list: [email('e1', 'mb-inbox')] }, 'emails'],
+        ],
+      },
+    });
+
+    // A predicate, not a bare rejects: without one this passes on ANY throw, including a
+    // TypeError from a refactor that broke the call before it ever reached the guard.
     await assert.rejects(
-      () => client.archiveEmail('e1'),
+      () => client.archiveEmails(['e1']),
       (err: Error) => {
-        assert.ok(err instanceof InvalidInputError);
-        assert.match(err.message, /archive role/);
+        assert.match(err.message, /JMAP error: serverFail/);
         return true;
       },
     );
-    assert.equal(makeReq.mock.callCount(), 0, 'a named folder must not receive the mail');
   });
 
-  it('rejects an account with no archive-role mailbox, naming the alternative', async () => {
-    stubMailboxes(client, [INBOX_MAILBOX, TRASH_MAILBOX]);
+  it('fails closed when Mailbox/get succeeds with an EMPTY list', async () => {
+    // The shape getListResult cannot distinguish from a real answer. Left unchecked it
+    // would produce the confidently wrong "this account has no inbox-role mailbox".
+    stubArchive(client, { mailboxes: [], emails: [email('e1', 'mb-inbox')] });
 
     await assert.rejects(
-      () => client.archiveEmail('e1'),
+      () => client.archiveEmails(['e1']),
       (err: Error) => {
-        // Caller-fixable: they can name any destination on move_email, so the message has
-        // to say so and the class has to tell the client to re-form rather than retry.
-        assert.ok(err instanceof InvalidInputError);
-        assert.match(err.message, /archive role/);
-        assert.match(err.message, /move_email/);
+        assert.ok(!(err instanceof InvalidInputError));
+        assert.match(err.message, /mailboxes/);
         return true;
       },
     );
   });
 
-  it('routes a notUpdated bad id through the shared set-error classifier', async () => {
-    stubMakeRequest(client, {
-      methodResponses: [['Email/set', { notUpdated: { e1: { type: 'notFound' } } }, 'archiveEmail']],
+  it('fails closed when Email/get errors', async () => {
+    stubArchive(client, {
+      readResponse: {
+        methodResponses: [
+          ['Mailbox/get', { list: ARCHIVE_MAILBOXES }, 'mailboxes'],
+          ['error', { type: 'serverFail' }, 'emails'],
+        ],
+      },
     });
 
     await assert.rejects(
-      () => client.archiveEmail('e1'),
+      () => client.archiveEmails(['e1']),
       (err: Error) => {
-        assert.ok(err instanceof InvalidInputError);
-        assert.equal(err.message, 'Failed to archive email: notFound');
+        assert.match(err.message, /JMAP error: serverFail/);
         return true;
       },
     );
   });
 
-  it('keeps an operational notUpdated reason a server-side failure', async () => {
-    stubMakeRequest(client, {
-      methodResponses: [
-        ['Email/set', { notUpdated: { e1: { type: 'forbidden', description: 'mailbox is read-only' } } }, 'archiveEmail'],
+  it('fails closed on an id the server accounted for in NEITHER list nor notFound', async () => {
+    stubArchive(client, { emails: [email('e1', 'mb-inbox')], notFound: [] });
+
+    await assert.rejects(
+      () => client.archiveEmails(['e1', 'ghost']),
+      (err: Error) => {
+        assert.match(err.message, /ghost/);
+        assert.match(err.message, /Nothing was archived/);
+        return true;
+      },
+    );
+  });
+
+  it('returns results in the caller\'s order, whatever order the server answered in', async () => {
+    // The type doc promises caller order with first occurrence winning, and a caller
+    // zipping this against its own input array depends on it. Email/get is free to return
+    // its list in any order (RFC 8621 puts no ordering on it), so this is not implied by
+    // the request.
+    stubArchive(client, {
+      emails: [
+        email('c', 'mb-label'),
+        email('a', 'mb-inbox', 'mb-label'),
+        email('b', 'mb-trash'),
       ],
     });
 
+    const result = await client.archiveEmails(['a', 'b', 'c', 'a']);
+
+    assert.deepEqual(result.results.map(r => r.id), ['a', 'b', 'c']);
+  });
+
+  it('reports a message returned WITHOUT mailboxIds as failed, never as already archived', async () => {
+    // mailboxIds is requested explicitly, so this is a non-compliant server. The danger is
+    // that the obvious `Object.keys(email.mailboxIds || {})` default reads as an EMPTY
+    // membership, which has no Inbox and no refusing role — so the message would take the
+    // notInInbox branch and be reported as "already archived, nothing to do". That is a
+    // confident success statement about filing this server never saw.
+    const makeReq = stubArchive(client, {
+      emails: [{ id: 'e1' }, email('e2', 'mb-inbox', 'mb-label')],
+    });
+
+    const result = await client.archiveEmails(['e1', 'e2']);
+
+    const bad = result.results.find(r => r.id === 'e1')!;
+    assert.equal(bad.action, 'failed');
+    assert.match(bad.reason!.description!, /mailboxIds/);
+    assert.equal(result.counts.notInInbox, 0);
+    assert.equal(result.counts.failed, 1);
+    // The unreadable id never reaches the write, and its sibling is still served.
+    const update = writtenUpdate(makeReq);
+    assert.deepEqual(Object.keys(update), ['e2']);
+    assert.equal(result.results.find(r => r.id === 'e2')!.action, 'removedFromInbox');
+  });
+
+  // The other three shapes an unreadable filing arrives in. Each is a separate guard, and
+  // each fails the same way if it is dropped: no Inbox and no refusing role means
+  // decideArchiveBranch answers notInInbox, and the tool reports "already archived, nothing
+  // to do" about filing it never learned.
+  for (const [label, filing] of [
+    ['an ARRAY (typeof [] is "object", so a plain typeof test passes it through)', ['mb-inbox', 'mb-label']],
+    ['an EMPTY map (a message is always filed somewhere, so {} is a server fault)', {}],
+    ['a map whose only entries are FALSE', { 'mb-inbox': false }],
+  ] as [string, any][]) {
+    it(`reports a message whose mailboxIds is ${label} as failed`, async () => {
+      const makeReq = stubArchive(client, { emails: [{ id: 'e1', mailboxIds: filing }] });
+
+      const result = await client.archiveEmails(['e1']);
+
+      assert.equal(result.results[0].action, 'failed');
+      assert.equal(result.counts.notInInbox, 0);
+      assert.equal(writtenUpdate(makeReq), undefined, 'nothing may be written for it');
+      // The reason has to be true of the shape that produced it. An array and a false-valued
+      // map both HAVE the property, so the absent-property sentence would send a reader
+      // looking for something that is there.
+      assert.doesNotMatch(result.results[0].reason!.description!, /without a mailboxIds property/);
+    });
+  }
+
+  // The destination is resolved by ROLE and never by name. This is the security property the
+  // whole tool leans on — a caller, or text a model merely read, can create a mailbox NAMED
+  // "archive", while a role is assigned by the server and cannot be minted that way — and it
+  // is exactly what is lost if someone ever "simplifies" findByExactRole into a name lookup.
+  it('files into the mailbox carrying the archive ROLE, not a folder merely NAMED "Archive"', async () => {
+    const makeReq = stubArchive(client, {
+      // The decoy is FIRST. Behind the real Archive it discriminates nothing: a name lookup
+      // would find the role-carrying mailbox anyway and the assertion below would still pass,
+      // so the test would go green against exactly the change it exists to catch.
+      mailboxes: [{ id: 'mb-decoy', name: 'Archive', role: null }, ...ARCHIVE_MAILBOXES],
+      emails: [email('e1', 'mb-inbox')],
+    });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.equal(result.results[0].action, 'movedToArchive');
+    assert.deepEqual(writtenUpdate(makeReq).e1, {
+      'mailboxIds/mb-inbox': null,
+      'mailboxIds/mb-archive': true,
+    });
+  });
+
+  it('refuses the batch rather than filing into a folder NAMED "Archive" when no mailbox carries the role', async () => {
+    const makeReq = stubArchive(client, {
+      mailboxes: [INBOX_MAILBOX, { id: 'mb-decoy', name: 'Archive', role: null }],
+      emails: [email('e1', 'mb-inbox')],
+    });
+
+    await assert.rejects(client.archiveEmails(['e1']), /no mailbox with the archive role/);
+    assert.equal(writtenUpdate(makeReq), undefined, 'the decoy folder must never be written to');
+  });
+
+  it('treats a role mailbox with no usable id as absent, rather than writing "mailboxIds/undefined"', async () => {
+    // findByExactRole matches on role AND a usable id. Without the id half, this record
+    // satisfies a bare truthiness test and the patch key becomes the literal string
+    // "mailboxIds/undefined" — a silently corrupt write, which is far worse for the caller
+    // than the rejection they get instead.
+    const makeReq = stubArchive(client, {
+      mailboxes: [INBOX_MAILBOX, { name: 'Archive', role: 'archive' }],
+      emails: [email('e1', 'mb-inbox')],
+    });
+
+    await assert.rejects(client.archiveEmails(['e1']), /no mailbox with the archive role/);
+    assert.equal(writtenUpdate(makeReq), undefined);
+  });
+
+  it('carries the "Nothing was archived" tell when the read itself errors', async () => {
+    // The tool description tells a caller to key off that phrase to decide whether to re-read
+    // the messages. A method-level error entry is the commonest way the read fails, and it
+    // throws from getMethodResult with no tell of its own — so a caller reading its absence
+    // as "the write may have happened" would re-read for nothing, or worse, trust a stale
+    // picture. The server's own diagnosis has to survive alongside it.
+    stubArchive(client, {
+      readResponse: {
+        methodResponses: [
+          ['error', { type: 'serverFail' }, 'mailboxes'],
+          ['Email/get', { list: [], notFound: [] }, 'emails'],
+        ],
+      },
+    });
+
+    await assert.rejects(client.archiveEmails(['e1']), (err: Error) => {
+      assert.match(err.message, /serverFail/);
+      assert.match(err.message, /Nothing was archived\./);
+      return true;
+    });
+  });
+
+  it('aborts the whole batch when the Email/set itself fails, rather than bucketing the ids', async () => {
+    // The fourth abort, and the only one that fires AFTER the write was dispatched — so it is
+    // the one whose caller instruction differs ("re-read rather than assume nothing changed").
+    // Degrading it into per-message buckets would state an outcome for ids whose outcome
+    // nothing observed.
+    stubRequests(client, async (request: JmapRequest) => {
+      if (request.methodCalls[0][0] === 'Mailbox/get') {
+        return {
+          methodResponses: [
+            ['Mailbox/get', { list: ARCHIVE_MAILBOXES }, 'mailboxes'],
+            ['Email/get', { list: [email('e1', 'mb-inbox', 'mb-label')], notFound: [] }, 'emails'],
+          ],
+        };
+      }
+      return { methodResponses: [['error', { type: 'serverFail' }, 'archiveEmails']] };
+    });
+
+    await assert.rejects(client.archiveEmails(['e1']), /serverFail/);
+  });
+
+  it('does not read a set-error out of a non-object notUpdated', async () => {
+    // typeof is not enough on its own: for a STRING, hasOwnProperty.call('oops', '0') is true,
+    // so an id of "0" reads a character out of it as a set-error and a write the server
+    // confirmed in `updated` comes back reported as failed.
+    stubArchive(client, {
+      emails: [email('0', 'mb-inbox', 'mb-label')],
+      set: { updated: { '0': null }, notUpdated: 'oops' },
+    });
+
+    const result = await client.archiveEmails(['0']);
+
+    assert.equal(result.results[0].action, 'removedFromInbox');
+    assert.equal(result.counts.failed, 0);
+  });
+
+  it('never re-asserts a mailbox whose membership value was false', async () => {
+    // Every writing branch RE-ASSERTS the memberships it read, so reading keys wholesale
+    // instead of truthy values would write `mailboxIds/mb-label: true` for an entry that says
+    // the message is NOT in that mailbox — filing it somewhere it never was, which is the one
+    // thing this tool promises never to do. Deleting the truthy filter leaves every other
+    // assertion in this file green.
+    const makeReq = stubArchive(client, {
+      emails: [{ id: 'e1', mailboxIds: { 'mb-inbox': true, 'mb-label': false } }],
+    });
+
+    const result = await client.archiveEmails(['e1']);
+
+    // Inbox was its only real membership, so it is an Inbox-only message: it moves to Archive.
+    assert.equal(result.results[0].action, 'movedToArchive');
+    assert.deepEqual(writtenUpdate(makeReq).e1, {
+      'mailboxIds/mb-inbox': null,
+      'mailboxIds/mb-archive': true,
+    });
+  });
+
+  it('reports an id the server listed in notUpdated with a null value as failed, not as unknown', async () => {
+    // A null entry is still the server explicitly saying it did not update the record. Reading
+    // the map by truthiness rather than by key presence drops it through to the
+    // acknowledgement check, which then tells the caller nothing confirmed the outcome — about
+    // an id whose outcome the server confirmed.
+    stubArchive(client, {
+      emails: [email('e1', 'mb-inbox', 'mb-label')],
+      set: { updated: {}, notUpdated: { e1: null } },
+    });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.equal(result.results[0].action, 'failed');
+    assert.ok(!result.results[0].reason?.outcomeUnknown, 'the outcome was reported, not withheld');
+  });
+
+  it('fails closed with the read-path message when notFound is not an array', async () => {
+    // `notFound || []` lets a non-array through, and spreading it into a Set throws a bare
+    // TypeError that surfaces as "object is not iterable" — the one read-path failure in this
+    // method that would not tell the caller nothing was archived.
+    stubArchive(client, {
+      readResponse: {
+        methodResponses: [
+          ['Mailbox/get', { list: ARCHIVE_MAILBOXES }, 'mailboxes'],
+          ['Email/get', { list: [], notFound: { e1: true } }, 'emails'],
+        ],
+      },
+    });
+
     await assert.rejects(
-      () => client.archiveEmail('e1'),
+      client.archiveEmails(['e1']),
+      /neither a result nor a not-found entry.*Nothing was archived/s,
+    );
+  });
+
+  it('does not read a set-error off Object.prototype for an id named after one', async () => {
+    // Ids are caller-supplied strings. A bare `notUpdated[id]` lookup for an id of
+    // "constructor" finds a function on the prototype chain and reports a set-error the
+    // server never sent.
+    stubArchive(client, {
+      emails: [email('constructor', 'mb-inbox', 'mb-label')],
+      set: { notUpdated: {} },
+    });
+
+    const result = await client.archiveEmails(['constructor']);
+
+    assert.equal(result.results[0].action, 'removedFromInbox');
+    assert.equal(result.counts.failed, 0);
+  });
+
+  it('writes an id of "__proto__" as an ordinary key instead of silently dropping it', async () => {
+    // On a plain object, `update['__proto__'] = patch` invokes the prototype SETTER rather
+    // than creating an own key. The entry vanishes from the write, no Email/set carries it,
+    // and the id then gets reported as "acknowledged in neither map" — a statement about a
+    // request the server was never sent, which is the failure the acknowledgement check was
+    // added to prevent, arriving through a different door.
+    const makeReq = stubArchive(client, {
+      emails: [email('__proto__', 'mb-inbox', 'mb-label')],
+    });
+
+    const result = await client.archiveEmails(['__proto__']);
+
+    const update = writtenUpdate(makeReq);
+    assert.deepEqual(Object.keys(update), ['__proto__']);
+    assert.deepEqual(
+      { ...update }['__proto__'],
+      { 'mailboxIds/mb-inbox': null, 'mailboxIds/mb-label': true },
+    );
+    assert.equal(result.results[0].action, 'removedFromInbox');
+    assert.equal(result.counts.failed, 0);
+  });
+
+  // ---- the two role guards ----
+
+  it('throws a plain Error when the account has no inbox-role mailbox', async () => {
+    // Not InvalidInputError: unlike a missing Archive there is no substitute call the
+    // caller could make instead, so this is not caller-fixable.
+    //
+    // A folder NAMED "Inbox" is in the fixture and must not rescue it. The Inbox is resolved
+    // by role for the same reason Archive is, and this hard error is the natural place for a
+    // later "just fall back to the folder called Inbox" edit — which would hand a mailbox
+    // anyone can create control over which messages this tool unfiles.
+    stubArchive(client, {
+      mailboxes: [ARCHIVE_MAILBOX, TRASH_MAILBOX, { id: 'mb-fake-inbox', name: 'Inbox', role: null }],
+      emails: [email('e1', 'mb-archive')],
+    });
+
+    await assert.rejects(
+      () => client.archiveEmails(['e1']),
       (err: Error) => {
         assert.ok(!(err instanceof InvalidInputError));
-        assert.equal(err.message, 'Failed to archive email: forbidden - mailbox is read-only');
+        assert.match(err.message, /inbox role/);
         return true;
       },
     );
+  });
+
+  it('rejects a missing archive role ONLY when a message actually needs Archive', async () => {
+    const makeReq = stubArchive(client, {
+      mailboxes: [INBOX_MAILBOX, LABEL_MAILBOX],
+      emails: [email('e1', 'mb-inbox')],
+    });
+
+    await assert.rejects(
+      () => client.archiveEmails(['e1']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /archive role/);
+        assert.match(err.message, /move_email/);
+        // The guard rejects the WHOLE batch, so it has to say nothing was written — the three
+        // sibling guards say the same, and a caller cannot otherwise tell a pre-write refusal
+        // from one that stopped halfway.
+        assert.match(err.message, /Nothing was archived\./);
+        return true;
+      },
+    );
+    assert.equal(writtenUpdate(makeReq), undefined, 'the guard must reject before any write');
+  });
+
+  it('serves a batch that never needs Archive even with no archive-role mailbox', async () => {
+    // The unconditional guard the old code had would have rejected this outright, and the
+    // call is perfectly serviceable: nothing here reaches the Inbox-only branch.
+    const makeReq = stubArchive(client, {
+      mailboxes: [INBOX_MAILBOX, LABEL_MAILBOX],
+      emails: [email('e1', 'mb-inbox', 'mb-label'), email('e2', 'mb-label')],
+    });
+
+    const result = await client.archiveEmails(['e1', 'e2']);
+
+    assert.deepEqual(result.counts.removedFromInbox, 1);
+    assert.deepEqual(result.counts.notInInbox, 1);
+    assert.deepEqual(writtenUpdate(makeReq).e1, {
+      'mailboxIds/mb-inbox': null,
+      'mailboxIds/mb-label': true,
+    });
+  });
+
+  // ---- the never-throw report ----
+
+  it('buckets an unknown id as notFound instead of throwing', async () => {
+    const result = await (() => {
+      stubArchive(client, { emails: [], notFound: ['bogus'] });
+      return client.archiveEmails(['bogus']);
+    })();
+
+    assert.deepEqual(result.results, [{ id: 'bogus', action: 'notFound' }]);
+    assert.equal(result.counts.notFound, 1);
+  });
+
+  it("routes Email/set's own notFound set-error to the notFound bucket, not failed", async () => {
+    // Cyrus emits notFound for the empty-membership rejection too. One condition, one
+    // answer — folding it into `failed` would give the same situation two names.
+    stubArchive(client, {
+      emails: [email('e1', 'mb-inbox')],
+      set: { notUpdated: { e1: { type: 'notFound' } } },
+    });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.equal(result.results[0].action, 'notFound');
+    assert.equal(result.counts.failed, 0);
+  });
+
+  it('buckets an operational set-error as failed, reporting the OBSERVED filing', async () => {
+    stubArchive(client, {
+      emails: [email('e1', 'mb-inbox', 'mb-label')],
+      set: { notUpdated: { e1: { type: 'forbidden', description: 'mailbox is read-only' } } },
+    });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.deepEqual(result.results, [{
+      id: 'e1',
+      action: 'failed',
+      mailboxes: ['Inbox', 'Gmail'],
+      roles: ['inbox'],
+      reason: { setErrorType: 'forbidden', description: 'mailbox is read-only' },
+    }]);
+  });
+
+  it('counts every action and sums them to the number of DISTINCT ids', async () => {
+    const makeReq = stubArchive(client, {
+      emails: [
+        email('a', 'mb-inbox'), email('b', 'mb-inbox', 'mb-label'),
+        email('c', 'mb-label'), email('d', 'mb-trash'),
+        email('e', 'mb-inbox'),
+      ],
+      notFound: ['f'],
+      set: { notUpdated: { e: { type: 'forbidden' } } },
+    });
+
+    const result = await client.archiveEmails(['a', 'b', 'c', 'd', 'e', 'f', 'a']);
+
+    assert.deepEqual(result.counts, {
+      movedToArchive: 1, removedFromInbox: 1, notInInbox: 1, refused: 1, notFound: 1, failed: 1,
+    });
+    const sum = Object.values(result.counts).reduce((t, n) => t + n, 0);
+    assert.equal(sum, 6, 'six distinct ids from seven inputs');
+    assert.equal(result.results.length, 6);
+
+    // The non-writing branches must stay OUT of an Email/set that IS being issued. The
+    // refusal tests only prove no write happens when nothing writes at all, so nothing else
+    // pins the branch filter in a mixed batch — and breaking it would write silently.
+    assert.deepEqual(
+      Object.keys(writtenUpdate(makeReq)).sort(),
+      ['a', 'b', 'e'],
+      'only the two writing branches (plus the one that failed at the server) are sent',
+    );
+  });
+
+  it('reports a write the server acknowledged in neither map as failed, not as success', async () => {
+    // RFC 8620 §5.3 requires every id in exactly one of updated/notUpdated, and Cyrus does
+    // that, so this models a server that stopped honouring it. Reporting our own plan as the
+    // outcome would state as fact something nothing confirmed.
+    const makeReq = stubArchive(client, {
+      emails: [email('e1', 'mb-inbox', 'mb-label')],
+      set: { updated: {}, notUpdated: {} },
+    });
+
+    const result = await client.archiveEmails(['e1']);
+
+    assert.ok(writtenUpdate(makeReq), 'the write was still issued');
+    assert.equal(result.results[0].action, 'failed');
+    assert.match(String(result.results[0].reason?.description), /neither/);
+    // The filing reported is the pre-write observation, and the entry says so.
+    assert.deepEqual(result.results[0].mailboxes, ['Inbox', 'Gmail']);
+    assert.equal(result.counts.failed, 1);
+    assert.equal(result.counts.removedFromInbox, 0);
+  });
+
+  it('collapses duplicate ids before the read', async () => {
+    const makeReq = stubArchive(client, { emails: [email('e1', 'mb-inbox')] });
+
+    await client.archiveEmails(['e1', 'e1', 'e1']);
+
+    assert.deepEqual(callArguments(makeReq, 0)[0].methodCalls[1][1].ids, ['e1']);
+  });
+
+  it('writes both patch shapes in ONE Email/set for a mixed batch', async () => {
+    const makeReq = stubArchive(client, {
+      emails: [email('a', 'mb-inbox'), email('b', 'mb-inbox', 'mb-label')],
+    });
+
+    await client.archiveEmails(['a', 'b']);
+
+    const setCalls = [];
+    for (let i = 0; i < makeReq.mock.callCount(); i++) {
+      const call = callArguments(makeReq, i)[0];
+      if (call.methodCalls[0][0] === 'Email/set') setCalls.push(call);
+    }
+    assert.equal(setCalls.length, 1, 'one write for the whole batch');
+    // Spread before comparing: the update map is built with Object.create(null) so that an
+    // id of "__proto__" becomes an ordinary key instead of invoking the prototype setter,
+    // and deepEqual compares prototypes. The keys and values are what this pins.
+    assert.deepEqual({ ...setCalls[0].methodCalls[0][1].update }, {
+      a: { 'mailboxIds/mb-inbox': null, 'mailboxIds/mb-archive': true },
+      b: { 'mailboxIds/mb-inbox': null, 'mailboxIds/mb-label': true },
+    });
+  });
+
+  it('never mixes a bare mailboxIds with mailboxIds/ patch keys in one update', async () => {
+    // Cyrus's patch-key loop lives inside the `mailboxids == NULL` branch
+    // (imap/jmap_mail.c:11760-11773) and there is no prefix-collision check — RFC 8620
+    // section 5.3 is an explicit TODO at jmap_util.c:136-139 — so an update carrying both
+    // would silently apply only the whole-value half and still report success. This pins
+    // OUR side of that; upstream may tighten theirs later.
+    const makeReq = stubArchive(client, {
+      emails: [email('a', 'mb-inbox'), email('b', 'mb-inbox', 'mb-label'), email('c', 'mb-label')],
+    });
+
+    await client.archiveEmails(['a', 'b', 'c']);
+
+    for (const patch of Object.values(writtenUpdate(makeReq)) as Record<string, any>[]) {
+      assert.ok(!('mailboxIds' in patch), 'no whole-value key');
+      assert.ok(Object.keys(patch).every(k => k.startsWith('mailboxIds/')), 'patch keys only');
+      assert.ok(!('keywords' in patch), 'no keyword is written');
+    }
+  });
+
+  it('requests only the properties it reads, in one batch of two', async () => {
+    const makeReq = stubArchive(client, { emails: [email('e1', 'mb-label')] });
+
+    await client.archiveEmails(['e1']);
+
+    const methodCalls = callArguments(makeReq, 0)[0].methodCalls;
+    assert.equal(methodCalls.length, 2);
+    assert.deepEqual(methodCalls[0][1].properties, ['id', 'name', 'role']);
+    assert.deepEqual(methodCalls[1][1].properties, ['id', 'mailboxIds']);
+  });
+});
+
+describe('decideArchiveBranch', () => {
+  const roles = new Map<string, string | null>([
+    ['mb-inbox', 'inbox'], ['mb-trash', 'trash'], ['mb-label', null], ['mb-sent', 'sent'],
+  ]);
+
+  it('tests Inbox membership before the refusal set', () => {
+    assert.deepEqual(decideArchiveBranch(['mb-inbox', 'mb-trash'], 'mb-inbox', roles), {
+      branch: 'removedFromInbox',
+      keptIds: ['mb-trash'],
+    });
+  });
+
+  it('reports movedToArchive with no kept ids when the Inbox is the only membership', () => {
+    assert.deepEqual(decideArchiveBranch(['mb-inbox'], 'mb-inbox', roles), {
+      branch: 'movedToArchive',
+      keptIds: [],
+    });
+  });
+
+  it('refuses on a refusing role once the message has left the Inbox', () => {
+    assert.deepEqual(decideArchiveBranch(['mb-sent'], 'mb-inbox', roles), {
+      branch: 'refused',
+      keptIds: [],
+      refusingRole: 'sent',
+    });
+  });
+
+  it('treats a message with NO memberships at all as not-in-Inbox rather than refused', () => {
+    assert.deepEqual(decideArchiveBranch([], 'mb-inbox', roles), { branch: 'notInInbox', keptIds: [] });
   });
 });
 
@@ -2466,6 +3127,25 @@ describe('bulkMove resolution', () => {
       () => client.bulkMove(['e1'], 'nope'),
       (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
     );
+  });
+
+  it('sends an update for an id named __proto__ instead of silently writing nothing', async () => {
+    // The update map is keyed by caller-supplied ids, so it must not inherit from
+    // Object.prototype: `updates['__proto__'] = patch` on a plain {} runs the prototype
+    // SETTER, the entry never appears in the request, and the caller is told the move
+    // succeeded for a message the server never saw. Pinned on a bulk writer as well as on
+    // archive_email, because the null-prototype map is shared across all of them and
+    // reverting one back to {} would otherwise leave the suite green.
+    const makeReq = stubRequests(client, async () => (
+      { methodResponses: [['Email/set', { updated: { '__proto__': null } }, 'bulkMove']] }
+    ));
+    await client.bulkMove(['__proto__'], 'Archive');
+    const update = callArguments(makeReq, 0)[0].methodCalls[0][1].update;
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(update, '__proto__'),
+      'the id must be an OWN key of the update map, not swallowed by the prototype setter',
+    );
+    assert.deepEqual((update as any)['__proto__'], { mailboxIds: { 'mb-archive': true } });
   });
 });
 

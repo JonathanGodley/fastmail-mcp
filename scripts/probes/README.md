@@ -67,6 +67,7 @@ and clear them by hand if you care.
 | `inline-quotecarry.smoke.mjs` | Reply/forward quote carry: minted `ii-...@inline.invalid` cids, keep-rebuild reuse, drop/degrade/exclusion notes, asAttachment untouched, `send_draft` transmit receipt |
 | `foreign-draft-roundtrip.mjs` | Edit round-trip of a foreign-shape draft (`alternative[text, related[html, inline image]]`, `@`-bearing Content-ID): metadata edit, body-keep edit, ref-dropping edit |
 | `probe-exact-instance.mjs` | Exact-instance thread-state marking on duplicated messages (see its header; needs `FASTMAIL_PROBE_TEST_ADDR`) |
+| `archive-parity.smoke.mjs` | Archive semantics end to end: the `mailboxIds/` patch form is accepted, an Inbox+label message keeps its label without gaining Archive, an Inbox-only message reaches Archive, a message already out of the Inbox is untouched, a refusing role writes nothing, and a mixed batch sends both patch shapes in one `Email/set`. Creates and destroys its own label folder |
 
 `jmaplib.mjs` is a minimal raw-JMAP helper (session, Email/set, blob upload,
 tiny PNG generator) used to build fixtures outside the server under test.

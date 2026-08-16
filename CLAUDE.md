@@ -38,7 +38,7 @@ A tool that **irreversibly destroys** a record must refuse a record whose **kind
 
 **Get the granularity right: the test is the record KIND, not the fields.** Almost every real record carries fields the create tool cannot set — a contact card's titles, organizations, photos — and refusing to destroy all of those would break the tool. A field the echo cannot rebuild is a documented limit (see the echo bound in `docs/conventions.md`); a *kind of thing* that cannot be made at all is a refusal. Write the in-code comment so the next reader applies the narrow reading, because that is the one that stays correct as the create surface grows.
 
-This governs delete paths not yet written. When adding one, check it against the create surface first, and if the two disagree, either refuse the unmakeable kind or say plainly why the destroy is still safe (e.g. `delete_email` moves to Trash rather than destroying, so nothing is lost to recreate).
+This governs delete paths not yet written. When adding one, check it against the create surface first, and if the two disagree, either refuse the unmakeable kind or say plainly why the destroy is still safe (e.g. `delete_email` moves to Trash rather than destroying, so no content is lost to recreate — note that this is true of CONTENT and false of FILING: it writes `mailboxIds` whole-value, so a message's other labels are dropped and the Trash copy cannot show you what they were, per #123).
 
 ## Version
 
@@ -89,6 +89,7 @@ The *why* behind shipped behaviour lives in two places, split by scope. Look her
 - **Cross-cutting rationale → the `docs/*.md` files** (checked in, version-controlled). Facts and models that span multiple tools, or that are properties of the JMAP/Fastmail platform or the shared codebase:
   - `docs/email-bodies.md` — the body-format model (HTML as source of truth, text/plain as a derived fallback), the asymmetric `edit_draft` coupling, MIME-matched body extraction + the 12-cell edit matrix, destroy+recreate, and live-probed Fastmail body facts.
   - `docs/security-model.md` — path confinement for download/attachment (always-on, configurable scope, the read-vs-write guard distinction).
+  - `docs/fastmail-action-availability.md` — what the Fastmail web client offers per screen and what each action actually does, measured rather than inferred. The authority for any "what does Fastmail mean by this verb" question, because Cyrus implements almost none of the policy and JMAP permits far more than the client does. Extend it by measuring a view, never by inferring from a role's name.
   - `docs/conventions.md` — lenient input coercion (and its fail-closed variant for arguments that narrow what a call touches), mailbox-query scoping (JMAP's singular `inMailbox`, the solely-in `inMailboxOtherThan`, the single unioned excluded set, and the two sites that decide whether the default Trash/Spam exclusion runs), the U+202F local-time trap, the two-pass quote sanitiser (its posture, and why a quote is rebuilt in two passes), and dependency/build gotchas.
 
 The dividing line: **an issue explains why ONE tool behaves as it does; a docs file captures a fact or model spanning multiple tools, or a property of the platform/codebase.** When you add a durable decision, file it on the side of that line — don't leave it in a local scratch file.

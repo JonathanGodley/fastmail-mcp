@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -68,6 +68,22 @@ describe('coerceStringArrayStrict', () => {
     assert.equal(coerceStringArrayStrict(null, 'requiredMailboxes'), undefined);
   });
 
+  it('trims on the array branch, so both branches agree about whitespace', () => {
+    // Without this the two branches of one coercer disagree: the comma-split branch has
+    // always trimmed, while the array branch passed a padded element straight through. A
+    // padded id then reaches the server and comes back as a not-found — a type error
+    // wearing a lookup error's clothes, which is the exact failure this variant exists to
+    // stop. Deleting the trim leaves every other assertion in this file green.
+    // Through the LENIENT coercer directly. The strict one delegates here for the trim, so an
+    // assertion that only went through coerceStringArrayStrict would keep passing if the
+    // lenient array branch stopped trimming — which is every bulk tool's emailIds.
+    assert.deepEqual(coerceStringArray([' e1 ', 'e2']), ['e1', 'e2']);
+    assert.deepEqual(coerceStringArray('[" e1 "]'), ['e1']);
+    assert.deepEqual(coerceStringArrayStrict([' M123 ', 'M2'], 'emailIds'), ['M123', 'M2']);
+    assert.deepEqual(coerceStringArrayStrict('[" M123 "]', 'emailIds'), ['M123']);
+    assert.deepEqual(coerceStringArrayStrict(' M123 , M2 ', 'emailIds'), ['M123', 'M2']);
+  });
+
   // The whole point of the strict variant: a value that is present but unusable must not
   // come back as `undefined`, because on a scoping parameter that reads as "not supplied"
   // and silently widens the query the caller passed it to narrow.
@@ -103,6 +119,33 @@ describe('coerceStringArrayStrict', () => {
       assert.throws(() => coerceStringArrayStrict(value, 'requiredMailboxes'), InvalidInputError);
       assert.throws(() => coerceStringArrayStrict(value, 'requiredMailboxes'), pattern);
     }
+  });
+
+  // An empty element is a string, so the type check above passes it, and the plain coercer
+  // only drops blanks on its comma-split branch. Without this it reaches the lookup as a real
+  // value and comes back as "not found" — the same type-error-wearing-a-lookup-error's-clothes
+  // failure the per-element check exists to stop.
+  it('rejects an empty or whitespace-only element by index', () => {
+    const cases: Array<[unknown, RegExp]> = [
+      [[''], /\[0\] must be a non-empty string/],
+      [['   '], /\[0\] must be a non-empty string/],
+      [['Archive', ''], /\[1\] must be a non-empty string/],
+      // A JSON-string array is unwrapped before the element check, so a blank cannot hide in
+      // one. These two are the bare string, not an array wrapping it.
+      ['[""]', /\[0\] must be a non-empty string/],
+      ['["Archive", "  "]', /\[1\] must be a non-empty string/],
+    ];
+    for (const [value, pattern] of cases) {
+      assert.throws(() => coerceStringArrayStrict(value, 'emailIds'), InvalidInputError);
+      assert.throws(() => coerceStringArrayStrict(value, 'emailIds'), pattern);
+    }
+  });
+
+  // A blank between commas is a separator artefact rather than something a caller wrote
+  // down, so the comma-split branch keeps dropping it. The two are deliberately different.
+  it('still drops blanks on the comma-split branch', () => {
+    assert.deepEqual(coerceStringArrayStrict('Archive,,Sent', 'requiredMailboxes'), ['Archive', 'Sent']);
+    assert.deepEqual(coerceStringArrayStrict('Archive, , Sent', 'requiredMailboxes'), ['Archive', 'Sent']);
   });
 
   // The JSON-string array a lenient client sends is unwrapped before the element check,
@@ -463,6 +506,41 @@ describe('redactBearerTokens', () => {
   it('does not redact unrelated text', () => {
     const original = 'JMAP error: invalidArguments — mailbox not found';
     assert.equal(redactBearerTokens(original), original);
+  });
+
+});
+
+describe('redactedJson', () => {
+  it('stays parseable when a string value begins with "Bearer"', () => {
+    // The failure this function exists to prevent. Redacting the FINISHED document instead
+    // lets BEARER_PATTERN's `\S+` run past the value and eat its closing quote and the comma
+    // after it, and the item a caller is promised can be parsed stops parsing. A mailbox
+    // named "Bearer Bonds" is enough; mailbox names are free text.
+    const out = redactedJson({ results: [{ id: 'e1', mailboxes: ['Bearer Bonds', 'Inbox'] }] }, 2);
+    const parsed = JSON.parse(out);
+    assert.deepEqual(parsed.results[0].mailboxes[1], 'Inbox');
+  });
+
+  it('still redacts a real credential inside a value', () => {
+    // The other half: staying parseable must not come at the cost of letting a token through.
+    const out = redactedJson({ results: [{ id: 'e1', reason: { description: 'auth failed: Bearer abc123xyz' } }] });
+    JSON.parse(out);
+    assert.match(out, /Bearer \[REDACTED\]/);
+    assert.ok(!out.includes('abc123xyz'));
+  });
+
+  it('redacts a token that ENDS a value without breaking the document', () => {
+    // A server description ending in a credential is the case where redaction matters most,
+    // and it is also the case where document-level redaction destroyed the report - the
+    // trailing delimiters sit immediately after the token with no whitespace between.
+    const out = redactedJson({ description: 'rejected by Bearer sk-0123456789' });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.description, 'rejected by Bearer [REDACTED]');
+  });
+
+  it('leaves non-string values alone', () => {
+    const out = redactedJson({ counts: { failed: 2 }, ok: true, missing: null });
+    assert.deepEqual(JSON.parse(out), { counts: { failed: 2 }, ok: true, missing: null });
   });
 
   it('redacts multiple tokens in one string', () => {

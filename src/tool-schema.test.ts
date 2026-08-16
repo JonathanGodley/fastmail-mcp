@@ -422,6 +422,72 @@ describe('the limit bound is owned by the handlers', () => {
 // orchestrate. What made the residual worth narrowing at all is that the mis-wire above is
 // both the likeliest edit and the one whose symptom (mail quietly missing from a result)
 // looks like an empty mailbox rather than like a bug.
+// The same class of untestable handler wiring, for a different coercer. archive_email's
+// contract says `notFound` means the server did not know the id; the LENIENT
+// coerceStringArray maps every element through String(), so `emailIds: [null]` would reach
+// Email/get as the literal id "null" and come back in that bucket. A caller reading the
+// report would be told the server does not have a message it was never asked about, and the
+// type error would be invisible.
+//
+// Nothing else catches the swap. coerceStringArrayStrict's own rejection is unit-tested in
+// coerce.test.ts, but that pins the COERCER, not which coercer the handler calls — swap the
+// call here for the lenient one and every existing test still passes.
+describe('archive_email is wired to the strict string-array coercer', () => {
+  it('reads emailIds through coerceStringArrayStrict', () => {
+    const lines = readLines('index.ts');
+    const start = lines.findIndex((l) => l.includes("case 'archive_email':"));
+    assert.ok(start >= 0, "could not find the archive_email case in src/index.ts");
+    // The handler is short; scanning to the next `case '` keeps this from reading a
+    // neighbouring tool's coercion and calling it a pass.
+    const end = lines.findIndex((l, i) => i > start && /^\s*case '/.test(l));
+    const body = lines.slice(start, end > start ? end : start + 40).join('\n');
+    assert.match(
+      body,
+      /const emailIds = coerceStringArrayStrict\(/,
+      'archive_email must coerce emailIds with coerceStringArrayStrict; the lenient ' +
+        'coerceStringArray would turn a non-string element into a literal id string and ' +
+        'report it as notFound',
+    );
+    assert.doesNotMatch(
+      body,
+      // `coerceStringArrayStrict(` does not match this: the pattern requires the open
+      // paren immediately after the lenient name.
+      /coerceStringArray\(/,
+      'archive_email must not use the lenient coerceStringArray for any argument',
+    );
+  });
+
+  it('serialises counts alongside results, which both descriptions promise', () => {
+    // The tool description and the README both tell a caller the counts sum to the number
+    // of distinct ids they passed. That invariant is uncheckable from the prose alone,
+    // because a bucket with no entries produces no line — so `counts` has to be in the JSON
+    // item. Serialising `result.results` on its own satisfies every other test in the repo
+    // while quietly making both descriptions wrong.
+    const lines = readLines('index.ts');
+    const start = lines.findIndex((l) => l.includes("case 'archive_email':"));
+    const end = lines.findIndex((l, i) => i > start && /^\s*case '/.test(l));
+    const body = lines.slice(start, end > start ? end : start + 60).join('\n');
+    assert.match(
+      body,
+      /redactedJson\(\{\s*counts: result\.counts,\s*results: result\.results\s*\}/,
+      'the archive_email JSON content item must carry counts as well as results',
+    );
+    // And it must go through redactedJson rather than redacting the finished document:
+    // BEARER_PATTERN runs to the next whitespace, so over serialised JSON it eats the quote
+    // and comma that terminate a value and the item stops parsing. See redactedJson in
+    // coerce.ts; the failing input is a mailbox named "Bearer Bonds".
+    // Comment lines are stripped first: the code carries a comment naming the wrong form in
+    // order to warn against it, and a negative match over the raw text would fire on the
+    // warning rather than on a real regression.
+    const code = body.split('\n').filter((l) => !l.trimStart().startsWith('//')).join('\n');
+    assert.doesNotMatch(
+      code,
+      /redactBearerTokens\(\s*JSON\.stringify/,
+      'the archive_email JSON item must not be redacted after serialisation',
+    );
+  });
+});
+
 describe('scope flags are wired to their own argument', () => {
   it('reads every coerceBool flag from the argument of the same name', () => {
     // `const raw = coerceBool((args as any).raw)`, `raw: coerceBool(args?.raw)` and the

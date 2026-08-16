@@ -524,15 +524,35 @@ than overclaimed:
   than implied covered. **`archive_email` (#21) sits in exactly this gap and is the cheapest way
   into it**: one call, one required argument, and mail leaves the Inbox with nothing reporting it.
   Its fixed destination narrows only where the mail can be aimed. An injected agent cannot choose
-  the folder, but Archive is where it wanted the mail anyway. It adds no capability `move_email`
-  (`targetMailbox:"archive"`) did not already have; it is the same concealment at a lower bar.
-  Accepted on the same footing as move-to-any, and for the same reason: the restriction that would
-  change it is the deferred move-target guard (fork #43), not a disclosure note.
+  the folder, but Archive is where it wanted the mail anyway. As a way of *getting mail out of the
+  Inbox* it adds no capability `move_email` (`targetMailbox:"archive"`) did not already have; it is
+  the same concealment at a lower bar. It is **not** capability-identical in where the mail ends up,
+  and that difference cuts against it — see the amendment below. Accepted on the same footing as
+  move-to-any, and for the same reason: the restriction that would change it is the deferred
+  move-target guard (fork #43), not a disclosure note.
+  - **Two amendments from the Fastmail-parity rewrite (#104), and the first one makes concealment
+    worse.** `archive_email` no longer moves mail into Archive in the general case — it removes the
+    Inbox membership and leaves the message wherever else it was filed. Under the old behaviour
+    every message an injected sweep touched landed in one folder, so recovery was "enumerate
+    Archive". Now a swept Inbox+label message leaves the Inbox and arrives nowhere new, and **the
+    affected set is no longer enumerable from anywhere.** That is a genuine loss and is recorded as
+    a **new accepted residual**, on the same footing as the concealment above: what would change it
+    is a disclosure mechanism or the #43 guard, neither of which exists yet.
+  - The tool now returns a per-message report naming each id's outcome and its resulting filing.
+    That is **cooperative-reader transparency only** and does not close the bullet above: it is
+    read by the agent, not by the user, and this document's own precedent settles the point — "the
+    hidden-count note is TRANSPARENCY for a cooperative reader, not an injection control." An
+    injected agent simply does not relay it.
+  - The refusal set (`trash`, `junk`, `drafts`, `scheduled`, `sent`, `snoozed`) narrows what the
+    verb can touch, but claim nothing for it as a control: it is parity with the client, and every
+    one of those messages remains reachable through `move_email`.
 - **`archive_email`'s destination is EXACT-ROLE ONLY, and that is a real (small) hardening.**
   Its destination is not caller-supplied at all: no `targetMailbox`, no name fallback, role
   lookup only. It shares that shape with `delete_email`/`bulk_delete`, whose Trash is found the
   same way, and those three are the only destinations on the server that work like it (see the
-  resolver section of `docs/conventions.md`). The reason is that a caller can
+  resolver section of `docs/conventions.md`). The **Inbox it removes** is resolved the same way and
+  needs to be: a folder anyone can create and name "Inbox" must not become the membership this verb
+  strips. The reason is that a caller can
   create a mailbox literally *named* `archive`; had the tool resolved names, "archive this" (a
   phrase an untrusted message body can plant) would file mail into an attacker-chosen folder
   under the innocuous verb. Against a *deliberate* attacker holding `move_email` this changes

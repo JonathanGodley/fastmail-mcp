@@ -3118,6 +3118,23 @@ describe('updateDraft attachments', () => {
     assert.equal(draftFromCall(makeReq).attachments, undefined);
   });
 
+  it('matches a stored name that carries surrounding whitespace', async () => {
+    // BOTH sides of the comparison are trimmed, and the pair is what makes it safe. The
+    // coercer trims the caller's ref so the three ways of writing a list agree, which on its
+    // own would make ' doc.pdf ' unreachable — a caller could name it exactly and still be
+    // told it matched nothing, with no spelling that works. Trimming the stored side too
+    // restores it. Delete either half and this test fails.
+    const paddedDraft = {
+      ...EXISTING_DRAFT,
+      attachments: [
+        { blobId: 'b-pad', type: 'application/pdf', name: ' doc.pdf ', disposition: 'attachment', cid: null, partId: '3', size: 1 },
+      ],
+    };
+    const makeReq = mockUpdate(client, paddedDraft);
+    await client.updateDraft('draft-1', { removeAttachments: ['doc.pdf'] });
+    assert.equal(draftFromCall(makeReq).attachments, undefined);
+  });
+
   it('rejects a remove ref that matches nothing', async () => {
     mockUpdate(client, DRAFT_ONE_ATT);
     await assert.rejects(

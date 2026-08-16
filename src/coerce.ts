@@ -82,16 +82,51 @@ export function redactBearerTokens(input: string): string {
   return out;
 }
 
+/**
+ * Serialise a value to JSON with every string inside it redacted.
+ *
+ * This is the ONLY safe way to redact a structured result item, and the reason is
+ * BEARER_PATTERN: `/Bearer\s+\S+/gi` runs `\S+` to the next whitespace, which over an
+ * already-serialised document is the string's own closing quote and the comma after it.
+ * Redacting the finished document therefore eats JSON delimiters and the item stops
+ * parsing — triggered by nothing more exotic than a mailbox named "Bearer Bonds", and
+ * also by a server description that ends in a real token, which loses the caller the
+ * whole report exactly when a credential was present.
+ *
+ * Redacting per value has neither problem: a value has no trailing delimiter for `\S+` to
+ * swallow, JSON.stringify escapes whatever the replacer hands back, and a genuine
+ * `Bearer <token>` inside a value is still redacted. Prose has no delimiters to protect,
+ * so it calls redactBearerTokens directly; anything JSON.stringify touches comes here.
+ */
+export function redactedJson(value: any, space?: number): string {
+  return JSON.stringify(value, (_key, v) => (typeof v === 'string' ? redactBearerTokens(v) : v), space);
+}
+
+// Every branch TRIMS its elements, so the three ways of expressing the same list agree.
+// Without it the branches disagree: the comma-split branch has always trimmed, so
+// "e1, e2" arrives clean while ["e1", " e2"] arrives padded, and a padded value then
+// reaches the server and comes back as a not-found — a whitespace problem wearing a
+// lookup error's clothes. coerceStringArrayStrict relies on this too: it rejects a blank
+// element itself, then delegates here for the trim rather than repeating it.
+//
+// The call sites are email ids, mailbox references, addresses, message-ids, field names, and
+// edit_draft's removeAttachments. Whitespace is not meaningful in any of them, with ONE case
+// worth naming because it is not obvious: a removeAttachments ref is matched against an
+// attachment's own name, and a MIME filename may legally carry surrounding spaces. That
+// comparison trims both sides (resolveAttachmentRemovals), so such an attachment stays
+// reachable by name; if that ever stops being true, this trim starts hiding it.
+const trimAll = (values: unknown[]): string[] => values.map(v => String(v).trim());
+
 export function coerceStringArray(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
-  if (Array.isArray(value)) return value.map(String);
+  if (Array.isArray(value)) return trimAll(value);
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   if (!trimmed) return [];
   if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return parsed.map(String);
+      if (Array.isArray(parsed)) return trimAll(parsed);
     } catch { /* fall through to comma-split */ }
   }
   return trimmed.split(',').map(s => s.trim()).filter(Boolean);
@@ -138,6 +173,16 @@ export function coerceStringArrayStrict(value: unknown, paramName: string): stri
       if (typeof entry !== 'string') {
         const kind = entry === null ? 'null' : Array.isArray(entry) ? 'array' : typeof entry;
         throw new InvalidInputError(`${paramName}[${i}] must be a string; received ${kind}.`);
+      }
+      // An empty or whitespace-only element is rejected for the same reason a non-string one
+      // is, and it is the SAME failure by a different door: `['']` is a string, so the type
+      // check above passes it, and coerceStringArray's `.filter(Boolean)` only runs on the
+      // comma-split branch — so it reaches the downstream lookup as a real value and comes
+      // back as "not found" or "unknown mailbox", a type error wearing a lookup error's
+      // clothes. The comma-split branch keeps dropping blanks, because there the blank is a
+      // separator artefact ("a,,b") rather than something a caller wrote down.
+      if (entry.trim() === '') {
+        throw new InvalidInputError(`${paramName}[${i}] must be a non-empty string.`);
       }
     });
   }

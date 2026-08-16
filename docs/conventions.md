@@ -39,7 +39,16 @@ coerces rather than rejects, so a reasonable-looking call does not crash. This s
 most tools, so the helpers are centralised in `src/coerce.ts`:
 
 - `coerceStringArray` — array / comma-string / single value to `string[]` (or
-  `undefined`). `""` coerces to `[]`.
+  `undefined`). `""` coerces to `[]`. **Every branch trims its elements**, so the three ways
+  of writing one list agree: without that, `"e1, e2"` arrives clean while `["e1", " e2"]`
+  arrives padded, and the padded value reaches the server and comes back as a not-found — a
+  whitespace problem wearing a lookup error's clothes. It is safe at nearly every call site,
+  because this coercer otherwise takes only email ids, mailbox references, addresses,
+  message-ids and field names, and surrounding whitespace is meaningful in none of them. The
+  one call site where it *could* be meaningful is `edit_draft`'s `removeAttachments`, which
+  matches against a MIME filename that may legally carry surrounding spaces; that stays safe
+  because `resolveAttachmentRemovals` trims the **stored** name too, so both sides of the
+  comparison are trimmed and a padded stored name is still reachable.
 - `coerceStringArrayStrict` — the same coercion for a parameter that must **fail closed**:
   a value that is present but uncoercible (a number, an object, a boolean) is an
   `InvalidInputError` naming the parameter, instead of the plain coercer's `undefined`.
@@ -48,6 +57,22 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   field that **narrows what the call touches** it silently widens the operation the
   argument was passed to restrict, and the caller reads the wider answer as complete.
   `search_emails`' `requiredMailboxes` / `excludeMailboxes` are the first users.
+
+  `archive_email`'s `emailIds` is the third, and it widens the rule rather than fitting it:
+  the id list does not *narrow* anything, it IS the operand. The cost of a silently-coerced
+  element is the same shape though — `[null]` would reach `Email/get` as the literal id
+  `"null"` and come back in the `notFound` bucket, so a type error would arrive wearing a
+  not-found error's clothes and falsify the tool's promise that `notFound` means the server
+  did not know the id. So the real dividing line is **whether a dropped or mangled element
+  can be mistaken for a legitimate outcome**, and a narrowing argument is the commonest case
+  of it rather than the whole of it.
+
+  Strictness is per element, and covers the **empty string** as well as the wrong type. That
+  is not pedantry: `['']` passes a `typeof entry !== 'string'` check, and the plain coercer's
+  `.filter(Boolean)` runs only on the comma-split branch, so without an explicit check a
+  blank element reaches the lookup as a real value and returns the same misleading
+  "not found". Blanks are still dropped on the comma-split branch, where they are a separator
+  artefact (`"a,,b"`) rather than something a caller wrote down.
 - `coerceRecipients` — fans `coerceStringArray` over `to` / `cc` / `bcc` / `replyTo` so
   no recipient field can reach `.map(parseAddress)` as a bare string (the original
   `cc:""` / `bcc:""` crash class).
@@ -339,21 +364,56 @@ and a path would mean widening that projection on every read page.
 
 **Two destinations are deliberately NOT caller-resolvable at all**: `delete_email`/`bulk_delete`
 find Trash, and `archive_email` finds Archive, by **exact role only** (`findByExactRole`), with no
-name fallback and no destination parameter. These are fixed, membership-replacing defaults, and a
+name fallback and no destination parameter. These are fixed defaults with no way to aim them, and a
 folder can be created with any name a caller likes, "Trash" or "archive" included. Resolving the
 name would make the destination of a destructive default something text the model merely read could
 aim; a role is assigned by the server and cannot be minted that way. A caller who wants a different
-destination has one: `move_email`, where naming it is the whole point.
+destination has one: `move_email`, where naming it is the whole point. `archive_email` resolves the
+**Inbox** the same way, and needs to, since a caller-created folder named "Inbox" must not become
+the membership it strips.
 
-`move_email`, `bulk_move` and `archive_email` all set `mailboxIds` **whole-value** in a single
-`Email/set` (RFC 8620 §5.3) rather than reading the current membership and patching each id away.
-It states the promised contract directly ("replaces all mailbox membership") and has no read/write
-window in which a newly-added mailbox survives the move. None of the three writes a keyword: a move
-changes where a message is filed and nothing about its read or flagged state, so archiving does not
-mark a message read. Marking read is `mark_email_read`. This is a deliberate divergence from
-upstream PR `MadLlama25/fastmail-mcp#67`, whose `archive_email` writes `$seen` as part of the move:
-folding two effects into one verb means a caller who wanted only the filing cannot get it, while a
-caller who wanted both can still make the second call.
+`move_email` and `bulk_move` set `mailboxIds` **whole-value** in a single `Email/set`
+(RFC 8620 §5.3) rather than reading the current membership and patching each id away. It states
+the promised contract directly ("replaces all mailbox membership") and has no read/write window in
+which a newly-added mailbox survives the move. Neither writes a keyword: a move changes where a
+message is filed and nothing about its read or flagged state. Marking read is `mark_email_read`.
+This is a deliberate divergence from upstream PR `MadLlama25/fastmail-mcp#67`, whose
+`archive_email` writes `$seen` as part of the move: folding two effects into one verb means a
+caller who wanted only the filing cannot get it, while a caller who wanted both can still make the
+second call.
+
+### `archive_email` reverses that convention, deliberately
+
+`archive_email` is the one membership writer that does **not** use the whole-value form. It reads
+each message's current membership and emits a `mailboxIds/<id>` patch: `null` for the Inbox, `true`
+re-asserted for every mailbox the message was already in (or for Archive, when the Inbox was the
+only one). The reason is the tool's contract, which is the opposite of a move's: archiving must
+**never** drop other filing, because Fastmail's own Archive action does not.
+
+The two forms lose different races, and that is what decides it. Whole-value strips a mailbox added
+between our read and our write; the patch form resurrects one removed in that window. For a move,
+losing the add-race is acceptable — the tool promised to replace everything anyway. For archiving,
+losing the add-race is the failure that breaks the feature, while the patch form's worst case is a
+concurrently-removed label coming back, which is visible and recoverable.
+
+**The re-assert is not redundancy, and it needs no concurrency to matter.** Cyrus's patch-path
+emptiness guard (`imap/jmap_mail.c:13499-13516`) counts a message's mailboxes through
+`_email_mailboxes()`, whose callback inserts a key for every mailbox the message has a
+*conversations record* in, before testing whether that record is `"added"` (`:822-823`). A mailbox
+the message was expunged from days ago therefore still leaves a `{"removed": …}` tombstone in that
+map. The `mailboxIds` getter filters on `"added"` (`:7415-7421`); the guard does not. So a bare
+`{"mailboxIds/<inbox>": null}` can satisfy a guard that believes the message will still be filed
+somewhere, while the executor — which *does* filter tombstones out (`:11413-11417`, and again under
+the write lock at `:12916-12933`) — expunges the last live record and destroys the message.
+
+Those tombstones are guaranteed to exist, not merely possible: Fastmail's Undelete reconstructs a
+message's previous folders from exactly these expunged records (`Backup/restoreMail`,
+`imap/jmap_backup.c:1583-1640`), so every message the account has ever moved carries them for the
+length of the restore window. Do not simplify the re-assert back to a lone `null` on the grounds
+that a single-user stdio server has no concurrency; concurrency was never what made this reachable.
+
+`ifInState` was considered as a tighter alternative and declined: `Email` state is account-wide, so
+one unrelated message arriving mid-call would abort the whole batch.
 
 ## Scoping a query: intersection, exclusion, and what `inMailboxOtherThan` really means
 
@@ -429,6 +489,29 @@ assembling its own batch, precisely so it inherits that expression instead of co
 `requiredMailboxes`) is an explicit scope and turns the default off; naming folders to
 exclude is not, because narrowing by exclusion says nothing about wanting Trash/Spam back.
 
+## Update maps are keyed by caller-supplied ids
+
+Every `Email/set` `update` map built by assignment goes through `newUpdateMap()`
+(`Object.create(null)`), never a plain `{}`. An email id of `__proto__` is legal — underscores
+are in the base64url alphabet JMAP ids are drawn from — and `updates['__proto__'] = patch` on
+an ordinary object invokes the prototype **setter** instead of creating an own key. The entry
+never reaches the request, the server is never asked about that id, it cannot appear in
+`notUpdated`, and every tool here infers success from the absence of a set-error: so the
+message is reported as done while nothing touched it.
+
+Reading those maps back is the mirror image and needs `Object.prototype.hasOwnProperty.call`,
+not a bare index. `notUpdated` is parsed from the response, so an id of `constructor` or
+`toString` indexes through to a function on the prototype, which is truthy — a **fabricated**
+failure for a write the server performed. `setErrorFor` is the shared read; use it rather than
+indexing. Two further readings it centralises: **key presence, not the value's truthiness**, is
+what counts as a refusal (a server listing an id with a null value has still said it did not
+update that record), and the map's **shape is checked** before it is read, because
+`typeof [] === 'object'` and `hasOwnProperty.call('oops', '0')` is true — an array or a bare
+string would otherwise answer for an id that looks like an index.
+
+An object literal with a computed key (`update: { [emailId]: patch }`) is already safe: that
+form is `CreateDataProperty`, not the setter. It is the assignment form that is not.
+
 ## Error classification: `InvalidParams` vs `InternalError`
 
 The same recover-clear-intent / refuse-to-guess principle extends to *which* MCP error
@@ -457,14 +540,41 @@ wrong — re-form it; don't blind-retry as-is,"** while `InternalError` (-32603)
   transport error, a set-error naming a server/account/state condition, or a
   post-condition like "returned no ID." These stay a plain `Error`.
 
-A **missing Archive mailbox is the one that switches sides**: `archive_email` on an account
-with no archive-role mailbox throws `InvalidInputError` (`InvalidParams`), not the plain
-`Error` its Trash counterpart throws. The split is recoverability, and it really does differ
-here. "Archive" is a filing convention, so the caller substitutes any folder they like via
-`move_email` and gets the same outcome, which is a re-formed call and so the definition of
-caller-fixable. A missing Drafts/Sent/Trash has no substitute: nothing else *is* the trash,
-and no argument to any tool produces a delete without it. The error message therefore names
-`move_email`, because the classification is only honest if the route it implies exists.
+A **missing Archive mailbox is the one that switches sides**: `archive_email` throws
+`InvalidInputError` (`InvalidParams`), not the plain `Error` its Trash counterpart throws. The
+split is recoverability, and it really does differ here. "Archive" is a filing convention, so the
+caller substitutes any folder they like via `move_email` and gets the same outcome, which is a
+re-formed call and so the definition of caller-fixable. A missing Drafts/Sent/Trash has no
+substitute: nothing else *is* the trash, and no argument to any tool produces a delete without it.
+The error message therefore names `move_email`, because the classification is only honest if the
+route it implies exists.
+
+Two conditions on that, both consequences of archiving no longer being a move:
+
+- It is raised **only when a message actually reaches the Inbox-only branch**. Under the archive
+  rule a message that keeps other filing never touches Archive at all, so an unconditional guard
+  would reject a batch the tool can serve perfectly.
+- A missing **Inbox** role sits on the *other* side and throws a plain `Error`. There is no
+  substitute call for "remove this from the Inbox" — `move_email` would replace the whole
+  membership, which is the thing archiving exists not to do. The guard is load-bearing rather than
+  defensive: the entire rule keys on the inbox id, `findByExactRole` is typed `any | undefined` so
+  the compiler will not catch its absence, and both failure modes are silent (every message falls
+  to the no-Inbox branch and the tool becomes a universal no-op reporting success, or the patch key
+  becomes the literal `mailboxIds/undefined`).
+
+### `archive_email` reports per-message failures with no error code at all
+
+`archive_email` takes an array and **never throws on a partial failure**: an unknown id comes back
+as a `notFound` entry inside a successful response, not as `InvalidParams`. That is a real change
+to an observable contract — the single-id version threw `InvalidInputError` for exactly this case —
+and it is accepted deliberately, because a batch tool that threw on one bad id would discard the
+outcome of every other id in the call.
+
+The cost is that a caller branching on `error.code` to detect a bad id stops seeing one on this
+tool, and has to read the `notFound` bucket instead. The residual is recorded here rather than
+fixed locally because it is not specific to archiving: the same question applies to every tool the
+array-parameter family will cover, including whether a batch containing *only* failures should
+still be success-shaped. Fork issue #120 is where that gets settled.
 
 This rule is **tool-family-agnostic.** Because the calendar tools share the same
 `requireNonEmpty` / `validateClearFields` helpers from `src/coerce.ts`, their input
