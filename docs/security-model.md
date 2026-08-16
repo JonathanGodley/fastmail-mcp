@@ -241,6 +241,37 @@ threaded into the refusal builders is the combination, not the attach directory 
   send fails loudly server-side. Parity with `edit_draft`'s carry, which re-references the
   same way.
 
+## Calendar attendees are an outbound-mail path that bypasses draft-first
+
+The draft-first surface is built so that one named verb transmits: `send_draft`. That is
+true of everything a caller *composes*, and it is the basis on which a name-based
+permission system can gate a single tool. It is not true of the account as a whole, and the
+exception is worth stating where someone setting up that gate will read it.
+
+Naming attendees on a calendar event causes mail to be sent. When the event is written the
+server emails each attendee an invitation from this account; deleting that event later
+emails them a cancellation; changing the attendee list notifies whoever the change affects.
+This is CalDAV scheduling doing its job — the sending happens server-side in response to the
+write, not in any code here — so there is no draft, no `send_draft` call, and no flag in
+this server that suppresses it. Confirmed by observation, not inference: an event created
+with a single attendee produced an outbound invitation, and deleting it produced the
+cancellation.
+
+**The reach.** A caller that can reach `create_calendar_event` can cause mail to be sent to
+an address of its choosing, with attacker-influenced text in the event title, description
+and location, under the account's own identity. That is a smaller surface than a composed
+message — the recipient sees a meeting invitation rather than free-form mail, and the body
+is the event — but it is a real one, and it is reachable with `send_draft` fully denied.
+
+**Why it is documented rather than blocked.** Refusing attendees would remove the feature
+outright, since there is no way to write an attendee without the server scheduling it, and
+the tool's purpose includes inviting people. So the control is disclosure: the tool
+description says plainly that naming an attendee emails them, and the parameter is optional
+— an event written without `participants` notifies nobody. An operator who needs the
+guarantee that nothing leaves the account has to deny `create_calendar_event` and
+`update_calendar_event` alongside `send_draft`, and that requirement is stated here because
+the alternative is an operator believing one denial covers it.
+
 ## Attaching in-account content is its own opt-in (`FASTMAIL_ALLOW_BLOB_ATTACH`)
 
 An `attachments` item names its bytes in one of three ways, and the gates split by which

@@ -30,6 +30,34 @@ failure.
   verify the transmit receipt; the sent and received copies are swept to Trash.
 - Never print or persist token values; scripts reference env var names only.
 
+### Creating a calendar event with a participant sends real mail
+
+`create_calendar_event` with a non-empty `participants` is **not** a local
+write. Adding an attendee makes the server's scheduling layer send that address
+an iTIP meeting invitation, from the account under test, the moment the event is
+created - and a `delete_calendar_event` afterwards sends the matching
+cancellation. Neither goes through a compose tool, so "the probe never called
+`send_draft`" does not mean the probe sent nothing.
+
+That makes it the one live check here that reaches outside the account, and the
+consequence is a real invitation in a real person's calendar if the address
+belongs to one. Two ways to stay inside the account:
+
+- Omit `participants` entirely when the point of the check is the CalDAV write
+  path itself (creation, properties, parsing, deletion). It exercises everything
+  except the scheduling hop.
+- If the attendee handling is what you are verifying, address it into a domain
+  that cannot receive mail. RFC 2606 reserves `example.com`, which publishes a
+  null MX, so nothing is delivered and no stranger is contacted.
+
+Note what the second option costs, because it is not free: the invitation is
+still *sent*, the null MX merely refuses it, and the refusal arrives back in the
+account as an "Undelivered Mail Returned to Sender" bounce - one for the
+invitation and one for the cancellation. Those bounces are real messages that
+outlive the probe; nothing sweeps them, because they arrive as ordinary inbound
+mail rather than as an artifact the probe created and can track. Expect them,
+and clear them by hand if you care.
+
 ## Inventory
 
 | Probe | Covers |

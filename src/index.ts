@@ -316,6 +316,13 @@ function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
 // stay identical between create and update. `leadIn` carries the per-tool sentence
 // (create adds an ORGANIZER; update REPLACES the whole attendee list).
 //
+// The shared text has to say that naming an attendee SENDS them mail, because nothing
+// else here does. The invitation is emitted by the server's scheduling layer when the
+// event is written, not by any tool in this server, so a caller reasoning about which
+// tools transmit — send_draft and nothing else — reaches the wrong answer about this one.
+// Confirmed live: an event created with one attendee produced an outbound invitation, and
+// deleting that event produced the matching cancellation.
+//
 // The type is widened to ['array', 'string'] for the same reason every lenient boolean is
 // widened: coerceParticipants accepts a JSON-stringified array from clients that
 // stringify structured params, and a client validating against a narrow `type: 'array'`
@@ -334,6 +341,7 @@ function participantsSchemaProperty(leadIn: string) {
     },
     description:
       leadIn +
+      ` SENDS MAIL: naming an attendee makes the server email them a meeting invitation from this account as soon as the event is written, and deleting that event later emails them a cancellation. That is the server's scheduling layer, not a compose tool, so it happens with no send_draft call — treat naming a real person here as contacting them. Omit participants to write the event without notifying anyone.` +
       ` Each entry is either an object { email, name? } or a bare email-address string (equivalent to { email }).` +
       ` An entry with any other key, a missing or non-string email, or a non-string name is rejected naming its position, e.g. participants[2] — nothing is silently dropped.` +
       ` The whole array may also be sent as a JSON string ('[{"email":"a@example.com"}]'), for clients that stringify structured parameters; a comma-joined list is NOT accepted.`,
