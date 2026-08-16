@@ -61,7 +61,7 @@ createDebug.enable([process.env.DEBUG, '-tsdav*'].filter(Boolean).join(','));
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.9.4-fork.11',
+    version: '1.13.4-fork.1',
   },
   {
     capabilities: {
@@ -1522,7 +1522,7 @@ const TOOLS = [
             },
             confirmRecurring: {
               type: ['boolean', 'string'],
-              description: lenientBool('Required when changing start/end on a recurring event with exceptions. Acknowledges that orphaned exception overrides will be removed.'),
+              description: lenientBool('Required only when a start/end change would orphan an exception override — one whose recurrence-id no longer lands on an occurrence of the rule. The rejection names the orphaned dates; passing this acknowledges they will be removed. Not needed when the exceptions still line up, when the event has no overrides, or where the recurrence rule cannot be expanded safely (nothing is pruned there and no confirmation is asked for).'),
             },
           },
           required: ['eventId'],
@@ -1530,13 +1530,16 @@ const TOOLS = [
       },
       {
         name: 'delete_calendar_event',
-        description: 'Delete a calendar event by ID',
+        description:
+          'Delete a calendar event by ID.' +
+          ' SENDS MAIL: if the event has attendees, the server emails every one of them a cancellation from this account as soon as it is deleted. That is the server scheduling layer, not a compose tool, so it happens with no send_draft call — deleting an event with a real person on it is contacting them.' +
+          ' The delete is irreversible and nothing is echoed back: a calendar event does not go to Trash the way an email does, and this tool reads nothing before destroying it. Call get_calendar_event first if there is any chance the id is wrong — that response is the only copy you will have, and it is also how you find out whether anyone is about to be mailed.',
         inputSchema: {
           type: 'object',
           properties: {
             eventId: {
               type: 'string',
-              description: 'ID of the event to delete',
+              description: 'ID of the event to delete. Not verified before the destroy — a wrong id deletes a real event and mails its attendees.',
             },
           },
           required: ['eventId'],

@@ -28,6 +28,11 @@ Then `npm install --package-lock-only`, which carries the new version into
 lockfile is regenerated, never hand-edited, but it is the fourth site the sync
 test checks, and a `.dxt` built from a stale lock ships a mismatched version.
 
+Then bump the **README `npx` pin example** to the tag being cut. It is a fifth
+version site that no test guards, so it silently ages a release behind: readers
+copy it verbatim, and a pin to a superseded tag is worse than no example. Set it
+to the tag this release will push, not to the newest tag that already exists.
+
 ## 3. Verify clean
 
 Run all three:
