@@ -35,10 +35,13 @@ to the tag this release will push, not to the newest tag that already exists.
 
 ## 3. Verify clean
 
-Run all three:
+Run all four:
 - `npx tsc --noEmit`
 - `npm test` — this **enforces version sync**: the `version sync` test asserts all four sites match, so a missed bump fails the suite.
 - `npm run build`
+- `npm run scan:secrets` — **the one whose absence has actually broken a release.** CI runs this as a step inside "Build and Release DXT", so a scan failure does not merely go red, it stops the `.dxt` asset being built and attached: the tag ships with no artifact. It fires on any new synthetic credential fixture, which test code adds routinely. A deliberate fixture is cleared by appending the marker `allowlist-secret` in a comment **on that line**, with a short note saying why it is safe.
+
+A failure here after the tag is pushed is expensive to unwind — the fix lands after the tagged commit, so the tag has to be force-moved onto it and the workflows retriggered. Run all four *before* step 4.
 
 ## 4. ⛔ CHECKPOINT — do not cross until this holds
 
