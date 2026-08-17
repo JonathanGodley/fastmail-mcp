@@ -310,6 +310,44 @@ function listIds(ids: string[]): string {
   return `${shown}${more}`;
 }
 
+/**
+ * Summary for remove_labels / bulk_remove_labels.
+ *
+ * States the archive rescue whenever it fired. Removing a label and relocating a message are
+ * different outcomes, and reporting them with the same sentence leaves the caller telling the
+ * user "label removed" about a message that has moved. Silence here would also be the one
+ * outcome of this call that nothing reports, which is the failure the never-silently-drop rule
+ * in CLAUDE.md names.
+ *
+ * Ids run through listIds for the same reason they do everywhere else in this file: they are
+ * CALLER-supplied and can carry a newline that would forge extra lines in this prose.
+ */
+export function formatLabelRemoval(rescued: string[], total: number, unchangedCount = 0): string {
+  const subject = total === 1 ? '1 email' : `${total} emails`;
+  // Nothing was written at all: every message carried none of the named labels. Leading with
+  // "Labels removed successfully" here would claim a removal that did not happen, so the
+  // no-op leads instead. This is the whole-batch case; the mixed one is handled below.
+  if (unchangedCount >= total && rescued.length === 0) {
+    return total === 1
+      ? 'No labels were removed: the email did not carry any of these labels.'
+      : `No labels were removed: none of the ${total} emails carried any of these labels.`;
+  }
+  // A message none of the named labels was on is not written at all. Saying so keeps a call
+  // that changed nothing for part of the batch from reading like one that relabelled all of it.
+  const nothingToDo = unchangedCount > 0
+    ? ` ${unchangedCount} of them did not carry any of these labels and ${unchangedCount === 1 ? 'was' : 'were'} left untouched.`
+    : '';
+  if (rescued.length === 0) return `Labels removed successfully from ${subject}.${nothingToDo}`;
+  // "would have been left filed nowhere, so Archive was added" rather than "was filed in
+  // Archive": the latter reads as a report of where the message already sat, when the point
+  // is that this call put it there. The distinction matters most in the case a caller finds
+  // most surprising — naming Archive for removal on a message that then gets rescued into it.
+  const n = rescued.length;
+  const which = `${n} ${n === 1 ? 'message' : 'messages'} would have been left filed nowhere, ` +
+    `so Archive was added: ${listIds(rescued)}`;
+  return `Labels removed successfully from ${subject}.${nothingToDo} ${which}.`;
+}
+
 // The distinct mailbox names across a group of results, in first-seen order, so one line
 // can say where a group of messages ended up without repeating a name per message.
 function namesAcross(group: ArchiveEmailResult[]): string[] {

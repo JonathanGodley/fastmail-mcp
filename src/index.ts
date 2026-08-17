@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
@@ -61,7 +61,7 @@ createDebug.enable([process.env.DEBUG, '-tsdav*'].filter(Boolean).join(','));
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.13.4-fork.2',
+    version: '1.13.4-fork.3',
   },
   {
     capabilities: {
@@ -507,6 +507,15 @@ const CREATE_PARENT_PARAM_DESC =
 const labelMailboxIdsDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once.';
+
+// Shared by remove_labels and bulk_remove_labels. A message must be filed somewhere, so a
+// removal that would take away its last mailbox needs an answer; this states the one the
+// Fastmail client gives, since a caller cannot otherwise predict where the message lands.
+const LABEL_REMOVAL_RESCUE_DESC =
+  ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. TWO cases are rejected instead of served. First: the removal would take away every mailbox holding the message AND Archive is one of them — a message held only by Archive cannot have Archive removed, because that is a request to delete it, and this tool does not delete. Second: the account has no archive-role mailbox at all, so there is no fallback to reach for. Both say so and point at move_email/bulk_move or delete_email/bulk_delete.' +
+  ' Naming a label the message does not carry changes nothing for that message, with one exception: if the SAME call empties the message, the rescue still files it in Archive even when Archive was one of the labels named for removal. That is reported.' +
+  ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so. Per-message server failures are reported per message as usual.' +
+  ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request (see issue #130). That combination has not been measured.';
 
 // One canonical explanation of the simplified location + status fields, shared
 // verbatim by every read tool (get_email, get_thread, list_emails, search_emails,
@@ -1732,7 +1741,7 @@ const TOOLS = [
       },
       {
         name: 'remove_labels',
-        description: 'Remove specific labels (mailboxes) from an email. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
+        description: 'Remove specific labels (mailboxes) from an email. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_REMOVAL_RESCUE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1937,7 +1946,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_remove_labels',
-        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
+        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_REMOVAL_RESCUE_DESC + ' The rescue is decided per message, so a batch can archive some and merely unlabel others. A rejection is NOT decided per message: one unservable id rejects the whole batch before anything is written. When some messages succeed and others fail at the server, the error still names any message the call filed in Archive.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2575,12 +2584,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
         }
         const client = initializeClient();
-        await client.removeLabels(emailId, mailboxIds);
+        const { rescued, unchangedCount } = await client.removeLabels(emailId, mailboxIds);
         return {
           content: [
             {
               type: 'text',
-              text: `Labels removed successfully from email`,
+              text: formatLabelRemoval(rescued, 1, unchangedCount),
             },
           ],
         };
@@ -2854,12 +2863,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
         }
         const client = initializeClient();
-        await client.bulkRemoveLabels(emailIds, mailboxIds);
+        const { rescued, unchangedCount } = await client.bulkRemoveLabels(emailIds, mailboxIds);
         return {
           content: [
             {
               type: 'text',
-              text: `Labels removed successfully from ${emailIds.length} emails`,
+              text: formatLabelRemoval(rescued, new Set(emailIds).size, unchangedCount),
             },
           ],
         };

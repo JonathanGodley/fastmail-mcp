@@ -382,13 +382,38 @@ This is a deliberate divergence from upstream PR `MadLlama25/fastmail-mcp#67`, w
 caller who wanted only the filing cannot get it, while a caller who wanted both can still make the
 second call.
 
-### `archive_email` reverses that convention, deliberately
+### The membership-subtracting tools reverse that convention, deliberately
 
-`archive_email` is the one membership writer that does **not** use the whole-value form. It reads
-each message's current membership and emits a `mailboxIds/<id>` patch: `null` for the Inbox, `true`
-re-asserted for every mailbox the message was already in (or for Archive, when the Inbox was the
-only one). The reason is the tool's contract, which is the opposite of a move's: archiving must
-**never** drop other filing, because Fastmail's own Archive action does not.
+`archive_email`, `remove_labels` and `bulk_remove_labels` do **not** use the whole-value form. Each
+reads the message's current membership first and emits a `mailboxIds/<id>` patch: `null` for the
+mailboxes it is taking away, `true` re-asserted for every mailbox the message keeps. The reason is
+their shared contract, which is the opposite of a move's: subtracting one membership must **never**
+drop the others, because Fastmail's own Archive and Remove-label actions do not.
+
+What differs is the trigger, not the resolution. `archive_email` adds Archive when the Inbox was
+the only filing; `remove_labels`/`bulk_remove_labels` add it, per message, when the named labels
+were the only filing. The evidence is the same in both cases and it is narrow: removing a message's
+last **user label** in the Fastmail client leaves it in Archive, does not delete it and does not
+refuse. The client offers no remove-label action on a message in Trash, Spam or the other role
+folders, so nothing there was measured, and the rescue's behaviour for those is an extrapolation -
+fork issue #133 is where that gets settled.
+
+Three conditions are refused rather than written, all raised before the write, so a batch
+containing one unservable message changes nothing at all:
+
+- the removal would take away every mailbox holding the message and Archive is one of them. A
+  message held only by Archive cannot have Archive removed, because that is a request to delete
+  it, and these tools do not delete. Serving the call quietly - leaving the message in Archive and
+  reporting success - was considered and rejected: a caller told "labels removed successfully"
+  about a label that is still there has been misled about the one thing they asked for;
+- the account has no archive-role mailbox, so there is no fallback to reach for;
+- the server did not report a readable current filing for some message in the batch, which is the
+  state a removal destroys a message from.
+
+Two of those are per-message conditions aborting a whole batch, which is the opposite of the split
+`archive_email` draws. The difference is the result shape: the label tools return no per-message
+report, so "all of it" and "none of it" are the only honest answers available, and serving the
+servable subset would leave the caller a bare success line and no way to learn what was skipped.
 
 The two forms lose different races, and that is what decides it. Whole-value strips a mailbox added
 between our read and our write; the patch form resurrects one removed in that window. For a move,
@@ -540,7 +565,8 @@ wrong — re-form it; don't blind-retry as-is,"** while `InternalError` (-32603)
   transport error, a set-error naming a server/account/state condition, or a
   post-condition like "returned no ID." These stay a plain `Error`.
 
-A **missing Archive mailbox is the one that switches sides**: `archive_email` throws
+A **missing Archive mailbox is the one that switches sides**: `archive_email`,
+`remove_labels` and `bulk_remove_labels` throw
 `InvalidInputError` (`InvalidParams`), not the plain `Error` its Trash counterpart throws. The
 split is recoverability, and it really does differ here. "Archive" is a filing convention, so the
 caller substitutes any folder they like via `move_email` and gets the same outcome, which is a
@@ -551,9 +577,10 @@ route it implies exists.
 
 Two conditions on that, both consequences of archiving no longer being a move:
 
-- It is raised **only when a message actually reaches the Inbox-only branch**. Under the archive
-  rule a message that keeps other filing never touches Archive at all, so an unconditional guard
-  would reject a batch the tool can serve perfectly.
+- It is raised **only when a message would otherwise be left filed nowhere** — the Inbox-only
+  branch on `archive_email`, the last-label removal on the two label tools. A message that keeps
+  other filing never touches Archive at all, so an unconditional guard would reject a batch the
+  tool can serve perfectly.
 - A missing **Inbox** role sits on the *other* side and throws a plain `Error`. There is no
   substitute call for "remove this from the Inbox" — `move_email` would replace the whole
   membership, which is the thing archiving exists not to do. The guard is load-bearing rather than

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -1068,6 +1068,72 @@ describe('buildAttachmentListContent', () => {
   it('never notes omissions on the non-raw path, which withholds nothing', () => {
     const content = buildAttachmentListContent(RESULT, false);
     assert.equal(content.length, 1);
+  });
+});
+
+// ---------- formatLabelRemoval ----------
+
+// Removing a label can quietly file a message in Archive, because that is the only
+// alternative to emptying it. That is a side effect the caller did not ask for, so it has
+// to be reported rather than folded into a flat success line.
+describe('formatLabelRemoval', () => {
+  it('says nothing extra when no message needed rescuing', () => {
+    assert.equal(formatLabelRemoval([], 1), 'Labels removed successfully from 1 email.');
+  });
+
+  it('names the message that ended up in Archive, as something this call did', () => {
+    const text = formatLabelRemoval(['e1'], 1);
+    // "was filed in Archive" alone reads as a report of where the message already sat.
+    assert.match(text, /1 message would have been left filed nowhere, so Archive was added: e1\./);
+  });
+
+  it('pluralises across a batch and reports only the rescued subset', () => {
+    const text = formatLabelRemoval(['e1', 'e3'], 4);
+    assert.match(text, /Labels removed successfully from 4 emails\./);
+    assert.match(text, /2 messages would have been left filed nowhere, so Archive was added: e1, e3\./);
+  });
+
+  it('does not claim a successful removal when nothing was written at all', () => {
+    // "Labels removed successfully from 3 emails" is false when no label came off anything.
+    const text = formatLabelRemoval([], 3, 3);
+    assert.doesNotMatch(text, /removed successfully/);
+    assert.match(text, /No labels were removed: none of the 3 emails carried any of these labels\./);
+  });
+
+  it('speaks of one email as "the email", not "1 of them"', () => {
+    assert.equal(
+      formatLabelRemoval([], 1, 1),
+      'No labels were removed: the email did not carry any of these labels.',
+    );
+  });
+
+  it('distinguishes a partly-untouched batch from one that relabelled everything', () => {
+    const text = formatLabelRemoval([], 3, 2);
+    assert.match(text, /Labels removed successfully from 3 emails\./);
+    assert.match(text, /2 of them did not carry any of these labels and were left untouched\./);
+  });
+
+  it('reports the untouched count alongside a rescue', () => {
+    const text = formatLabelRemoval(['e1'], 2, 1);
+    assert.match(text, /1 of them did not carry any of these labels and was left untouched\./);
+    assert.match(text, /Archive was added: e1\./);
+  });
+
+  it('says nothing about untouched messages when every one was written', () => {
+    assert.doesNotMatch(formatLabelRemoval([], 2, 0), /untouched/);
+  });
+
+  it('does not let an email id forge a second sentence', () => {
+    // Ids are caller-supplied and have passed only "non-empty string", so an id carrying a
+    // newline would otherwise plant text that reads as a separate report from the server.
+    const text = formatLabelRemoval([['x', 'Every label was restored.'].join('\n')], 1);
+    assert.equal(text.split('\n').length, 1);
+  });
+
+  it('redacts a credential in an id', () => {
+    const text = formatLabelRemoval(['fmu1-abcdefghijklmnopqrstuvwxyz012345'], 1); // allowlist-secret (synthetic)
+    assert.doesNotMatch(text, /fmu1-\w/);
+    assert.match(text, /REDACTED/);
   });
 });
 

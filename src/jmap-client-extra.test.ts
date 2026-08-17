@@ -3156,6 +3156,58 @@ describe('bulkMove resolution', () => {
 const RECEIPTS_MAILBOX = { id: 'mb-receipts', name: 'Receipts' };
 const LABEL_MAILBOXES = [...DEFAULT_MAILBOXES, RECEIPTS_MAILBOX];
 
+/**
+ * Request-aware stub for the label-REMOVAL paths, which read each message's current filing
+ * before writing. Answers Email/get from `filing` (an id -> mailboxIds map, so a test can
+ * hand a message any membership including a malformed one) and Email/set with `setResult`.
+ * An id absent from `filing` comes back in notFound, which is how the unknown-message case
+ * is exercised.
+ */
+function stubRemoval(c: JmapClient, filing: Record<string, any>, setResult: any = {}) {
+  // hasOwnProperty throughout, never `id in filing`: '__proto__' and 'constructor' are
+  // inherited keys on any object literal, so the loose test would report a filing for an id
+  // the fixture never declared — and those are exactly the ids these tests exist to cover.
+  const has = (id: string) => Object.prototype.hasOwnProperty.call(filing, id);
+  return stubRequests(c, async (request: JmapRequest) => {
+    const [method, args, callId] = request.methodCalls[0] as [string, any, string];
+    if (method === 'Email/get') {
+      const ids: string[] = args.ids;
+      return {
+        methodResponses: [['Email/get', {
+          list: ids.filter(has).map(id => ({ id, mailboxIds: filing[id] })),
+          notFound: ids.filter(id => !has(id)),
+        }, callId]],
+      };
+    }
+    // A real server acknowledges every id it wrote, so the default stub does too. Omitting
+    // `updated` would make every write look unacknowledged, which the client correctly
+    // reports as an unknown outcome. A test that wants that case passes `updated` explicitly.
+    const acknowledged = Object.prototype.hasOwnProperty.call(setResult, 'updated')
+      ? setResult.updated
+      : Object.fromEntries(Object.keys(request.methodCalls[0][1].update || {})
+          .filter(id => !Object.prototype.hasOwnProperty.call(setResult.notUpdated || {}, id))
+          .map(id => [id, null]));
+    return { methodResponses: [['Email/set', { ...setResult, updated: acknowledged }, callId]] };
+  });
+}
+
+// The Email/set update map, found by method NAME rather than call index: the removal paths
+// issue an Email/get first, so a positional read would pick up the wrong request.
+function setUpdateOf(makeReq: ReturnType<typeof stubRequests>): any {
+  for (let i = 0; i < makeReq.mock.callCount(); i++) {
+    const request = callArguments(makeReq, i)[0];
+    if (request.methodCalls[0][0] === 'Email/set') return request.methodCalls[0][1].update;
+  }
+  throw new Error('no Email/set was issued');
+}
+
+function issuedEmailSet(makeReq: ReturnType<typeof stubRequests>): boolean {
+  for (let i = 0; i < makeReq.mock.callCount(); i++) {
+    if (callArguments(makeReq, i)[0].methodCalls[0][0] === 'Email/set') return true;
+  }
+  return false;
+}
+
 describe('label mailboxId resolution (#50)', () => {
   let client: JmapClient;
 
@@ -3168,6 +3220,7 @@ describe('label mailboxId resolution (#50)', () => {
     return stubRequests(c, async () =>
       ({ methodResponses: [['Email/set', { updated: { e1: null } }, callId]] }));
   }
+
 
   it('resolves a ROLE to its id and emits the mailboxIds/<id> patch', async () => {
     const makeReq = stubSet(client, 'addLabels');
@@ -3251,9 +3304,10 @@ describe('label mailboxId resolution (#50)', () => {
   });
 
   it('removeLabels resolves a role and emits the null patch', async () => {
-    const makeReq = stubSet(client, 'removeLabels');
+    // The message keeps Receipts, so this exercises resolution without the rescue.
+    const makeReq = stubRemoval(client, { e1: { 'mb-archive': true, 'mb-receipts': true } });
     await client.removeLabels('e1', ['archive']);
-    const update = callArguments(makeReq)[0].methodCalls[0][1].update;
+    const update = setUpdateOf(makeReq);
     assert.equal(update.e1['mailboxIds/mb-archive'], null);
   });
 
@@ -3270,6 +3324,440 @@ describe('label mailboxId resolution (#50)', () => {
       () => client.bulkAddLabels(['e1'], ['nope']),
       (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
     );
+  });
+});
+
+// ---------- removing the last label archives rather than destroys (#132) ----------
+//
+// A bare {"mailboxIds/<id>": null} that would empty a message does not fail safe: the
+// server rejects it for a message that has never moved and ACCEPTS it, expunging the
+// message, for one carrying a tombstone from an earlier move. The Fastmail client answers
+// this by rehoming to Archive, and these pin that this server does the same.
+describe('label removal never leaves a message filed nowhere (#132)', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client, LABEL_MAILBOXES);
+  });
+
+  it('re-asserts the surviving mailboxes rather than emitting a bare null', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-archive': true } });
+    await client.removeLabels('e1', ['Receipts']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-receipts'], null);
+    // The re-assert is the safety property: without it the emptiness guard is the only
+    // thing between this call and a destroyed message.
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+  });
+
+  it('adds Archive when the removal would take the last mailbox', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
+    await client.removeLabels('e1', ['Receipts']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-receipts'], null);
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+  });
+
+  it('does NOT add Archive when another mailbox survives', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-sent': true } });
+    await client.removeLabels('e1', ['Receipts']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-archive'], undefined);
+    assert.equal(update.e1['mailboxIds/mb-sent'], true);
+  });
+
+  it('never re-asserts a mailbox whose entry is false', async () => {
+    // Reading the VALUE, not just the key, is what keeps the re-assert faithful: a false
+    // entry written back as true would file the message somewhere it never was.
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-sent': false } });
+    await client.removeLabels('e1', ['Receipts']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-sent'], undefined);
+    assert.equal(update.e1['mailboxIds/mb-archive'], true, 'mb-sent was not a real membership, so this empties');
+  });
+
+  it('asserts Archive last, so naming it for removal cannot cancel the rescue', async () => {
+    // The single most safety-critical line in this path, and the cheapest to break. The
+    // patch writes every removed id as null, THEN every kept id as true, so on the one key
+    // the two loops can share the rescue wins. Swap the loops and this same call emits
+    // {receipts: null, archive: null} — an emptying patch, which is the destroyed message
+    // the whole function exists to prevent — while every other test still passes.
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
+    await client.removeLabels('e1', ['Receipts', 'archive']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-receipts'], null);
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+  });
+
+  it('rejects removing Archive from a message held only by Archive', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-archive': true } });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['archive']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        // The refusal has to say the consequence, not just the mechanism: a caller who reads
+        // only "cannot be the fallback" does not learn that the message would be deleted.
+        assert.match(err.message, /including Archive itself.*would be deleted/s);
+        return true;
+      },
+    );
+    assert.equal(issuedEmailSet(makeReq), false, 'nothing may be written when the rescue cannot serve');
+  });
+
+  it('rejects removing Archive alongside every other mailbox holding the message', async () => {
+    // The refusal is not "the message is in Archive and nothing else" — it is "the removal
+    // would empty the message, and Archive is one of the things being removed". A two-mailbox
+    // message hits it too, and the advertised precondition has to cover that.
+    const makeReq = stubRemoval(client, { e1: { 'mb-archive': true, 'mb-receipts': true } });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['archive', 'Receipts']),
+      (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('rejects an emptying removal when the account has no archive-role mailbox', async () => {
+    stubMailboxes(client, [INBOX_MAILBOX, RECEIPTS_MAILBOX]);
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /move_email/);
+        return true;
+      },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('serves a non-emptying removal even with no archive-role mailbox', async () => {
+    // The guard is conditional for the same reason archive_email's is: an unconditional
+    // check would reject calls this tool can serve perfectly.
+    stubMailboxes(client, [INBOX_MAILBOX, RECEIPTS_MAILBOX]);
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-inbox': true } });
+    await client.removeLabels('e1', ['Receipts']);
+    assert.equal(setUpdateOf(makeReq).e1['mailboxIds/mb-inbox'], true);
+  });
+
+  it('fails closed, writing nothing, when a message has no readable mailboxIds', async () => {
+    const makeReq = stubRemoval(client, { e1: undefined });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => { assert.match(err.message, /nothing was changed/); return true; },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('fails closed on an array-shaped mailboxIds', async () => {
+    // typeof [] === 'object', so this is the shape that slips past a bare object test and
+    // would read as the INDICES under Object.keys.
+    const makeReq = stubRemoval(client, { e1: ['mb-receipts'] });
+    await assert.rejects(() => client.removeLabels('e1', ['Receipts']), /nothing was changed/);
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('fails closed when every mailboxIds entry is false', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': false } });
+    await assert.rejects(() => client.removeLabels('e1', ['Receipts']), /nothing was changed/);
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('still reports a notFound error for an id the server does not know', async () => {
+    // The read already told us the id does not exist, so it is left out of the write
+    // entirely rather than sent as a bare null against an unknown filing. The error
+    // contract the caller sees is unchanged: the same notFound it always got.
+    const makeReq = stubRemoval(client, {});
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => { assert.match(err.message, /remove labels from email: notFound/); return true; },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('does not report a failure for an id a non-compliant server listed in both maps', async () => {
+    // A server that returns the same id in `list` AND `notFound` gave us a filing, so the id
+    // was written. Synthesizing a notFound off list membership alone would report a write
+    // that succeeded as one that never happened — the mirror of the class this code guards.
+    const makeReq = stubRequests(client, async (request: JmapRequest) => {
+      const [method, , callId] = request.methodCalls[0] as [string, any, string];
+      if (method === 'Email/get') {
+        return {
+          methodResponses: [['Email/get', {
+            list: [{ id: 'e1', mailboxIds: { 'mb-receipts': true, 'mb-sent': true } }],
+            notFound: ['e1'],
+          }, callId]],
+        };
+      }
+      return { methodResponses: [['Email/set', { updated: { e1: null } }, callId]] };
+    });
+    await client.removeLabels('e1', ['Receipts']);
+    assert.equal(setUpdateOf(makeReq).e1['mailboxIds/mb-receipts'], null);
+  });
+
+  it('reports notFound for the unknown id while serving the rest of the batch', async () => {
+    const makeReq = stubRemoval(client, { e2: { 'mb-receipts': true, 'mb-sent': true } });
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']),
+      (err: Error) => { assert.match(err.message, /notFound/); return true; },
+    );
+    // e2 is a real message and is still written; only the unknown id is dropped.
+    const update = setUpdateOf(makeReq);
+    assert.deepEqual(Object.keys(update), ['e2']);
+  });
+
+  it('writes nothing for the whole batch when one message cannot be rescued', async () => {
+    // The refusals are raised before the write, so a batch containing an unservable
+    // message leaves every message in it untouched rather than half-applying.
+    const makeReq = stubRemoval(client, {
+      e1: { 'mb-receipts': true, 'mb-sent': true },  // ordinary, would be served
+      e2: { 'mb-archive': true },                    // Archive removing Archive
+    });
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e2'], ['Receipts', 'archive']),
+      (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('writes nothing at all when the removal is a no-op for every message', async () => {
+    // Removing a label the message does not carry changes nothing, so there is no patch
+    // to send. Emitting one would be a bare null against a mailbox it was never in.
+    const makeReq = stubRemoval(client, { e1: { 'mb-sent': true } });
+    await client.removeLabels('e1', ['Receipts']);
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('bulkRemoveLabels decides the rescue per message, not per batch', async () => {
+    const makeReq = stubRemoval(client, {
+      e1: { 'mb-receipts': true },                      // emptied -> rescued
+      e2: { 'mb-receipts': true, 'mb-sent': true },     // survives -> not rescued
+    });
+    await client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+    assert.equal(update.e2['mailboxIds/mb-archive'], undefined);
+    assert.equal(update.e2['mailboxIds/mb-sent'], true);
+    // Both still carry the removal itself.
+    assert.equal(update.e1['mailboxIds/mb-receipts'], null);
+    assert.equal(update.e2['mailboxIds/mb-receipts'], null);
+  });
+
+  it('reports a notFound for an email id of __proto__ instead of claiming success', async () => {
+    // The synthesized set-error is ASSIGNED into the notUpdated map under a caller-supplied
+    // id. On an ordinary {} that assignment runs the prototype setter for this id: no own key
+    // appears, Object.keys stays empty, and a message the server said does not exist is
+    // reported as successfully unlabelled. Underscores are in the JMAP id alphabet, so this
+    // is a legal id rather than a contrived one.
+    stubRemoval(client, {});
+    await assert.rejects(
+      () => client.removeLabels('__proto__', ['Receipts']),
+      (err: Error) => { assert.match(err.message, /notFound/); return true; },
+    );
+  });
+
+  it('carries a server set-error for an email id of __proto__ through to the caller', async () => {
+    // The sibling path: the error comes from the server's own notUpdated rather than being
+    // synthesized, and Object.assign onto the map must keep it an own key.
+    // Computed keys, not `{ __proto__: … }`: the literal form sets the prototype instead of
+    // creating an own property, so the fixture would be empty and the test would pass for
+    // the wrong reason.
+    stubRemoval(
+      client,
+      { ['__proto__']: { 'mb-receipts': true, 'mb-sent': true } },
+      { notUpdated: { ['__proto__']: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.removeLabels('__proto__', ['Receipts']),
+      (err: Error) => { assert.match(err.message, /forbidden/); return true; },
+    );
+  });
+
+  it('fails closed for an id the server accounted for in neither list', async () => {
+    // An id the server said NOTHING about is not an id the server said does not exist. Left
+    // to fall through it becomes a reported success for a message whose filing is unknown —
+    // and the filing being unknown is the one state a removal destroys a message from.
+    const makeReq = stubRequests(client, async (request: JmapRequest) => {
+      const [method, , callId] = request.methodCalls[0] as [string, any, string];
+      if (method === 'Email/get') return { methodResponses: [['Email/get', { list: [], notFound: [] }, callId]] };
+      return { methodResponses: [['Email/set', { updated: { e1: null } }, callId]] };
+    });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /did not report a readable current filing/);
+        return true;
+      },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('keeps the tell when the mailbox read returns a truthy non-array', async () => {
+    // getMailboxes() returns `result.list || []` unchecked, so a non-array list is handed
+    // straight back. Without the normalisation it dies in the resolver, OUTSIDE the guarded
+    // block, and the failure loses the tell that says no write happened.
+    mock.method(client, 'getMailboxes', async () => ({ nope: true }) as any);
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /Nothing was changed\.$/);
+        return true;
+      },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('fails closed with the tell when the filing read comes back malformed', async () => {
+    // The guard that closed the round-one blocker: a non-array `list` must not degrade to
+    // empty, because that puts every id on the "filing unknown" path, which is the one place
+    // a removal destroys a message.
+    const makeReq = stubRequests(client, async (request: JmapRequest) => {
+      const [method, , callId] = request.methodCalls[0] as [string, any, string];
+      if (method === 'Email/get') return { methodResponses: [['Email/get', { list: null, notFound: [] }, callId]] };
+      return { methodResponses: [['Email/set', {}, callId]] };
+    });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => { assert.match(err.message, /malformed.*Nothing was changed\./s); return true; },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('appends the "Nothing was changed." tell when the read itself fails', async () => {
+    const makeReq = stubRequests(client, async () => { throw new Error('JMAP request failed: Bad Gateway'); });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /Bad Gateway Nothing was changed\.$/);
+        return true;
+      },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('keeps the error CLASS when the read fails with an input error', async () => {
+    // The suffix must not flatten an InvalidInputError into a plain Error: the two map to
+    // different JSON-RPC codes, which is how a caller knows whether to re-form or retry.
+    mock.method(client, 'getMailboxes', async () => { throw new InvalidInputError('no such account.'); });
+    stubRequests(client, async (request: JmapRequest) => {
+      const [, , callId] = request.methodCalls[0] as [string, any, string];
+      return { methodResponses: [['Email/get', { list: [], notFound: ['e1'] }, callId]] };
+    });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /Nothing was changed\.$/);
+        return true;
+      },
+    );
+  });
+
+  it('blames the read, not the caller, when the mailbox list comes back unusable', async () => {
+    // Left to the resolver this surfaces as "no mailbox named 'Receipts', valid mailboxes:
+    // (none)" — an input error for what was a server-side read failure.
+    stubMailboxes(client, []);
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /Could not read this account's mailboxes/);
+        assert.doesNotMatch(err.message, /not found/);
+        return true;
+      },
+    );
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('does not claim a rescue the server refused', async () => {
+    // "filed in Archive" is a relocation claim. Reporting it for a message the Email/set
+    // rejected would state as fact something that did not happen.
+    stubRemoval(client, { e1: { 'mb-receipts': true } }, { notUpdated: { e1: { type: 'forbidden' } } });
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /forbidden/);
+        // The load-bearing half. Matching only /forbidden/ passes with the filter deleted,
+        // and the error then reads "forbidden: e1 … 1 had no mailbox left and was filed in
+        // Archive: e1" — a relocation claim about the one message that did not move.
+        assert.doesNotMatch(err.message, /filed in Archive/);
+        return true;
+      },
+    );
+  });
+
+  it('names the rescued messages on the error when part of the batch fails', async () => {
+    // A stale id in a batch is the commonest failure there is. Without this, a message the
+    // same call relocated to Archive is never mentioned to anyone.
+    stubRemoval(
+      client,
+      { e1: { 'mb-receipts': true }, e2: { 'mb-receipts': true, 'mb-sent': true } },
+      { notUpdated: { e2: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /filed in Archive: e1/);
+        return true;
+      },
+    );
+  });
+
+  it('treats an id the server acknowledged in neither map as a failure', async () => {
+    // Reporting it as done — and worse, as rescued — would state an outcome nothing
+    // confirmed. archiveEmails draws the same conclusion for the same case.
+    stubRemoval(client, { e1: { 'mb-receipts': true } }, { updated: {}, notUpdated: {} });
+    await assert.rejects(
+      () => client.removeLabels('e1', ['Receipts']),
+      (err: Error) => { assert.match(err.message, /outcomeUnknown/); return true; },
+    );
+  });
+
+  it('counts distinct ids, not the raw input, in the bulk failure message', async () => {
+    // What de-duplication actually buys. Asserting the update-map size instead proves
+    // nothing: two writes to the same object key collapse whether or not ids are deduped.
+    stubRemoval(
+      client,
+      { e1: { 'mb-receipts': true, 'mb-sent': true }, e2: { 'mb-receipts': true, 'mb-sent': true } },
+      { notUpdated: { e2: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e1', 'e2'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /1 of 2 emails/);
+        return true;
+      },
+    );
+  });
+
+  it('reports how many messages did not carry any of the named labels', async () => {
+    const result = await (async () => {
+      stubRemoval(client, { e1: { 'mb-sent': true }, e2: { 'mb-receipts': true, 'mb-sent': true } });
+      return client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']);
+    })();
+    assert.equal(result.unchangedCount, 1);
+  });
+
+  it('reports which ids were rescued, so the side effect is not silent', async () => {
+    stubRemoval(client, {
+      e1: { 'mb-receipts': true },
+      e2: { 'mb-receipts': true, 'mb-sent': true },
+    });
+    const result = await client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']);
+    assert.deepEqual(result.rescued, ['e1']);
+  });
+
+  it('reports no rescue when the removal left the message filed somewhere', async () => {
+    stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-sent': true } });
+    const result = await client.removeLabels('e1', ['Receipts']);
+    assert.deepEqual(result.rescued, []);
+  });
+
+  it('bulkRemoveLabels de-duplicates ids', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-sent': true } });
+    await client.bulkRemoveLabels(['e1', 'e1'], ['Receipts']);
+    assert.equal(Object.keys(setUpdateOf(makeReq)).length, 1);
   });
 });
 
