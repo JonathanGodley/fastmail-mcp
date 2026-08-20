@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -2098,7 +2098,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: raw ? JSON.stringify(email, null, 2) : JSON.stringify(projectEmail(simplified, fields), null, 2),
+              text: raw ? toolJson(email) : toolJson(projectEmail(simplified, fields)),
             },
           ],
         };
@@ -2218,7 +2218,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(output, null, 2),
+              text: toolJson(output),
             },
           ],
         };
@@ -2271,7 +2271,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
         const calendars = await davClient.getCalendars();
-        return { content: [{ type: 'text', text: JSON.stringify(calendars, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(calendars) }] };
       }
 
       case 'list_calendar_events': {
@@ -2281,7 +2281,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
         const events = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
-        return { content: [{ type: 'text', text: JSON.stringify(events, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(events) }] };
       }
 
       case 'get_calendar_event': {
@@ -2294,7 +2294,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
         const event = await davClient.getCalendarEventById(eventId);
-        return { content: [{ type: 'text', text: JSON.stringify(event, null, 2) }] };
+        return { content: [{ type: 'text', text: toolJson(event) }] };
       }
 
       case 'create_calendar_event': {
@@ -2383,7 +2383,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(output, null, 2),
+              text: toolJson(output),
             },
           ],
         };
@@ -2548,7 +2548,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // redactedJson, NOT redactBearerTokens(JSON.stringify(...)): redacting a finished
             // JSON document lets the bearer pattern eat the delimiters that terminate a value,
             // and this item's whole promise is that it parses. See its definition in coerce.ts.
-            { type: 'text', text: redactedJson({ counts: result.counts, results: result.results }, 2) },
+            { type: 'text', text: redactedJson({ counts: result.counts, results: result.results }) },
           ],
         };
       }
@@ -2739,7 +2739,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(stats, null, 2),
+              text: toolJson(stats),
             },
           ],
         };
@@ -2752,7 +2752,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(summary, null, 2),
+              text: toolJson(summary),
             },
           ],
         };
@@ -2955,7 +2955,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(availability, null, 2),
+              text: toolJson(availability),
             },
           ],
         };
@@ -3027,7 +3027,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [
               {
                 type: 'text',
-                text: `BULK OPERATIONS TEST (DRY RUN)\n\n${JSON.stringify(results, null, 2)}\n\nTo actually execute the test, set dryRun: false`,
+                text: `BULK OPERATIONS TEST (DRY RUN)\n\n${toolJson(results)}\n\nTo actually execute the test, set dryRun: false`,
               },
             ],
           };
@@ -3063,7 +3063,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [
               {
                 type: 'text',
-                text: `BULK OPERATIONS TEST (EXECUTED)\n\n${JSON.stringify(results, null, 2)}`,
+                text: `BULK OPERATIONS TEST (EXECUTED)\n\n${toolJson(results)}`,
               },
             ],
           };

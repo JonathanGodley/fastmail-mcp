@@ -97,9 +97,35 @@ export function redactBearerTokens(input: string): string {
  * swallow, JSON.stringify escapes whatever the replacer hands back, and a genuine
  * `Bearer <token>` inside a value is still redacted. Prose has no delimiters to protect,
  * so it calls redactBearerTokens directly; anything JSON.stringify touches comes here.
+ *
+ * The redacting counterpart to toolJson below, and compact for the same reason: it takes no
+ * indent argument, so this path cannot pretty-print even by accident.
  */
-export function redactedJson(value: any, space?: number): string {
-  return JSON.stringify(value, (_key, v) => (typeof v === 'string' ? redactBearerTokens(v) : v), space);
+export function redactedJson(value: any): string {
+  return JSON.stringify(value, (_key, v) => (typeof v === 'string' ? redactBearerTokens(v) : v));
+}
+
+/**
+ * Serialise a tool result payload. THE one seam every JSON result item goes through, across
+ * every handler and formatter, so how this server serialises is decided once (#40).
+ *
+ * Compact, with no option to indent. Every payload here is read by a machine — an MCP client
+ * parses it, or a model reads it as data — and neither needs indentation, while the reader
+ * pays for every byte of it. On a 25-message list page the indentation alone was ~17% of the
+ * response by bytes, carrying no information at all. The saving scales with the number of
+ * JSON tokens, so it is largest exactly where the payload is largest: the list and search
+ * seams in response-formatters.ts.
+ *
+ * This applies to a payload embedded in a prose frame too (a list result's summary line, the
+ * bulk-operations diagnostic). The prose stays prose; the JSON inside it is still a payload
+ * the caller parses, so it is serialised the same way as a payload standing alone. Whitespace
+ * is not the thing that makes a result legible — its structure and field names are, and
+ * compacting changes neither.
+ *
+ * Use redactedJson above instead where the values may carry credentials.
+ */
+export function toolJson(value: unknown): string {
+  return JSON.stringify(value);
 }
 
 // Every branch TRIMS its elements, so the three ways of expressing the same list agree.

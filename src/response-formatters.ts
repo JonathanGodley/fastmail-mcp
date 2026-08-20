@@ -1,6 +1,6 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
-import { redactBearerTokens } from './coerce.js';
+import { redactBearerTokens, toolJson } from './coerce.js';
 import { describePart } from './inline-images.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
@@ -58,14 +58,14 @@ export function formatQuerySummary(result: QueryResult, options?: { paged?: bool
 // to remember to pass: forgetting a flag would silently drop a promised signal, while
 // reaching for the wrong function is visible in the handler.
 export function formatQueryResult(result: QueryResult): string {
-  return `${formatQuerySummary(result)}\n${JSON.stringify(result.items, null, 2)}`;
+  return `${formatQuerySummary(result)}\n${toolJson(result.items)}`;
 }
 
 // Raw rendering for the three paging email tools (list_emails, search_emails,
 // get_recent_emails), the counterpart to formatEmailQueryResult below: same summary,
 // untransformed items.
 export function formatRawEmailQueryResult(result: QueryResult): string {
-  return `${formatQuerySummary(result, { paged: true })}\n${JSON.stringify(result.items, null, 2)}`;
+  return `${formatQuerySummary(result, { paged: true })}\n${toolJson(result.items)}`;
 }
 
 // The one seam every list/search read tool renders through (list_emails,
@@ -77,7 +77,7 @@ export function formatRawEmailQueryResult(result: QueryResult): string {
 // for a narrower shape would be a scope lie, not a smaller response.
 export function formatEmailQueryResult(result: QueryResult, options?: { fields?: ReadonlySet<string> }): string {
   const simplified = result.items.map(e => projectEmail(simplifyEmail(e), options?.fields));
-  return `${formatQuerySummary(result, { paged: true })}\n${JSON.stringify(simplified, null, 2)}`;
+  return `${formatQuerySummary(result, { paged: true })}\n${toolJson(simplified)}`;
 }
 
 // Recipient lists are capped so a big draft can't turn the result into a wall of
@@ -607,10 +607,10 @@ export function buildAttachmentListContent(
   raw: boolean,
 ): Array<{ type: 'text'; text: string }> {
   if (!raw) {
-    return [{ type: 'text', text: JSON.stringify(result.attachments, null, 2) }];
+    return [{ type: 'text', text: toolJson(result.attachments) }];
   }
   const content: Array<{ type: 'text'; text: string }> = [
-    { type: 'text', text: JSON.stringify(result.rawAttachments, null, 2) },
+    { type: 'text', text: toolJson(result.rawAttachments) },
   ];
   const note = buildOmittedPartsNote(result.omittedFromRaw);
   if (note) content.push({ type: 'text', text: note });
@@ -784,5 +784,5 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
 // callers could not act on.
 export function formatContactQueryResult(result: QueryResult, options?: { verbose?: boolean }): string {
   const simplified = result.items.map(c => simplifyContact(c, options));
-  return `${formatQuerySummary(result)}\n${JSON.stringify(simplified, null, 2)}`;
+  return `${formatQuerySummary(result)}\n${toolJson(simplified)}`;
 }

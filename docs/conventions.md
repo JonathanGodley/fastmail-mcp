@@ -876,6 +876,45 @@ the server — the JMAP property sets are held identical across the read methods
 (see the JMAP-property-consistency rule in `CLAUDE.md`), and making the fetch shape depend
 on a caller's projection would trade that invariant for a saving the caller never sees.
 
+## Result serialisation
+
+Every JSON payload this server returns is serialised **compact**, through one of two seams in
+`src/coerce.ts`:
+
+- `toolJson(value)` — the default, used by every handler and formatter.
+- `redactedJson(value)` — the same thing with every string value passed through
+  `redactBearerTokens` first, for payloads whose values could carry a credential (server error
+  descriptions, mailbox names). See its own comment for why redaction has to run per value
+  rather than over the finished document.
+
+**Neither takes an indent argument**, so the seams cannot pretty-print even by accident, and
+TypeScript rejects a second argument to either. The one way back to indented output is a
+handler reaching past them for a bare `JSON.stringify(x, null, 2)`, which is what the drift
+guard in `src/tool-schema.test.ts` scans every non-test source file for.
+
+The reason is that indentation is bytes the caller pays for and nothing parses. Every payload
+here is machine-read — an MCP client parses it, or a model reads it as data — and neither
+needs the whitespace. It also scales with the number of JSON *tokens* rather than with the
+content, so it costs most on exactly the payloads that are already the largest. Measured live
+against a real account: **17.3%** of a 25-message `list_emails` page, **24.9%** of the same
+page under `raw: true`, **28.5%** of a `list_mailboxes` result (many small flat objects, so the
+most delimiters per byte of content), and 6.5% of a single `get_email` (dominated by one long
+body string, which carries no delimiters to indent). That is pure whitespace in every case:
+the change removes no field and alters no value (#40).
+
+**A payload inside a prose frame is still a payload.** A list result is a summary line, a
+newline, then the JSON array; the bulk-operations diagnostic wraps its JSON in a heading and a
+follow-up instruction. In both, the prose stays prose and only the JSON is compacted. Treating
+the framed ones as a readability exception would be a carve-out the next reader has to
+remember, and whitespace is not what makes a payload legible: its structure and field names
+are, and compacting changes neither.
+
+The rule is about **payloads**, not about every `JSON.stringify` in the tree. Two things
+outside `src/` stay indented on purpose, because their output is not a tool result:
+`scripts/dump-official-surface.mjs` writes a checked-in JSON document, where indentation is
+what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a human
+running it by hand.
+
 ## Query-level signals: the result count and `position` paging
 
 `total` and `nextPosition` are properties of the *query*, not of a message, and that

@@ -1,6 +1,8 @@
-// Two drift guards over the tool schemas in src/index.ts: the lenient-boolean convention
-// (#54), and the rule that a tool emitting a recovery note has to expose every parameter
-// that note prescribes.
+// Three drift guards over what this server's tools present to a caller: the lenient-boolean
+// convention (#54), the rule that a tool emitting a recovery note has to expose every
+// parameter that note prescribes, and the rule that every JSON result payload goes out
+// compact (#40). The first two read the schemas and handlers in src/index.ts; the third
+// scans every non-test source file, since any of them can serialise a payload.
 //
 // Lenient booleans (#54).
 //
@@ -37,10 +39,24 @@
 // the assertion is derived from both sides at once: which tools emit a note is read out of
 // the handlers, and which parameters a note names is read out of the real emitter's output
 // rather than a copy of its wording.
+//
+// Compact result payloads (#40).
+//
+// Every JSON result item goes out through one of two seams in coerce.ts — toolJson, or
+// redactedJson where the values may carry credentials. Neither takes an indent argument, so
+// the seams themselves cannot pretty-print, and TypeScript rejects a second argument to
+// either. What nothing else catches is a new handler reaching past them for a bare
+// JSON.stringify with an indent, which is how all 27 sites came to be indented in the first
+// place: the cost is invisible at the call site and only shows up in the response.
+//
+// It is not a small cost. Indentation is bytes the reader pays for that nothing parses, and
+// it scales with the number of JSON tokens rather than with the content, so it bites hardest
+// on the largest payloads — measured live at 17.3% of a 25-message list page, 24.9% of that
+// same page under raw:true, and 28.5% of a mailbox listing.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildExclusionNote } from './response-formatters.js';
@@ -518,6 +534,55 @@ describe('scope flags are wired to their own argument', () => {
       [],
       `a boolean is read from an argument of a different name, which silently applies the ` +
         `caller's answer to the wrong parameter: ${mismatches.join(', ')}`,
+    );
+  });
+});
+
+describe('result payloads are serialised compact', () => {
+  // Every shipped source file, since any handler or formatter can serialise a payload. Read
+  // as text out of src/ rather than imported from dist/, for the same reason as the scans
+  // above: `npm test` never builds first, so a dist/ read would miss the site just added.
+  // src/testing/ is excluded with the .test.ts files - it is test-only support code that
+  // never reaches a caller.
+  const sourceFiles = readdirSync(SRC_DIR)
+    .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+    .sort();
+
+  it('no JSON.stringify passes an indent argument', () => {
+    const offenders: string[] = [];
+    for (const file of sourceFiles) {
+      readLines(file).forEach((line, i) => {
+        // Comment lines are dropped first: coerce.ts documents this rule by naming the form
+        // it forbids, and matching raw text would fire on the documentation rather than on a
+        // regression - the same treatment the redactBearerTokens scan above gives it.
+        if (line.trimStart().startsWith('//') || line.trimStart().startsWith('*')) return;
+        if (/JSON\.stringify\(.*,\s*(?:null|undefined)\s*,/.test(line)) {
+          offenders.push(`src/${file}:${i + 1}`);
+        }
+      });
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      `a result payload is pretty-printed. Indentation is bytes the caller pays for that ` +
+        `nothing parses (17-28% of a real payload, measured live). Serialise through ` +
+        `toolJson - or redactedJson where a value could carry a credential - both in ` +
+        `coerce.ts: ${offenders.join(', ')}`,
+    );
+  });
+
+  it('the payload sites still go through the shared seam', () => {
+    // A floor, not an exact count, so adding a tool does not fail this. It catches the other
+    // direction the guard above cannot see: the seam being bypassed wholesale by call sites
+    // that serialise compact by hand, which passes the indent check while leaving the rule
+    // with no single place it is written down.
+    const uses = sourceFiles
+      .flatMap((f) => readLines(f))
+      .filter((l) => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*'))
+      .reduce((n, l) => n + (l.split(/\btoolJson\(/).length - 1), 0);
+    assert.ok(
+      uses >= 25,
+      `only ${uses} toolJson call sites; the shared serialisation seam is being bypassed`,
     );
   });
 });
