@@ -1,8 +1,10 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceAttachments } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceAttachments, coerceBool } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank } from './body-format.js';
 import { planAuthoredInlineImages, reportAuthoredInlineImages } from './compose-inline.js';
+import { applySignature } from './reply-quote.js';
+import { resolveSignature } from './identity.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // Parameters passed to createDraft for a freshly composed message (matches its input
@@ -27,6 +29,8 @@ export interface DraftParams {
 // structurally. Declared here (rather than importing JmapClient) so the handler stays
 // unit-testable with a mock, matching ReplyClient / ForwardClient.
 export interface ComposeClient {
+  /** The sending identities, for the signature lookup (#33). Called only when one is asked for. */
+  getIdentities(): Promise<any[]>;
   uploadAttachments(
     specs: AttachmentSpec[],
     attachDir: string | undefined,
@@ -103,6 +107,17 @@ export async function composeDraft(
     ? await client.uploadAttachments(specs, attachDir, allowBlobAttach, { inlineCids: plan.inlineCids })
     : undefined;
 
+  // Off by default, and the lookup is skipped when it is off (see composeReply). Applied
+  // AFTER the contentless-draft guard above on purpose: a signature is a sign-off on a
+  // message, not a message, so it must not turn an empty call into a saveable draft. It is
+  // also applied after the embedded-image plan, which reads the caller's OWN html — the
+  // signature is this server's markup and is not held against them.
+  const appendSignature = coerceBool(a.appendSignature) === true;
+  const signature = appendSignature
+    ? resolveSignature(await client.getIdentities(), from)
+    : undefined;
+  const signed = applySignature({ textBody, htmlBody }, signature);
+
   const emailId = await client.createDraft({
     to,
     cc,
@@ -110,8 +125,8 @@ export async function composeDraft(
     from,
     mailbox,
     subject,
-    textBody,
-    htmlBody,
+    textBody: signed.textBody,
+    htmlBody: signed.htmlBody,
     inReplyTo,
     references,
     replyTo,

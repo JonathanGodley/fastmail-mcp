@@ -3,7 +3,8 @@ import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
-import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml } from './reply-quote.js';
+import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml, applySignature, hasSignatureMarker, NOTE_SIGNATURE_REAPPENDED } from './reply-quote.js';
+import { matchesIdentity, signatureOf } from './identity.js';
 import { isSettableMessageId } from './forward-handler.js';
 import {
   buildUnionParts, cidKey, describePart, sanitizeDownloadFilename,
@@ -1472,26 +1473,6 @@ export function computeExclusion(
   return { excludeIds, excludedRoles, unresolvedRoles };
 }
 
-/** Match an email address against an identity, supporting wildcard identities (e.g. *@example.com). */
-function matchesIdentity(identityEmail: string, address: string): boolean {
-  const identity = identityEmail.toLowerCase();
-  const addr = address.toLowerCase();
-  if (identity === addr) return true;
-  if (identity.startsWith('*@')) {
-    const domain = identity.slice(1); // "@example.com"
-    // A wildcard identity is only honoured for a single well-formed addr-spec. Without
-    // this, a composite value like "a@evil.com,b@example.com" (or one carrying CR/LF or
-    // a quoted local part) satisfies the endsWith test and lands unparsed in the
-    // outgoing `from`/`mailFrom`, turning the "verified identity" check into a pass.
-    // Note the pattern admits a BARE addr-spec only — a "Name <a@b.example>" form is
-    // rejected on purpose, because the display name is supplied separately and is never
-    // part of the value matched here. Do not widen it to accept angle-addr shapes.
-    if (!/^[^\s@,;"]+@[^\s@,;"]+$/.test(addr)) return false;
-    return addr.endsWith(domain);
-  }
-  return false;
-}
-
 export class JmapClient {
   private auth: FastmailAuth;
   private session: JmapSession | null = null;
@@ -2258,6 +2239,11 @@ export class JmapClient {
     // message; noQuote = deliberately drop it. Absent both, the edit is rejected (no silent loss).
     originalEmailId?: string;
     noQuote?: boolean;
+    // What happens to the sending identity's signature when this edit writes a body (#33).
+    // TRI-STATE, and the omitted case is the interesting one: true adds the signature,
+    // false takes it off, and undefined PRESERVES — re-appending only when the stored body
+    // already carried one. See the signature step below for why omission cannot mean "no".
+    appendSignature?: boolean;
   }, options: {
     // Whether this server can attach anything at all — a local file (FASTMAIL_ATTACH_DIR) or
     // content already in the account (FASTMAIL_ALLOW_BLOB_ATTACH). It changes only which
@@ -2456,8 +2442,48 @@ export class JmapClient {
     // The caller's OWN html, snapshotted before the keep path can replace it with a rebuilt
     // body. The checks that must not see this server's own output — an authored reference to
     // a server-managed identifier is an error, while the rebuilt quote is full of them by
-    // design — read this, never updates.htmlBody.
+    // design — read this, never updates.htmlBody. Snapshotted BEFORE the signature step
+    // below for the same reason: the signature is this server's markup, not the caller's.
     const callerWrittenHtml = updates.htmlBody;
+
+    // ---- The sending identity's signature (#33) ----
+    // Positioned here for two reasons. It must run BEFORE the quote rebuild further down,
+    // which replaces updates.htmlBody with the quote-appended body — appending after that
+    // would put the sign-off underneath the quoted history. And it must run AFTER the
+    // callerWrittenHtml snapshot above, so the reserved-identifier scan judges only what the
+    // caller wrote.
+    //
+    // The trigger is deliberately NOT the flag alone. A draft that already carries a
+    // signature block was signed because somebody asked for it; a later edit that rewrites
+    // the body and says nothing about signatures has not un-asked, it has just written a
+    // body — and the merge rule below drops the unwritten partner, so an htmlBody-alone edit
+    // (the common one) would otherwise lose the signature silently. So an omitted flag
+    // PRESERVES: re-append when the stored body carried the marker and the new one does not.
+    // appendSignature:false is the deliberate way to take a signature off a draft.
+    //
+    // Because that re-append is the one signature outcome nobody asked for in the same call,
+    // it is the one the result announces (NOTE_SIGNATURE_REAPPENDED below).
+    const storedSignature = hasSignatureMarker(existingHtmlValue);
+    let reAppendedSignature = false;
+    if (updates.appendSignature === true || (updates.appendSignature === undefined && storedSignature)) {
+      // Only bodies this edit actually WRITES are signed. An unwritten body is either
+      // preserved verbatim (a metadata-only edit) or dropped as the unwritten partner, and
+      // in neither case is there caller text to sign.
+      const before = { textBody: updates.textBody, htmlBody: updates.htmlBody };
+      const signed = applySignature(
+        {
+          ...(wroteText && { textBody: updates.textBody }),
+          ...(wroteHtml && { htmlBody: updates.htmlBody }),
+        },
+        // The identity resolved above is the one this edit writes into `from`, so the
+        // signature always matches the sender the recipient will see.
+        signatureOf(selectedIdentity),
+      );
+      if (wroteHtml && signed.htmlBody !== undefined) updates.htmlBody = signed.htmlBody;
+      if (wroteText && signed.textBody !== undefined) updates.textBody = signed.textBody;
+      reAppendedSignature = updates.appendSignature === undefined
+        && (updates.htmlBody !== before.htmlBody || updates.textBody !== before.textBody);
+    }
 
     // Which parts this call takes off the draft, resolved HERE because the quote rebuild
     // below has to know what survives it: a surviving part supplies its own embedded image,
@@ -3160,6 +3186,9 @@ export class JmapClient {
           reEmbeddedCount: quoteImageMappings.length,
         }),
       }),
+      // Announced because nothing in THIS call asked for it — see the signature step above.
+      // An explicitly requested append says nothing: the caller already knows.
+      ...(reAppendedSignature ? [NOTE_SIGNATURE_REAPPENDED] : []),
       ...followUpNotes,
     ];
     const touchedInlineImages = tally.embedded > 0 || tally.degraded > 0 || tally.removed > 0;

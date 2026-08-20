@@ -5,7 +5,7 @@ parts of an email. This spans every authoring path (`create_draft`, `reply_email
 `forward_email`, `edit_draft`, `send_draft`) and the read paths that undo
 their quoting again (`get_email`, `get_thread`), so it lives here rather than in any one
 tool's issue. The per-tool behaviour rationale lives in the closed GitHub issues
-(#4, #7, #15, #16, #73, #74); this file is the shared model they all depend on.
+(#4, #7, #15, #16, #33, #73, #74); this file is the shared model they all depend on.
 
 ## The body-format model
 
@@ -181,6 +181,60 @@ it would discard a non-empty opposite partner, in either direction. The body-for
 model made the text side auto-managed, so the symmetric throw was replaced with the
 asymmetric rule above. (Issue #4's resolution comment describes the shipped asymmetric
 model; do not reintroduce the symmetric option-D description or the `2fc8283` citation.)
+
+## The identity signature in the body model (#33)
+
+The sending identity's configured sign-off is a third thing this server puts into a body
+the caller did not write, alongside the reply quote and the forwarded-message block. It is
+opt-in per call (`appendSignature`) and appears in no message that did not ask for it. Two
+properties of the body model above decide almost everything about how it behaves.
+
+**The text form is derived, not the configured one.** An identity carries both
+`textSignature` and `htmlSignature` (RFC 8621 §6; Fastmail writes both and keeps them in
+sync). It would be natural to write each into the matching part — and it would be wrong.
+The text part of an HTML message is a *derived fallback*: the first `htmlBody`-alone edit
+regenerates it from the HTML, which regenerates the signature along with everything else.
+A verbatim `textSignature` would therefore be correct when written and silently different
+after that edit, with nothing reporting the change. So whenever HTML ships, the text form
+is `htmlToText(htmlSignature)` — the same value that edit will produce — and the configured
+`textSignature` is used only for a message that ships no HTML at all, where nothing will
+ever derive it. This is the same "HTML is the source of truth" rule the rest of this file
+describes, applied to a fragment rather than to a whole body.
+
+The corollary for a half-configured identity: an identity with only one form still signs
+either kind of body. An HTML-only signature derives its text form; a text-only signature is
+escaped into an HTML block. That escape is not the forbidden "fabricate HTML from a
+plain-text message" — the HTML body already exists and ships either way; this only decides
+what goes inside it, and skipping it would drop a signature the user really has.
+
+**Placement is above the quoted history**, which is why the insertion lives in
+`src/reply-quote.ts` rather than in `createDraft`. By the time a compose path reaches
+`createDraft`, the quote or forwarded block has already been concatenated onto the body, so
+anything appended there lands *underneath* the quoted message and reads as part of it. The
+same trap exists on the edit path: `updateDraft` replaces `updates.htmlBody` with the
+quote-appended body when it rebuilds a quote, so the signature step runs before that.
+
+**Preservation on edit is keyed on the draft, not on the flag.** The block is wrapped in a
+`<div class="fm-mcp-signature">`, recognised by `hasSignatureMarker` beside the two quote
+marker families. When an edit writes a body, the merge rule above drops the unwritten
+partner and replaces the written one wholesale — so an `htmlBody`-alone edit, the commonest
+edit there is, would drop a signature the draft carried. Reading that as intent would be
+wrong: the caller asked to change a body, not to remove a sign-off. So an omitted
+`appendSignature` *preserves* — the current signature is re-appended when the stored body
+carried the marker and the new one does not — and because that is the one signature outcome
+nobody asked for in the same call, it is the one the result announces. `appendSignature:false`
+is the deliberate way to take one off. Note the asymmetry with the quote guard next door: a
+dropped quote must be *challenged*, because only the caller knows which message it quoted,
+while a dropped signature can simply be re-read from the identity.
+
+**Residual: detection is HTML-only.** The marker is a class, so a draft with no HTML body
+carries none. A plain-text draft that was signed keeps its signature through any edit that
+does not write a body (bodies are untouched), but an edit that rewrites its text body
+without passing `appendSignature:true` loses it, and a hand-typed signature is invisible to
+this everywhere. Accepted rather than fixed: the alternatives are matching the signature's
+*text* against the identity (fragile the moment either is edited by a character) or storing
+state outside the message (there is nowhere to put it that survives the recreate). The
+edit-time flag is the recovery, and it is documented on the parameter.
 
 ## Reply-quote preservation on edit (#37, redesigned #42)
 

@@ -6,13 +6,24 @@ import { InvalidInputError } from './coerce.js';
 
 const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
 
+// A sending identity with a configured sign-off, for the appendSignature cases (#33).
+const SIGNED_IDENTITY = {
+  id: 'id-1',
+  name: 'Test User',
+  email: 'me@example.com',
+  mayDelete: false,
+  textSignature: 'Kind regards,\nTest User',
+  htmlSignature: '<div>Kind regards,</div><div>Test User</div>',
+};
+
 // A spy ComposeClient: records what each method was called with; uploadAttachments
 // returns the canned UPLOADED parts so we can assert they thread through. getEmailById is
 // only ever reached by the post-save confirmation read, so its call count is itself an
 // assertion target: an ordinary draft must not pay for a round trip it has no use for.
 function spyClient(over: Partial<ComposeClient> = {}, uploadResult: any[] = UPLOADED) {
-  const calls: any = { readBacks: 0 };
+  const calls: any = { readBacks: 0, identityLookups: 0 };
   const client: ComposeClient = {
+    getIdentities: async () => { calls.identityLookups += 1; return [SIGNED_IDENTITY]; },
     uploadAttachments: async (specs, dir, allowBlob, options) => { calls.upload = { specs, dir, allowBlob, options }; return uploadResult; },
     createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
     getEmailById: async (id) => { calls.readBacks += 1; calls.readId = id; return { id, attachments: [] }; },
