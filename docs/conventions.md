@@ -932,6 +932,24 @@ flag would silently drop a promised signal while a wrong function name is visibl
 handler. Paginating the contacts and calendar protocol paths is tracked on
 [#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51).
 
+**The CalDAV calendar listing joins the same discipline, over a different protocol.**
+`list_calendar_events` does not go through JMAP at all, so nothing hands it a server-computed
+`total` — it counts what it gathered. `getCalendarEvents` therefore returns
+`{ events, total }`, where `total` is the number of events that matched *after* the window
+re-filter and *before* `limit` trimmed the list, and the handler renders it through the same
+`formatQuerySummary` as everything else (unpaged, so no `nextPosition`, since the tool takes
+no `position`). The count is load-bearing here rather than cosmetic: recurrence expansion
+turns one fortnightly series across a quarter into seven rows, so the cap is reached far
+sooner than it was when a series counted once, and a caller reading a capped page as the
+whole answer is exactly the false negative this section exists to prevent (#64, #100).
+
+Its sibling failure is disclosed the same way, by refusing to answer at all. Calendar
+*discovery* used to return an empty list on a server failure, which the listing reported as
+a successful empty result — "you are free" for a question about availability. That now
+raises. Where the email tools express a degraded read as an explicit note, the calendar read
+path expresses it as an error, because there is no partial answer to annotate: with no
+calendars there is nothing that could have matched.
+
 ## `hasAttachment` is a server heuristic — passed through by design
 
 `hasAttachment` in simplified output is the server's value, untouched. This is a
@@ -1218,6 +1236,34 @@ Three properties of the implementation are load-bearing and easy to undo by acci
 The frame check is deliberately *not* applied when the caller touches neither `start` nor
 `end`: it exists to stop us writing a broken pair, not to hold a title edit hostage to an
 inconsistency some other client left in the event.
+
+### The read path loses one frame, so its window filter can only widen
+
+The four frames survive intact on the *write* path, where the property line is built and
+inspected whole. Reading is lossy: `formatICalDate` takes only the property's **value**, so
+`DTSTART;TZID=Australia/Sydney:20270305T083000` and a floating `DTSTART:20270305T083000`
+both become `2027-03-05T08:30:00`. The zone name is gone by the time a `CalendarEvent`
+exists, and nothing downstream can get it back — resolving it would need a timezone database
+this server does not carry.
+
+That is why `eventIntersectsWindow` (the client-side re-filter behind `list_calendar_events`)
+is built to **drop only what provably cannot intersect**, rather than to decide membership.
+Any value with no zone designator is widened by ±14 hours, the largest UTC offset any IANA
+zone has used, so a zone-carrying event near a window edge is kept even though its true
+instant is unknown here. The residue that leaves is accepted deliberately: the CalDAV server
+is the authority on time-range matching (RFC 4791 §9.9, occurrence-based), and this filter
+exists only to catch what that matching cannot express — the server matches per *occurrence*
+but returns whole *resources*, so an unexpanded series arrives showing a master `DTSTART`
+that may be years outside the window (#64). Erring the other way would discard events the
+server correctly matched, which turns a busy day into a free one; an extra row a caller can
+see and dismiss is the cheaper error.
+
+The window's own bounds do not have this problem, because they never touch iCal: they are
+normalised once by `coerceUtcDate` / `coerceCalendarWindowEnd` and used for both the server's
+`time-range` and this filter, so the two cannot disagree about which days were asked for.
+`coerceCalendarWindowEnd` is the one place the calendar deliberately diverges from the email
+search filters — a date-only *end* means the whole of that day, because CalDAV's `time-range`
+end is exclusive and the midnight-UTC reading would make a one-day query a zero-length window.
 
 ## Local-time formatting and the U+202F trap
 

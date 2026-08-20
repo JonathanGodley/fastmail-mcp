@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
+import { formatQuerySummary, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
@@ -1426,7 +1426,12 @@ const TOOLS = [
       },
       {
         name: 'list_calendar_events',
-        description: 'List events from a calendar',
+        description:
+          'List events from a calendar, one entry per occurrence in the requested window. ' +
+          'RECURRING EVENTS ARE EXPANDED: give startDate/endDate and a repeating event returns one entry for each occurrence that falls inside the window, with start/end set to that occurrence\'s real dates — so a fortnightly event across three months is several entries, not one. Reading three recurrence fields tells you exactly what a date is: `recurrenceId` present means start/end ARE the in-window occurrence; `recurrenceRule` present (the RRULE, only ever without recurrenceId) means you are looking at the series master shown at its ORIGINAL start date, which may be years before the window; `isRecurring` is set in both cases, and a one-off event carries none of them. ' +
+          'Without startDate/endDate nothing is expanded, so a recurring event is reported once at its original start — pass a window to ask "what is actually on these days?". ' +
+          'Every calendar is queried before the results are sorted and trimmed, so `limit` is a genuine "earliest N" across all of them. The response opens with a summary line stating how many events matched in total; when that total exceeds the returned count, `limit` cut the rest off and there is no paging — narrow the window instead of raising it. ' +
+          'A calendar-discovery failure is reported as an error, never as an empty list.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1436,15 +1441,17 @@ const TOOLS = [
             },
             startDate: {
               type: 'string',
-              description: 'Filter events starting from this date (ISO 8601, e.g. 2026-03-23T00:00:00Z)',
+              description:
+                'Start of the window, inclusive. Either a date (2027-03-01, meaning 00:00:00 UTC that day) or a full datetime (2027-03-01T09:00:00Z or 2027-03-01T09:00:00+10:00). Other spellings such as 2027/03/01 or "March 1 2027" are rejected rather than guessed at, and so is a day its month does not have (2027-02-30) — which would otherwise roll silently into the next month and move the window.',
             },
             endDate: {
               type: 'string',
-              description: 'Filter events ending before this date (ISO 8601, e.g. 2026-03-30T00:00:00Z)',
+              description:
+                'End of the window, exclusive. Same accepted spellings as startDate, with one difference: a DATE-ONLY endDate covers the WHOLE of that day (2027-03-10 runs through to the following midnight UTC), so a single-day query is startDate and endDate on the same date. A full datetime is taken literally as the exclusive end.',
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging — narrow the window with startDate/endDate instead.',
+              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging — narrow the window with startDate/endDate instead. Recurrence expansion means this is reached sooner than it used to be; the summary line states the true total.',
               default: 50,
             },
           },
@@ -1452,7 +1459,9 @@ const TOOLS = [
       },
       {
         name: 'get_calendar_event',
-        description: 'Get a specific calendar event by ID. Returns organizer and participants when available.',
+        description:
+          'Get a specific calendar event by ID. Returns organizer and participants when available. ' +
+          'For a repeating event this returns the SERIES MASTER: `isRecurring` and `recurrenceRule` (the RRULE) are set, and start/end are the series\' original dates, NOT the next or nearest occurrence. To find out when the event actually falls on given days, call list_calendar_events with a startDate/endDate window, which expands the recurrence.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2280,8 +2289,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const events = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
-        return { content: [{ type: 'text', text: JSON.stringify(events, null, 2) }] };
+        const { events, total } = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
+        // The same summary line the other listings carry, so a `limit` that trimmed the
+        // result is visible instead of being inferred from the array length. Unpaged: this
+        // tool takes no `position`, so no nextPosition is offered — passing one back would
+        // be rejected by the unknown-parameter guard. Recurrence expansion makes the count
+        // load-bearing, since one fortnightly event across a quarter is now several rows.
+        const summary = formatQuerySummary({ items: events, total });
+        return { content: [{ type: 'text', text: `${summary}\n${JSON.stringify(events, null, 2)}` }] };
       }
 
       case 'get_calendar_event': {
