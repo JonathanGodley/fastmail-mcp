@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowEnd, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -1189,5 +1189,56 @@ describe('coerceContactName', () => {
     assert.throws(() => coerceContactName('   '), isInvalidInput(/name cannot be empty/));
     assert.throws(() => coerceContactName({ given: '  ' }), isInvalidInput(/name\.given cannot be empty/));
     assert.throws(() => coerceContactName({}), isInvalidInput(/at least one of/));
+  });
+});
+
+describe('coerceCalendarWindowEnd (#64)', () => {
+  it('returns undefined for undefined/null (no window bound)', () => {
+    assert.equal(coerceCalendarWindowEnd(undefined, 'endDate'), undefined);
+    assert.equal(coerceCalendarWindowEnd(null, 'endDate'), undefined);
+  });
+
+  it('runs a date-only value to the end of that day', () => {
+    // The one deliberate divergence from coerceUtcDate. CalDAV time-range ends are
+    // exclusive, so the following midnight is exactly "through the end of the 10th".
+    assert.equal(coerceCalendarWindowEnd('2027-03-10', 'endDate'), '2027-03-11T00:00:00Z');
+  });
+
+  it('rolls a date-only value at a month end into the next month', () => {
+    assert.equal(coerceCalendarWindowEnd('2027-03-31', 'endDate'), '2027-04-01T00:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2027-12-31', 'endDate'), '2028-01-01T00:00:00Z');
+    // A leap day is a real date and must advance to 1 March, not 29 February again.
+    assert.equal(coerceCalendarWindowEnd('2028-02-28', 'endDate'), '2028-02-29T00:00:00Z');
+  });
+
+  it('takes a full datetime literally, like coerceUtcDate', () => {
+    assert.equal(coerceCalendarWindowEnd('2027-03-10T17:00:00Z', 'endDate'), '2027-03-10T17:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2027-03-10T17:00:00+01:00', 'endDate'), '2027-03-10T16:00:00Z');
+  });
+
+  it('trims surrounding whitespace on a date-only value before extending it', () => {
+    assert.equal(coerceCalendarWindowEnd('  2027-03-10  ', 'endDate'), '2027-03-11T00:00:00Z');
+  });
+
+  it('rejects a day its month does not have rather than rolling it over', () => {
+    assert.throws(
+      () => coerceCalendarWindowEnd('2027-02-30', 'endDate'),
+      /endDate is not a real calendar date/,
+    );
+  });
+
+  it('rejects free text, reduced precision and non-strings, naming the parameter', () => {
+    for (const value of ['next friday', '2027', '2027-03', '2027/03/10', '', '   ']) {
+      assert.throws(
+        () => coerceCalendarWindowEnd(value, 'endDate'),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, /endDate/);
+          return true;
+        },
+        `expected rejection for ${JSON.stringify(value)}`,
+      );
+    }
+    assert.throws(() => coerceCalendarWindowEnd(20270310, 'endDate'), /endDate must be a date string/);
   });
 });

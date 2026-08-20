@@ -346,6 +346,34 @@ function echoDate(value: string): string {
   return value.length > DATE_ECHO_LIMIT ? `${value.slice(0, DATE_ECHO_LIMIT)}...` : value;
 }
 
+// The EXCLUSIVE end of a calendar window (`list_calendar_events`' endDate), normalised the
+// same way coerceUtcDate normalises everything else — same two accepted shapes, same
+// rejections for an impossible day, free text, a reduced-precision `2026-07`, or an empty
+// string — with ONE deliberate difference.
+//
+//   2027-03-10                -> 2027-03-11T00:00:00Z   (the whole of the 10th)
+//   2027-03-10T17:00:00Z      -> 2027-03-10T17:00:00Z   (unchanged, like coerceUtcDate)
+//
+// A date-only value means the WHOLE DAY here, not midnight at its start. CalDAV's
+// <C:time-range> end is exclusive (RFC 4791 section 9.9), so the following midnight is
+// precisely "through the end of that day" — 23:59:59 would be an approximation that drops
+// the last second. Under coerceUtcDate's midnight-UTC rule instead, the natural
+// `startDate: 2027-03-10, endDate: 2027-03-10` would be a zero-length window and a
+// one-day query would return nothing at all, which reads as "you are free that day".
+// That is why calendar windows diverge from the email search filters rather than sharing
+// one function: a search bound names an instant, a window names days.
+export function coerceCalendarWindowEnd(value: unknown, paramName: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const dateOnly = typeof value === 'string' && DATE_ONLY_PATTERN.test(value.trim());
+  const normalised = coerceUtcDate(value, paramName);
+  if (!normalised || !dateOnly) return normalised;
+  // Advance a whole day through Date rather than by string surgery, so month and year
+  // ends (and leap days) roll correctly. The input has already been proved a real
+  // calendar date by coerceUtcDate, so this cannot land on NaN.
+  const endOfDay = new Date(new Date(normalised).getTime() + 24 * 60 * 60 * 1000);
+  return endOfDay.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
 // The pagination offset shared by the list/search tools: a 0-based index into the
 // full result set (the JMAP `position` argument, RFC 8620 section 5.5). Values are
 // coerced leniently like `limit` — a stringified "40" from a client that stringifies

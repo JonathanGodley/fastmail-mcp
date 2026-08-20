@@ -12,7 +12,7 @@ const { rrulestr, RRule } = rruleLib;
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, requireNonEmpty, validateClearFields } from './coerce.js';
+import { InvalidInputError, requireNonEmpty, validateClearFields, coerceUtcDate, coerceCalendarWindowEnd } from './coerce.js';
 
 export interface CalDAVConfig {
   username: string;
@@ -51,6 +51,32 @@ export interface CalendarEvent {
   location?: string;
   organizer?: Participant;
   participants?: Participant[];
+  // ---- recurrence (#64) ----
+  // Whether this entry belongs to a repeating series at all. Set for a series master AND
+  // for a single expanded occurrence, so a caller can tell "this repeats" without having
+  // to reason about which of the two fields below is present.
+  isRecurring?: boolean;
+  // The occurrence this entry IS, from RECURRENCE-ID. Its presence is the unambiguous
+  // signal that `start`/`end` are the in-window occurrence rather than the series' original
+  // DTSTART — which is exactly what #64 asked for, because a recurring event reported at
+  // its first occurrence years earlier is indistinguishable from a one-off on that date.
+  recurrenceId?: string;
+  // The raw RRULE value ("FREQ=WEEKLY;BYDAY=MO"), present only on a series MASTER. Master
+  // and occurrence are mutually exclusive: a master carries the rule and shows its original
+  // DTSTART, an occurrence carries a recurrenceId and shows the real date. Reading them
+  // together is how a caller knows which of the two it is holding.
+  recurrenceRule?: string;
+}
+
+// What `getCalendarEvents` returns: the page, plus how many events matched before `limit`
+// trimmed it. The count is stated rather than left implicit because `limit` is a hard cap
+// with no paging — a caller that reads a capped page as the whole answer concludes the
+// calendar is empty past that point (#100). Expansion makes this sharper, not softer: a
+// fortnightly event across a three-month window is now seven entries where it was one, so
+// the cap is reached far more often than it used to be.
+export interface CalendarEventQueryResult {
+  events: CalendarEvent[];
+  total: number;
 }
 
 /**
@@ -641,17 +667,76 @@ export function parseICalDuration(duration: string, start: string): string | und
   return endDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
-export function parseCalendarObject(obj: DAVCalendarObject, options?: { includeParticipants?: boolean }): CalendarEvent {
-  const vevent = extractVEvent(obj.data || '');
-  if (!vevent) {
+/** Every VEVENT block in an iCalendar payload, in the order the server serialised them. */
+function extractAllVEvents(data: string): string[] {
+  return data.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g) || [];
+}
+
+/**
+ * Parse EVERY event a single CalDAV resource represents.
+ *
+ * One resource is not one event, and which events it holds depends on how it was asked
+ * for — so the shape of the payload has to be decided before anything is read out of it:
+ *
+ *   EXPANDED (a time-range query sent with `expand`): the server applies the recurrence
+ *     itself and returns one VEVENT per in-window occurrence, RRULE stripped and
+ *     RECURRENCE-ID set to the real date. Several occurrences arrive inside ONE
+ *     calendar-data blob — measured against Fastmail at 3, 6 and 7 VEVENTs in a single
+ *     blob (scripts/probes/calendar-expand.probe.mjs) — so reading only the first would
+ *     silently drop six events out of seven. Every block becomes its own CalendarEvent.
+ *
+ *   UNEXPANDED (no time range, or a plain query): the resource holds the series MASTER,
+ *     which carries the RRULE, optionally followed by exception blocks that override
+ *     individual instances. Only the master is emitted, which is the long-standing
+ *     one-event-per-resource behaviour.
+ *
+ *   NO VEVENT: the minimal-event fallback, unchanged.
+ *
+ * The master is selected by looking for the block WITHOUT a RECURRENCE-ID rather than by
+ * taking the first block. RFC 5545 does not fix component order, so a resource authored by
+ * another client can serialise an override ahead of its master — and the previous
+ * first-match read reported that override as though it were the event. `normalizeMasterVEventFirst`
+ * encodes the same rule for the write path by reordering the payload; this decides it on
+ * the block list instead, because the read path has no reason to re-serialise anything.
+ * The two are deliberately left as separate implementations: unifying them means making the
+ * write path consume a parsed model it does not have, which is the read/write divergence
+ * tracked in #102 rather than something to settle inside a parser.
+ */
+export function parseCalendarObjects(obj: DAVCalendarObject, options?: { includeParticipants?: boolean }): CalendarEvent[] {
+  const blocks = extractAllVEvents(obj.data || '');
+  if (blocks.length === 0) {
     // No VEVENT found — return minimal event
-    return {
+    return [{
       id: obj.url || '',
       url: obj.url || '',
       title: 'Untitled',
-    };
+    }];
   }
 
+  const hasRecurrenceId = (block: string) => /^RECURRENCE-ID[;:]/m.test(block);
+  const master = blocks.find(b => !hasRecurrenceId(b));
+
+  // No master at all means every block is an occurrence: the expanded shape. (A resource
+  // holding only detached overrides would land here too; emitting each of them is still
+  // right, since each names a distinct instance.)
+  if (!master) return blocks.map(b => parseVEvent(obj, b, options));
+
+  return [parseVEvent(obj, master, options)];
+}
+
+/**
+ * Parse ONE event out of a resource.
+ *
+ * Retained as the single-event entry point that most of this file and its callers use.
+ * It returns the first event `parseCalendarObjects` produces, which for an unexpanded
+ * resource is the series master — the right answer for `get_calendar_event`, which fetches
+ * without a time range and so has no occurrence to report.
+ */
+export function parseCalendarObject(obj: DAVCalendarObject, options?: { includeParticipants?: boolean }): CalendarEvent {
+  return parseCalendarObjects(obj, options)[0];
+}
+
+function parseVEvent(obj: DAVCalendarObject, vevent: string, options?: { includeParticipants?: boolean }): CalendarEvent {
   const title = parseICalValue(vevent, 'SUMMARY') || 'Untitled';
   const description = parseICalValue(vevent, 'DESCRIPTION');
   const rawStart = parseICalValue(vevent, 'DTSTART');
@@ -677,6 +762,7 @@ export function parseCalendarObject(obj: DAVCalendarObject, options?: { includeP
             end: computedEnd,
             location: location ? unescapeICalText(location) : undefined,
           };
+          addRecurrenceToEvent(event, vevent);
           if (options?.includeParticipants) {
             addParticipantsToEvent(event, vevent);
           }
@@ -696,11 +782,34 @@ export function parseCalendarObject(obj: DAVCalendarObject, options?: { includeP
     location: location ? unescapeICalText(location) : undefined,
   };
 
+  addRecurrenceToEvent(event, vevent);
   if (options?.includeParticipants) {
     addParticipantsToEvent(event, vevent);
   }
 
   return event;
+}
+
+/**
+ * Attach the recurrence markers that say what KIND of date `start` is (#64).
+ *
+ * Read from the block being parsed rather than from the resource, because that is the
+ * distinction being reported: an expanded occurrence has had its RRULE stripped by the
+ * server and carries a RECURRENCE-ID, a master carries the rule and no RECURRENCE-ID.
+ * Both set `isRecurring`; nothing is set for an ordinary one-off event, per the
+ * omit-empty-fields convention.
+ */
+function addRecurrenceToEvent(event: CalendarEvent, vevent: string): void {
+  const rrule = parseICalValue(vevent, 'RRULE');
+  const recurrenceId = parseICalValue(vevent, 'RECURRENCE-ID');
+  if (recurrenceId) {
+    event.isRecurring = true;
+    event.recurrenceId = formatICalDate(recurrenceId);
+  }
+  if (rrule) {
+    event.isRecurring = true;
+    event.recurrenceRule = rrule;
+  }
 }
 
 function addParticipantsToEvent(event: CalendarEvent, vevent: string): void {
@@ -1114,6 +1223,64 @@ export function parseICalDateAsUTC(iso: string): Date {
   return new Date(iso + 'Z');
 }
 
+// The widest UTC offset any IANA zone has ever used (+14:00 for Kiritimati; the negative
+// extreme is smaller, so one bound covers both directions).
+//
+// It is needed because `formatICalDate` DROPS the TZID parameter: a value that arrived as
+// `DTSTART;TZID=Australia/Sydney:20270305T083000` becomes the bare `2027-03-05T08:30:00`,
+// which is indistinguishable from a floating time and, read as UTC, can be up to fourteen
+// hours away from the instant it names. Resolving it properly would need a timezone
+// database this client does not carry.
+const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
+
+/**
+ * Whether a parsed event could fall inside the requested window.
+ *
+ * This is a RESIDUE filter, not a reimplementation of RFC 4791 time-range matching. The
+ * server does the authoritative, timezone-correct matching; this exists because the server
+ * matches per OCCURRENCE but returns whole RESOURCES, so without expansion a series whose
+ * occurrence lands in the window comes back showing a master DTSTART years earlier (#64 —
+ * a ten-day window in March 2027 returning an event dated August 2020). It also closes the
+ * gap if a server ever declines to expand.
+ *
+ * Because it is a safety net rather than the authority, it is built to DROP ONLY WHAT
+ * PROVABLY CANNOT INTERSECT. Any value with no zone designator gets MAX_UTC_OFFSET_MS of
+ * slack on both sides, so a zoned event near a window edge is kept even though its real
+ * instant is unknown here. That deliberately leaves a little genuine residue — a zoned
+ * event just outside the window survives this filter — and that is the right way to be
+ * wrong: the alternative is discarding events the server correctly matched, which is the
+ * "you are free when you are not" failure this whole issue is about.
+ */
+export function eventIntersectsWindow(
+  event: Pick<CalendarEvent, 'start' | 'end'>,
+  windowStartMs: number,
+  windowEndMs: number,
+): boolean {
+  // Nothing to judge: keep it rather than guess. A promised event vanishing with no trace
+  // is worse than one extra row the caller can see and dismiss.
+  const anchor = event.start || event.end;
+  if (!anchor) return true;
+
+  const startMs = parseICalDateAsUTC(anchor).getTime();
+  if (Number.isNaN(startMs)) return true;
+
+  const parsedEnd = event.end ? parseICalDateAsUTC(event.end).getTime() : NaN;
+  // A missing or unreadable end makes the event a point in time, not an unbounded one.
+  const endMs = Number.isNaN(parsedEnd) ? startMs : Math.max(parsedEnd, startMs);
+
+  const zoneless = (v?: string) => !!v && !/Z$|[+-]\d{2}:?\d{2}$/.test(v);
+  const slack = zoneless(event.start) || zoneless(event.end) ? MAX_UTC_OFFSET_MS : 0;
+
+  const lo = startMs - slack;
+  const hi = endMs + slack;
+
+  // A zero-width instant (a zone-designated event with no duration) has no interval to
+  // overlap, so it counts as inside when the window contains it. `windowEnd` is exclusive,
+  // matching CalDAV.
+  if (lo === hi) return lo >= windowStartMs && lo < windowEndMs;
+  return lo < windowEndMs && hi > windowStartMs;
+}
+
 /**
  * Reorder VEVENT blocks so the master (no RECURRENCE-ID) comes first.
  * RFC 5545/4791 do not guarantee component ordering — a resource authored by
@@ -1191,10 +1358,68 @@ export class CalDAVCalendarClient {
     return this.client;
   }
 
-  async getCalendars(): Promise<CalendarInfo[]> {
+  /**
+   * Discover the account's calendars, failing loudly instead of returning an empty list.
+   *
+   * tsdav's `fetchCalendars` never checks `response.ok`. On a non-2xx PROPFIND its parser
+   * produces an error pseudo-response, which is then filtered out on `props.resourcetype`,
+   * so the call returns `[]` and does NOT throw. Every read here used to take that at face
+   * value, and the consequences all pointed the same way (#100): `list_calendar_events`
+   * reported success with no events, which answers "am I free?" with "yes" on a server
+   * failure; `getCalendarEventById` blamed the caller's event id for a discovery that never
+   * happened; and because `[]` is truthy, `if (!this.calendars)` CACHED the empty result on
+   * this long-lived client, repeating it until the process restarted.
+   *
+   * So: cache only a non-empty result, and treat empty as a failure to be explained.
+   *
+   * An empty-BUT-SUCCESSFUL discovery is also treated as a failure, which is the surprising
+   * half and should not be "tidied up" into returning `[]`. Two reasons. The dangerous
+   * direction here is under-reporting — an availability question answered with nothing reads
+   * as free time that may not exist — and this is an account-shape assumption that stays
+   * checkable: a Fastmail account always has at least one calendar collection, so an empty
+   * successful discovery means something went wrong upstream of the status code far more
+   * often than it means the account genuinely has no calendars. If that ever stops being
+   * true of the accounts this server targets, this is the line to revisit.
+   */
+  private async discoverCalendars(): Promise<DAVCalendar[]> {
     const client = await this.getClient();
+    if (this.calendars && this.calendars.length > 0) return this.calendars;
+
     const calendars = await client.fetchCalendars();
-    this.calendars = calendars;
+    if (calendars.length > 0) {
+      this.calendars = calendars;
+      return calendars;
+    }
+
+    // Empty. Re-ask with a status-checked PROPFIND, because the status is the one thing
+    // fetchCalendars threw away — this is the read-path counterpart to assertDavOk, which
+    // exists for the same reason on the write paths. The extra round-trip only ever happens
+    // on the already-broken path.
+    await this.assertCalendarHomeReachable();
+    throw new Error(
+      'Calendar discovery returned no calendars. The CalDAV server answered successfully but listed ' +
+      'no calendar collections, so no calendar could be read — this is reported as an error rather ' +
+      'than an empty result, because an empty result would read as "there are no events".',
+    );
+  }
+
+  /** Status-check the calendar-home PROPFIND that discovery runs, and throw on any non-2xx. */
+  private async assertCalendarHomeReachable(): Promise<void> {
+    const client = await this.getClient();
+    const homeUrl = (client as any).account?.homeUrl;
+    if (!homeUrl) {
+      throw new Error('Calendar discovery failed: the CalDAV account has no calendar home URL.');
+    }
+    const responses = await client.propfind({
+      url: homeUrl,
+      props: { 'd:resourcetype': {} },
+      depth: '1',
+    });
+    assertDavOk(responses, 'discover calendars');
+  }
+
+  async getCalendars(): Promise<CalendarInfo[]> {
+    const calendars = await this.discoverCalendars();
 
     return calendars
       .filter(c => c.displayName !== 'DEFAULT_TASK_CALENDAR_NAME')
@@ -1207,14 +1432,11 @@ export class CalDAVCalendarClient {
       }));
   }
 
-  async getCalendarEvents(calendarId?: string, limit: number = 50, startDate?: string, endDate?: string): Promise<CalendarEvent[]> {
+  async getCalendarEvents(calendarId?: string, limit: number = 50, startDate?: string, endDate?: string): Promise<CalendarEventQueryResult> {
     const client = await this.getClient();
+    const calendars = await this.discoverCalendars();
 
-    if (!this.calendars) {
-      this.calendars = await client.fetchCalendars();
-    }
-
-    let targetCalendars = this.calendars.filter(
+    let targetCalendars = calendars.filter(
       c => c.displayName !== 'DEFAULT_TASK_CALENDAR_NAME'
     );
     if (calendarId) {
@@ -1223,27 +1445,61 @@ export class CalDAVCalendarClient {
       );
     }
 
+    // The window is normalised ONCE and then used for two different things — the server's
+    // time-range filter and the local re-filter below — so the two cannot disagree about
+    // which days were asked for.
+    const start = coerceUtcDate(startDate, 'startDate');
+    const end = coerceCalendarWindowEnd(endDate, 'endDate');
+
     const fetchOptions: any = {};
-    if (startDate || endDate) {
-      fetchOptions.timeRange = {
-        start: startDate || '1970-01-01T00:00:00Z',
-        end: endDate || '2099-12-31T23:59:59Z',
-      };
+    if (start || end) {
+      const windowStart = start || '1970-01-01T00:00:00Z';
+      const windowEnd = end || '2099-12-31T23:59:59Z';
+      // Checked here rather than left to tsdav, which throws a plain Error for a backwards
+      // range. That reaches the tool boundary as InternalError ("server-side, a bare retry
+      // might work"), which is false and unactionable for what is plainly a caller-fixable
+      // pair of arguments. See docs/conventions.md on error classification.
+      if (Date.parse(windowStart) >= Date.parse(windowEnd)) {
+        throw new InvalidInputError(
+          `startDate must be before endDate (got startDate ${windowStart}, endDate ${windowEnd}). ` +
+          'Note that a date-only endDate covers the whole of that day, so a single-day window is ' +
+          'startDate and endDate on the SAME date.',
+        );
+      }
+      fetchOptions.timeRange = { start: windowStart, end: windowEnd };
+      // Expansion is what makes a recurring event report the occurrence that actually falls
+      // in the window instead of the series' original DTSTART (#64). tsdav only forwards
+      // <C:expand> when a timeRange accompanies it, which is why this sits inside the same
+      // branch rather than being set unconditionally.
+      fetchOptions.expand = true;
     }
+
+    const windowStartMs = fetchOptions.timeRange ? Date.parse(fetchOptions.timeRange.start) : NaN;
+    const windowEndMs = fetchOptions.timeRange ? Date.parse(fetchOptions.timeRange.end) : NaN;
 
     const allEvents: CalendarEvent[] = [];
     for (const cal of targetCalendars) {
       const objects = await client.fetchCalendarObjects({ calendar: cal, ...fetchOptions });
       for (const obj of objects) {
-        allEvents.push(parseCalendarObject(obj));
+        // Every VEVENT in the blob, not the first: with `expand` a single resource carries
+        // one block per in-window occurrence, so a first-match read drops all but one.
+        for (const event of parseCalendarObjects(obj)) {
+          if (fetchOptions.timeRange && !eventIntersectsWindow(event, windowStartMs, windowEndMs)) continue;
+          allEvents.push(event);
+        }
       }
-      if (allEvents.length >= limit) break;
+      // NOTE: no early exit on `limit`. Breaking out of this loop once enough events had
+      // been gathered meant later calendars were never queried at all, so with several
+      // calendars the "earliest N" were the earliest N *of whichever calendar happened to be
+      // read first* — silently, and fatally for any cross-calendar availability check (#100).
+      // Every target calendar is read, and only then is the combined set sorted and trimmed,
+      // which is what makes the slice a genuine top-N.
     }
 
     // Sort by start date ascending
     allEvents.sort((a, b) => (a.start || '').localeCompare(b.start || ''));
 
-    return allEvents.slice(0, limit);
+    return { events: allEvents.slice(0, limit), total: allEvents.length };
   }
 
   /**
@@ -1252,12 +1508,13 @@ export class CalDAVCalendarClient {
    */
   private async findCalendarObjectByUID(eventId: string): Promise<DAVCalendarObject | null> {
     const client = await this.getClient();
+    // Routed through discovery so a failed lookup can only mean "no object matched". A
+    // discovery failure throws here instead, which is what keeps getCalendarEventById from
+    // telling the caller their event id is wrong about a call that never reached a
+    // calendar (#100).
+    const calendars = await this.discoverCalendars();
 
-    if (!this.calendars) {
-      this.calendars = await client.fetchCalendars();
-    }
-
-    for (const cal of this.calendars) {
+    for (const cal of calendars) {
       const objects = await client.fetchCalendarObjects({ calendar: cal });
       for (const obj of objects) {
         const vevent = extractVEvent(obj.data || '');
@@ -1296,12 +1553,9 @@ export class CalDAVCalendarClient {
     participants?: Array<{ email: string; name?: string }>;
   }): Promise<string> {
     const client = await this.getClient();
+    const calendars = await this.discoverCalendars();
 
-    if (!this.calendars) {
-      this.calendars = await client.fetchCalendars();
-    }
-
-    const targetCal = this.calendars.find(
+    const targetCal = calendars.find(
       c => c.url === event.calendarId || c.displayName === event.calendarId
     );
     if (!targetCal) {

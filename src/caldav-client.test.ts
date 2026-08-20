@@ -10,6 +10,8 @@ import {
   parseICalDuration,
   formatICalDate,
   parseCalendarObject,
+  parseCalendarObjects,
+  eventIntersectsWindow,
   escapeICalText,
   unescapeICalText,
   validateAndFormatICalDate,
@@ -416,9 +418,10 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
       { data: makeIcal('b@fm', 'Afternoon', '20260325T140000Z'), url: '/b.ics' },
     ];
     const { client } = createMockedClient(objects);
-    const events = await client.getCalendarEvents(undefined, 50);
+    const { events, total } = await client.getCalendarEvents(undefined, 50);
 
     assert.equal(events.length, 3);
+    assert.equal(total, 3);
     assert.equal(events[0].title, 'Morning');
     assert.equal(events[1].title, 'Afternoon');
     assert.equal(events[2].title, 'Evening');
@@ -436,6 +439,9 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
       start: '2026-03-25T00:00:00Z',
       end: '2026-03-26T00:00:00Z',
     });
+    // Expansion rides with the time range: without it a recurring series comes back as its
+    // master, dated wherever the series began, and no in-window occurrence exists to report.
+    assert.equal(callArgs.expand, true);
   });
 
   it('does not pass timeRange when no dates provided', async () => {
@@ -447,6 +453,9 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.equal(callArgs.timeRange, undefined);
+    // tsdav only forwards <C:expand> alongside a time range, so asking for it without one
+    // would be a silently ignored request rather than a harmless extra.
+    assert.equal(callArgs.expand, undefined);
   });
 });
 
@@ -3393,5 +3402,396 @@ describe('CalDAV requests refuse to follow redirects', () => {
     } finally {
       DAVClient.prototype.login = realLogin;
     }
+  });
+});
+
+// ============================================================
+// Recurrence expansion and window scoping (#64), and the read
+// path's silent under-reporting (#100).
+// ============================================================
+
+describe('parseCalendarObjects', () => {
+  it('returns one event per VEVENT when the server expanded the recurrence', () => {
+    // The shape a time-range query with expand actually returns: several occurrences inside
+    // ONE calendar-data blob, RRULE stripped, RECURRENCE-ID set to the real date. Reading
+    // only the first block here would report one event where the window holds three.
+    const occurrence = (date: string) => [
+      'BEGIN:VEVENT',
+      'UID:payday@fm',
+      `DTSTART;VALUE=DATE:${date}`,
+      `RECURRENCE-ID;VALUE=DATE:${date}`,
+      'SUMMARY:Pay Day',
+      'END:VEVENT',
+    ].join('\r\n');
+    const data = [
+      'BEGIN:VCALENDAR',
+      occurrence('20270305'),
+      occurrence('20270319'),
+      occurrence('20270402'),
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const events = parseCalendarObjects({ data, url: '/cal/payday.ics' });
+
+    assert.equal(events.length, 3);
+    assert.deepEqual(events.map(e => e.start), ['2027-03-05', '2027-03-19', '2027-04-02']);
+    assert.deepEqual(events.map(e => e.recurrenceId), ['2027-03-05', '2027-03-19', '2027-04-02']);
+    for (const e of events) {
+      assert.equal(e.isRecurring, true);
+      // An expanded occurrence has no rule of its own; the server already applied it.
+      assert.equal(e.recurrenceRule, undefined);
+      assert.equal(e.title, 'Pay Day');
+    }
+  });
+
+  it('returns only the master for an unexpanded series, carrying its RRULE', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:standup@fm',
+      'DTSTART;VALUE=DATE:20190101',
+      'RRULE:FREQ=WEEKLY;BYDAY=MO',
+      'SUMMARY:Standup',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'UID:standup@fm',
+      'RECURRENCE-ID;VALUE=DATE:20190408',
+      'DTSTART;VALUE=DATE:20190409',
+      'SUMMARY:Standup moved',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const events = parseCalendarObjects({ data, url: '/cal/standup.ics' });
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].title, 'Standup');
+    assert.equal(events[0].start, '2019-01-01');
+    assert.equal(events[0].isRecurring, true);
+    assert.equal(events[0].recurrenceRule, 'FREQ=WEEKLY;BYDAY=MO');
+    // No recurrenceId: this is the series shown at its original start, and the absence of
+    // that field is what says so.
+    assert.equal(events[0].recurrenceId, undefined);
+  });
+
+  it('picks the master even when an exception is serialised first', () => {
+    // RFC 5545 fixes no component order, so another client can write the override ahead of
+    // the master. Taking the first block would report the override as though it were the event.
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:standup@fm',
+      'RECURRENCE-ID;VALUE=DATE:20190408',
+      'DTSTART;VALUE=DATE:20190409',
+      'SUMMARY:Standup moved',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'UID:standup@fm',
+      'DTSTART;VALUE=DATE:20190101',
+      'RRULE:FREQ=WEEKLY;BYDAY=MO',
+      'SUMMARY:Standup',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const events = parseCalendarObjects({ data, url: '/cal/standup.ics' });
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].title, 'Standup');
+    assert.equal(events[0].recurrenceRule, 'FREQ=WEEKLY;BYDAY=MO');
+  });
+
+  it('falls back to a single minimal event when the payload has no VEVENT', () => {
+    const data = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR';
+    const events = parseCalendarObjects({ data, url: '/cal/empty.ics' });
+
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], { id: '/cal/empty.ics', url: '/cal/empty.ics', title: 'Untitled' });
+  });
+
+  it('parses timed occurrences as datetimes and all-day occurrences as dates', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:mixed@fm',
+      'DTSTART:20270305T093000Z',
+      'DTEND:20270305T103000Z',
+      'RECURRENCE-ID:20270305T093000Z',
+      'SUMMARY:Timed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const events = parseCalendarObjects({ data, url: '/cal/mixed.ics' });
+    assert.equal(events[0].start, '2027-03-05T09:30:00Z');
+    assert.equal(events[0].end, '2027-03-05T10:30:00Z');
+    assert.equal(events[0].recurrenceId, '2027-03-05T09:30:00Z');
+  });
+
+  it('leaves recurrence fields off a one-off event', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:once@fm',
+      'DTSTART:20270305T093000Z',
+      'SUMMARY:One off',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    const events = parseCalendarObjects({ data, url: '/cal/once.ics' });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].isRecurring, undefined);
+    assert.equal(events[0].recurrenceId, undefined);
+    assert.equal(events[0].recurrenceRule, undefined);
+  });
+
+  it('parseCalendarObject returns the master, matching the single-event callers', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:standup@fm',
+      'RECURRENCE-ID;VALUE=DATE:20190408',
+      'SUMMARY:Standup moved',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'UID:standup@fm',
+      'DTSTART;VALUE=DATE:20190101',
+      'RRULE:FREQ=WEEKLY',
+      'SUMMARY:Standup',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+
+    assert.equal(parseCalendarObject({ data, url: '/cal/s.ics' }).title, 'Standup');
+  });
+});
+
+describe('eventIntersectsWindow', () => {
+  const WINDOW_START = Date.parse('2027-03-01T00:00:00Z');
+  const WINDOW_END = Date.parse('2027-03-10T00:00:00Z');
+
+  it('excludes a series master dated years before the window', () => {
+    // The exact failure #64 reported: a ten-day window in March 2027 answered with an
+    // August 2020 date.
+    assert.equal(
+      eventIntersectsWindow({ start: '2020-08-28', end: '2020-08-29' }, WINDOW_START, WINDOW_END),
+      false,
+    );
+  });
+
+  it('includes an occurrence inside the window', () => {
+    assert.equal(
+      eventIntersectsWindow({ start: '2027-03-05', end: '2027-03-06' }, WINDOW_START, WINDOW_END),
+      true,
+    );
+  });
+
+  it('includes an all-day event on the last day the window covers', () => {
+    // The window end is exclusive, so an all-day event on 9 March runs [09, 10) and must
+    // survive; getting this wrong silently loses the last day of every query.
+    assert.equal(
+      eventIntersectsWindow({ start: '2027-03-09', end: '2027-03-10' }, WINDOW_START, WINDOW_END),
+      true,
+    );
+  });
+
+  it('excludes an event that starts after the window ends', () => {
+    assert.equal(
+      eventIntersectsWindow({ start: '2027-04-05T09:00:00Z', end: '2027-04-05T10:00:00Z' }, WINDOW_START, WINDOW_END),
+      false,
+    );
+  });
+
+  it('keeps a zone-free value just outside the window, within the maximum UTC offset', () => {
+    // TZID is dropped during formatting, so a zoned value is indistinguishable from a
+    // floating one here and may be up to fourteen hours from the instant it names. The
+    // filter widens rather than narrows, because dropping an event the server correctly
+    // matched is the failure that reports a busy day as free.
+    assert.equal(
+      eventIntersectsWindow({ start: '2027-03-10T08:00:00', end: '2027-03-10T09:00:00' }, WINDOW_START, WINDOW_END),
+      true,
+    );
+  });
+
+  it('keeps an event with no readable dates rather than dropping it silently', () => {
+    assert.equal(eventIntersectsWindow({}, WINDOW_START, WINDOW_END), true);
+  });
+});
+
+describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () => {
+  function makeIcal(uid: string, summary: string, dtstart: string): string {
+    return [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `DTSTART:${dtstart}`,
+      `SUMMARY:${summary}`,
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  it('queries every calendar before slicing, so limit is a genuine earliest-N', async () => {
+    // The first calendar alone satisfies the limit. Under the old early break the later
+    // calendars were never read at all, so an earlier event in one of them could not appear
+    // and nothing said so.
+    const byCalendar: Record<string, Array<{ data: string; url: string }>> = {
+      '/cal/a/': [
+        { data: makeIcal('a1@fm', 'A late', '20260325T200000Z'), url: '/a1.ics' },
+        { data: makeIcal('a2@fm', 'A later', '20260325T210000Z'), url: '/a2.ics' },
+      ],
+      '/cal/b/': [
+        { data: makeIcal('b1@fm', 'B earliest', '20260325T060000Z'), url: '/b1.ics' },
+      ],
+    };
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: 'A', url: '/cal/a/' },
+        { displayName: 'B', url: '/cal/b/' },
+      ]),
+      fetchCalendarObjects: mock.fn(async (params: FetchObjectsParams) =>
+        byCalendar[(params as any).calendar.url] ?? []),
+    };
+    (client as any).client = mockDAVClient;
+
+    const { events, total } = await client.getCalendarEvents(undefined, 2);
+
+    assert.equal(mockDAVClient.fetchCalendarObjects.mock.callCount(), 2);
+    assert.equal(events.length, 2);
+    assert.equal(events[0].title, 'B earliest');
+    // The total reports what matched before the limit trimmed it, so a caller can see that
+    // something was cut rather than reading the page as the whole answer.
+    assert.equal(total, 3);
+  });
+
+  it('rejects a backwards window as caller-fixable input', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'A', url: '/cal/a/' }]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50, '2027-03-10', '2027-03-01'),
+      (err: Error) => {
+        // InvalidInputError, not a plain Error: tsdav would throw one that reaches the tool
+        // boundary as InternalError, telling the model a bare retry might work.
+        assert.equal(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+
+  it('ends a date-only endDate at the end of that day, so a single-day window is not empty', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'A', url: '/cal/a/' }]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+    (client as any).client = mockDAVClient;
+
+    await client.getCalendarEvents(undefined, 50, '2027-03-10', '2027-03-10');
+
+    const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
+    assert.deepEqual(callArgs.timeRange, {
+      start: '2027-03-10T00:00:00Z',
+      end: '2027-03-11T00:00:00Z',
+    });
+  });
+
+  it('rejects an impossible calendar date instead of rolling it into the next month', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'A', url: '/cal/a/' }]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50, '2027-02-30', '2027-03-10'),
+      /startDate is not a real calendar date/,
+    );
+  });
+
+  it('drops an out-of-window event the server returned anyway', async () => {
+    // A resource the server matched on an occurrence but returned whole. Nothing in the
+    // payload places it in the window, so it must not be listed as though it were.
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'A', url: '/cal/a/' }]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+        { data: makeIcal('old@fm', 'Pay Day', '20200828T000000Z'), url: '/old.ics' },
+        { data: makeIcal('now@fm', 'In window', '20270305T090000Z'), url: '/now.ics' },
+      ]),
+    };
+
+    const { events, total } = await client.getCalendarEvents(undefined, 50, '2027-03-01', '2027-03-10');
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].title, 'In window');
+    assert.equal(total, 1);
+  });
+});
+
+describe('CalDAVCalendarClient calendar discovery failures', () => {
+  function clientWithEmptyDiscovery(propfindResponses: unknown) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      account: { homeUrl: 'https://caldav.example.com/dav/calendars/user/' },
+      // tsdav filters a non-2xx PROPFIND out on resourcetype and returns [] without throwing.
+      fetchCalendars: mock.fn(async () => []),
+      propfind: mock.fn(async (_p: unknown) => propfindResponses),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  it('throws instead of reporting an empty list when the discovery PROPFIND failed', async () => {
+    const { client } = clientWithEmptyDiscovery([{ status: 503, statusText: 'Service Unavailable' }]);
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50),
+      /discover calendars: server returned 503/,
+    );
+  });
+
+  it('throws when discovery succeeds but lists no calendars', async () => {
+    // An empty-but-successful discovery is still an error: answering an availability
+    // question with nothing reads as free time.
+    const { client } = clientWithEmptyDiscovery([{ status: 207 }]);
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50),
+      /Calendar discovery returned no calendars/,
+    );
+  });
+
+  it('does not cache an empty discovery result', async () => {
+    // `[]` is truthy, so the previous `if (!this.calendars)` guard cached a failed discovery
+    // on this long-lived client and repeated it until the process restarted.
+    const { client, mockDAVClient } = clientWithEmptyDiscovery([{ status: 207 }]);
+    await assert.rejects(() => client.getCalendarEvents(undefined, 50));
+    await assert.rejects(() => client.getCalendarEvents(undefined, 50));
+    assert.equal(mockDAVClient.fetchCalendars.mock.callCount(), 2);
+  });
+
+  it('does not blame the caller event id when discovery failed', async () => {
+    // The old path returned null from the lookup and raised InvalidInputError, telling the
+    // model to fix an id that was never the problem.
+    const { client } = clientWithEmptyDiscovery([{ status: 503, statusText: 'Service Unavailable' }]);
+    await assert.rejects(
+      () => client.getCalendarEventById('real-id@fm'),
+      (err: Error) => {
+        assert.notEqual(err.name, 'InvalidInputError');
+        assert.match(err.message, /discover calendars/);
+        return true;
+      },
+    );
   });
 });
