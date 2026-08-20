@@ -19,6 +19,12 @@ after touching an area a probe covers). See CLAUDE.md "Testing".
    python scripts/probes/run-probe.py inline-read.smoke.mjs
    ```
 
+   The launcher also injects the CalDAV username/password when the config
+   carries them, because the calendar probes authenticate with a separate app
+   password rather than the JMAP token. Those are optional: a config without
+   them still runs every JMAP probe, and a calendar probe reports the missing
+   credential itself rather than failing obscurely.
+
 Each probe prints one PASS/FAIL line per check and exits non-zero on any
 failure.
 
@@ -68,6 +74,7 @@ and clear them by hand if you care.
 | `foreign-draft-roundtrip.mjs` | Edit round-trip of a foreign-shape draft (`alternative[text, related[html, inline image]]`, `@`-bearing Content-ID): metadata edit, body-keep edit, ref-dropping edit |
 | `probe-exact-instance.mjs` | Exact-instance thread-state marking on duplicated messages (see its header; needs `FASTMAIL_PROBE_TEST_ADDR`) |
 | `archive-parity.smoke.mjs` | Archive semantics end to end: the `mailboxIds/` patch form is accepted, an Inbox+label message keeps its label without gaining Archive, an Inbox-only message reaches Archive, a message already out of the Inbox is untouched, a refusing role writes nothing, and a mixed batch sends both patch shapes in one `Email/set`. Creates and destroys its own label folder |
+| `calendar-expand.probe.mjs` | The platform fact behind #64: what Fastmail's CalDAV server returns when a `timeRange` query is sent with `expand: true`. Measures that expanded occurrences arrive with `RRULE` stripped and `RECURRENCE-ID` set at the real in-window date, and — the part that decides the fix — that several occurrences arrive as multiple VEVENTs inside ONE `calendar-data` blob, so a first-match parser drops all but one. Read-only; creates nothing. Raw CalDAV via tsdav, not the built server, so it measures the platform rather than our parsing |
 | `label-emptiness.probe.mjs` | The emptiness-guard premise behind #132: a membership patch that would leave a message filed nowhere is REJECTED for a message that has never moved, but ACCEPTED — expunging the message — for one carrying a tombstone from an earlier move. Raw JMAP, not the built server, so it measures the platform rather than the guard `remove_labels` now applies on top of it. Creates and destroys its own mailboxes |
 
 `jmaplib.mjs` is a minimal raw-JMAP helper (session, Email/set, blob upload,
