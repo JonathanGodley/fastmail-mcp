@@ -32,6 +32,7 @@ export interface EditDraftClient {
       removeAttachments?: string[];
       originalEmailId?: string;
       noQuote?: boolean;
+      appendSignature?: boolean;
     },
     options?: { attachmentsEnabled?: boolean },
   ): Promise<UpdateDraftResult>;
@@ -69,6 +70,11 @@ export async function editDraft(
   // Coerce to a real boolean (lenient clients send "true"/"false"); a non-bool like
   // "garbage" yields undefined, never true — so it can never silently drop the quote.
   const noQuote = coerceBool(a.noQuote) === true;
+  // Passed through as a TRI-STATE, unlike noQuote above: undefined is a distinct answer here
+  // (preserve whatever the draft already carries), so it must not be flattened to false. A
+  // non-bool like "garbage" coerces to undefined and therefore preserves — the same
+  // fail-safe direction, since the destructive reading is the one that drops a signature.
+  const appendSignature = coerceBool(a.appendSignature);
   if (!emailId) {
     throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
   }
@@ -101,6 +107,7 @@ export async function editDraft(
     removeAttachments,
     originalEmailId,
     noQuote,
+    appendSignature,
   }, {
     attachmentsEnabled: !!attachDir || allowBlobAttach,
   });

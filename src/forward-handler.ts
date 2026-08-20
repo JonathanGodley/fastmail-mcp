@@ -3,8 +3,10 @@ import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { isBlank, assertBodyInputs } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
-import { buildForwardBodies, emptyQuoteImages } from './reply-quote.js';
+import { applySignature, buildForwardBodies, emptyQuoteImages } from './reply-quote.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
+import { resolveSignature } from './identity.js';
+import type { ResolvedSignature } from './identity.js';
 import {
   DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, recordQuoteImages,
   reportAuthoredInlineImages,
@@ -148,11 +150,15 @@ function isBodyMedia(entry: { part: any; inBodyList: boolean }): boolean {
 //
 // `mint` is injected only so tests are deterministic; production leaves it unset and the
 // forwarded-block builder draws from the CSPRNG.
+//
+// `signature` is the sending identity's sign-off, already resolved by composeForward (the
+// lookup is I/O, and this function is pure). Absent unless the caller asked for one.
 export function buildForwardParams(
   args: any,
   originalEmail: any,
   inline: AuthoredInlineContext = DEFAULT_INLINE_CONTEXT,
   mint?: () => string,
+  signature?: ResolvedSignature,
 ): BuiltForward {
   const a = args ?? {};
   // Validate the caller's note FIRST — before the forwarded-message block is assembled
@@ -238,6 +244,16 @@ export function buildForwardParams(
       if (textBody !== undefined) params.textBody = textBody;
       if (htmlBody !== undefined) params.htmlBody = htmlBody;
     }
+    // Signed here rather than in a builder, because this shape has no builder: the note IS
+    // the body. The filler above is signed too — a signature under one line of filler is
+    // still the sign-off the caller asked for, and leaving it off would make the flag mean
+    // something different on this one forward shape.
+    const signedNote = applySignature(
+      { textBody: params.textBody, htmlBody: params.htmlBody },
+      signature,
+    );
+    if (signedNote.textBody !== undefined) params.textBody = signedNote.textBody;
+    if (signedNote.htmlBody !== undefined) params.htmlBody = signedNote.htmlBody;
     if (!originalEmail?.blobId) {
       throw new McpError(ErrorCode.InternalError, 'Original email has no blobId; cannot attach it as .eml');
     }
@@ -263,6 +279,9 @@ export function buildForwardParams(
     textBody,
     htmlBody,
     quoteImages: { sourceParts: sourceParts.map((u) => u.part), ...(mint && { mint }) },
+    // Appended inside the builder, between the caller's note and the forwarded-message
+    // block — see the signature section of src/reply-quote.ts.
+    ...(signature && { signature }),
   });
   params.textBody = bodies.textBody;
   params.htmlBody = bodies.htmlBody;
@@ -308,6 +327,8 @@ export function buildForwardParams(
 // unit-testable with a mock and free of a hard dependency on the concrete client.
 export interface ForwardClient {
   getEmailById(id: string): Promise<any>;
+  /** The sending identities, for the signature lookup (#33). Called only when one is asked for. */
+  getIdentities(): Promise<any[]>;
   uploadAttachments(
     specs: AttachmentSpec[],
     attachDir: string | undefined,
@@ -354,10 +375,19 @@ export async function composeForward(
   assertBodyInputs(args ?? {});
   const specs = coerceAttachments(args?.attachments);
 
+  // Off by default, and the lookup is skipped when it is off — see composeReply for why the
+  // sign-off is resolved fresh on every call rather than remembered.
+  const appendSignature = coerceBool(args?.appendSignature) === true;
+  const signature = appendSignature
+    ? resolveSignature(await client.getIdentities(), args?.from)
+    : undefined;
+
   const { forwardParams, inlinePlan, quoteImages, carry } = buildForwardParams(
     args,
     originalEmail,
     { specs, attachmentsEnabled: !!attachDir || allowBlobAttach },
+    undefined,
+    signature,
   );
 
   // Upload NEW attachments (if any) after the pure builder and append them behind

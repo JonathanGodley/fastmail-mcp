@@ -2,6 +2,7 @@ import { htmlToText, isBlank } from './body-format.js';
 import { formatAddress, formatReplyDate } from './email-formatter.js';
 import { buildCidMap, resolveCidRefs, sanitizeQuoteHtml } from './inline-images.js';
 import type { CidMapping, CidPart, MintedInlinePart } from './inline-images.js';
+import type { ResolvedSignature } from './identity.js';
 
 // Build the reply bodies (caller's new text + an attributed, top-posted quote of the
 // original), matching the Fastmail web client with a portable quote-bar. createDraft adds
@@ -226,6 +227,151 @@ export function hasTextQuoteMarker(text: string | null | undefined): boolean {
   return /\bwrote:[ \t]*\r?\n([ \t]*\r?\n)*[ \t]*>/.test(text);
 }
 
+// ---------------------------------------------------------------------------
+// The sending identity's signature (#33)
+// ---------------------------------------------------------------------------
+//
+// A third marked block, beside the reply quote and the forwarded-message block above. Same
+// job as those markers: let a LATER edit tell what this server put in the body apart from
+// what the caller wrote, so a body rewrite does not silently throw it away. What differs is
+// the recovery — a dropped quote is challenged and rebuilt from the named original, while a
+// dropped signature is simply re-appended from the identity, because the identity is where
+// it came from and nothing about it depends on another message.
+//
+// The block is placed ABOVE any quoted or forwarded history, which is why insertion lives in
+// this file at all: by the time a compose path reaches createDraft the quote is already
+// concatenated onto the body, and appending there would put the sign-off underneath it.
+//
+// Detection is by CLASS, which is HTML-only by construction. A text-only draft carries no
+// marker and so gets no preservation on edit — see the signature section of
+// docs/email-bodies.md for that residual.
+export const SIGNATURE_CLASS = 'fm-mcp-signature';
+
+// Built from the constant so the emitted class and the detector cannot drift. Quoted and
+// unquoted attribute forms both count: this has to survive a store/fetch round trip, and
+// the value written back is the server's to re-serialize. Anchored on <div> and on the
+// class, so it is disjoint from both quote-marker families (blockquote type=cite,
+// div type=cite) — a signature inside a quote is caught by neither of those, and a quote
+// inside a signature is not a shape anything here emits.
+//
+// Note the sanitizer strips class= from quoted content (src/inline-images.ts), so our own
+// signature quoted back inside someone's reply CANNOT false-trip this. That is a feature:
+// the marker means "this draft's own signature", never "somebody once signed something".
+const SIGNATURE_MARKER_RE = new RegExp(
+  `<div\\b[^>]*\\bclass\\s*=\\s*(?:"[^"]*\\b${SIGNATURE_CLASS}\\b|'[^']*\\b${SIGNATURE_CLASS}\\b|${SIGNATURE_CLASS}\\b)`,
+  'i',
+);
+
+// The blank line between the body and the signature, matching the spacer the reply quote
+// uses below so the two read as one consistently spaced message.
+const SIGNATURE_SPACER = '<div><br></div>';
+
+/** True if html carries a signature block this server wrote. */
+export function hasSignatureMarker(html: string | null | undefined): boolean {
+  if (!html) return false;
+  return SIGNATURE_MARKER_RE.test(html);
+}
+
+/**
+ * The signature as an html block, marker and all. Undefined when the identity has none.
+ *
+ * An identity configured with ONLY a text signature is escaped into html rather than
+ * skipped: the html body already exists, so this is not the body-model's forbidden
+ * "fabricate html from a plain-text message" — it is putting a sign-off into a body that is
+ * html either way, and skipping it would silently drop a signature the user really has.
+ */
+export function signatureHtmlBlock(signature: ResolvedSignature | undefined): string | undefined {
+  if (!signature) return undefined;
+  const inner = signature.html
+    ?? (signature.text !== undefined ? textToHtmlBlock(signature.text) : undefined);
+  if (inner === undefined) return undefined;
+  return `<div class="${SIGNATURE_CLASS}">${inner}</div>`;
+}
+
+/**
+ * The signature as plain text. Undefined when the identity has none.
+ *
+ * `htmlShips` decides WHICH form, and the answer is not "whichever was configured":
+ *
+ *  - html ships → derive from the html form. The text part of an html message is a derived
+ *    fallback (docs/email-bodies.md), regenerated from the html on the first html-only edit.
+ *    Writing the configured `textSignature` verbatim here would look right and then change
+ *    by itself on that edit, with nothing reporting it. Deriving means the text part reads
+ *    the same before and after.
+ *  - no html ships → the configured `textSignature`, verbatim. There is no html to derive
+ *    from and none will be fabricated, so this is the one place the configured text form is
+ *    the answer.
+ */
+export function signatureTextBlock(
+  signature: ResolvedSignature | undefined,
+  htmlShips: boolean,
+): string | undefined {
+  if (!signature) return undefined;
+  if (htmlShips) {
+    const block = signatureHtmlBlock(signature);
+    return block === undefined ? undefined : htmlToText(block, 'unconditional');
+  }
+  return signature.text
+    ?? (signature.html !== undefined ? htmlToText(signature.html, 'unconditional') : undefined);
+}
+
+/**
+ * Append the signature to a caller's bodies, returning new ones. Pure: the identity lookup
+ * is the caller's job (the handlers own the client), and this takes the resolved strings.
+ *
+ * Definedness is preserved exactly — a body that came in undefined goes out undefined — so
+ * every downstream `!== undefined` test that decides which formats a message emits reads the
+ * same answer with a signature as without one.
+ *
+ * A body already carrying the marker is returned untouched: a caller that supplied a
+ * signature block deliberately gets theirs, not two.
+ */
+export function applySignature(
+  bodies: { textBody?: string; htmlBody?: string },
+  signature: ResolvedSignature | undefined,
+): { textBody?: string; htmlBody?: string } {
+  const { textBody, htmlBody } = bodies;
+  if (!signature) return bodies;
+  // Which form applies follows what the message SHIPS, not what it declares: a
+  // present-but-blank htmlBody emits no html part (buildBodyParts drops it), so treating it
+  // as an html message would sign a part no recipient ever sees.
+  const htmlShips = !isBlank(htmlBody);
+  if (htmlShips && hasSignatureMarker(htmlBody)) return bodies;
+
+  const join = (body: string | undefined, block: string, spacer: string) =>
+    (isBlank(body) ? block : `${body}${spacer}${block}`);
+
+  const out = { ...bodies };
+  if (htmlShips) {
+    const block = signatureHtmlBlock(signature);
+    if (block === undefined) return bodies;
+    out.htmlBody = join(htmlBody, block, SIGNATURE_SPACER);
+    // The text side is only written when the caller supplied one. With no textBody the
+    // whole text part is derived from the (now signed) html downstream, which carries the
+    // signature into it without this having to say anything.
+    if (textBody !== undefined) {
+      const text = signatureTextBlock(signature, true);
+      if (text !== undefined) out.textBody = join(textBody, text, '\n\n');
+    }
+    return out;
+  }
+  if (textBody !== undefined) {
+    const text = signatureTextBlock(signature, false);
+    if (text !== undefined) out.textBody = join(textBody, text, '\n\n');
+  }
+  return out;
+}
+
+/**
+ * What edit_draft says when it re-appended a signature nobody asked about in that call.
+ *
+ * The re-append is preservation of an EARLIER decision, so it is the one signature outcome
+ * that happens without being requested in the same breath — and therefore the one the
+ * result has to announce.
+ */
+export const NOTE_SIGNATURE_REAPPENDED =
+  "The identity's configured signature was re-appended: this draft already carried one and the body you supplied did not. Pass appendSignature:false to drop it instead.";
+
 // The original's html as the quote builders read it. Exported so a caller that has to decide
 // which embedded images the quote will display — edit_draft, which resolves that against the
 // draft's own surviving parts before the quote is rebuilt — reads exactly the same string
@@ -247,8 +393,19 @@ export function buildReplyBodies(input: {
   // The COMPOSE path's channel: no draft exists yet, so the builder runs both passes itself
   // and reports what it decided on `quoteImages` in the result.
   quoteImages?: QuoteImageInput;
+  // The sending identity's sign-off, already resolved by the caller (this builder does no
+  // I/O). Appended to the caller's own body BEFORE anything below runs, which is what puts
+  // it above the quote — and what gets it onto the two passthrough branches too.
+  signature?: ResolvedSignature;
 }): { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } {
-  const { original, textBody, htmlBody, quoteOriginal, timezone, cidMap, quoteImages } = input;
+  const {
+    original, textBody: callerText, htmlBody: callerHtml, quoteOriginal, timezone, cidMap,
+    quoteImages, signature,
+  } = input;
+  const { textBody, htmlBody } = applySignature(
+    { textBody: callerText, htmlBody: callerHtml },
+    signature,
+  );
 
   // Return only the formats the caller supplied (createDraft adds the text fallback later).
   // The outcome rides along only for a caller that asked this builder to resolve images, so
@@ -425,8 +582,15 @@ export function buildForwardBodies(input: {
   cidMap?: Map<string, string>;
   // See buildReplyBodies: the compose path's channel, where this builder runs both passes.
   quoteImages?: QuoteImageInput;
+  // See buildReplyBodies: the resolved sign-off, appended to the caller's note so it lands
+  // above the forwarded-message block rather than under the message being forwarded.
+  signature?: ResolvedSignature;
 }): { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } {
-  const { original, textBody, htmlBody, cidMap, quoteImages } = input;
+  const { original, textBody: callerText, htmlBody: callerHtml, cidMap, quoteImages, signature } = input;
+  const { textBody, htmlBody } = applySignature(
+    { textBody: callerText, htmlBody: callerHtml },
+    signature,
+  );
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
@@ -494,8 +658,11 @@ export function buildForwardBodies(input: {
   if (htmlBody !== undefined) out.htmlBody = composeHtml(htmlBody);
   if (textBody !== undefined) out.textBody = composeText(textBody);
   if (htmlBody === undefined && textBody === undefined) {
-    if (htmlQuotable) out.htmlBody = composeHtml(undefined);
-    else out.textBody = composeText(undefined);
+    // No note to append to, but a requested signature still ships: it becomes the whole of
+    // the content above the forwarded-message block. (Both arms pass undefined when no
+    // signature was asked for, which is exactly the bare-FYI forward this has always made.)
+    if (htmlQuotable) out.htmlBody = composeHtml(signatureHtmlBlock(signature));
+    else out.textBody = composeText(signatureTextBlock(signature, false));
   }
   // Only the rewriting pass drops a reference form it cannot carry, and only its output
   // ships an html forwarded block. Reported on the same two arms as the reply builder's —

@@ -191,6 +191,16 @@ describe('buildReplyParams — malformed caller bodies (#62, #71/#77, #78)', () 
   });
 });
 
+// A sending identity with a configured sign-off, for the appendSignature cases (#33).
+const SIGNED_IDENTITY = {
+  id: 'id-1',
+  name: 'Test User',
+  email: 'me@example.com',
+  mayDelete: false,
+  textSignature: 'Kind regards,\nTest User',
+  htmlSignature: '<div>Kind regards,</div><div>Test User</div>',
+};
+
 describe('composeReply — draft-only orchestration', () => {
   const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
 
@@ -203,6 +213,7 @@ describe('composeReply — draft-only orchestration', () => {
       // Serves two jobs: fetching the original, and the post-save confirmation read. The
       // recorded ids are what tell the two apart.
       getEmailById: async (id) => { calls.getId = id; calls.gets.push(id); return makeOriginal(); },
+      getIdentities: async () => { calls.identityLookups = (calls.identityLookups ?? 0) + 1; return [SIGNED_IDENTITY]; },
       uploadAttachments: async (specs, dir, allowBlob, options) => { calls.upload = { specs, dir, allowBlob, options }; return uploadResult; },
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
       ...over,
@@ -536,6 +547,7 @@ describe('composeReply — threading the quote images onto the draft', () => {
         if (id !== 'draft-9') return original;
         return { id, attachments: (calls.draft?.attachments ?? []).map((a: any) => ({ ...a, size: 1024 })) };
       },
+      getIdentities: async () => [SIGNED_IDENTITY],
       uploadAttachments: async () => uploadResult,
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
     };
@@ -571,6 +583,7 @@ describe('composeReply — threading the quote images onto the draft', () => {
     const client: ReplyClient = {
       // The read-back finds a draft with none of the parts this call attached.
       getEmailById: async (id) => (id === 'draft-9' ? { id, attachments: [] } : withInlineImage()),
+      getIdentities: async () => [SIGNED_IDENTITY],
       uploadAttachments: async () => [],
       createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
     };

@@ -5,6 +5,8 @@ import { assertBodyInputs, isBlank } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
 import { buildReplyBodies, emptyQuoteImages } from './reply-quote.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
+import { resolveSignature } from './identity.js';
+import type { ResolvedSignature } from './identity.js';
 import { formatAddress } from './email-formatter.js';
 import {
   DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, recordQuoteImages,
@@ -52,11 +54,15 @@ export interface ReplyParams {
 //
 // `mint` is injected only so tests are deterministic; production leaves it unset and the
 // quote builder draws from the CSPRNG.
+//
+// `signature` is the sending identity's sign-off, already resolved by composeReply (the
+// lookup is I/O, and this function is pure). Absent unless the caller asked for one.
 export function buildReplyParams(
   args: any,
   originalEmail: any,
   inline: AuthoredInlineContext = DEFAULT_INLINE_CONTEXT,
   mint?: () => string,
+  signature?: ResolvedSignature,
 ): {
   quoteOriginal: boolean;
   replyParams: ReplyParams;
@@ -130,6 +136,9 @@ export function buildReplyParams(
       sourceParts: buildUnionParts(originalEmail).map((u) => u.part),
       ...(mint && { mint }),
     },
+    // Appended inside the builder, between this reply's own body and the quote — see the
+    // signature section of src/reply-quote.ts for why the insertion cannot happen later.
+    ...(signature && { signature }),
   });
 
   return {
@@ -158,6 +167,8 @@ export function buildReplyParams(
 // testable with a mock and free of a hard dependency on the concrete client.
 export interface ReplyClient {
   getEmailById(id: string): Promise<any>;
+  /** The sending identities, for the signature lookup (#33). Called only when one is asked for. */
+  getIdentities(): Promise<any[]>;
   uploadAttachments(
     specs: AttachmentSpec[],
     attachDir: string | undefined,
@@ -207,10 +218,18 @@ export async function composeReply(
   assertBodyInputs(args ?? {});
   const specs = coerceAttachments(args?.attachments);
 
+  // Off by default, and the lookup is skipped entirely when it is off — an ordinary reply
+  // pays no extra round trip for a feature it did not ask for. Resolved fresh on every call
+  // rather than remembered: the identity's configured sign-off is the source of truth.
+  const appendSignature = coerceBool(args?.appendSignature) === true;
+  const signature = appendSignature
+    ? resolveSignature(await client.getIdentities(), args?.from)
+    : undefined;
+
   const { replyParams, inlinePlan, quoteImages } = buildReplyParams(args, originalEmail, {
     specs,
     attachmentsEnabled: !!attachDir || allowBlobAttach,
-  });
+  }, undefined, signature);
 
   // Upload attachments (if any) after the pure builder, then thread the parts into
   // the draft.

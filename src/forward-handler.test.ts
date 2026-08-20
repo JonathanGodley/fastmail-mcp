@@ -403,6 +403,15 @@ describe('buildForwardParams — attachment carry', () => {
 
 describe('composeForward — draft-only orchestration', () => {
   const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'new.pdf', disposition: 'attachment' }];
+  // A sending identity with a configured sign-off, for the appendSignature cases (#33).
+  const SIGNED_IDENTITY = {
+    id: 'id-1',
+    name: 'Test User',
+    email: 'me@example.com',
+    mayDelete: false,
+    textSignature: 'Kind regards,\nTest User',
+    htmlSignature: '<div>Kind regards,</div><div>Test User</div>',
+  };
 
   // The interface has no transmit method at all — send_draft is the only sender.
   function spyClient(over: Partial<ForwardClient> = {}, uploadResult: any[] = UPLOADED) {
@@ -411,6 +420,7 @@ describe('composeForward — draft-only orchestration', () => {
       // Serves two jobs: fetching the original, and the post-save confirmation read. The
       // recorded ids are what tell the two apart.
       getEmailById: async (id) => { calls.getId = id; calls.gets.push(id); return makeOriginal(); },
+      getIdentities: async () => { calls.identityLookups = (calls.identityLookups ?? 0) + 1; return [SIGNED_IDENTITY]; },
       uploadAttachments: async (specs, dir, allowBlob, options) => { calls.upload = { specs, dir, allowBlob, options }; return uploadResult; },
       createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
       ...over,
@@ -429,6 +439,7 @@ describe('composeForward — draft-only orchestration', () => {
         if (id !== 'draft-7') return original;
         return { id, attachments: (calls.draft?.attachments ?? []).map((a: any) => ({ ...a, size: 1024 })) };
       },
+      getIdentities: async () => [SIGNED_IDENTITY],
       uploadAttachments: async (specs, dir, allowBlob, options) => { calls.upload = { specs, dir, allowBlob, options }; return UPLOADED; },
       createDraft: async (p) => { calls.draft = p; return 'draft-7'; },
     };
