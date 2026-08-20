@@ -516,7 +516,7 @@ describe('redactedJson', () => {
     // lets BEARER_PATTERN's `\S+` run past the value and eat its closing quote and the comma
     // after it, and the item a caller is promised can be parsed stops parsing. A mailbox
     // named "Bearer Bonds" is enough; mailbox names are free text.
-    const out = redactedJson({ results: [{ id: 'e1', mailboxes: ['Bearer Bonds', 'Inbox'] }] }, 2);
+    const out = redactedJson({ results: [{ id: 'e1', mailboxes: ['Bearer Bonds', 'Inbox'] }] });
     const parsed = JSON.parse(out);
     assert.deepEqual(parsed.results[0].mailboxes[1], 'Inbox');
   });

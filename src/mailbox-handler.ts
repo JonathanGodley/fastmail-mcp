@@ -1,6 +1,6 @@
 import { buildMailboxPathMap, filterMailboxesByParent } from './jmap-client.js';
 import { simplifyMailbox, buildUnpathableMailboxNote } from './response-formatters.js';
-import { coerceBool } from './coerce.js';
+import { coerceBool, toolJson } from './coerce.js';
 
 /**
  * The slice of the JMAP client the mailbox tools need, so both handlers can be exercised
@@ -40,12 +40,12 @@ export async function listMailboxes(args: any, client: MailboxClient): Promise<T
 
   // raw stays untransformed JMAP, which carries no path — and therefore no note about a
   // path being absent, since none was promised.
-  if (raw) return [{ type: 'text', text: JSON.stringify(shown, null, 2) }];
+  if (raw) return [{ type: 'text', text: toolJson(shown) }];
 
   const content: ToolContent = [
     {
       type: 'text',
-      text: JSON.stringify(shown.map(mb => simplifyMailbox(mb, { verbose, path: paths.get(mb.id) })), null, 2),
+      text: toolJson(shown.map(mb => simplifyMailbox(mb, { verbose, path: paths.get(mb.id) }))),
     },
   ];
   const note = buildUnpathableMailboxNote(shown.filter(mb => !paths.has(mb.id)).map(mb => mb.id));
@@ -73,10 +73,10 @@ export async function createMailbox(args: any, client: MailboxClient): Promise<T
 
   // raw returns the server's own Mailbox/set created object, untouched — the same meaning
   // raw carries on every other tool here.
-  if (raw) return [{ type: 'text', text: JSON.stringify(created, null, 2) }];
+  if (raw) return [{ type: 'text', text: toolJson(created) }];
 
   const content: ToolContent = [
-    { type: 'text', text: JSON.stringify(simplifyMailbox(mailbox, { verbose, path }), null, 2) },
+    { type: 'text', text: toolJson(simplifyMailbox(mailbox, { verbose, path })) },
   ];
   const note = path === undefined ? buildUnpathableMailboxNote([mailbox.id]) : null;
   if (note) content.push({ type: 'text', text: note });

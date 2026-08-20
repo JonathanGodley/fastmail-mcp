@@ -6,6 +6,7 @@ import {
   coerceContactName,
   coerceContactPhones,
   coerceStringArray,
+  toolJson,
   type ContactAddressSpec,
   type ContactEmailSpec,
   type ContactNameSpec,
@@ -117,7 +118,7 @@ export async function createContactTool(args: any, client: ContactsWriteClient):
   });
 
   const card = await client.getContactById(id);
-  return [{ type: 'text', text: JSON.stringify(renderCard(card, raw, verbose), null, 2) }];
+  return [{ type: 'text', text: toolJson(renderCard(card, raw, verbose)) }];
 }
 
 /**
@@ -145,7 +146,7 @@ export async function updateContactTool(args: any, client: ContactsWriteClient):
   if (result.contact !== undefined) envelope.contact = renderCard(result.contact, raw, verbose);
   envelope.previousCard = result.previousCard;
 
-  const content: ToolContent = [{ type: 'text', text: JSON.stringify(envelope, null, 2) }];
+  const content: ToolContent = [{ type: 'text', text: toolJson(envelope) }];
   if (result.contact === undefined) {
     // Never-silent degrade: the write landed, the read-back that rides with it did not come
     // back, so the promised `contact` field is absent and says why rather than vanishing.
@@ -170,7 +171,7 @@ export async function deleteContactTool(args: any, client: ContactsWriteClient):
   const { deletedCard } = await client.deleteContact(contactId);
 
   const content: ToolContent = [
-    { type: 'text', text: JSON.stringify({ deleted: contactId, deletedCard }, null, 2) },
+    { type: 'text', text: toolJson({ deleted: contactId, deletedCard }) },
   ];
   if (deletedCard === undefined) {
     // The one degrade that cannot be retried out of: the contact is gone and no copy of it

@@ -1,4 +1,4 @@
-import { coerceBool, InvalidInputError } from './coerce.js';
+import { coerceBool, InvalidInputError, toolJson } from './coerce.js';
 import { simplifyEmail } from './email-formatter.js';
 import type { SimplifiedEmail } from './email-formatter.js';
 import { parseEmailFields, projectEmail } from './field-projection.js';
@@ -115,7 +115,7 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
     // consumer can pass includeDrafts itself. The size cap still applies: it guards the
     // response, not the formatting.
     if (includeBodies) assertThreadBodiesWithinCap(rawBodyBytes(emails), { stripQuoted: false, raw: true });
-    return JSON.stringify(emails, null, 2);
+    return toolJson(emails);
   }
 
   const simplified: SimplifiedEmail[] = emails.map((e: any) => simplifyEmail(e, { stripQuoted }));
@@ -144,7 +144,7 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
     );
   }
 
-  let text = JSON.stringify(projected, null, 2);
+  let text = toolJson(projected);
   if (hiddenDraftCount > 0) {
     text += `\n\nNote: ${hiddenDraftCount} draft(s) in this thread are hidden; set includeDrafts:true to include them.`;
   }
