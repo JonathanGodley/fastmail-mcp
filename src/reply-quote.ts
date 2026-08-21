@@ -243,33 +243,115 @@ export function hasTextQuoteMarker(text: string | null | undefined): boolean {
 // concatenated onto the body, and appending there would put the sign-off underneath it.
 //
 // Detection is by CLASS, which is HTML-only by construction. A text-only draft carries no
-// marker and so gets no preservation on edit — see the signature section of
-// docs/email-bodies.md for that residual.
+// marker, so nothing PRESERVES its signature across an edit that rewrites the body — see the
+// signature section of docs/email-bodies.md for that residual, which applies to a signature
+// this server wrote just as much as to a hand-typed one. Not to be confused with
+// idempotence, which the text path does have: applySignature declines to append a block a
+// body already ends with, so the edit-time flag that recovers the residual cannot stack.
 export const SIGNATURE_CLASS = 'fm-mcp-signature';
 
-// Built from the constant so the emitted class and the detector cannot drift. Quoted and
-// unquoted attribute forms both count: this has to survive a store/fetch round trip, and
-// the value written back is the server's to re-serialize. Anchored on <div> and on the
-// class, so it is disjoint from both quote-marker families (blockquote type=cite,
-// div type=cite) — a signature inside a quote is caught by neither of those, and a quote
-// inside a signature is not a shape anything here emits.
-//
-// Note the sanitizer strips class= from quoted content (src/inline-images.ts), so our own
-// signature quoted back inside someone's reply CANNOT false-trip this. That is a feature:
-// the marker means "this draft's own signature", never "somebody once signed something".
-const SIGNATURE_MARKER_RE = new RegExp(
-  `<div\\b[^>]*\\bclass\\s*=\\s*(?:"[^"]*\\b${SIGNATURE_CLASS}\\b|'[^']*\\b${SIGNATURE_CLASS}\\b|${SIGNATURE_CLASS}\\b)`,
-  'i',
-);
+// Where a `<div` tag opens. Everything after it is read by the attribute walk below rather
+// than by a regex: the tag has to be understood, not pattern-matched. Anchored on <div> so
+// the marker is disjoint from both quote-marker families (blockquote type=cite, div
+// type=cite) — a signature inside a quote is caught by neither of those, and a quote inside
+// a signature is not a shape anything here emits.
+const DIV_TAG_OPEN_RE = /<div\b/gi;
+
+/**
+ * Whether one `<div>` tag's attributes carry the marker class, reading the tag the way a
+ * parser would: attribute by attribute, with quoted values consumed whole.
+ *
+ * A single regex over the raw tag got this wrong in both directions, and both directions
+ * matter because the same predicate reads the STORED body in updateDraft, where agent-authored
+ * html arrives unsanitised:
+ *
+ *  - FALSE POSITIVE. Any pattern that accepts a quote character as the boundary in front of
+ *    `class` matches `class=` sitting INSIDE another attribute's value —
+ *    `<div data-x=" class=fm-mcp-signature ">` and `<div title="a class='fm-mcp-signature'">`
+ *    both did. The cost is the one the marker exists to avoid: an edit that said nothing
+ *    about signatures appends one nobody asked for and announces that the draft already
+ *    carried one.
+ *  - FALSE NEGATIVE. `[^>]*` before the attribute cannot cross a `>` inside a quoted value,
+ *    so `<div title="a > b" class="fm-mcp-signature">` — a perfectly ordinary tag — MISSED a
+ *    genuine marker, which silently drops the block on the preserve path.
+ *
+ * Walking the attributes settles both: a quoted value is skipped as a unit whatever is in
+ * it, and the name is whatever sits between the delimiters, so `data-class` and `myclass` are
+ * simply different names rather than near-misses of a boundary rule.
+ *
+ * The class must also be a WHOLE token of the class list, which is why the value is split on
+ * whitespace instead of searched: a longer name that merely starts with ours
+ * (`fm-mcp-signature-ish`) is somebody else's class.
+ *
+ * Returns the index just past the tag so the caller can carry on scanning.
+ */
+function divTagCarriesMarker(html: string, from: number): { found: boolean; next: number } {
+  let i = from;
+  while (i < html.length) {
+    while (i < html.length && /\s/.test(html[i])) i++;
+    if (i >= html.length || html[i] === '>') break;
+    if (html[i] === '/') { i++; continue; }
+    const nameStart = i;
+    while (i < html.length && !/[\s=>/]/.test(html[i])) i++;
+    const name = html.slice(nameStart, i).toLowerCase();
+    // Whitespace is allowed on both sides of `=` (`class = "…"`), and a valueless attribute
+    // is legal, so the `=` is looked for past any run of spaces and its absence is not a
+    // parse failure.
+    let j = i;
+    while (j < html.length && /\s/.test(html[j])) j++;
+    let value = '';
+    if (html[j] === '=') {
+      j++;
+      while (j < html.length && /\s/.test(html[j])) j++;
+      const quote = html[j];
+      if (quote === '"' || quote === "'") {
+        const end = html.indexOf(quote, j + 1);
+        // An unterminated quoted value means the rest of the document is inside it; there is
+        // no further attribute to read on this tag or any other.
+        if (end < 0) return { found: false, next: html.length };
+        value = html.slice(j + 1, end);
+        i = end + 1;
+      } else {
+        const valueStart = j;
+        while (j < html.length && !/[\s>]/.test(html[j])) j++;
+        value = html.slice(valueStart, j);
+        i = j;
+      }
+    } else {
+      i = j;
+    }
+    if (name === 'class' && value.split(/\s+/).includes(SIGNATURE_CLASS)) {
+      return { found: true, next: i };
+    }
+  }
+  return { found: false, next: Math.min(i + 1, html.length) };
+}
 
 // The blank line between the body and the signature, matching the spacer the reply quote
 // uses below so the two read as one consistently spaced message.
 const SIGNATURE_SPACER = '<div><br></div>';
 
-/** True if html carries a signature block this server wrote. */
+/**
+ * True if html carries a signature block this server wrote.
+ *
+ * Whole-document, so it does not care where in the body the block sits — which is why the
+ * html side of the edit path needs no equivalent of the text side's history-aware search.
+ *
+ * Note the sanitizer strips class= from quoted content (src/inline-images.ts), so our own
+ * signature quoted back inside someone's reply CANNOT false-trip this. That is a feature:
+ * the marker means "this draft's own signature", never "somebody once signed something".
+ * The mechanism lives in another module, so signature.test.ts pins it end to end.
+ */
 export function hasSignatureMarker(html: string | null | undefined): boolean {
   if (!html) return false;
-  return SIGNATURE_MARKER_RE.test(html);
+  DIV_TAG_OPEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = DIV_TAG_OPEN_RE.exec(html)) !== null) {
+    const tag = divTagCarriesMarker(html, m.index + m[0].length);
+    if (tag.found) return true;
+    DIV_TAG_OPEN_RE.lastIndex = Math.max(tag.next, DIV_TAG_OPEN_RE.lastIndex);
+  }
+  return false;
 }
 
 /**
@@ -298,9 +380,30 @@ export function signatureHtmlBlock(signature: ResolvedSignature | undefined): st
  *    Writing the configured `textSignature` verbatim here would look right and then change
  *    by itself on that edit, with nothing reporting it. Deriving means the text part reads
  *    the same before and after.
- *  - no html ships → the configured `textSignature`, verbatim. There is no html to derive
- *    from and none will be fabricated, so this is the one place the configured text form is
- *    the answer.
+ *  - no html ships → the configured `textSignature`, verbatim. That is the one place the
+ *    configured text form is the answer. An identity that configured ONLY an html signature
+ *    still gets a text form derived from it — the html body it was written for is not
+ *    shipping, but the WORDS in it are the user's sign-off and dropping them would lose a
+ *    signature they really have.
+ *
+ * The derivation on that second branch suppresses image placeholders, and that is
+ * load-bearing rather than cosmetic: no html ships, so no image ships either, and writing
+ * `[image]` would make the recipient's entire sign-off a description of something no part
+ * of the message carries. It is the same rule `buildReplyBodies` applies to quoted images.
+ * An images-only html signature therefore yields '' here, which `planSignature` reports as
+ * `no-text-form` rather than shipping the placeholder.
+ *
+ * The FIRST branch deliberately does NOT suppress, and the asymmetry is the point. There the
+ * html ships, so the embedded image ships with it, and `[image]` is what
+ * `ImagePlaceholderPolicy.unconditional` is for: the text alternative of a body that is about
+ * to carry the image. It also has to agree with the derivation downstream — an html-only
+ * draft's text fallback is derived from the WHOLE signed html under that same policy, so
+ * suppressing here would make a caller who supplies both bodies get a different text sign-off
+ * from one who supplies html alone, which is the by-itself drift this function's html/text
+ * split exists to prevent. An images-only html signature therefore yields '[image]' here when
+ * the image is embedded, and '' when it is remote (a remote image writes no placeholder under
+ * any policy — see ImagePlaceholderPolicy). Only the second of those is a missing sign-off,
+ * and `planSignature` reports it as `text-part-unsigned`.
  */
 export function signatureTextBlock(
   signature: ResolvedSignature | undefined,
@@ -312,7 +415,229 @@ export function signatureTextBlock(
     return block === undefined ? undefined : htmlToText(block, 'unconditional');
   }
   return signature.text
-    ?? (signature.html !== undefined ? htmlToText(signature.html, 'unconditional') : undefined);
+    ?? (signature.html !== undefined ? htmlToText(signature.html, 'suppress') : undefined);
+}
+
+/**
+ * Why an append did not land where it was asked to. Every one of these is a call that ASKED
+ * for a signature and did not fully get one, so each is reportable: the caller cannot see the
+ * stored body from here, and a flag that silently no-ops is indistinguishable from one that
+ * worked.
+ *
+ *  - `no-signature`        the identity has none configured (or names no verified identity).
+ *  - `no-body`             this call writes no body for the sign-off to sit under.
+ *  - `already-signed`      the body supplied already carries a sign-off this call would
+ *                          otherwise duplicate — the html marker, or a text body carrying one
+ *                          of the two block forms among its OWN lines (quoted and forwarded
+ *                          history excluded; see textAlreadySigned).
+ *  - `no-text-form`        the message ships no html, and the signature has no plain-text
+ *                          form to write into the text part (an images-only html signature).
+ *  - `text-part-unsigned`  the html body WAS signed, but the signature has no text form for
+ *                          the message's plain-text alternative — whether the caller supplied
+ *                          that alternative or it is derived from the html downstream. The
+ *                          only partial outcome here: a recipient rendering the html sees the
+ *                          sign-off, one reading the text alternative does not.
+ */
+export type SignatureSkipReason =
+  | 'no-signature' | 'no-body' | 'already-signed' | 'no-text-form' | 'text-part-unsigned';
+
+/**
+ * The one decision function behind both `applySignature` and `signatureSkipReason`, so the
+ * bodies that come back and the reason reported for an empty append cannot disagree.
+ */
+function planSignature(
+  bodies: { textBody?: string; htmlBody?: string },
+  signature: ResolvedSignature | undefined,
+): { textBody?: string; htmlBody?: string; skipped?: SignatureSkipReason } {
+  const { textBody, htmlBody } = bodies;
+  if (!signature) return { ...bodies, skipped: 'no-signature' };
+  // Which form applies follows what the message SHIPS, not what it declares: a
+  // present-but-blank htmlBody emits no html part (buildBodyParts drops it), so treating it
+  // as an html message would sign a part no recipient ever sees.
+  const htmlShips = !isBlank(htmlBody);
+  if (htmlShips && hasSignatureMarker(htmlBody)) return { ...bodies, skipped: 'already-signed' };
+
+  // Every call site below has already established the body is non-blank — `htmlShips` for
+  // the html, the `isBlank` gates for the text — so this only ever concatenates. It used to
+  // fall back to the block alone for a blank body, which is how a present-but-blank textBody
+  // came to be REPLACED by the signature instead of counting as no body at all.
+  const join = (body: string, block: string, spacer: string) => `${body}${spacer}${block}`;
+
+  const out = { ...bodies };
+  if (htmlShips) {
+    const block = signatureHtmlBlock(signature);
+    if (block === undefined) return { ...bodies, skipped: 'no-signature' };
+    out.htmlBody = join(htmlBody!, block, SIGNATURE_SPACER);
+    // What the plain-text alternative will carry — asked BEFORE looking at whether the caller
+    // supplied that alternative, because the outcome is the same either way. A caller who
+    // supplies a text part gets this written into it; a caller who supplies none gets a text
+    // part derived downstream from the (now signed) html, under the same `unconditional`
+    // policy this is derived under. So when this is blank the recipient reading the text
+    // alternative sees no sign-off on EITHER path, and reporting only the first one made the
+    // html-only call the single place in this feature where a flag landed nowhere in silence.
+    //
+    // Blank, not merely defined: an html signature made only of a REMOTE logo derives to '',
+    // and joining that would append two newlines and no sign-off to the text part. The html
+    // half succeeded, so this is a PARTIAL rather than a no-op, and it is reported as one.
+    const text = signatureTextBlock(signature, true);
+    if (text === undefined || isBlank(text)) return { ...out, skipped: 'text-part-unsigned' };
+    // A blank text part is no text part — buildBodyParts drops it, and the alternative is
+    // derived from the signed html instead. Writing the block into it would turn a body the
+    // caller left empty into a text alternative whose ENTIRE content is the sign-off, while
+    // the html carried the real message. Same rule as `htmlShips` above, read off the other
+    // body: what the message SHIPS decides, not what it declares.
+    if (!isBlank(textBody) && !textAlreadySigned(textBody, signature)) {
+      out.textBody = join(textBody!, text, '\n\n');
+    }
+    return out;
+  }
+  // Blank counts as none, matching `htmlShips` on the other body and the wording every
+  // surface uses for this reason. Falling through with a blank text body made the signature
+  // the WHOLE body — the caller's own (blank) text discarded, a signature-only message
+  // stored, and nothing reported, because `join` treats a blank body as "nothing to sit
+  // under" rather than as a body it must not replace.
+  if (isBlank(textBody)) return { ...bodies, skipped: 'no-body' };
+  if (textAlreadySigned(textBody, signature)) return { ...bodies, skipped: 'already-signed' };
+  const text = signatureTextBlock(signature, false);
+  if (text === undefined || isBlank(text)) return { ...bodies, skipped: 'no-text-form' };
+  out.textBody = join(textBody!, text, '\n\n');
+  return out;
+}
+
+// The forward separator, as a whole-line test: this server's '----- Original message -----'
+// (FORWARD_MARKER_LINE) and Gmail's '---------- Forwarded message ----------'. Deliberately
+// the same shape hasTextForwardMarker matches, so a body that guard calls forwarded is a body
+// this one agrees is forwarded. Anchored at the dashes, so a '> '-quoted separator inside a
+// reply quote is quoted content and does not cut the body short — the same answer
+// hasTextForwardMarker gives, whose line anchor the '>' likewise defeats.
+const FORWARD_SEPARATOR_LINE = /^[ \t]*-{3,}[ \t]*(?:Original|Forwarded) message[ \t]*-{2,}/i;
+
+/**
+ * A plain-text body as normalised lines: any line ending → LF, then each line trimmed at BOTH
+ * ends. Applied identically to the body and to the signature block, so it can only ever make
+ * a match MORE likely — which is the announced-error direction (see textAlreadySigned).
+ *
+ * Every part of it answers a way a body changes on a round trip through a mail store, and
+ * every one of those, left unhandled, produces a SECOND sign-off with nothing reported:
+ *
+ *  - `\r\n` and a bare `\r` are both line endings here. RFC 5322 says CRLF; a store that
+ *    emits bare CR would otherwise leave the whole body as one line and match nothing.
+ *  - trailing whitespace goes because `-- `, the RFC 3676 signature delimiter, ENDS IN A
+ *    SPACE, and stripping it is an ordinary thing for a store to do. `\s` rather than
+ *    `[ \t]` so a space replaced by NBSP (U+00A0) on the trip is covered too — `\s` includes
+ *    it, along with the other Unicode spaces.
+ *  - LEADING whitespace goes because of RFC 3676 space-stuffing: a format=flowed sender
+ *    prepends a space to any line starting with a space, '>' or 'From '. Fastmail does not
+ *    emit format=flowed (verified live — see quoteText), but `edit_draft` receives drafts
+ *    composed by other clients, and one that does would otherwise be signed twice.
+ */
+function normalizeTextLines(s: string): string[] {
+  return s.replace(/\r\n?/g, '\n').split('\n').map((line) => line.trim());
+}
+
+/**
+ * The lines of a plain-text body that can be the draft's OWN text: everything above a forward
+ * separator. See textAlreadySigned for the design and for why nothing here excludes a
+ * reply-quoted line.
+ */
+function draftOwnTextLines(body: string): string[] {
+  const own: string[] = [];
+  for (const line of normalizeTextLines(body)) {
+    if (FORWARD_SEPARATOR_LINE.test(line)) break;
+    own.push(line);
+  }
+  return own;
+}
+
+/**
+ * Whether `needle` appears in `hay` as a contiguous run of WHOLE lines.
+ *
+ * The empty-needle arm is defensive rather than reachable from textAlreadySigned — its
+ * `isBlank(block)` gate already excludes a block that would trim to nothing — but an empty
+ * needle matching everything is the wrong answer for a general helper, so it is stated here
+ * rather than left to the one caller.
+ */
+function containsLineRun(hay: string[], needle: string[]): boolean {
+  if (needle.length === 0 || needle.length > hay.length) return false;
+  for (let i = 0; i + needle.length <= hay.length; i++) {
+    if (needle.every((line, j) => hay[i + j] === line)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a plain-text body already carries one of this identity's sign-off blocks in its own
+ * text — as opposed to inside quoted or forwarded history it happens to be carrying along.
+ *
+ * This is the text part's whole idempotence story: the html side is protected by the CLASS
+ * marker, which a plain-text body cannot carry, so without this the read-modify-write loop
+ * docs/email-bodies.md prescribes as the recovery (read the draft, edit the words, send the
+ * body back with appendSignature:true) appends a second copy every time round.
+ *
+ * The rule is SUBTRACTIVE: cut the body at the forward separator, then look for the block as a
+ * run of WHOLE LINES in what is above it (see draftOwnTextLines). The separator is a thing that
+ * IS a line — distinctive, machine-emitted, anchored at line start — rather than prose.
+ *
+ * Why that matters: four earlier versions of this guard tried to locate where history BEGINS
+ * by recognising the attribution line above the quote ("On <date>, <name> wrote:"). Attribution
+ * lines wrap, localise and vary per client, so each version was a fresh guess about one client
+ * with an unbounded supply of others left to be wrong about — a hard-wrapped Gmail attribution
+ * is what broke the last one. A separator line needs no parsing: it matches or it does not.
+ *
+ * A REPLY QUOTE NEEDS NO REMOVAL, and trying to remove one was a bug. The whole-line comparison
+ * already keeps quoted content out: a quoted line is '> ' + text, and `'> Regards,'` is not
+ * `'Regards,'`, so a thread quoting an earlier signed message of ours cannot read as this
+ * draft's own sign-off. Dropping '>'-prefixed lines from the body as well looked like belt and
+ * braces and was the opposite, because the block on the other side of the comparison is NOT
+ * filtered: `signatureTextBlock` derives the text form through html-to-text, whose blockquote
+ * output IS '> '-prefixed, so any identity whose html signature contains a <blockquote> had a
+ * needle line that no surviving body line could ever equal — and every pass of the
+ * read-modify-write loop appended another sign-off, silently. Removing the filter cannot
+ * introduce a wrong match either: a '> '-prefixed BODY line can only equal a '> '-prefixed
+ * NEEDLE line, which is the signature's own quoted content and the match we want.
+ *
+ * THE TWO ERRORS ARE NOT SYMMETRIC, and this is tuned for that. A false positive (read as
+ * signed when it is not) appends nothing AND reports `already-signed`, so the caller sees it
+ * and can write the sign-off themselves. A false negative (read as unsigned when it is signed)
+ * ships two sign-offs and says nothing at all. Only the second is invisible to the caller, so
+ * wherever this cannot be certain it must fall on the side of NOT appending. Do not "improve"
+ * this into a fuzzy or best-effort match: that trades the announced error for the silent one.
+ *
+ * BOTH forms are tested, not just the one this call would write. Which form a previous call
+ * left there depends on whether THAT call shipped html: an html-shipping call writes the
+ * form derived from `htmlSignature`, a text-only call writes the configured `textSignature`,
+ * and for the ordinary identity that configures both, those are different strings. So an
+ * html draft converted to plain text — `clearFields:['htmlBody']` with the text the draft
+ * just handed back — hands this the derived form while the call is about to write the
+ * configured one. Testing only the outgoing form stacked a second sign-off there, which is
+ * exactly the duplication this function exists to prevent.
+ *
+ * RESIDUAL: a forwarded block in a shape neither separator names — an Outlook
+ * `From:/Sent:/To:/Subject:` header block, say — is not removed, so a forwarded message whose
+ * own text carries this identity's sign-off reads as this draft's own and the caller's note
+ * goes out bare. That is the CHEAP error by construction: announced as `already-signed`, and
+ * recovered by writing the sign-off into the note. Extending separator recognition is tracked
+ * as issue #144; the residual is written down in docs/email-bodies.md.
+ */
+function textAlreadySigned(
+  body: string | undefined,
+  signature: ResolvedSignature,
+): boolean {
+  if (body === undefined) return false;
+  const hay = draftOwnTextLines(body);
+  for (const block of [signatureTextBlock(signature, true), signatureTextBlock(signature, false)]) {
+    if (block === undefined || isBlank(block)) continue;
+    // Trimmed to the block's non-blank extent. A configured signature that opens or closes
+    // with a blank line would otherwise demand a matching blank line in the body on that side,
+    // and there need not be one — the append writes the block against whatever the body
+    // already ended with, and the OTHER form of the same signature (see above) may carry the
+    // blank where this one does not. Interior blank lines are kept: they are part of the run.
+    const needle = normalizeTextLines(block);
+    while (needle.length > 0 && isBlank(needle[0])) needle.shift();
+    while (needle.length > 0 && isBlank(needle[needle.length - 1])) needle.pop();
+    if (containsLineRun(hay, needle)) return true;
+  }
+  return false;
 }
 
 /**
@@ -323,43 +648,32 @@ export function signatureTextBlock(
  * every downstream `!== undefined` test that decides which formats a message emits reads the
  * same answer with a signature as without one.
  *
- * A body already carrying the marker is returned untouched: a caller that supplied a
- * signature block deliberately gets theirs, not two.
+ * A body already carrying the signature is returned untouched: an html body is recognised by
+ * the marker class, a plain-text one by already carrying EITHER of the identity's two block
+ * forms among its own lines — the body with its reply-quoted lines and any forwarded block
+ * removed (see textAlreadySigned — which form is there depends on whether the call that put
+ * it there shipped html). A caller that supplied a signature gets theirs, not two.
  */
 export function applySignature(
   bodies: { textBody?: string; htmlBody?: string },
   signature: ResolvedSignature | undefined,
 ): { textBody?: string; htmlBody?: string } {
-  const { textBody, htmlBody } = bodies;
-  if (!signature) return bodies;
-  // Which form applies follows what the message SHIPS, not what it declares: a
-  // present-but-blank htmlBody emits no html part (buildBodyParts drops it), so treating it
-  // as an html message would sign a part no recipient ever sees.
-  const htmlShips = !isBlank(htmlBody);
-  if (htmlShips && hasSignatureMarker(htmlBody)) return bodies;
-
-  const join = (body: string | undefined, block: string, spacer: string) =>
-    (isBlank(body) ? block : `${body}${spacer}${block}`);
-
-  const out = { ...bodies };
-  if (htmlShips) {
-    const block = signatureHtmlBlock(signature);
-    if (block === undefined) return bodies;
-    out.htmlBody = join(htmlBody, block, SIGNATURE_SPACER);
-    // The text side is only written when the caller supplied one. With no textBody the
-    // whole text part is derived from the (now signed) html downstream, which carries the
-    // signature into it without this having to say anything.
-    if (textBody !== undefined) {
-      const text = signatureTextBlock(signature, true);
-      if (text !== undefined) out.textBody = join(textBody, text, '\n\n');
-    }
-    return out;
-  }
-  if (textBody !== undefined) {
-    const text = signatureTextBlock(signature, false);
-    if (text !== undefined) out.textBody = join(textBody, text, '\n\n');
-  }
+  // `skipped` is destructured off rather than deleted so the returned object keeps exactly
+  // the body keys it came in with — every downstream `!== undefined` test depends on that.
+  const { skipped, ...out } = planSignature(bodies, signature);
   return out;
+}
+
+/**
+ * What `applySignature` would decline to do to these bodies, or undefined when it appends
+ * something. The orchestrations use this to report a requested signature that landed
+ * nowhere; it runs the same plan rather than re-deriving the rules.
+ */
+export function signatureSkipReason(
+  bodies: { textBody?: string; htmlBody?: string },
+  signature: ResolvedSignature | undefined,
+): SignatureSkipReason | undefined {
+  return planSignature(bodies, signature).skipped;
 }
 
 /**
@@ -371,6 +685,81 @@ export function applySignature(
  */
 export const NOTE_SIGNATURE_REAPPENDED =
   "The identity's configured signature was re-appended: this draft already carried one and the body you supplied did not. Pass appendSignature:false to drop it instead.";
+
+/**
+ * What a compose call says when appendSignature:true appended nothing.
+ *
+ * The flag is an input the caller cannot verify without re-reading the draft, so an append
+ * that lands nowhere has to be announced — the same rule that makes a dropped enrichment
+ * surface its degradation rather than vanish. Each reason names WHICH one it was, because
+ * the fix differs: configure a signature, supply a body, or leave the one you already wrote.
+ *
+ * `text-part-unsigned` is the one arm that does not open with "nothing was appended", because
+ * on that arm something was: the html carries the sign-off and only its text alternative
+ * does not. Saying "nothing was appended" there would be a plainly false report.
+ */
+export function noteSignatureNotAppended(
+  reason: SignatureSkipReason,
+  identityAddress: string | undefined,
+): string {
+  const who = identityAddress
+    ? `the identity this message sends as (${identityAddress})`
+    : 'the identity this message sends as';
+  // The no-signature arm names an ADDRESS rather than an identity, and says both ways it can
+  // fail. `signatureOf(undefined)` is what reaches this arm, and "undefined" covers two
+  // different things: a verified identity with the field blank, and an address that is not a
+  // verified identity at all. edit_draft reaches the second on a stored `from` it never
+  // vetted (only an EXPLICIT from is rejected), where "set one in Fastmail" is both false and
+  // unactionable. Same wording as noteSignatureUnavailableOnEdit's default arm, which had it
+  // right; this one is not a different fact.
+  const whoAddress = identityAddress
+    ? `the address this message sends as (${identityAddress})`
+    : 'the address this message sends as';
+  const head = 'appendSignature was requested but nothing was appended: ';
+  switch (reason) {
+    case 'no-signature':
+      return `${head}no signature is available for ${whoAddress} — it has none configured in Fastmail, or it is not one of your verified identities. Set one there, or write the sign-off into the body yourself.`;
+    case 'no-body':
+      return `${head}this call wrote no body for the signature to sign (a blank body counts as none). Supply textBody or htmlBody in the call that should carry the sign-off.`;
+    case 'already-signed':
+      return `${head}the body you supplied already carries a signature — at the end, or above a quoted or forwarded original — so it was left as you wrote it rather than signed twice.`;
+    case 'no-text-form':
+      return `${head}this message ships no HTML body, and ${who} has no plain-text form of its signature to write into the text part.`;
+    case 'text-part-unsigned':
+      return `appendSignature was requested and the HTML body was signed, but its plain-text alternative was not: ${who} has an HTML signature with no readable text in it (images only), so there is nothing to write into the text part. A recipient reading the plain-text alternative sees no sign-off.`;
+  }
+}
+
+/**
+ * What edit_draft says when a draft that WAS carrying a signature comes out of the edit
+ * without one (or without it everywhere), because the keep could not be honoured.
+ *
+ * The preserve branch is armed by the stored draft, so this is the caller's OMITTED flag
+ * meaning "keep it" and the keep failing. Silence here would drop a block the draft was
+ * carrying with nothing said — see the never-silently-drop rule in CLAUDE.md. It is a
+ * separate function from `noteSignatureNotAppended` for exactly that reason: nothing in this
+ * call asked, so a note opening "appendSignature was requested" would be untrue.
+ *
+ * The reason is passed in rather than assumed. `no-signature` is not the only way a keep
+ * fails: an identity whose signature is images-only html has nothing to put in a draft this
+ * edit converts to plain text, and that loses the sign-off just as completely.
+ */
+export function noteSignatureUnavailableOnEdit(
+  fromAddress: string | undefined,
+  reason: SignatureSkipReason = 'no-signature',
+): string {
+  const who = fromAddress ? ` (${fromAddress})` : '';
+  const head = "This draft carried the sending identity's signature, but ";
+  const tail = ' Write the sign-off into the body if you want it back.';
+  switch (reason) {
+    case 'text-part-unsigned':
+      return `${head}only its HTML body carries it now: the signature configured for the address this edit sends as${who} is images only, so there is no plain-text form to write into the text alternative you supplied. A recipient reading that alternative sees no sign-off.${tail}`;
+    case 'no-text-form':
+      return `${head}this edit leaves it as a plain-text message and the signature configured for the address this edit sends as${who} is images-only HTML, so there is no plain-text form to carry over — the edited draft carries none.${tail}`;
+    default:
+      return `${head}no signature is available for the address this edit sends as${who} — it has none configured, or it is not one of your verified identities — so the edited draft carries none.${tail}`;
+  }
+}
 
 // The original's html as the quote builders read it. Exported so a caller that has to decide
 // which embedded images the quote will display — edit_draft, which resolves that against the
@@ -585,8 +974,20 @@ export function buildForwardBodies(input: {
   // See buildReplyBodies: the resolved sign-off, appended to the caller's note so it lands
   // above the forwarded-message block rather than under the message being forwarded.
   signature?: ResolvedSignature;
-}): { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } {
+}): {
+  textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome;
+  /** Why a requested signature landed nowhere; see BuiltForward.signatureSkip. */
+  signatureSkip?: SignatureSkipReason;
+} {
   const { original, textBody: callerText, htmlBody: callerHtml, cidMap, quoteImages, signature } = input;
+  const noNote = callerText === undefined && callerHtml === undefined;
+  // A noted forward signs the note; a note-less one has the signature become the whole
+  // content above the block, on the two arms at the bottom of this function. The skip for
+  // that second shape is decided down there, where those arms are, so this asks about the
+  // note only when there is a note.
+  let signatureSkip = noNote
+    ? undefined
+    : signatureSkipReason({ textBody: callerText, htmlBody: callerHtml }, signature);
   const { textBody, htmlBody } = applySignature(
     { textBody: callerText, htmlBody: callerHtml },
     signature,
@@ -654,16 +1055,26 @@ export function buildForwardBodies(input: {
   //     html; a text-only original yields a TEXT forward (the body model's
   //     "never fabricate HTML from plain text" holds for the tool's own
   //     default choice — see docs/email-bodies.md).
-  const out: { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } = {};
+  const out: {
+    textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome;
+    signatureSkip?: SignatureSkipReason;
+  } = {};
   if (htmlBody !== undefined) out.htmlBody = composeHtml(htmlBody);
   if (textBody !== undefined) out.textBody = composeText(textBody);
   if (htmlBody === undefined && textBody === undefined) {
     // No note to append to, but a requested signature still ships: it becomes the whole of
     // the content above the forwarded-message block. (Both arms pass undefined when no
     // signature was asked for, which is exactly the bare-FYI forward this has always made.)
-    if (htmlQuotable) out.htmlBody = composeHtml(signatureHtmlBlock(signature));
-    else out.textBody = composeText(signatureTextBlock(signature, false));
+    const block = htmlQuotable ? signatureHtmlBlock(signature) : signatureTextBlock(signature, false);
+    if (htmlQuotable) out.htmlBody = composeHtml(block);
+    else out.textBody = composeText(block);
+    // Read off the block this shape actually produced, so the reported reason follows the
+    // arm taken rather than a rule restated here. An html-quotable original wants the html
+    // block, a text one the derived text form, and either can come back empty.
+    if (signature === undefined) signatureSkip = 'no-signature';
+    else if (block === undefined || isBlank(block)) signatureSkip = htmlQuotable ? 'no-signature' : 'no-text-form';
   }
+  if (signatureSkip) out.signatureSkip = signatureSkip;
   // Only the rewriting pass drops a reference form it cannot carry, and only its output
   // ships an html forwarded block. Reported on the same two arms as the reply builder's —
   // see the comment there for why a loss is reported even when nothing asked.

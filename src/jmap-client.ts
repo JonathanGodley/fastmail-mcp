@@ -3,7 +3,7 @@ import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
-import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml, applySignature, hasSignatureMarker, NOTE_SIGNATURE_REAPPENDED } from './reply-quote.js';
+import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml, applySignature, hasSignatureMarker, NOTE_SIGNATURE_REAPPENDED, noteSignatureNotAppended, noteSignatureUnavailableOnEdit, signatureSkipReason } from './reply-quote.js';
 import { matchesIdentity, signatureOf } from './identity.js';
 import { isSettableMessageId } from './forward-handler.js';
 import {
@@ -2463,27 +2463,89 @@ export class JmapClient {
     //
     // Because that re-append is the one signature outcome nobody asked for in the same call,
     // it is the one the result announces (NOTE_SIGNATURE_REAPPENDED below).
+    //
+    // Note what this preservation is NOT: `hasSignatureMarker` reads a CLASS, so a draft
+    // with no html body carries no marker whatever wrote its signature. A text-only draft
+    // therefore loses its sign-off on a body-writing edit that omits the flag — a signature
+    // THIS SERVER appended is as invisible here as a hand-typed one. That residual is
+    // documented on the parameter and in docs/email-bodies.md; the recovery is
+    // appendSignature:true, which cannot stack because applySignature declines to append a
+    // block the body already ends with.
     const storedSignature = hasSignatureMarker(existingHtmlValue);
+    // The address this edit will write into `from` (see the emailObject build below, which
+    // must keep using the same expression). The sign-off is resolved against THAT rather
+    // than against `selectedIdentity`, because the two can differ: when the edit writes no
+    // `from` and the stored one matches no verified identity, selectedIdentity falls back to
+    // the account default while the stored address is what gets written. Signing from that
+    // fallback would put one identity's sign-off under another identity's address.
+    const writtenFromAddress: string | undefined =
+      updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email;
+    const signingIdentity = writtenFromAddress
+      ? identities.find((id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, writtenFromAddress))
+      : undefined;
+    // The display name written alongside that address, resolved in the SAME order the
+    // address was: the verified identity that owns it, else the name the stored draft
+    // already carried against it, else none. `selectedIdentity.name` is deliberately not a
+    // fallback — it is the account default's name, and on the very path the hoisted address
+    // exists for (a stored `from` matching no verified identity) pairing the two puts the
+    // default identity's name in front of a foreign address.
+    const storedFromName = existingEmail.from?.[0]?.email === writtenFromAddress
+      ? existingEmail.from?.[0]?.name
+      : undefined;
+    const writtenFromName: string | null = signingIdentity?.name ?? storedFromName ?? null;
+    const editSignature = signatureOf(signingIdentity);
     let reAppendedSignature = false;
-    if (updates.appendSignature === true || (updates.appendSignature === undefined && storedSignature)) {
-      // Only bodies this edit actually WRITES are signed. An unwritten body is either
-      // preserved verbatim (a metadata-only edit) or dropped as the unwritten partner, and
-      // in neither case is there caller text to sign.
+    // Armed by the stored draft (preserve) or by the flag (add), and dropped when neither.
+    const signatureWanted =
+      updates.appendSignature === true || (updates.appendSignature === undefined && storedSignature);
+    // Only bodies this edit actually WRITES are signed. An unwritten body is either
+    // preserved verbatim (a metadata-only edit) or dropped as the unwritten partner, and in
+    // neither case is there caller text to sign.
+    const writtenBodies = {
+      ...(wroteText && { textBody: updates.textBody }),
+      ...(wroteHtml && { htmlBody: updates.htmlBody }),
+    };
+    // Why the sign-off did not land, read off the bodies as the caller WROTE them — before
+    // the append below rewrites them, because the reason is only legible against their own
+    // text. This runs the same plan the append does rather than restating any part of it,
+    // which is what makes it total: every reason the compose paths can report is reachable
+    // here, including the one this used to miss. An identity whose signature is images-only
+    // HTML is not signature-LESS, so the old `editSignature === undefined` gate armed
+    // nothing for it — and an edit leaving that draft as plain text then appended nothing
+    // and said nothing, silently dropping a sign-off the draft was carrying.
+    const signatureSkip = signatureWanted
+      ? signatureSkipReason(writtenBodies, editSignature)
+      : undefined;
+    if (signatureWanted) {
       const before = { textBody: updates.textBody, htmlBody: updates.htmlBody };
-      const signed = applySignature(
-        {
-          ...(wroteText && { textBody: updates.textBody }),
-          ...(wroteHtml && { htmlBody: updates.htmlBody }),
-        },
-        // The identity resolved above is the one this edit writes into `from`, so the
-        // signature always matches the sender the recipient will see.
-        signatureOf(selectedIdentity),
-      );
+      const signed = applySignature(writtenBodies, editSignature);
       if (wroteHtml && signed.htmlBody !== undefined) updates.htmlBody = signed.htmlBody;
       if (wroteText && signed.textBody !== undefined) updates.textBody = signed.textBody;
       reAppendedSignature = updates.appendSignature === undefined
         && (updates.htmlBody !== before.htmlBody || updates.textBody !== before.textBody);
     }
+    // What the result says when it did not land. Two framings, because two different things
+    // asked for it:
+    //
+    //  - `appendSignature:true` is a request made in THIS call, so it gets exactly the note
+    //    the compose tools give, for EVERY reason — including "the body already ends with
+    //    one" and "this edit wrote no body". A flag the caller cannot verify without
+    //    re-reading the draft must not report on the three compose surfaces and stay silent
+    //    on this one.
+    //  - an OMITTED flag is the stored draft's earlier decision being preserved, so a
+    //    failure there is a loss rather than a declined request and gets the loss wording.
+    //    Two outcomes are not losses on that path and stay silent: a body the caller supplied
+    //    that already carries the sign-off (which is what preservation wanted), and an edit
+    //    that writes no body at all (both bodies, signature included, are carried verbatim).
+    //    `no-body` cannot arise WITH a written body — requireNonEmpty above rejects a blank
+    //    one — so the body gate covers that reason on this path completely.
+    const signatureUnavailable = !signatureSkip
+      ? undefined
+      : updates.appendSignature === true
+        ? noteSignatureNotAppended(signatureSkip, writtenFromAddress)
+        : (signatureSkip === 'already-signed' || !(wroteHtml || wroteText))
+          ? undefined
+          : noteSignatureUnavailableOnEdit(writtenFromAddress, signatureSkip);
 
     // Which parts this call takes off the draft, resolved HERE because the quote rebuild
     // below has to know what survives it: a surviving part supplies its own embedded image,
@@ -2994,7 +3056,9 @@ export class JmapClient {
       mailboxIds: existingEmail.mailboxIds,
       // Preserve all existing keywords (e.g. $flagged, custom labels), not just $draft.
       keywords: { ...(existingEmail.keywords || {}), $draft: true },
-      from: [{ name: selectedIdentity.name, email: updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email }],
+      // Same expression the signature step above resolves its identity against, hoisted to
+      // a single value so the sign-off, the display name and the sender cannot drift apart.
+      from: [{ name: writtenFromName, email: writtenFromAddress }],
       to: mergedTo,
       cc: mergedCc,
       bcc: mergedBcc,
@@ -3189,6 +3253,9 @@ export class JmapClient {
       // Announced because nothing in THIS call asked for it — see the signature step above.
       // An explicitly requested append says nothing: the caller already knows.
       ...(reAppendedSignature ? [NOTE_SIGNATURE_REAPPENDED] : []),
+      // …and the other side of the same rule: a signature that was meant to survive the
+      // edit, or was explicitly asked for, and could not be produced.
+      ...(signatureUnavailable ? [signatureUnavailable] : []),
       ...followUpNotes,
     ];
     const touchedInlineImages = tally.embedded > 0 || tally.degraded > 0 || tally.removed > 0;

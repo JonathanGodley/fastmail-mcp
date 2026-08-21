@@ -64,8 +64,9 @@ export interface ResolvedSignature {
 
 /**
  * Read the sign-off off one identity. Undefined when it has none configured — an identity
- * with a blank signature is signature-less, and a call that asked for one gets nothing
- * appended and nothing said about it (there is no failure here to report).
+ * with a blank signature is signature-less. A call that asked for one then gets nothing
+ * appended AND is told so: undefined here becomes the `no-signature` skip reason, which
+ * every compose path and edit_draft report (see SignatureSkipReason in src/reply-quote.ts).
  */
 export function signatureOf(identity: any): ResolvedSignature | undefined {
   const html = typeof identity?.htmlSignature === 'string' && !isBlank(identity.htmlSignature)
@@ -76,11 +77,8 @@ export function signatureOf(identity: any): ResolvedSignature | undefined {
   return { ...(html !== undefined && { html }), ...(text !== undefined && { text }) };
 }
 
-/**
- * The sign-off for the identity a compose call will send as. Looked up on every write
- * rather than remembered: the configured signature is the source of truth and may have
- * changed since the draft was made.
- */
-export function resolveSignature(identities: any[] | undefined | null, from?: string): ResolvedSignature | undefined {
-  return signatureOf(selectIdentity(identities, from));
-}
+// There is deliberately no `resolveSignature(identities, from)` convenience wrapper here.
+// Every caller needs the identity OBJECT as well as its sign-off — the note that reports an
+// empty append names the address the message sends as — so all three compose handlers call
+// selectIdentity and signatureOf separately. A wrapper that returned only the signature was
+// used by nothing but its own tests.

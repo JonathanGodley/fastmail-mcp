@@ -402,9 +402,18 @@ function lenientBool(description: string): string {
 // the flag means (edit_draft's is different in kind — it is a tri-state that preserves what
 // the draft already carries — and is written out separately). `context` names where the
 // signature lands relative to whatever else that tool puts in the body.
-function appendSignatureDesc(context: string): string {
+//
+// `noBodyReason` exists because the shared no-body clause is FALSE on forward_email: an
+// INLINE forward with no note at all is signed, the signature becoming the whole of the
+// content above the forwarded-message block, and an asAttachment forward with no note cannot
+// reach no-body at all because it substitutes a filler body and signs that. Only a note that
+// was supplied and blank yields no-body there, so that tool passes its own wording rather
+// than reading a rule that does not apply to it. Every other reason is identical across the
+// three, which is why they share this.
+function appendSignatureDesc(context: string, noBodyReason?: string): string {
+  const noBody = noBodyReason ?? 'the call wrote no body for the sign-off to sit under (a blank body counts as none)';
   return lenientBool(
-    `Append the sending identity's configured signature — the sign-off set in Fastmail — to the body${context}. Default false: nothing is appended unless you ask, and nothing is said when you do not. The signature is read from the identity this message sends as (the \`from\` address, or the default identity), so it is always the configured one rather than a remembered copy; an identity with no signature configured appends nothing. An HTML body gets the HTML signature, and its plain-text alternative is derived from it; a plain-text-only message gets the text signature. A body you pass that already contains a signature block this server wrote is left alone rather than signed twice.`,
+    `Append the sending identity's configured signature — the sign-off set in Fastmail — to the body${context}. Default false: nothing is appended unless you ask, and nothing is said when you do not. The signature is read from the identity this message sends as (the \`from\` address, or the default identity), so it is always the configured one rather than a remembered copy. An HTML body gets the HTML signature, and its plain-text alternative is derived from it; a plain-text-only message gets the identity's plain-text signature, or — if only an HTML signature is configured — a plain-text form derived from that. WHEN YOU ASK AND THE SIGN-OFF DOES NOT LAND EVERYWHERE IT SHOULD, THE RESULT SAYS SO AND WHY — no signature is available for the address this message sends as (none configured, or not one of your verified identities); ${noBody}; the body you passed already carries a signature; the message ships no HTML and the identity's signature has no plain-text form to write instead (an images-only HTML signature — no HTML ships, so no image does either); or the HTML body WAS signed while the message's plain-text alternative could not be, because the signature's only content is a remote image, which derives no readable text. That last one is reported whether you supplied the plain-text alternative yourself or left it to be derived from the HTML — the recipient reading it sees no sign-off either way. The already-carries case is why asking twice does not sign twice: an HTML body carrying a signature block this server wrote is left alone, and a plain-text body already ending in either form of this identity's block — at the end, or above a quoted or forwarded original — is left alone too, so re-sending a body you read back from a draft is safe, including a body read back from a draft that used to be HTML.`,
   );
 }
 
@@ -955,7 +964,7 @@ const TOOLS = [
             },
             asAttachment: {
               type: ['boolean', 'string'],
-              description: lenientBool('Instead of reproducing the original inline, attach the entire original as a raw .eml file (message/rfc822): lossless, including embedded inline images; supersedes includeOriginalAttachments. NOTE: the raw message carries its full transport headers (Received chain, authentication results) and — when forwarding a message from Sent — any Bcc recipients (see docs/security-model.md), which an inline forward would not expose.'),
+              description: lenientBool('Instead of reproducing the original inline, attach the entire original as a raw .eml file (message/rfc822): lossless, including embedded inline images; supersedes includeOriginalAttachments. There is no forwarded-message block on this shape — your note (textBody/htmlBody) is the WHOLE body. IF YOU PASS NO NOTE THE DRAFT IS NOT BODY-LESS: it ships the literal plain-text body "Forwarded message attached." so the message reads as something rather than as an empty page with a file on it. Pass your own note to replace it. NOTE: the raw message carries its full transport headers (Received chain, authentication results) and — when forwarding a message from Sent — any Bcc recipients (see docs/security-model.md), which an inline forward would not expose.'),
             },
             replyTo: {
               type: 'array',
@@ -964,7 +973,10 @@ const TOOLS = [
             },
             appendSignature: {
               type: ['boolean', 'string'],
-              description: appendSignatureDesc(', above the forwarded-message block (or above the note on an asAttachment forward)'),
+              description: appendSignatureDesc(
+                ', above the forwarded-message block (on an asAttachment forward there is no such block — the note is the whole body, and the signature goes BELOW it)',
+                'the note you passed was blank — note that an INLINE forward with NO note at all IS signed, the signature becoming the whole of the content above the forwarded-message block, and that an asAttachment forward cannot report this at all: with no note it writes the filler body "Forwarded message attached." and signs that',
+              ),
             },
             attachments: attachmentsSchemaProperty(false, "NEW attachments to add (the original's own attachments are carried automatically — see includeOriginalAttachments). "),
           },
@@ -1078,7 +1090,7 @@ const TOOLS = [
             },
             originalEmailId: {
               type: 'string',
-              description: "When editing the body of a REPLY or FORWARD draft, the id of the message this draft replies to OR forwards (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original / forwarded-message block. Without it, a body edit that would drop them is rejected.",
+              description: "When editing the body of a REPLY or FORWARD draft, the id of the message this draft replies to OR forwards (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original / forwarded-message block. Without it, a body edit that would drop them is rejected. Rebuilding APPENDS the quote to the body you supply: if the body you are sending already contains the quoted original — which it does whenever you read the draft, edit the words, and send the whole text back — pass noQuote:true instead, or the draft will end up carrying the quote twice.",
             },
             noQuote: {
               type: ['boolean', 'string'],
@@ -1091,7 +1103,7 @@ const TOOLS = [
             },
             appendSignature: {
               type: ['boolean', 'string'],
-              description: lenientBool("What happens to the sending identity's configured signature when this edit writes a body. OMIT IT and the signature is preserved: if the draft already carries a signature block this server wrote and the body you supply does not, the identity's CURRENT signature is re-appended (above any quoted or forwarded original) and the result says so — rewriting a body is not read as a request to drop a sign-off that was deliberately added. Pass true to add the signature to a draft that never had one. Pass false to remove it: your new body is stored exactly as written, with nothing appended. Ignored by an edit that writes no body, which leaves both bodies untouched anyway. Detection is by the block this server wrote, so a signature typed by hand into a plain-text draft is invisible to it and is neither preserved nor duplicated."),
+              description: lenientBool("What happens to the sending identity's configured signature when this edit writes a body. OMIT IT and the signature is preserved: if the draft already carries a signature block this server wrote and the body you supply does not, the identity's CURRENT signature is re-appended (above any quoted or forwarded original) and the result says so — rewriting a body is not read as a request to drop a sign-off that was deliberately added. Pass true to add the signature to a draft that never had one. Pass false to remove it: your new body is stored exactly as written, with nothing appended. An edit that writes no body leaves both bodies untouched, so nothing is appended there either; pass true on such an edit and the result says that plainly rather than ignoring the flag in silence. LIMIT: preservation is detected by an HTML class, so it works on drafts with an HTML body ONLY. A PLAIN-TEXT draft carries no marker, so an edit that rewrites its text loses the sign-off even if this server put it there — pass appendSignature:true on that edit to keep it, which is safe to repeat because a text body already carrying EITHER form of this identity's block (the HTML-derived one or the configured plain-text one) is left alone rather than signed twice — whether the block ends the body or sits above a quoted or forwarded original, which is the shape a reply or forward draft you read back will actually have. That covers converting an HTML draft to plain text with clearFields:['htmlBody'] and handing back the text the draft gave you. A signature typed by hand is invisible to this everywhere. WHEN THE SIGN-OFF DOES NOT LAND, THE RESULT SAYS SO AND WHY, and which cases are reported depends on who asked. WITH true, all four: no signature is available for the address this edit sends as (none configured, or not one of your verified identities); the body you supplied already carries one; this edit wrote no body; or the identity's signature is images-only HTML and this edit leaves the draft as plain text (or supplies a plain-text alternative) that has nothing to carry it. WITH THE FLAG OMITTED only the two that LOSE something are reported — no signature available, and the images-only case — because the other two mean the sign-off is still there: a body you supplied that already carries it is what preservation wanted, and an edit that writes no body carries both bodies through untouched. So on the omitted path, silence does not mean all four checks passed."),
             },
             attachments: attachmentsSchemaProperty(true),
             removeAttachments: {

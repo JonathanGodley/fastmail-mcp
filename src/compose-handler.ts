@@ -3,8 +3,8 @@ import { coerceRecipients, coerceStringArray, coerceAttachments, coerceBool } fr
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank } from './body-format.js';
 import { planAuthoredInlineImages, reportAuthoredInlineImages } from './compose-inline.js';
-import { applySignature } from './reply-quote.js';
-import { resolveSignature } from './identity.js';
+import { applySignature, noteSignatureNotAppended, signatureSkipReason } from './reply-quote.js';
+import { selectIdentity, signatureOf } from './identity.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // Parameters passed to createDraft for a freshly composed message (matches its input
@@ -103,19 +103,30 @@ export async function composeDraft(
     surface: 'compose',
   });
 
+  // Off by default, and the lookup is skipped when it is off (see composeReply).
+  //
+  // Ordered BEFORE the upload below, for the reason the embedded-image plan is: a lookup
+  // that fails after the upload would orphan freshly written blobs in the account with no
+  // draft referencing them. It still runs AFTER the contentless guard above, which is what
+  // keeps a signature from turning an empty call into a saveable draft here — note that
+  // guard is this function's own, and createDraft's downstream "html body has no visible
+  // content" reject DOES see the signature, so create_draft(htmlBody:'<p></p>',
+  // appendSignature:true) saves as a signature-only draft rather than being refused. It is
+  // also resolved after the embedded-image plan, which reads the caller's OWN html — the
+  // signature is this server's markup and is not held against them.
+  const appendSignature = coerceBool(a.appendSignature) === true;
+  const identity = appendSignature ? selectIdentity(await client.getIdentities(), from) : undefined;
+  const signature = appendSignature ? signatureOf(identity) : undefined;
+  // Read before the append, because the reason for an empty append is only legible against
+  // the bodies as the caller supplied them.
+  const signatureSkip = appendSignature
+    ? signatureSkipReason({ textBody, htmlBody }, signature)
+    : undefined;
+
   const attachments = specs?.length
     ? await client.uploadAttachments(specs, attachDir, allowBlobAttach, { inlineCids: plan.inlineCids })
     : undefined;
 
-  // Off by default, and the lookup is skipped when it is off (see composeReply). Applied
-  // AFTER the contentless-draft guard above on purpose: a signature is a sign-off on a
-  // message, not a message, so it must not turn an empty call into a saveable draft. It is
-  // also applied after the embedded-image plan, which reads the caller's OWN html — the
-  // signature is this server's markup and is not held against them.
-  const appendSignature = coerceBool(a.appendSignature) === true;
-  const signature = appendSignature
-    ? resolveSignature(await client.getIdentities(), from)
-    : undefined;
   const signed = applySignature({ textBody, htmlBody }, signature);
 
   const emailId = await client.createDraft({
@@ -133,12 +144,15 @@ export async function composeDraft(
     attachments,
   });
 
-  const notes = await reportAuthoredInlineImages({
-    uploaded: attachments,
-    plan,
-    emailId,
-    readBack: (id) => client.getEmailById(id),
-  });
+  const notes = [
+    ...await reportAuthoredInlineImages({
+      uploaded: attachments,
+      plan,
+      emailId,
+      readBack: (id) => client.getEmailById(id),
+    }),
+    ...(signatureSkip ? [noteSignatureNotAppended(signatureSkip, identity?.email ?? from)] : []),
+  ];
 
   return { emailId, subject, to, cc, ...(notes.length > 0 && { notes }) };
 }

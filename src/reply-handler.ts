@@ -3,9 +3,11 @@ import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
-import { buildReplyBodies, emptyQuoteImages } from './reply-quote.js';
+import {
+  buildReplyBodies, emptyQuoteImages, noteSignatureNotAppended, signatureSkipReason,
+} from './reply-quote.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
-import { resolveSignature } from './identity.js';
+import { selectIdentity, signatureOf } from './identity.js';
 import type { ResolvedSignature } from './identity.js';
 import { formatAddress } from './email-formatter.js';
 import {
@@ -222,8 +224,20 @@ export async function composeReply(
   // pays no extra round trip for a feature it did not ask for. Resolved fresh on every call
   // rather than remembered: the identity's configured sign-off is the source of truth.
   const appendSignature = coerceBool(args?.appendSignature) === true;
-  const signature = appendSignature
-    ? resolveSignature(await client.getIdentities(), args?.from)
+  const identity = appendSignature ? selectIdentity(await client.getIdentities(), args?.from) : undefined;
+  const signature = appendSignature ? signatureOf(identity) : undefined;
+  // buildReplyBodies signs exactly these two values — the quote is concatenated afterwards —
+  // so the reason an append landed nowhere is read off them, before the builder runs.
+  //
+  // Note this reports rather than rescues a body-less reply: unlike a forward, where a
+  // note-less "FYI, see below" is the normal shape and the builder makes the signature the
+  // whole content above the forwarded block, reply_email leaves a body-less reply unsigned
+  // and says so. A reply whose entire content is a sign-off over a quote is not a message,
+  // and changing that would change what reply_email produces. A BLANK body counts as none
+  // here, which is what makes that true: it used to fall through and produce exactly the
+  // signature-only reply this arm exists to refuse.
+  const signatureSkip = appendSignature
+    ? signatureSkipReason({ textBody: args?.textBody, htmlBody: args?.htmlBody }, signature)
     : undefined;
 
   const { replyParams, inlinePlan, quoteImages } = buildReplyParams(args, originalEmail, {
@@ -270,6 +284,7 @@ export async function composeReply(
       emailId,
       readBack: (id) => client.getEmailById(id),
     }),
+    ...(signatureSkip ? [noteSignatureNotAppended(signatureSkip, identity?.email ?? args?.from)] : []),
   ];
   return { subject: replyParams.subject, emailId, ...(notes.length > 0 && { notes }) };
 }

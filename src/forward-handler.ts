@@ -3,9 +3,12 @@ import { coerceRecipients, coerceBool, coerceAttachments } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { isBlank, assertBodyInputs } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
-import { applySignature, buildForwardBodies, emptyQuoteImages } from './reply-quote.js';
-import type { QuoteImageOutcome } from './reply-quote.js';
-import { resolveSignature } from './identity.js';
+import {
+  applySignature, buildForwardBodies, emptyQuoteImages, noteSignatureNotAppended,
+  signatureSkipReason,
+} from './reply-quote.js';
+import type { QuoteImageOutcome, SignatureSkipReason } from './reply-quote.js';
+import { selectIdentity, signatureOf } from './identity.js';
 import type { ResolvedSignature } from './identity.js';
 import {
   DEFAULT_INLINE_CONTEXT, planAuthoredInlineImages, recordQuoteImages,
@@ -116,6 +119,13 @@ export interface ForwardCarry {
 export interface BuiltForward {
   asAttachment: boolean;
   forwardParams: ForwardParams;
+  // Why a requested signature landed nowhere, or absent when it landed (or when none was
+  // requested — this builder cannot tell "not asked" from "asked, identity has none", so
+  // composeForward supplies that half). Reported by the builder rather than re-derived by
+  // the orchestration because the two forward shapes decide the signed body differently:
+  // an asAttachment forward signs a filler note when the caller gave none, and an inline
+  // forward with no note at all makes the signature the whole content above the block.
+  signatureSkip?: SignatureSkipReason;
   // What the caller's own note asks this server to embed, and whether the forward will
   // actually be able to display it (#13).
   inlinePlan: AuthoredInlinePlan;
@@ -248,10 +258,9 @@ export function buildForwardParams(
     // the body. The filler above is signed too — a signature under one line of filler is
     // still the sign-off the caller asked for, and leaving it off would make the flag mean
     // something different on this one forward shape.
-    const signedNote = applySignature(
-      { textBody: params.textBody, htmlBody: params.htmlBody },
-      signature,
-    );
+    const noteBodies = { textBody: params.textBody, htmlBody: params.htmlBody };
+    const signatureSkip = signatureSkipReason(noteBodies, signature);
+    const signedNote = applySignature(noteBodies, signature);
     if (signedNote.textBody !== undefined) params.textBody = signedNote.textBody;
     if (signedNote.htmlBody !== undefined) params.htmlBody = signedNote.htmlBody;
     if (!originalEmail?.blobId) {
@@ -266,6 +275,7 @@ export function buildForwardParams(
     return {
       asAttachment,
       forwardParams: params,
+      ...(signatureSkip && { signatureSkip }),
       inlinePlan,
       quoteImages: emptyQuoteImages(),
       carry: emptyCarry(),
@@ -319,7 +329,14 @@ export function buildForwardParams(
   const attachments = [...carried, ...quoteImages.minted];
   if (attachments.length > 0) params.attachments = attachments;
 
-  return { asAttachment, forwardParams: params, inlinePlan, quoteImages, carry };
+  return {
+    asAttachment,
+    forwardParams: params,
+    ...(bodies.signatureSkip && { signatureSkip: bodies.signatureSkip }),
+    inlinePlan,
+    quoteImages,
+    carry,
+  };
 }
 
 // The minimal client surface composeForward needs; JmapClient satisfies it
@@ -378,11 +395,10 @@ export async function composeForward(
   // Off by default, and the lookup is skipped when it is off — see composeReply for why the
   // sign-off is resolved fresh on every call rather than remembered.
   const appendSignature = coerceBool(args?.appendSignature) === true;
-  const signature = appendSignature
-    ? resolveSignature(await client.getIdentities(), args?.from)
-    : undefined;
+  const identity = appendSignature ? selectIdentity(await client.getIdentities(), args?.from) : undefined;
+  const signature = appendSignature ? signatureOf(identity) : undefined;
 
-  const { forwardParams, inlinePlan, quoteImages, carry } = buildForwardParams(
+  const { forwardParams, inlinePlan, quoteImages, carry, signatureSkip } = buildForwardParams(
     args,
     originalEmail,
     { specs, attachmentsEnabled: !!attachDir || allowBlobAttach },
@@ -436,6 +452,11 @@ export async function composeForward(
       emailId,
       readBack: (id) => client.getEmailById(id),
     }),
+    // Only when this call asked: the builder cannot tell "not requested" from "requested,
+    // and the identity has none", so the flag half of that decision is applied here.
+    ...(appendSignature && signatureSkip
+      ? [noteSignatureNotAppended(signatureSkip, identity?.email ?? args?.from)]
+      : []),
   ];
   return {
     subject: forwardParams.subject,

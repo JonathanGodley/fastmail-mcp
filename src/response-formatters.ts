@@ -110,11 +110,17 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
   return parts.join(', ');
 }
 
-// The embedded-image sentences a call produced, appended to its result text (#13). They are
-// already whole sentences, composed in one place so their counts agree, so this only joins
-// them; an empty channel adds nothing.
+// The notes a call produced — embedded-image sentences (#13), signature outcomes (#33) —
+// appended to its result text. They are already whole sentences, composed in one place so
+// their counts agree, so this only joins them; an empty channel adds nothing.
+//
+// ONE LINE EACH, not a space join. The summaries these ride on end in caller-controlled text
+// with no terminator (`Subject: ${subject}`), so a leading space ran the first note straight
+// on from the subject line: "Subject: Re: Lunch appendSignature was requested but…". A
+// newline is the same separation convention the rest of the result text uses for a note that
+// is about the call rather than part of its summary.
 export function formatInlineNotes(notes?: string[]): string {
-  return notes?.length ? ` ${notes.join(' ')}` : '';
+  return notes?.length ? notes.map((note) => `\n${note}`).join('') : '';
 }
 
 // The edit_draft result text. An edit recreates the message (JMAP content is immutable),

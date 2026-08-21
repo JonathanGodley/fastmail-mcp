@@ -207,6 +207,27 @@ escaped into an HTML block. That escape is not the forbidden "fabricate HTML fro
 plain-text message" — the HTML body already exists and ships either way; this only decides
 what goes inside it, and skipping it would drop a signature the user really has.
 
+Deriving the text form of an HTML-only signature **suppresses image placeholders**, and that
+is load-bearing rather than cosmetic. The `unconditional` policy writes `[image]` for an
+embedded image, which is right for the text alternative of a body that ships that image —
+and wrong for a message that ships no HTML at all, where the recipient's entire sign-off
+would be a line describing something no part of the message carries. (That is the same rule
+`buildReplyBodies` applies to quoted images.) So an images-only HTML signature derives to the
+empty string on that branch and is reported as `no-text-form` rather than shipped as a
+placeholder; alt text, which always wins, still derives normally.
+
+The **other** branch deliberately does not suppress, and the asymmetry is the whole point.
+When HTML ships, the embedded image ships with it, so `[image]` is exactly what
+`unconditional` is for — and it has to agree with the derivation downstream, because an
+HTML-only draft's text fallback is derived from the *whole* signed HTML under that same
+policy. Suppressing here would give a caller who supplies both bodies a different text
+sign-off from one who supplies HTML alone, which is the by-itself drift this split exists to
+prevent. So the two spellings of "my signature is a logo" are genuinely different outcomes on
+this branch, not an inconsistency: an **embedded** (`cid:`) logo derives `[image]` and the
+sign-off is present, while a **remote** (`http(s)`) one derives nothing at all — a remote
+image writes no placeholder under any policy — and that one is reported as
+`text-part-unsigned`.
+
 **Placement is above the quoted history**, which is why the insertion lives in
 `src/reply-quote.ts` rather than in `createDraft`. By the time a compose path reaches
 `createDraft`, the quote or forwarded block has already been concatenated onto the body, so
@@ -227,14 +248,196 @@ is the deliberate way to take one off. Note the asymmetry with the quote guard n
 dropped quote must be *challenged*, because only the caller knows which message it quoted,
 while a dropped signature can simply be re-read from the identity.
 
-**Residual: detection is HTML-only.** The marker is a class, so a draft with no HTML body
-carries none. A plain-text draft that was signed keeps its signature through any edit that
-does not write a body (bodies are untouched), but an edit that rewrites its text body
-without passing `appendSignature:true` loses it, and a hand-typed signature is invisible to
-this everywhere. Accepted rather than fixed: the alternatives are matching the signature's
-*text* against the identity (fragile the moment either is edited by a character) or storing
-state outside the message (there is nowhere to put it that survives the recreate). The
-edit-time flag is the recovery, and it is documented on the parameter.
+**What the marker's survival is proven against, and what it is not.** The class round-trips
+through the JMAP store — written on create, read back unchanged on the next `Email/get`, which
+is what every test here and the live probe exercise. It has **not** been measured against a
+Fastmail *web UI* round trip: a draft this server signed, opened and saved in the browser, and
+then edited here again. Two interactions follow from that gap and neither is tested:
+
+- if the UI re-appends its own signature on each save, a draft this server signed gains a
+  second sign-off that nothing here put there — the accumulation shape reported in
+  [#135](https://github.com/JonathanGodley/fastmail-mcp/issues/135), arriving from the other
+  side of the same draft;
+- if the UI re-serialises the `class` attribute away, `hasSignatureMarker` goes false and the
+  preserve path stops firing — silently, because "the draft carried no signature" and "the
+  marker was lost" are the same observation from in here.
+
+Settling either needs a measurement against the live UI, not a reading of this code. Until
+then, treat "the marker survives" as a claim about the JMAP store only.
+
+**Residual: PRESERVATION is HTML-only.** The marker is a class, so a draft with no HTML body
+carries none. State the residual at its real width: a signature *this server appended* to a
+plain-text draft is exactly as invisible here as a hand-typed one, because nothing about the
+detector looks at where the text came from. So a plain-text draft that was signed keeps its
+signature through any edit that does not write a body (bodies are untouched), but an edit
+that rewrites its text body without passing `appendSignature:true` loses it. Accepted rather
+than fixed: the alternatives are matching the signature's *text* against the identity
+(fragile the moment either is edited by a character) or storing state outside the message
+(there is nowhere to put it that survives the recreate). The edit-time flag is the recovery,
+and it is documented on the parameter.
+
+**Idempotence is NOT the same thing, and the text path has it.** Naming
+`appendSignature:true` as the recovery above only works if asking twice does not sign twice,
+and the HTML marker cannot provide that for a body with no HTML. So `applySignature` also
+declines to append when the body it is given **already carries one of the identity's two block
+forms among its own lines**. That is not the fragile match rejected above: both forms are built
+from the identity by this same call, so neither side is a remembered value that can drift.
+Without it the read-modify-write loop the residual prescribes (read the draft, edit the words,
+send the body back with the flag still set) appends another copy every time round, which is the
+shape a duplicated sign-off actually takes in practice.
+
+**The rule is SUBTRACTIVE: cut off what cannot be the draft's own text, then match over the
+rest.** `updateDraft` hands `applySignature` the caller's **whole** `textBody`, quoted history
+included, so the sign-off it is looking for is usually somewhere in the middle rather than at
+either end. One removal builds the haystack, and it keys on a thing that *is* a line:
+
+- **The forward separator line and everything below it** — this server's
+  `----- Original message -----` and Gmail's `---------- Forwarded message ----------`,
+  anchored at line start, the same two shapes `hasTextForwardMarker` recognises. Because the
+  anchor sits on the dashes, a `> `-quoted separator inside a reply quote does not cut the body
+  short, which is the same answer `hasTextForwardMarker` gives.
+
+What is left is compared against each block form as a contiguous run of **whole lines**.
+
+**A reply quote needs no removal, and removing one was a bug worth recording.** The whole-line
+comparison already keeps quoted content out, because a quoted line is `'> '` + text and
+`> Regards,` is not `Regards,`. An earlier version of this rule *also* dropped every
+`>`-prefixed line from the body as belt and braces, and that was the opposite of safe: the
+block on the other side of the comparison is not filtered, and `signatureTextBlock` derives the
+text form through html-to-text, whose `<blockquote>` output **is** `> `-prefixed. So any
+identity whose HTML signature contains a `<blockquote>` — a quote-of-the-day sign-off — had a
+needle line that no surviving body line could ever equal, and every pass of the read-modify-write
+loop appended another copy of the sign-off in silence. Dropping the filter cannot introduce a
+wrong match either: a `> `-prefixed body line can only equal a `> `-prefixed needle line, which
+is the signature's own quoted content and exactly the match wanted.
+
+**Why subtractive, and why nothing here parses an attribution line.** Four earlier versions of
+this guard tried to find where history *begins* by recognising the attribution above the quote
+(`On <date>, <name> wrote:`). Attribution lines wrap, localise and differ per client, so each
+version was a fresh guess about one client with an unbounded supply of others left to be wrong
+about — a hard-wrapped Gmail attribution is what broke the last one, and each break shipped two
+sign-offs. A separator line needs no parsing: it matches or it does not.
+
+**The two errors are not symmetric, and the rule is tuned for that.** A false positive (read as
+signed when it is not) appends nothing *and* reports `already-signed`, so the caller sees it and
+can write the sign-off into the body themselves. A false negative (read as unsigned when it is
+signed) ships two sign-offs and says nothing at all. Only the second is invisible from the
+caller's side, so wherever the rule cannot be certain it falls on the side of not appending.
+That trade is the whole justification for the design; a "smarter", fuzzier match would swap the
+announced error for the silent one.
+
+**Accepted residual — a forward this server does not recognise as one.** An Outlook-style
+`From:/Sent:/To:/Subject:` header-block forward carries no dashed separator, so it is not
+removed, and a forwarded message whose own text carries this identity's sign-off reads as this
+draft's own: the call reports `already-signed` and the caller's note goes out bare. That is the
+*cheap* error by construction, and it is recovered by writing the sign-off into the note.
+Consistent rather than accidental: `hasTextForwardMarker` does not recognise that shape either,
+so no path in this server treats such a body as carrying a forwarded block. Extending separator
+recognition is tracked as issue #144, and it is one change to both markers.
+
+A *recognised* forward has no such residual: the block is removed wherever the sign-off sits
+inside it, including at its very end, so the caller's note above it is signed normally.
+
+**BOTH forms, not just the one this call would write.** Testing only the outgoing block was a
+duplication bug, not a simplification. Which form is sitting in a body depends on whether the
+call that put it there shipped HTML — an HTML-shipping call writes the form derived from
+`htmlSignature`, a text-only call writes the configured `textSignature` — and for the ordinary
+identity that configures both, those are different strings. So the permitted HTML→text
+conversion (`clearFields:['htmlBody']` with the text the draft just handed back) offered the
+derived form to a call about to write the configured one, and the sign-off stacked: on the
+`appendSignature:true` recovery this residual names, and on the *omitted*-flag preserve path,
+where the result additionally announced a re-append that had not happened. Matching both forms
+is what closes it, and it costs nothing: they are two strings this call already has.
+
+**The comparison is normalised, not byte-exact.** The body being tested has usually made a
+round trip through a mail store, and a store is free to change it in ways that mean nothing to
+a reader and everything to an equality test. Both sides get the SAME normalisation — any line
+ending to LF, then each line trimmed at both ends — so it can only ever make a match more
+likely, which is the announced-error direction. Four things it answers, each of which would
+otherwise ship a second sign-off in silence:
+
+- **CRLF, and a bare CR.** RFC 5322 says CRLF; a store emitting bare CR would leave the whole
+  body reading as one line, matching nothing.
+- **Stripped trailing whitespace.** `-- `, the RFC 3676 signature delimiter, *ends in a space*,
+  so losing it is not exotic.
+- **A space replaced by NBSP.** The trim uses `\s`, which covers U+00A0 and the other Unicode
+  spaces, so the same delimiter still matches when its trailing space arrives as U+00A0.
+- **Leading whitespace**, because of RFC 3676 *space-stuffing*: a `format=flowed` sender
+  prepends a space to any line starting with a space, `>` or `From `. Fastmail does not emit
+  `format=flowed` (verified live), but `edit_draft` receives drafts composed by other clients.
+
+**An append that lands nowhere is reported.** `appendSignature` is an input the caller
+cannot verify without re-reading the draft, so a flag that silently no-ops is
+indistinguishable from one that worked — the never-silently-drop rule, applied to an input.
+Every path emits a note naming which reason applied, and there are five:
+
+| reason | what happened |
+| --- | --- |
+| `no-signature` | the identity has none configured, or `from` names no verified identity |
+| `no-body` | this call wrote no body for the sign-off to sit under (a blank body counts as none) |
+| `already-signed` | the body supplied already carries a sign-off this call would otherwise duplicate (quoted and forwarded history excluded) |
+| `no-text-form` | the message ships no HTML, and the signature has no plain-text form to write into the text part |
+| `text-part-unsigned` | the HTML body *was* signed, but the signature has no text form for the message's plain-text alternative |
+
+The last one is the only **partial** outcome: a recipient rendering the HTML sees the sign-off
+and one reading the plain-text alternative does not, so its note deliberately does not open
+with "nothing was appended", which would be a plainly false report.
+
+**`text-part-unsigned` does not depend on which bodies the caller passed**, and scoping it to
+"the caller also supplied a text part" was a sixth outcome hiding as a silence. An `htmlBody`
+alone still ships a plain-text alternative — derived downstream from the now-signed HTML, under
+the same policy this derives under — so when there is no text form to derive, the recipient
+reading that alternative sees no sign-off, identically to the case where the caller supplied
+the text part themselves. Reporting only the second made the HTML-only call the one place in
+this feature where a requested flag landed nowhere without saying so.
+
+`no-body` covers a **blank** body as well as an absent one, on both formats. `htmlShips` is
+`!isBlank(htmlBody)` because `buildBodyParts` drops a blank body and signing a part no
+recipient sees is not signing; the text side reads the same way for the same reason. Falling
+through on a blank `textBody` instead made the signature the *whole* body — the caller's own
+(blank) text discarded, a signature-only message stored, and nothing reported — which
+contradicted every wording on every surface, all of which say a blank body counts as none. The
+same rule applies to a blank text alternative beside a real HTML body: it is left alone rather
+than replaced with a bare sign-off, and the alternative is derived from the signed HTML.
+
+`edit_draft` reports the same set from both sides. `appendSignature:true` is a request made in
+that call, so it gets exactly the compose wording for every reason — including
+`already-signed` and `no-body`, which it used to swallow; a flag that reports on three
+surfaces and stays silent on the fourth is worse than one that never reports. An **omitted**
+flag is the stored draft's earlier decision being preserved, so a failure there is a loss
+rather than a declined request and gets loss wording instead. Two outcomes are not losses on
+that path and stay silent: a supplied body that already carries the sign-off (which is what
+preservation wanted), and an edit that writes no body at all (both bodies, signature included,
+are carried through verbatim).
+
+Note that `no-signature` is not the only way an edit's *keep* can fail. An identity whose
+signature is images-only HTML is not signature-less, so a gate keyed on "the identity has
+none" arms nothing for it — and an edit converting that draft to plain text then dropped the
+sign-off in silence. The reason is read off the same plan the append runs, which is what makes
+that gate total rather than a list of remembered cases.
+
+**A note-less forward signs; a body-less reply does not.** `buildForwardBodies` makes the
+signature the whole content above the forwarded-message block when the caller supplied no
+note, because a bare "FYI, see below" forward is the normal shape of that tool and a sign-off
+is the only content such a message would otherwise lack. `buildReplyBodies` has no equivalent
+arm: a reply whose entire content is a sign-off over a quote is not a message, and a body-less
+reply draft is an intermediate state meant to be filled in via `edit_draft` before sending.
+The asymmetry is deliberate; the reply reports the unsigned outcome rather than inventing a
+body for it.
+
+**The sign-off follows the address written into `from`, not the identity resolved for the
+recreate.** On the edit path these can differ: when the edit writes no `from` and the stored
+one matches no verified identity, `updateDraft`'s identity resolution falls back to the
+account default while the address actually written into `from` stays the stored one. Signing
+from that fallback would put one identity's sign-off under another identity's address, so the
+signature is resolved against the written address instead, and the draft losing its signature
+that way is reported.
+
+The **display name** follows the same address, and for the same reason. It resolves in the
+same order: the verified identity that owns the written address, else the name the stored
+draft already carried against it, else none. The account default's name is deliberately *not*
+a fallback — pairing it with a foreign address is the identical drift, one step to the left of
+the sign-off.
 
 ## Reply-quote preservation on edit (#37, redesigned #42)
 

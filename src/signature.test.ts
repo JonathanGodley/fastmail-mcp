@@ -19,9 +19,10 @@ import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applySignature, hasSignatureMarker, signatureHtmlBlock, signatureTextBlock,
-  buildReplyBodies, buildForwardBodies, NOTE_SIGNATURE_REAPPENDED,
+  buildReplyBodies, buildForwardBodies, NOTE_SIGNATURE_REAPPENDED, signatureSkipReason,
+  noteSignatureNotAppended, noteSignatureUnavailableOnEdit,
 } from './reply-quote.js';
-import { resolveSignature, selectIdentity, signatureOf } from './identity.js';
+import { selectIdentity, signatureOf } from './identity.js';
 import { composeDraft } from './compose-handler.js';
 import type { ComposeClient } from './compose-handler.js';
 import { composeReply } from './reply-handler.js';
@@ -51,9 +52,32 @@ const UNSIGNED_IDENTITY = { id: 'id-2', name: 'Test User', email: 'me@example.co
 // against this rather than against the configured textSignature.
 const DERIVED_TEXT = 'Kind regards,\nTest User';
 
+// An identity whose html sign-off carries a QUOTATION — a quote-of-the-day signature, which
+// is an ordinary thing for a person to configure. It matters far out of proportion to how
+// exotic it looks: html-to-text renders a <blockquote> as '> '-prefixed lines, so this is the
+// only fixture in this file whose derived text block contains a line that looks like reply
+// quoting. Every other signature here is a plain two-line sign-off or an <img>, and a guard
+// that treated a '> ' line in the BODY as quoted history while leaving it in the BLOCK it was
+// comparing against therefore passed the whole suite while duplicating this identity's
+// sign-off on every pass of the read-modify-write loop, with nothing reported.
+const QUOTING_IDENTITY = {
+  id: 'id-q',
+  name: 'Test User',
+  email: 'me@example.com',
+  mayDelete: false,
+  textSignature: 'Regards,\nTest User\n> Per aspera ad astra',
+  htmlSignature: '<div>Kind regards,</div><blockquote>Per aspera ad astra</blockquote><div>Test User</div>',
+};
+const QUOTING_SIG = signatureOf(QUOTING_IDENTITY)!;
+
 // ---------------------------------------------------------------------------
-// resolveSignature / identity selection
+// identity selection and the sign-off read off it
 // ---------------------------------------------------------------------------
+
+// What every handler does: pick the identity, then read its sign-off. Written out here
+// rather than wrapped in a helper because that is the shape production uses — the handlers
+// need the identity OBJECT too, for the address the "nothing was appended" note names.
+const sigFor = (identities: any[], from?: string) => signatureOf(selectIdentity(identities, from));
 
 describe('reading the sign-off off an identity', () => {
   it('returns both configured forms', () => {
@@ -79,7 +103,7 @@ describe('reading the sign-off off an identity', () => {
   it('selects the identity matching an explicit from, not the default', () => {
     const other = { id: 'id-9', email: 'other@example.com', mayDelete: true, textSignature: 'Other' };
     assert.equal(selectIdentity([SIGNED_IDENTITY, other], 'other@example.com'), other);
-    assert.equal(resolveSignature([SIGNED_IDENTITY, other], 'OTHER@example.com')?.text, 'Other');
+    assert.equal(sigFor([SIGNED_IDENTITY, other], 'OTHER@example.com')?.text, 'Other');
   });
 
   it('falls back to the identity that cannot be deleted when no from is given', () => {
@@ -89,14 +113,14 @@ describe('reading the sign-off off an identity', () => {
 
   it('honours a wildcard identity', () => {
     const wild = { id: 'id-w', email: '*@example.com', mayDelete: true, textSignature: 'Wild' };
-    assert.equal(resolveSignature([wild], 'anything@example.com')?.text, 'Wild');
+    assert.equal(sigFor([wild], 'anything@example.com')?.text, 'Wild');
   });
 
   // createDraft raises the real "not verified for sending" refusal a moment later; a
   // signature lookup that threw its own version first would replace an accurate message
   // with an oblique one.
   it('resolves to no signature — not an error — when from names nothing verified', () => {
-    assert.equal(resolveSignature([SIGNED_IDENTITY], 'stranger@elsewhere.example'), undefined);
+    assert.equal(sigFor([SIGNED_IDENTITY], 'stranger@elsewhere.example'), undefined);
   });
 });
 
@@ -150,6 +174,386 @@ describe('applySignature', () => {
     assert.equal(out.textBody, 'Hi');
   });
 
+  // A plain-text body carries no class, so the html marker cannot protect it. Without an
+  // idempotence rule of its own, the read-modify-write loop the plain-text residual
+  // prescribes as the recovery (read the draft, edit the text, send it back with
+  // appendSignature:true) stacks a second copy every time round.
+  it('does not sign a plain-text body twice when it already ends with the block', () => {
+    const once = applySignature({ textBody: 'Hi Bob' }, SIG).textBody!;
+    assert.equal(once, 'Hi Bob\n\nRegards,\nTest User');
+    // The loop: read that body back, change the words above the sign-off, send it in again.
+    const edited = once.replace('Hi Bob', 'Hi Bob, one more thing');
+    const twice = applySignature({ textBody: edited }, SIG);
+    assert.equal(twice.textBody, edited);
+    assert.equal(twice.textBody!.match(/Regards,/g)!.length, 1);
+  });
+
+  it('reports the already-signed text body rather than silently doing nothing', () => {
+    assert.equal(signatureSkipReason({ textBody: 'Hi\n\nRegards,\nTest User' }, SIG), 'already-signed');
+    assert.equal(signatureSkipReason({ textBody: 'Hi' }, SIG), undefined);
+  });
+
+  // The cross-form hole. Which text block a previous call left in the body depends on
+  // whether THAT call shipped html — an html-shipping one writes the form derived from
+  // htmlSignature, a text-only one writes the configured textSignature — and for an identity
+  // that configures both (the normal case, and what SIGNED_IDENTITY models) those differ.
+  // Testing only the form THIS call would write signed a converted draft twice.
+  it('does not sign twice when the body carries the OTHER form of the same signature', () => {
+    // An html draft's derived text part, handed back to a text-only call.
+    const converted = `Hello, one more thing.\n\n${DERIVED_TEXT}`;
+    assert.equal(applySignature({ textBody: converted }, SIG).textBody, converted);
+    assert.equal(signatureSkipReason({ textBody: converted }, SIG), 'already-signed');
+
+    // …and the mirror: a text-only draft's configured sign-off, handed to a call that also
+    // ships html, where the derived form is what would otherwise be appended.
+    const textForm = 'Hello.\n\nRegards,\nTest User';
+    const out = applySignature({ textBody: textForm, htmlBody: '<p>Hello.</p>' }, SIG);
+    assert.equal(out.textBody, textForm);
+    assert.ok(hasSignatureMarker(out.htmlBody)); // the unsigned html still gets one
+  });
+
+  // The edit path hands planSignature the caller's WHOLE text body, quote included, so the
+  // sign-off it is looking for is not at the end — the quote is. An end-of-body test alone
+  // read this as unsigned and stacked a second block underneath the quote, which is the exact
+  // duplication the flag's own documentation promises cannot happen, on the one path that
+  // documentation points callers at.
+  it('does not sign twice when the sign-off sits above a quoted original', () => {
+    const withQuote = 'Thanks.\n\nRegards,\nTest User\n\nOn 1 Jan Alice wrote:\n> original';
+    assert.equal(applySignature({ textBody: withQuote }, SIG).textBody, withQuote);
+    assert.equal(signatureSkipReason({ textBody: withQuote }, SIG), 'already-signed');
+
+    // The other form above the same quote (an html draft's derived text, converted).
+    const derivedAbove = `Thanks.\n\n${DERIVED_TEXT}\n\nOn 1 Jan Alice wrote:\n> original`;
+    assert.equal(applySignature({ textBody: derivedAbove }, SIG).textBody, derivedAbove);
+  });
+
+  // Nothing here parses the attribution line, so the shapes that used to need special
+  // handling are just ordinary bodies: the quote's own "> " prefix is what identifies it, and
+  // whatever sits between the sign-off and the quote is left in the haystack rather than being
+  // located and cut off. A hard-wrapped Gmail attribution — the shape that broke the previous
+  // rule — and one written tight against the sign-off with no blank line are the same case.
+  it('does not sign twice whatever shape the attribution above the quote takes', () => {
+    const wrapped = [
+      'Thanks for that.',
+      '',
+      'Regards,',
+      'Test User',
+      '',
+      'On Mon, Jan 1, 2026 at 9:00 AM Alice Example <alice@example.com>',
+      'wrote:',
+      '',
+      '> the original message',
+    ].join('\n');
+    assert.equal(signatureSkipReason({ textBody: wrapped }, SIG), 'already-signed');
+    assert.equal(applySignature({ textBody: wrapped }, SIG).textBody, wrapped);
+
+    // The same body with the attribution on one line, which is the shape this server writes.
+    const single = wrapped.replace('<alice@example.com>\nwrote:', '<alice@example.com> wrote:');
+    assert.equal(signatureSkipReason({ textBody: single }, SIG), 'already-signed');
+
+    // …and one written directly above the attribution with no blank line between them.
+    const tight = 'Thanks.\nRegards,\nTest User\nOn 1 Jan Alice wrote:\n> original';
+    assert.equal(signatureSkipReason({ textBody: tight }, SIG), 'already-signed');
+  });
+
+  // A genuinely unsigned body above a quote is still signed, however its own prose runs into
+  // the attribution: nothing about the attribution is read, and no line is treated specially.
+  it('signs an unsigned body whose last line runs into the attribution', () => {
+    const unsigned = 'Thanks.\nSee my reply below.\nOn 1 Jan Alice wrote:\n> original';
+    assert.equal(signatureSkipReason({ textBody: unsigned }, SIG), undefined);
+    const out = applySignature({ textBody: unsigned }, SIG).textBody!;
+    assert.equal(out.match(/Regards,/g)!.length, 1, out);
+  });
+
+  // Quote depth changes nothing: the block's lines carry no '>' at all, so neither '> ' nor
+  // '>> ' in front of them can equal one. A nested block carrying the sign-off is not ours.
+  it('does not read a sign-off inside a nested >> quote as the draft\'s own', () => {
+    const nested = [
+      'Thanks.',
+      '',
+      'On 1 Jan Alice wrote:',
+      '> On 31 Dec Test User wrote:',
+      '>> Here it is.',
+      '>>',
+      '>> Regards,',
+      '>> Test User',
+    ].join('\n');
+    assert.equal(signatureSkipReason({ textBody: nested }, SIG), undefined);
+    const out = applySignature({ textBody: nested }, SIG).textBody!;
+    assert.equal(out.match(/^Regards,$/gm)!.length, 1, out);
+  });
+
+  // A sign-off that CONTAINS a quotation. html-to-text renders <blockquote> as '> '-prefixed
+  // lines, so this identity's derived text block has a line that looks exactly like reply
+  // quoting — and a guard that filtered such lines out of the body while leaving them in the
+  // block it compared against could never match this signature at all. The result was a
+  // second sign-off on every pass of the loop, with nothing reported.
+  it('recognises a sign-off whose own text contains a quoted line', () => {
+    const derived = signatureTextBlock(QUOTING_SIG, true)!;
+    assert.match(derived, /^> Per aspera ad astra$/m, derived); // the premise
+
+    for (const block of [derived, signatureTextBlock(QUOTING_SIG, false)!]) {
+      const body = `Hello.\n\n${block}`;
+      assert.equal(applySignature({ textBody: body }, QUOTING_SIG).textBody, body, block);
+      assert.equal(signatureSkipReason({ textBody: body }, QUOTING_SIG), 'already-signed', block);
+    }
+  });
+
+  // …and the same signature above a real reply quote, which is where the two kinds of
+  // '> ' line sit in one body at once: the block's own quotation, and the quoted original.
+  it('recognises a quoting sign-off sitting above a quoted original', () => {
+    const block = signatureTextBlock(QUOTING_SIG, false)!;
+    const body = `Thanks.\n\n${block}\n\nOn 1 Jan Alice wrote:\n> original`;
+    assert.equal(applySignature({ textBody: body }, QUOTING_SIG).textBody, body);
+    assert.equal(signatureSkipReason({ textBody: body }, QUOTING_SIG), 'already-signed');
+  });
+
+  // The quoted original still does not read as this draft's own sign-off. That is the job the
+  // removed line filter looked like it was doing; the whole-line comparison does it, because
+  // '> Regards,' is not 'Regards,' — including when the identity itself quotes.
+  it('still ignores a sign-off that is only present inside the quote', () => {
+    const body = 'Thanks.\n\nOn 1 Jan Alice wrote:\n> Regards,\n> Test User\n> > Per aspera ad astra';
+    assert.equal(signatureSkipReason({ textBody: body }, QUOTING_SIG), undefined);
+    assert.equal(signatureSkipReason({ textBody: body }, SIG), undefined);
+  });
+
+  // A body that IS the sign-off and nothing else — the match starts at line 0, the one end of
+  // the run the other fixtures never exercise (they all have text above the block).
+  it('recognises a body whose every line is the sign-off', () => {
+    assert.equal(signatureSkipReason({ textBody: 'Regards,\nTest User' }, SIG), 'already-signed');
+    assert.equal(applySignature({ textBody: 'Regards,\nTest User' }, SIG).textBody, 'Regards,\nTest User');
+  });
+
+  // A configured signature that opens or closes with a blank line: the block is compared at
+  // its non-blank extent, because the body need not carry a matching blank line on that side.
+  it('is not defeated by a signature configured with blank lines around it', () => {
+    const padded = { text: '\nRegards,\nTest User\n' };
+    assert.equal(signatureSkipReason({ textBody: 'Hi\n\nRegards,\nTest User' }, padded), 'already-signed');
+    // Idempotent through its own append, too — the blank lines it writes change nothing.
+    const once = applySignature({ textBody: 'Hi' }, padded).textBody!;
+    assert.equal(applySignature({ textBody: once }, padded).textBody, once);
+    assert.equal(once.match(/Regards,/g)!.length, 1, once);
+  });
+
+  it('does not sign twice when the sign-off sits above a forwarded-message block', () => {
+    const withBlock = 'FYI.\n\nRegards,\nTest User\n\n----- Original message -----\nFrom: Alice\n\nbody';
+    assert.equal(applySignature({ textBody: withBlock }, SIG).textBody, withBlock);
+    assert.equal(signatureSkipReason({ textBody: withBlock }, SIG), 'already-signed');
+  });
+
+  // …and the forwarded block is removed entirely rather than searched. A forward reproduces
+  // the forwarded message's text UNPREFIXED, so a message that itself carries this identity's
+  // sign-off would read as this draft's own and the caller's note would go out bare —
+  // wherever in the forwarded block that sign-off sits, including at its very end.
+  it('still signs a note above a forwarded message that carries the same sign-off', () => {
+    const above = 'Please see below.\n\n----- Original message -----\nFrom: me\n\nRegards,\nTest User\n\nHi';
+    assert.equal(signatureSkipReason({ textBody: above }, SIG), undefined);
+    // WHERE the block lands on a caller body that already contains history is a separate
+    // question this does not pin; what it pins is that the note is signed at all.
+    assert.equal(applySignature({ textBody: above }, SIG).textBody!.match(/Regards,/g)!.length, 2);
+
+    // Gmail's separator, and the sign-off as the LAST thing in the forwarded message.
+    const atEnd = 'Please see below.\n\n---------- Forwarded message ----------\nFrom: me\n\nHi\n\nRegards,\nTest User';
+    assert.equal(signatureSkipReason({ textBody: atEnd }, SIG), undefined);
+    assert.equal(applySignature({ textBody: atEnd }, SIG).textBody!.match(/Regards,/g)!.length, 2);
+  });
+
+  // The residual, pinned so it reads as a decision rather than a surprise. A forwarded block
+  // in a shape no separator names — Outlook's From:/Sent:/To:/Subject: header block — is not
+  // removed, so a forwarded message carrying this identity's own sign-off reads as this
+  // draft's own and the note goes out bare. That is the CHEAP error by construction: it is
+  // announced as already-signed, and the caller can write the sign-off into the note. The
+  // expensive error is the other one — two sign-offs shipped in silence. Extending separator
+  // recognition is issue #144.
+  it('reports already-signed for a forward whose separator this server does not know', () => {
+    const body = [
+      'Please see below.',
+      '',
+      'From: Alice <alice@example.com>',
+      'Sent: Monday, 1 January 2026 09:00',
+      'To: Test User <me@example.com>',
+      'Subject: Project update',
+      '',
+      'Hi',
+      '',
+      'Regards,',
+      'Test User',
+    ].join('\n');
+    assert.equal(signatureSkipReason({ textBody: body }, SIG), 'already-signed');
+    assert.equal(applySignature({ textBody: body }, SIG).textBody, body);
+  });
+
+  // A body that already contains its own quote gets the block appended at the END, below the
+  // quote, so the next round of the same loop has to find it there — the quoted lines drop
+  // out of the haystack and the appended block sits in what is left.
+  it('does not stack when a previous append landed below the history', () => {
+    const once = applySignature(
+      { textBody: 'Thanks.\n\nOn 1 Jan Alice wrote:\n> original' },
+      SIG,
+    ).textBody!;
+    assert.equal(once.match(/Regards,/g)!.length, 1, once);
+    assert.equal(applySignature({ textBody: once }, SIG).textBody, once);
+    assert.equal(signatureSkipReason({ textBody: once }, SIG), 'already-signed');
+  });
+
+  // Idempotence has to survive a round trip through a mail store, which is free to change
+  // line endings and (because "-- " ends in a space) to strip per-line trailing whitespace.
+  it('is not defeated by CRLF line endings or stripped trailing whitespace', () => {
+    const once = applySignature({ textBody: 'Hi' }, SIG).textBody!;
+    assert.equal(applySignature({ textBody: once.replace(/\n/g, '\r\n') }, SIG).textBody, once.replace(/\n/g, '\r\n'));
+
+    // RFC 3676: the delimiter ends in a space, and a mail store is free to strip it. The
+    // identity configures an html form too — the ordinary Fastmail shape — so the DERIVED
+    // form (which loses the trailing space on its way through html) cannot stand in for the
+    // configured one here: the only thing that matches the stripped body is the per-line
+    // normalisation applied to both sides.
+    const delimited = { text: 'Cheers,\n-- \nTest User', html: '<div>Kind regards,</div><div>Test User</div>' };
+    const signed = applySignature({ textBody: 'Hi' }, delimited).textBody!;
+    assert.match(signed, /\n-- \n/); // the premise: the space is there to lose
+    const stripped = signed.split('\n').map((l) => l.replace(/[ \t]+$/, '')).join('\n');
+    assert.equal(applySignature({ textBody: stripped }, delimited).textBody, stripped);
+    assert.equal(signatureSkipReason({ textBody: stripped }, delimited), 'already-signed');
+  });
+
+  // Three more ways the same round trip changes a body. Each of these, left unhandled, reports
+  // the body unsigned and appends a SECOND sign-off with no note — the silent failure this
+  // guard exists to prevent, so each is pinned rather than left to the two above.
+  it('is not defeated by bare CR endings, an NBSP delimiter, or space-stuffed lines', () => {
+    const delimited = { text: 'Cheers,\n-- \nTest User', html: '<div>Kind regards,</div><div>Test User</div>' };
+    const signed = applySignature({ textBody: 'Hi' }, delimited).textBody!;
+
+    // A store that ends lines with a bare CR. Without it the whole body is one line.
+    const bareCr = signed.replace(/\n/g, '\r');
+    assert.equal(applySignature({ textBody: bareCr }, delimited).textBody, bareCr);
+    assert.equal(signatureSkipReason({ textBody: bareCr }, delimited), 'already-signed');
+
+    // The delimiter's trailing space turned into a non-breaking space in transit.
+        const nbsp = signed.replace('-- ', '--\u00a0');
+    assert.equal(applySignature({ textBody: nbsp }, delimited).textBody, nbsp);
+    assert.equal(signatureSkipReason({ textBody: nbsp }, delimited), 'already-signed');
+
+    // RFC 3676 space-stuffing, applied by a format=flowed sender to every line.
+    const stuffed = signed.split('\n').map((l) => ' ' + l).join('\n');
+    assert.equal(applySignature({ textBody: stuffed }, delimited).textBody, stuffed);
+    assert.equal(signatureSkipReason({ textBody: stuffed }, delimited), 'already-signed');
+  });
+
+  // Same rule for the derived text form on a message that also ships html: the html side is
+  // protected by its marker, the text side by the equality test.
+  it('does not sign the derived text part twice either', () => {
+    const out = applySignature(
+      { textBody: `Hi\n\n${DERIVED_TEXT}`, htmlBody: '<p>Hi</p>' },
+      SIG,
+    );
+    assert.equal(out.textBody, `Hi\n\n${DERIVED_TEXT}`);
+    assert.ok(hasSignatureMarker(out.htmlBody)); // the html was unsigned, so it still gets one
+  });
+
+  // An html signature that is nothing but a REMOTE logo derives to '' under every image
+  // policy (a remote image never writes a placeholder — see ImagePlaceholderPolicy), and
+  // joining that appended two newlines and no sign-off — a text part that gained trailing
+  // whitespace and nothing else, while the html part was correctly signed.
+  const IMAGE_ONLY_SIG = { html: '<img src="https://example.com/logo.png">' };
+
+  it('leaves the text part alone when the html signature has no text form', () => {
+    assert.equal(signatureTextBlock(IMAGE_ONLY_SIG, true), ''); // the premise
+    const out = applySignature({ textBody: 'hello', htmlBody: '<p>hello</p>' }, IMAGE_ONLY_SIG);
+    assert.equal(out.textBody, 'hello');
+    assert.ok(hasSignatureMarker(out.htmlBody));
+  });
+
+  // …and says so. Leaving it alone is right — there is nothing to write — but the html half
+  // succeeded, so this is a PARTIAL: a recipient rendering the html sees the sign-off and one
+  // reading the text alternative does not. A success report over a half-signed message is the
+  // silent half-result the whole reporting rule exists to prevent.
+  it('reports the text part it could not sign on a message whose html it did', () => {
+    assert.equal(
+      signatureSkipReason({ textBody: 'hello', htmlBody: '<p>hello</p>' }, IMAGE_ONLY_SIG),
+      'text-part-unsigned',
+    );
+  });
+
+  // The same outcome with NO text part supplied, which used to be silent. The text
+  // alternative of an html-only message is derived downstream from the signed html, so it
+  // derives exactly what the branch above would have written — nothing. The recipient reading
+  // it sees no sign-off either way, so the report cannot depend on which bodies the caller
+  // happened to pass.
+  it('reports the derived text alternative it could not sign either', () => {
+    assert.equal(signatureSkipReason({ htmlBody: '<p>hello</p>' }, IMAGE_ONLY_SIG), 'text-part-unsigned');
+    // The html half still landed: this is a partial, not a refusal.
+    assert.ok(hasSignatureMarker(applySignature({ htmlBody: '<p>hello</p>' }, IMAGE_ONLY_SIG).htmlBody));
+  });
+
+  // An EMBEDDED image is the other spelling of "my signature is a logo", and it is NOT the
+  // same outcome: the image ships with the html, so the text alternative gets the "[image]"
+  // placeholder the unconditional policy exists for, and the sign-off is present rather than
+  // missing. Pinned with a cid: fixture because the https one above never produced a
+  // placeholder in the first place and so could not tell the two branches apart.
+  it('writes the embedded-image placeholder into the text part when the html ships', () => {
+    const embedded = { html: '<img src="cid:logo">' };
+    assert.equal(signatureTextBlock(embedded, true), '[image]'); // the premise
+    const out = applySignature({ textBody: 'hello', htmlBody: '<p>hello</p>' }, embedded);
+    assert.equal(out.textBody, 'hello\n\n[image]');
+    assert.equal(signatureSkipReason({ textBody: 'hello', htmlBody: '<p>hello</p>' }, embedded), undefined);
+    // …and it agrees with what the derivation downstream would make of the signed html, which
+    // is the whole reason this branch does not suppress: the two must not disagree.
+    assert.equal(signatureSkipReason({ htmlBody: '<p>hello</p>' }, embedded), undefined);
+  });
+
+  it('reports a text-only message it cannot sign at all', () => {
+    assert.deepEqual(applySignature({ textBody: 'hello' }, IMAGE_ONLY_SIG), { textBody: 'hello' });
+    assert.equal(signatureSkipReason({ textBody: 'hello' }, IMAGE_ONLY_SIG), 'no-text-form');
+  });
+
+  // An EMBEDDED image derives a "[image]" placeholder under the unconditional policy, which
+  // is right for the text alternative of a body that ships the image — and wrong here. No
+  // html ships, so no image ships, and the recipient's entire sign-off would be a line
+  // describing something no part of the message carries. Same rule the quote builders apply.
+  it('never ships a bare image placeholder as the sign-off of a text-only message', () => {
+    const embedded = { html: '<img src="cid:logo">' };
+    assert.equal(signatureTextBlock(embedded, false), '');
+    assert.deepEqual(applySignature({ textBody: 't' }, embedded), { textBody: 't' });
+    assert.equal(signatureSkipReason({ textBody: 't' }, embedded), 'no-text-form');
+  });
+
+  it('still derives the alt text of an image signature that has some', () => {
+    const alted = { html: '<img src="cid:logo" alt="Test User, Example Ltd">' };
+    assert.equal(signatureTextBlock(alted, false), 'Test User, Example Ltd');
+    assert.equal(applySignature({ textBody: 't' }, alted).textBody, 't\n\nTest User, Example Ltd');
+  });
+
+  // A blank text body is no body, exactly as a blank html body is. It used to fall through to
+  // the join, whose blank-body arm made the signature the ENTIRE body — the caller's text
+  // discarded, a signature-only message stored, and no note, while every wording on every
+  // surface says a blank body counts as none.
+  it('treats a present-but-blank text body as no body at all', () => {
+    assert.equal(signatureSkipReason({ textBody: '   ' }, SIG), 'no-body');
+    assert.equal(signatureSkipReason({ textBody: '\u200b' }, SIG), 'no-body');
+    assert.deepEqual(applySignature({ textBody: '   ' }, SIG), { textBody: '   ' });
+    assert.deepEqual(applySignature({ textBody: '\u200b' }, SIG), { textBody: '\u200b' });
+  });
+
+  // The same rule on the other branch: a blank text alternative beside a real html body ships
+  // no text part (buildBodyParts drops it), so writing the block into it would make the
+  // message's whole plain-text alternative a bare sign-off under an html body carrying the
+  // actual message. Left alone, the alternative is derived from the signed html instead.
+  it('does not turn a blank text alternative into a signature-only text part', () => {
+    const out = applySignature({ textBody: '  ', htmlBody: '<p>Hi</p>' }, SIG);
+    assert.equal(out.textBody, '  ');
+    assert.ok(hasSignatureMarker(out.htmlBody));
+    assert.equal(signatureSkipReason({ textBody: '  ', htmlBody: '<p>Hi</p>' }, SIG), undefined);
+  });
+
+  it('reports the reason an append landed nowhere', () => {
+    assert.equal(signatureSkipReason({ textBody: 'Hi' }, undefined), 'no-signature');
+    assert.equal(signatureSkipReason({}, SIG), 'no-body');
+    assert.equal(signatureSkipReason({ htmlBody: '' }, SIG), 'no-body');
+    assert.equal(
+      signatureSkipReason({ htmlBody: '<p>Hi</p><div class="fm-mcp-signature">x</div>' }, SIG),
+      'already-signed',
+    );
+  });
+
   it('changes nothing when the identity has no signature', () => {
     const bodies = { textBody: 'Hi', htmlBody: '<p>Hi</p>' };
     assert.deepEqual(applySignature(bodies, undefined), bodies);
@@ -165,14 +569,55 @@ describe('applySignature', () => {
     assert.ok(hasSignatureMarker("<div class='fm-mcp-signature'>x</div>"));
     assert.ok(hasSignatureMarker('<div class=fm-mcp-signature>x</div>'));
     assert.ok(hasSignatureMarker('<div id="s" class="sig fm-mcp-signature">x</div>'));
-    // A longer class that merely starts with ours over-matches, the same way the
-    // gmail_quote arm of hasQuoteMarker does. Recorded rather than fixed because it can
-    // only ever suppress an append (the body is read as already signed), never cause a
-    // loss — and narrowing it would cost the tolerance the round trip needs.
-    assert.ok(hasSignatureMarker('<div class="fm-mcp-signature-ish">x</div>'));
+    assert.ok(hasSignatureMarker('<div class="fm-mcp-signature trailing">x</div>'));
+    assert.ok(hasSignatureMarker('<div class = "fm-mcp-signature">x</div>'));
+  });
+
+  // The class must be a WHOLE token of the class list. A longer name that merely starts with
+  // ours is somebody else's class, and matching it is not the harmless over-suppression it
+  // was once recorded as: the same predicate reads the STORED body in updateDraft, where a
+  // false positive makes an edit that said nothing about signatures append one nobody asked
+  // for and announce that the draft already carried one.
+  it('does not match a longer class name that merely starts with the marker', () => {
+    assert.ok(!hasSignatureMarker('<div class="fm-mcp-signature-ish">x</div>'));
+    assert.ok(!hasSignatureMarker('<div class="a fm-mcp-signature-ish b">x</div>'));
     assert.ok(!hasSignatureMarker('<div class="notfm-mcp-signature">x</div>'));
     assert.ok(!hasSignatureMarker('<div>Kind regards</div>'));
     assert.ok(!hasSignatureMarker('<blockquote class="fm-mcp-signature">x</blockquote>'));
+  });
+
+  // The other half of the same predicate: the ATTRIBUTE NAME needs a real boundary too, and
+  // `\b` is not one — `-` is a word boundary, so `data-class` ended in `class` and matched.
+  it('does not match a longer attribute name that merely ends in class', () => {
+    assert.ok(!hasSignatureMarker('<div data-class="fm-mcp-signature">x</div>'));
+    assert.ok(!hasSignatureMarker('<div myclass="fm-mcp-signature">x</div>'));
+    assert.ok(hasSignatureMarker('<div data-x="1" class="fm-mcp-signature">x</div>'));
+  });
+
+  // A quoted attribute VALUE is not a place attributes live. Accepting a quote character as
+  // the boundary in front of `class` let any string containing `class=fm-mcp-signature` claim
+  // the marker — and this predicate reads agent-authored html straight off the stored draft,
+  // where the sanitizer never ran.
+  it('does not match class= written inside another attribute value', () => {
+    assert.ok(!hasSignatureMarker('<div data-x=" class=fm-mcp-signature ">x</div>'));
+    assert.ok(!hasSignatureMarker(`<div title="a class='fm-mcp-signature' b">x</div>`));
+    assert.ok(!hasSignatureMarker('<div alt="class = fm-mcp-signature">x</div>'));
+  });
+
+  // The mirror failure, which costs a signature rather than inventing one: a `>` inside an
+  // earlier attribute's value ended the tag as far as a `[^>]*` scan was concerned, so a
+  // genuine marker behind one went unseen and the preserve path silently stopped firing.
+  it('finds the marker behind an attribute value containing a closing bracket', () => {
+    assert.ok(hasSignatureMarker('<div title="a > b" class="fm-mcp-signature">x</div>'));
+    assert.ok(hasSignatureMarker(`<div title='x > y' class=fm-mcp-signature>x</div>`));
+    assert.ok(hasSignatureMarker('<p>before</p><div title="1>2"><div class="fm-mcp-signature">x</div></div>'));
+  });
+
+  it('survives tags it cannot parse without claiming a marker', () => {
+    assert.ok(!hasSignatureMarker('<div title="unterminated class="fm-mcp-signature">x'));
+    assert.ok(!hasSignatureMarker('<div'));
+    assert.ok(!hasSignatureMarker('<div class>x</div>'));
+    assert.ok(hasSignatureMarker('<div hidden class="fm-mcp-signature">x</div>'));
   });
 
   it('exposes the two block forms on their own for a body that has nothing to append to', () => {
@@ -248,6 +693,44 @@ describe('signature placement in a reply', () => {
     const out = buildReplyBodies({ original: ORIGINAL, htmlBody: '<p>Thanks.</p>', quoteOriginal: true });
     assert.ok(!hasSignatureMarker(out.htmlBody));
   });
+
+  // Load-bearing and, until this test, unasserted: the marker means "this draft's OWN
+  // signature", and edit_draft's preservation reads it off the stored body. If a signature
+  // quoted back inside a reply could false-trip it, an edit of that reply would treat
+  // somebody else's sign-off as the draft's own. What makes it hold lives in ANOTHER module
+  // — QUOTE_ALLOWED_ATTRIBUTES in src/inline-images.ts has no global '*' entry, so class= is
+  // stripped from every quoted element — so this drives the real quote path rather than
+  // restating the rule.
+  it('cannot be false-tripped by a signature quoted back from the original', () => {
+    const signedOriginal = {
+      ...ORIGINAL,
+      bodyValues: {
+        t: { value: 'Original text.' },
+        h: { value: `<p>Original html.</p>${signatureHtmlBlock(SIG)}` },
+      },
+    };
+    assert.ok(hasSignatureMarker(signedOriginal.bodyValues.h.value)); // the source really is signed
+    const out = buildReplyBodies({
+      original: signedOriginal, htmlBody: '<p>Thanks.</p>', quoteOriginal: true,
+    });
+    assert.match(out.htmlBody!, /Kind regards,/); // the quoted content survives…
+    assert.ok(!hasSignatureMarker(out.htmlBody), out.htmlBody); // …but not as a marker
+  });
+
+  it('still detects the draft\'s own signature above a quote carrying somebody else\'s', () => {
+    const signedOriginal = {
+      ...ORIGINAL,
+      bodyValues: {
+        t: { value: 'Original text.' },
+        h: { value: `<p>Original html.</p>${signatureHtmlBlock(SIG)}` },
+      },
+    };
+    const out = buildReplyBodies({
+      original: signedOriginal, htmlBody: '<p>Thanks.</p>', quoteOriginal: true, signature: SIG,
+    });
+    assert.ok(hasSignatureMarker(out.htmlBody));
+    assert.ok(out.htmlBody!.indexOf('fm-mcp-signature') < out.htmlBody!.indexOf('<blockquote'));
+  });
 });
 
 describe('signature placement in a forward', () => {
@@ -277,6 +760,16 @@ describe('signature placement in a forward', () => {
   it('leaves a note-less forward unsigned when nothing asked', () => {
     const out = buildForwardBodies({ original: ORIGINAL });
     assert.ok(!hasSignatureMarker(out.htmlBody));
+  });
+
+  // The note-less arm on a TEXT-ONLY original takes the derived text form, so an images-only
+  // signature made the forward's entire visible content a "[image]" placeholder describing
+  // an image no part of that forward carries. It now ships nothing and reports why.
+  it('does not make a bare image placeholder the whole content of a text-only forward', () => {
+    const textOnly = { ...ORIGINAL, htmlBody: [], bodyValues: { t: { value: 'Original text.' } } };
+    const out = buildForwardBodies({ original: textOnly, signature: { html: '<img src="cid:logo">' } });
+    assert.ok(out.textBody!.startsWith('----- Original message -----'), out.textBody);
+    assert.equal(out.signatureSkip, 'no-text-form');
   });
 });
 
@@ -322,11 +815,55 @@ describe('create_draft signs on request', () => {
     assert.equal(calls.draft.htmlBody, '<p>Hi</p>');
   });
 
-  it('appends nothing, and says nothing, for an identity with no signature', async () => {
+  // appendSignature is an input the caller cannot verify without re-reading the draft, so an
+  // append that lands nowhere is reported rather than passed over in silence — and the note
+  // names WHICH reason, because the fix differs per reason.
+  it('appends nothing for an identity with no signature, and says so', async () => {
     const { client, calls } = composeClient([UNSIGNED_IDENTITY]);
     const r = await composeDraft({ to: ['bob@example.com'], htmlBody: '<p>Hi</p>', appendSignature: true }, client, undefined, false);
     assert.equal(calls.draft.htmlBody, '<p>Hi</p>');
+    assert.deepEqual(r.notes, [noteSignatureNotAppended('no-signature', 'me@example.com')]);
+  });
+
+  it('says so when the call writes no body for the signature to sign', async () => {
+    const { client, calls } = composeClient();
+    const r = await composeDraft({ to: ['bob@example.com'], subject: 'Hi', appendSignature: true }, client, undefined, false);
+    assert.equal(calls.draft.htmlBody, undefined);
+    assert.deepEqual(r.notes, [noteSignatureNotAppended('no-body', 'me@example.com')]);
+  });
+
+  // Html the caller pasted in (from anywhere) that happens to carry the marker suppresses
+  // the append. Suppression is right — one signature, not two — but silence is not.
+  it('says so when the supplied html already carries a signature block', async () => {
+    const { client } = composeClient();
+    const r = await composeDraft(
+      { to: ['bob@example.com'], htmlBody: '<p>Hi</p><div class="fm-mcp-signature">Someone</div>', appendSignature: true },
+      client, undefined, false,
+    );
+    assert.deepEqual(r.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  it('says nothing when the append succeeded', async () => {
+    const { client } = composeClient();
+    const r = await composeDraft({ to: ['bob@example.com'], htmlBody: '<p>Hi</p>', appendSignature: true }, client, undefined, false);
     assert.equal(r.notes, undefined);
+  });
+
+  // A lookup that failed after the upload would leave freshly written blobs in the account
+  // with no draft referencing them — the same ordering rule the embedded-image plan has.
+  it('resolves the identity BEFORE any attachment is uploaded', async () => {
+    const order: string[] = [];
+    const client: ComposeClient = {
+      getIdentities: async () => { order.push('identities'); return [SIGNED_IDENTITY]; },
+      uploadAttachments: async () => { order.push('upload'); return []; },
+      createDraft: async () => 'draft-9',
+      getEmailById: async (id) => ({ id, attachments: [] }),
+    };
+    await composeDraft(
+      { to: ['bob@example.com'], htmlBody: '<p>Hi</p>', appendSignature: true, attachments: [{ blobId: 'b', name: 'f.txt' }] },
+      client, undefined, true,
+    );
+    assert.deepEqual(order, ['identities', 'upload']);
   });
 
   it('signs with the identity named by from, not the default', async () => {
@@ -410,6 +947,73 @@ describe('reply_email and forward_email sign on request', () => {
       client, undefined, false,
     );
     assert.equal(calls.draft.textBody, 'Forwarded message attached.\n\nRegards,\nTest User');
+  });
+
+  // A body-less reply is left unsigned, and DELIBERATELY so — unlike a forward, where a
+  // note-less "FYI, see below" is the normal shape and the builder makes the signature the
+  // whole content above the block, a reply whose entire content is a sign-off over a quote
+  // is not a message. The asymmetry is a behaviour decision, not an oversight; what this
+  // pins is that the caller is told rather than left to discover it by re-reading the draft.
+  it('reports a body-less reply that asked for a signature', async () => {
+    const { client, calls } = replyClient();
+    const r = await composeReply({ originalEmailId: 'orig-1', appendSignature: true }, client, undefined, false);
+    assert.ok(!hasSignatureMarker(calls.draft.htmlBody));
+    assert.deepEqual(r.notes, [noteSignatureNotAppended('no-body', 'me@example.com')]);
+  });
+
+  // htmlShips is false for a blank body (buildBodyParts drops it), textBody is undefined, so
+  // nothing is signed — while the quote path still builds an html body around it.
+  it('reports a reply whose only body is a blank htmlBody', async () => {
+    const { client } = replyClient();
+    const r = await composeReply(
+      { originalEmailId: 'orig-1', htmlBody: '', appendSignature: true }, client, undefined, false,
+    );
+    assert.deepEqual(r.notes, [noteSignatureNotAppended('no-body', 'me@example.com')]);
+  });
+
+  it('reports a reply whose identity has no signature configured', async () => {
+    const calls: any = {};
+    const client: ReplyClient = {
+      getEmailById: async (id) => (id === 'draft-9' ? { id, attachments: [] } : ORIGINAL),
+      getIdentities: async () => [UNSIGNED_IDENTITY],
+      uploadAttachments: async () => [],
+      createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
+    };
+    const r = await composeReply(
+      { originalEmailId: 'orig-1', htmlBody: '<p>Thanks.</p>', appendSignature: true }, client, undefined, false,
+    );
+    assert.deepEqual(r.notes, [noteSignatureNotAppended('no-signature', 'me@example.com')]);
+  });
+
+  it('reports a forward whose identity has no signature configured', async () => {
+    const client: ForwardClient = {
+      getEmailById: async (id) => (id === 'draft-7' ? { id, attachments: [] } : { ...ORIGINAL, blobId: 'blob-eml' }),
+      getIdentities: async () => [UNSIGNED_IDENTITY],
+      uploadAttachments: async () => [],
+      createDraft: async () => 'draft-7',
+    };
+    const r = await composeForward(
+      { originalEmailId: 'orig-1', to: ['bob@example.com'], htmlBody: '<p>FYI.</p>', appendSignature: true },
+      client, undefined, false,
+    );
+    assert.deepEqual(r.notes, [noteSignatureNotAppended('no-signature', 'me@example.com')]);
+  });
+
+  // The forward's own no-note shape signs, so it must NOT be reported as an empty append.
+  it('says nothing about a note-less forward that the signature became the body of', async () => {
+    const { client } = forwardClient();
+    const r = await composeForward(
+      { originalEmailId: 'orig-1', to: ['bob@example.com'], appendSignature: true }, client, undefined, false,
+    );
+    assert.equal(r.notes, undefined);
+  });
+
+  it('says nothing about an ordinary unsigned forward', async () => {
+    const { client } = forwardClient();
+    const r = await composeForward(
+      { originalEmailId: 'orig-1', to: ['bob@example.com'], htmlBody: '<p>FYI.</p>' }, client, undefined, false,
+    );
+    assert.equal(r.notes, undefined);
   });
 });
 
@@ -529,9 +1133,322 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     assert.equal(result.notes, undefined);
   });
 
-  it('appends nothing when the identity no longer has a signature configured', async () => {
+  // The preserve branch is armed by the STORED draft, so the omitted flag meant "keep it".
+  // When the keep cannot be honoured the draft loses a block it was carrying, and a silent
+  // loss is exactly what the branch exists to prevent.
+  it('says so when the draft loses its signature because the identity no longer has one', async () => {
     const client = makeClient([UNSIGNED_IDENTITY]);
     const seen = mockUpdate(client, signedDraft());
+
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>Rewritten.</p>' });
+    assert.equal(seen.created.bodyValues.html.value, '<p>Rewritten.</p>');
+    assert.deepEqual(result.notes, [noteSignatureUnavailableOnEdit('me@example.com')]);
+  });
+
+  it('says so when appendSignature:true has no signature to append', async () => {
+    const client = makeClient([UNSIGNED_IDENTITY]);
+    const seen = mockUpdate(client, signedDraft({
+      bodyValues: { t: { value: 'Hello.' }, h: { value: '<p>Hello.</p>' } },
+    }));
+
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>Rewritten.</p>', appendSignature: true });
+    assert.equal(seen.created.bodyValues.html.value, '<p>Rewritten.</p>');
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('no-signature', 'me@example.com')]);
+  });
+
+  // Nothing is lost when no body is written: both bodies (and the signature in them) are
+  // carried through verbatim, so the loss note must not fire.
+  it('says nothing about a metadata-only edit on an identity with no signature', async () => {
+    const client = makeClient([UNSIGNED_IDENTITY]);
+    const seen = mockUpdate(client, signedDraft());
+
+    const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
+    assert.equal(seen.created.bodyValues.html.value, SIGNED_BODY);
+    assert.equal(result.notes, undefined);
+  });
+
+  // The draft's stored `from` matches no verified identity — an address removed from the
+  // account, or a draft made elsewhere. `selectedIdentity` falls back to the account default
+  // for the recreate, but the address WRITTEN into `from` stays the stored one, so signing
+  // from that fallback would put one identity's sign-off under another's address.
+  it('does not sign with the default identity when the written from matches none', async () => {
+    const client = makeClient([SIGNED_IDENTITY]);
+    const seen = mockUpdate(client, signedDraft({ from: [{ email: 'gone@elsewhere.example' }] }));
+
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>Rewritten.</p>' });
+    assert.equal(seen.created.from[0].email, 'gone@elsewhere.example');
+    assert.ok(!hasSignatureMarker(seen.created.bodyValues.html.value));
+    assert.deepEqual(result.notes, [noteSignatureUnavailableOnEdit('gone@elsewhere.example')]);
+  });
+
+  it('signs with the identity named by an explicit from on the edit', async () => {
+    const other = { id: 'id-9', email: 'other@example.com', mayDelete: true, htmlSignature: '<div>From Other</div>' };
+    const client = makeClient([SIGNED_IDENTITY, other]);
+    const seen = mockUpdate(client, signedDraft());
+
+    await client.updateDraft('draft-1', { htmlBody: '<p>Rewritten.</p>', from: 'other@example.com' });
+    assert.equal(seen.created.from[0].email, 'other@example.com');
+    assert.match(seen.created.bodyValues.html.value, /From Other/);
+  });
+
+  // The plain-text residual's own recovery loop. A text-only draft carries no marker, so an
+  // edit that rewrites its body must be given appendSignature:true to keep the sign-off —
+  // and the natural agent loop reads the draft back, edits the words, and sends the WHOLE
+  // text (signature included) with the flag still set. That must not stack.
+  it('does not stack the signature on a re-signed plain-text draft', async () => {
+    const client = makeClient();
+    const textOnly = {
+      id: 'draft-1',
+      subject: 'Old Subject',
+      from: [{ email: 'me@example.com' }],
+      to: [{ email: 'bob@example.com' }],
+      cc: [], bcc: [],
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [],
+      bodyValues: { t: { value: 'Hi Bob\n\nRegards,\nTest User' } },
+      mailboxIds: { 'mb-drafts': true },
+      keywords: { $draft: true },
+    };
+    const seen = mockUpdate(client, textOnly);
+
+    await client.updateDraft('draft-1', {
+      textBody: 'Hi Bob, one more thing\n\nRegards,\nTest User',
+      appendSignature: true,
+    });
+    const stored = seen.created.bodyValues.text.value;
+    assert.equal(stored.match(/Regards,/g)!.length, 1, stored);
+    assert.equal(stored, 'Hi Bob, one more thing\n\nRegards,\nTest User');
+  });
+
+  // The same recovery loop on a REPLY draft, which is the shape it is actually recommended
+  // for: a plain-text reply keeps the quoted original in its body, so the text handed back
+  // carries the sign-off in the MIDDLE and the quote at the end. The fixture above has no
+  // quote in it and so could not exhibit this; run through the real updateDraft it stacked a
+  // second sign-off below the quote every time the loop went round.
+  it('does not stack the signature on a re-signed plain-text reply draft that carries a quote', async () => {
+    const client = makeClient();
+    const QUOTE = 'On 1 Jan 2026, at 03:04, Alice <alice@example.com> wrote:\n> Original text.';
+    const textOnly = {
+      id: 'draft-1',
+      subject: 'Re: Project update',
+      from: [{ email: 'me@example.com' }],
+      to: [{ email: 'alice@example.com' }],
+      cc: [], bcc: [],
+      inReplyTo: ['<orig@example.com>'],
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [],
+      bodyValues: { t: { value: `Thanks.\n\nRegards,\nTest User\n\n${QUOTE}` } },
+      mailboxIds: { 'mb-drafts': true },
+      keywords: { $draft: true },
+    };
+    const seen = mockUpdate(client, textOnly);
+
+    const edited = `Thanks, and one more thing.\n\nRegards,\nTest User\n\n${QUOTE}`;
+    const result = await client.updateDraft('draft-1', {
+      textBody: edited,
+      originalEmailId: 'orig-1',
+      appendSignature: true,
+    });
+    const stored = seen.created.bodyValues.text.value;
+    assert.equal(stored.match(/Regards,/g)!.length, 1, stored);
+    assert.match(stored, /^Thanks, and one more thing\.\n\nRegards,\nTest User\n/, stored);
+    // The flag was passed and nothing was appended, so it is reported rather than silent.
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  /** A plain-text reply draft storing `value`, replying to ORIGINAL. */
+  const textReplyDraft = (value: string) => ({
+    id: 'draft-1',
+    subject: 'Re: Project update',
+    from: [{ email: 'me@example.com' }],
+    to: [{ email: 'alice@example.com' }],
+    cc: [], bcc: [],
+    inReplyTo: ['<orig@example.com>'],
+    textBody: [{ partId: 't', type: 'text/plain' }],
+    htmlBody: [],
+    bodyValues: { t: { value } },
+    mailboxIds: { 'mb-drafts': true },
+    keywords: { $draft: true },
+  });
+
+  /** The recovery loop: hand the draft's own text back with the flag still set. */
+  async function reSign(
+    body: string,
+    edit: (s: string) => string = (s) => s,
+    identities?: any[],
+  ) {
+    const client = makeClient(identities);
+    const seen = mockUpdate(client, textReplyDraft(body));
+    const result = await client.updateDraft('draft-1', {
+      textBody: edit(body), originalEmailId: 'orig-1', appendSignature: true,
+    });
+    return { stored: seen.created.bodyValues.text.value as string, result };
+  }
+
+  // Sign-offs the DRAFT carries, counted at line start and unquoted, so a "Regards," inside a
+  // quote is not mistaken for one of the draft's own.
+  const ownSignOffs = (s: string) => (s.match(/^Regards,$/gm) ?? []).length;
+
+  // The identity whose own sign-off contains a quotation, driven through the real edit on the
+  // loop the docs prescribe. This is the shape that duplicated silently while every pure-helper
+  // test in the file passed, because no fixture here had a '> ' line inside its signature.
+  it('does not stack a sign-off that itself contains a quoted line', async () => {
+    const block = signatureTextBlock(QUOTING_SIG, false)!;
+    const body = `Thanks.\n\n${block}\n\nOn 1 Jan 2026, Alice <alice@example.com> wrote:\n> Original text.`;
+    const { stored, result } = await reSign(
+      body,
+      (s) => s.replace('Thanks.', 'Thanks again.'),
+      [QUOTING_IDENTITY],
+    );
+    assert.equal(ownSignOffs(stored), 1, stored);
+    assert.equal(stored.match(/Per aspera ad astra/g)!.length, 1, stored);
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  // …and the html-derived form of the same signature, which is what a draft converted out of
+  // html hands back. That form's quotation comes from html-to-text's <blockquote> rendering.
+  it('does not stack the derived form of a quoting sign-off on a converted draft', async () => {
+    const client = makeClient([QUOTING_IDENTITY]);
+    const derived = signatureTextBlock(QUOTING_SIG, true)!;
+    const seen = mockUpdate(client, signedDraft({
+      bodyValues: {
+        t: { value: `Hello.\n\n${derived}` },
+        h: { value: `<p>Hello.</p><div class="fm-mcp-signature">${QUOTING_IDENTITY.htmlSignature}</div>` },
+      },
+    }));
+
+    const result = await client.updateDraft('draft-1', {
+      textBody: `Hello, one more thing.\n\n${derived}`,
+      clearFields: ['htmlBody'],
+      appendSignature: true,
+    });
+    const stored = seen.created.bodyValues.text.value;
+    assert.equal(stored, `Hello, one more thing.\n\n${derived}`, stored);
+    assert.equal(stored.match(/Per aspera ad astra/g)!.length, 1, stored);
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  // The property the removed line filter was supposed to protect, re-checked without it: a
+  // forward separator INSIDE a reply quote must not cut the body short, or a sign-off below
+  // the quote would fall outside the haystack and be appended a second time. It cannot,
+  // because FORWARD_SEPARATOR_LINE anchors at the dashes and the '> ' defeats that anchor.
+  it('does not let a quoted forward separator cut the body short', async () => {
+    const body = [
+      'Thanks.',
+      '',
+      'On 1 Jan 2026, Alice <alice@example.com> wrote:',
+      '> ----- Original message -----',
+      '> From: Bob',
+      '>',
+      '> Original text.',
+      '',
+      'Regards,',
+      'Test User',
+    ].join('\n');
+    const { stored, result } = await reSign(body, (s) => s.replace('Thanks.', 'Thanks again.'));
+    assert.equal(ownSignOffs(stored), 1, stored);
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  // The attribution shapes other clients write. Nothing in the guard parses an attribution,
+  // so a hard-wrapped Gmail attribution is an ordinary body. Driven through the real edit
+  // because that is where every earlier version of this stacked: the pure builder is handed a
+  // body with no quote in it.
+  it('does not stack when the Gmail attribution above the quote is hard-wrapped', async () => {
+    const body = [
+      'Thanks.',
+      '',
+      'Regards,',
+      'Test User',
+      '',
+      'On Mon, Jan 1, 2026 at 9:00 AM Alice Example <alice@example.com>',
+      'wrote:',
+      '',
+      '> Original text.',
+    ].join('\n');
+    const { stored, result } = await reSign(body, (s) => s.replace('Thanks.', 'Thanks again.'));
+    assert.equal(ownSignOffs(stored), 1, stored);
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  // Nested quoting is the same test — '>' is the first non-whitespace character either way.
+  it('does not stack on a re-signed reply draft quoting a quote', async () => {
+    const body = [
+      'Thanks.',
+      '',
+      'Regards,',
+      'Test User',
+      '',
+      'On 1 Jan 2026, Alice <alice@example.com> wrote:',
+      '> On 31 Dec 2025, Test User <me@example.com> wrote:',
+      '>> Original text.',
+      '>>',
+      '>> Regards,',
+      '>> Test User',
+    ].join('\n');
+    const { stored, result } = await reSign(body, (s) => s.replace('Thanks.', 'Thanks again.'));
+    assert.equal(ownSignOffs(stored), 1, stored);
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  // The mirror: an UNSIGNED note above a quote whose quoted text carries this identity's own
+  // sign-off (the ordinary thread where an earlier message of ours was signed). The quoted
+  // lines are removed, so the note reads as unsigned and IS signed — one sign-off of the
+  // draft's own. Reading through the quote instead would refuse to sign every reply in a
+  // thread the sender had ever signed.
+  it('signs a reply whose quote carries the sign-off but whose note does not', async () => {
+    const body = [
+      'Thanks.',
+      '',
+      'On 1 Jan 2026, Alice <alice@example.com> wrote:',
+      '> Original text.',
+      '>',
+      '> Regards,',
+      '> Test User',
+    ].join('\n');
+    const { stored, result } = await reSign(body);
+    assert.equal(ownSignOffs(stored), 1, stored);
+    assert.equal(result.notes, undefined);
+  });
+
+  // A forward whose forwarded message carries this identity's sign-off, with the caller's own
+  // note unsigned: the separator removes the block, so the note gets signed rather than the
+  // forwarded sign-off being read as the note's.
+  it('signs the note on a forward whose forwarded block carries the same sign-off', async () => {
+    const body = [
+      'Please see below.',
+      '',
+      '----- Original message -----',
+      'From: Test User <me@example.com>',
+      'Subject: Project update',
+      '',
+      'Here it is.',
+      '',
+      'Regards,',
+      'Test User',
+    ].join('\n');
+    const client = makeClient();
+    const seen = mockUpdate(client, textReplyDraft(body));
+    const result = await client.updateDraft('draft-1', {
+      textBody: body, noQuote: true, appendSignature: true,
+    });
+    const stored = seen.created.bodyValues.text.value;
+    assert.equal(ownSignOffs(stored), 2, stored); // the forwarded one, and the note's new one
+    assert.match(stored, /Test User$/, stored);
+    assert.equal(result.notes, undefined);
+  });
+
+  // hasSignatureMarker reads the STORED body here, so a false positive is not the harmless
+  // over-suppression it is on the compose side: it makes an edit that said nothing about
+  // signatures append one nobody asked for, and announce that the draft already carried one.
+  it('does not treat a lookalike class on the stored body as a signature', async () => {
+    const client = makeClient();
+    const seen = mockUpdate(client, signedDraft({
+      bodyValues: {
+        t: { value: 'Hello.' },
+        h: { value: '<p>Hello.</p><div class="fm-mcp-signature-ish">Not ours</div>' },
+      },
+    }));
 
     const result = await client.updateDraft('draft-1', { htmlBody: '<p>Rewritten.</p>' });
     assert.equal(seen.created.bodyValues.html.value, '<p>Rewritten.</p>');
@@ -555,6 +1472,126 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     // No html ships now, so the configured text form is the right one to write.
     assert.equal(seen.created.bodyValues.text.value, 'Rewritten.\n\nRegards,\nTest User');
     assert.equal(seen.created.bodyValues.html, undefined);
+  });
+
+  // The cross-form duplication, driven through the real edit rather than the pure builder.
+  // clearFields:['htmlBody'] is the permitted html→text conversion, and the natural loop
+  // hands back the text the draft was storing — which is the DERIVED form, while a text-only
+  // call writes the CONFIGURED one. Matching only the outgoing form stacked a second sign-off
+  // here, on the explicit recovery the schema recommends for exactly this draft shape.
+  it('does not stack a second sign-off when a signed html draft is converted to plain text', async () => {
+    const client = makeClient();
+    const seen = mockUpdate(client, signedDraft());
+
+    const result = await client.updateDraft('draft-1', {
+      textBody: `Hello, one more thing.\n\n${DERIVED_TEXT}`,
+      clearFields: ['htmlBody'],
+      appendSignature: true,
+    });
+    const stored = seen.created.bodyValues.text.value;
+    assert.equal(stored, `Hello, one more thing.\n\n${DERIVED_TEXT}`, stored);
+    assert.equal(stored.match(/regards,/gi)!.length, 1, stored);
+    // The flag was passed and nothing was appended, so it is reported — the body already
+    // carried the sign-off.
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  // Same conversion with the flag OMITTED — the preserve path, where the caller asked for
+  // nothing signature-related. This used to duplicate AND announce a re-append that had not
+  // happened, which is worse than the duplication: the note asserted the body it was handed
+  // carried no signature when it plainly did.
+  it('neither stacks nor announces a re-append on an omitted-flag conversion', async () => {
+    const client = makeClient();
+    const seen = mockUpdate(client, signedDraft());
+
+    const result = await client.updateDraft('draft-1', {
+      textBody: `Hello, one more thing.\n\n${DERIVED_TEXT}`,
+      clearFields: ['htmlBody'],
+    });
+    assert.equal(seen.created.bodyValues.text.value, `Hello, one more thing.\n\n${DERIVED_TEXT}`);
+    assert.equal(result.notes, undefined);
+  });
+
+  // An images-only html signature is not signature-LESS, so the old gate (keyed on the
+  // identity having no signature at all) armed nothing for it — and the conversion below
+  // dropped a sign-off the draft was carrying in silence, including on the explicit
+  // appendSignature:true recovery.
+  const IMAGE_ONLY_IDENTITY = {
+    id: 'id-1', name: 'Test User', email: 'me@example.com', mayDelete: false,
+    htmlSignature: '<img src="https://example.com/logo.png">',
+  };
+  const imageSignedDraft = () => signedDraft({
+    bodyValues: {
+      t: { value: 'Hello.' },
+      h: { value: '<p>Hello.</p><div class="fm-mcp-signature"><img src="https://example.com/logo.png"></div>' },
+    },
+  });
+
+  it('says so when a requested append has no plain-text form to write', async () => {
+    const client = makeClient([IMAGE_ONLY_IDENTITY]);
+    const seen = mockUpdate(client, imageSignedDraft());
+
+    const result = await client.updateDraft('draft-1', {
+      textBody: 'Rewritten.', clearFields: ['htmlBody'], appendSignature: true,
+    });
+    assert.equal(seen.created.bodyValues.text.value, 'Rewritten.');
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('no-text-form', 'me@example.com')]);
+  });
+
+  it('says so when a PRESERVED signature has no plain-text form to carry over', async () => {
+    const client = makeClient([IMAGE_ONLY_IDENTITY]);
+    const seen = mockUpdate(client, imageSignedDraft());
+
+    const result = await client.updateDraft('draft-1', {
+      textBody: 'Rewritten.', clearFields: ['htmlBody'],
+    });
+    assert.equal(seen.created.bodyValues.text.value, 'Rewritten.');
+    // The loss wording, not the "you asked" wording: nothing in this call asked.
+    assert.deepEqual(result.notes, [noteSignatureUnavailableOnEdit('me@example.com', 'no-text-form')]);
+  });
+
+  // The other three compose surfaces report a requested append that landed nowhere; this one
+  // used to stay silent for two of the reasons. The flag is an input the caller cannot verify
+  // without re-reading the draft, so it reports on every surface or on none.
+  it('says so when appendSignature:true lands on a body that already ends with one', async () => {
+    const client = makeClient();
+    const seen = mockUpdate(client, signedDraft());
+
+    const result = await client.updateDraft('draft-1', { htmlBody: SIGNED_BODY, appendSignature: true });
+    assert.equal(seen.created.bodyValues.html.value.match(/fm-mcp-signature/g)!.length, 1);
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
+  });
+
+  it('says so when appendSignature:true is passed by an edit that writes no body', async () => {
+    const client = makeClient();
+    const seen = mockUpdate(client, signedDraft({
+      bodyValues: { t: { value: 'Hello.' }, h: { value: '<p>Hello.</p>' } },
+    }));
+
+    const result = await client.updateDraft('draft-1', { subject: 'New Subject', appendSignature: true });
+    assert.equal(seen.created.bodyValues.html.value, '<p>Hello.</p>'); // body-invariant, as documented
+    assert.deepEqual(result.notes, [noteSignatureNotAppended('no-body', 'me@example.com')]);
+  });
+
+  // The address hoist that keeps the sign-off with the sender has to carry the DISPLAY NAME
+  // too. Signing was already resolved against the written address; the name was still read
+  // off the account default, so a draft whose stored from matches no verified identity came
+  // back with the default identity's name in front of a foreign address.
+  it('does not put the default identity\'s display name against a foreign address', async () => {
+    const client = makeClient([SIGNED_IDENTITY]);
+    const seen = mockUpdate(client, signedDraft({ from: [{ name: 'Old Name', email: 'gone@elsewhere.example' }] }));
+
+    await client.updateDraft('draft-1', { htmlBody: '<p>Rewritten.</p>' });
+    assert.deepEqual(seen.created.from, [{ name: 'Old Name', email: 'gone@elsewhere.example' }]);
+  });
+
+  it('takes the display name from the identity an explicit from names', async () => {
+    const other = { id: 'id-9', name: 'Other Person', email: 'other@example.com', mayDelete: true };
+    const client = makeClient([SIGNED_IDENTITY, other]);
+    const seen = mockUpdate(client, signedDraft());
+
+    await client.updateDraft('draft-1', { htmlBody: '<p>Rewritten.</p>', from: 'other@example.com' });
+    assert.deepEqual(seen.created.from, [{ name: 'Other Person', email: 'other@example.com' }]);
   });
 
   // The ordering trap: after the quote rebuild updates.htmlBody already carries the quoted

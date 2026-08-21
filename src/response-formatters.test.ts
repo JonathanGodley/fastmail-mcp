@@ -13,8 +13,11 @@ describe('formatInlineNotes', () => {
     assert.equal(formatInlineNotes([]), '');
   });
 
-  it('joins the sentences behind a single leading space', () => {
-    assert.equal(formatInlineNotes(['One.', 'Two.']), ' One. Two.');
+  // One line each. The summaries these append to end in caller-controlled text with no
+  // terminator ("Subject: <subject>"), so a space join ran the first note straight on from
+  // the subject and read as part of it.
+  it('puts each note on a line of its own', () => {
+    assert.equal(formatInlineNotes(['One.', 'Two.']), '\nOne.\nTwo.');
   });
 });
 
@@ -101,7 +104,7 @@ describe('formatSendDraftResult', () => {
     const notes = ['Sent with 2 embedded image(s) (1.4 MB).'];
     assert.equal(
       formatSendDraftResult({ submissionId: 'sub-1', notes }),
-      'Draft sent successfully. Submission ID: sub-1 Sent with 2 embedded image(s) (1.4 MB).',
+      'Draft sent successfully. Submission ID: sub-1\nSent with 2 embedded image(s) (1.4 MB).',
     );
     const skipped = formatSendDraftResult({
       submissionId: 'sub-1',
