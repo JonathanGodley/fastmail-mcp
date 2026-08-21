@@ -60,16 +60,14 @@ Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
 
 **A live harness is on-demand proof of the real external path, never the sole coverage.** The only thing that proves the real upload/send path is a raw JSON-RPC harness spawning `dist/index.js` against a live account (with `FASTMAIL_API_TOKEN` + `FASTMAIL_ATTACH_DIR`) — Fastmail's blob store can't be meaningfully mocked. Use it to verify externally-observable behavior (byte-identical round-trip, server accept/reject), but it is a manual check that runs once; it must not be the only thing testing logic that could be unit-tested. "Verified once, live" ≠ "tested going forward." The reusable harness lives at `scripts/mcp-harness.mjs` (`createClient({ env })` → `init`/`call`/`close`, matches responses by JSON-RPC `id`); use it rather than hand-writing a new client each time.
 
-## Review findings get a disposition
+## Review findings: where each disposition lands here
 
-A surfaced issue — from a review, a subagent, or a self-check — must end with an explicit disposition; never a silent drop. "Minor / nit / non-blocking" is a *severity*, not a disposition: a non-blocking issue that is neither fixed nor tracked is invisible to the next reader and hides forever. Likewise **"out of scope" is not a disposition** — it is a scope decision, and a scope decision is the user's to make, not one to bury in an "Out of scope:" line. This is sharpest when the scoped-out item is a gap in the very thing the current work fixes (e.g. #37 guarded a quote-dropping `htmlBody` edit but the symmetric `textBody`-on-a-text-only-reply-draft quote-drop was quietly scoped out — and worse, with a justification that was factually wrong). A scope call wearing a false justification looks dispositioned but isn't. Each finding resolves to exactly one of:
+The global rule (every finding is fixed, tracked, consciously declined with a written home, or surfaced) applies; in this repo the homes are:
 
-1. **Fixed now** — preferred for anything cheap and real (e.g. a guard that rejects valid input).
-2. **Tracked** — a fork GitHub issue (`--repo JonathanGodley/fastmail-mcp`). NOT a code `TODO`/comment: deferred work belongs in the issue tracker where it stays visible and triageable, not buried in a comment that never resurfaces.
-3. **Consciously declined** — allowed, but the *reason for declining* must live where the next reader will hit it: an in-code comment for a local call, or the `docs/*` rationale files for a cross-cutting/accepted residual (e.g. an inherent path-guard TOCTOU limit). This is for decisions that need no future action; anything meant to be revisited is deferred work and goes in an issue (2), not here. "We decided not to" with no written home does not count.
-4. **Surfaced to the user** — REQUIRED for anything that changes intended scope, behaviour, or a user-visible contract, including every "this is out of scope" call. The driver may fix / track / decline *implementation-level* findings on its own, but a scope/contract/behaviour call is the user's: state the gap and a recommendation, and let them veto. When unsure which side a finding falls on, surface it — a needless question is far cheaper than silently redrawing scope.
+- **Tracked** → a fork GitHub issue (`--repo JonathanGodley/fastmail-mcp`), never a code `TODO`.
+- **Consciously declined** → an in-code comment for a local call, or the `docs/*` rationale files for a cross-cutting/accepted residual (e.g. the inherent path-guard TOCTOU limit).
 
-When summarizing a review, state each finding's disposition plainly rather than burying declined items in a parenthetical, so the decision can be vetoed.
+The sharpest local example of a scope call that wasn't a disposition: #37 guarded a quote-dropping `htmlBody` edit but the symmetric `textBody`-on-a-text-only-reply-draft quote-drop was quietly scoped out, with a justification that was factually wrong.
 
 ## Parallel work: one worktree per concern, kept alive through review
 
@@ -127,4 +125,4 @@ The dividing line: **an issue explains why ONE tool behaves as it does; a docs f
 
 ## Artifacts read as standalone work
 
-Everything durable — commit messages, issue/PR titles and bodies, issue/PR comments, **and code comments and test names** — must stand on its own to a reader with no access to our planning. No internal plan codenames or slice labels (`B4`, `B7`, `Slice 2`), no review/session jargon (`Karen`, plan names, "the law"), and no AI-workflow meta (e.g. "drafted for a human to post," "we don't comment on upstream threads"). Explain the change or the *why* on its own terms; in GitHub artifacts, cite the public `#issue`/PR it relates to. For code comments this governs *content*, not prose style — they still follow ordinary code-comment conventions; the point is that a future reader sees the reason, not a label they can't decode. (Generalizes the release-notes codename rule above; see the `artifacts-stand-on-own-merit` memory.)
+The global rule applies (no plan codenames, session jargon or AI-workflow meta in anything durable). Here that specifically means: GitHub artifacts cite the public `#issue`/PR, and the release-notes codename rule above is the same rule applied to tags and release bodies.
