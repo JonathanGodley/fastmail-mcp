@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQuerySummary, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
@@ -347,6 +347,24 @@ function participantsSchemaProperty(leadIn: string) {
       ` The whole array may also be sent as a JSON string ('[{"email":"a@example.com"}]'), for clients that stringify structured parameters; a comma-joined list is NOT accepted.`,
   };
 }
+
+/**
+ * How `calendarId` is matched, said ONCE for the two tools that take one.
+ *
+ * The read and the write path resolve the parameter identically — same filtered calendar
+ * list, same trim, same fail-closed treatment of an empty value, and literally the same
+ * not-found error. Only the descriptions had diverged: 394 characters on the read side
+ * against 41 on the write side ("ID of the calendar to create the event in"), so a caller
+ * reading the write tool could not learn that a display name works, that it is matched
+ * exactly, or that a miss is rejected rather than answered emptily.
+ *
+ * `update_calendar_event` takes no calendarId, so these two are the whole set.
+ */
+const CALENDAR_ID_MATCHING_DESC =
+  'Takes either the calendar\'s `id`/URL from list_calendars or its display name, matched EXACTLY — case and ' +
+  'spacing included, though surrounding whitespace is trimmed. A value matching no calendar is rejected naming ' +
+  'the available calendars rather than answered with an empty result, and an empty or whitespace-only string is ' +
+  'such a value. Calendars list_calendars does not show cannot be named here either, on a read or on a write.';
 
 function getTimezone(): string | undefined {
   return findEnvValue([
@@ -1454,30 +1472,35 @@ const TOOLS = [
         name: 'list_calendar_events',
         description:
           'List events from a calendar, one entry per occurrence in the requested window. ' +
-          'RECURRING EVENTS ARE EXPANDED: give startDate/endDate and a repeating event returns one entry for each occurrence that falls inside the window, with start/end set to that occurrence\'s real dates — so a fortnightly event across three months is several entries, not one. Reading three recurrence fields tells you exactly what a date is: `recurrenceId` present means start/end ARE the in-window occurrence; `recurrenceRule` present (the RRULE, only ever without recurrenceId) means you are looking at the series master shown at its ORIGINAL start date, which may be years before the window; `isRecurring` is set in both cases, and a one-off event carries none of them. ' +
+          'RECURRING EVENTS ARE EXPANDED: give startDate/endDate and a repeating event returns one entry for each occurrence that falls inside the window, with start/end set to that occurrence\'s real dates — so a fortnightly event across three months is several entries, not one. Reading three recurrence fields tells you exactly what a date is: `recurrenceId` present means start/end ARE the in-window occurrence; `recurrenceRule` present (the RRULE) means you are looking at the series master shown at its ORIGINAL start date, which may be years before the window; `isRecurring` says the entry belongs to a repeating series. Master and occurrence are the usual split, but the two fields CAN appear together — RFC 5545 allows an override block to carry its own rule — and where they do, `recurrenceId` names the instance this entry is and `recurrenceRule` is that block\'s own rule, not the series\'. In an expanded window the FIRST occurrence of a series arrives with no recurrenceId of its own (the server marks only instances after the first), so it is recognisable as recurring only when a sibling occurrence shares the window; where the window holds that first occurrence and nothing else, the entry is indistinguishable from a one-off — call get_calendar_event on its id to see the series master and its RRULE. ' +
+          'EVERY OCCURRENCE OF A SERIES CARRIES THE SAME `id`, and that id names the SERIES, not the occurrence: seven rows of a fortnightly event are seven identical ids. update_calendar_event and delete_calendar_event act on ALL occurrences of the id you give them — deleting the row for one Thursday deletes every Thursday, past and future, and mails every attendee a cancellation. There is no per-occurrence id here and no way to change or remove a single instance through this server. A row\'s `url` is the SAME record under another name and is equally series-wide: delete_calendar_event accepts it in place of `id` and destroys just as much, so it is not a safer handle. ' +
+          'ROWS CARRY CORE FIELDS ONLY — never `participants` and never `organizer`, even on an event that has them, because this tool does not fetch them. An absent participant list here does NOT mean the event has no attendees, and empty fields are omitted throughout, so there is nothing to distinguish "none" from "not asked for". Call get_calendar_event on the id before any destructive call: it is the only way to see who is about to be mailed a cancellation. ' +
           'Without startDate/endDate nothing is expanded, so a recurring event is reported once at its original start — pass a window to ask "what is actually on these days?". ' +
-          'Every calendar is queried before the results are sorted and trimmed, so `limit` is a genuine "earliest N" across all of them. The response opens with a summary line stating how many events matched in total; when that total exceeds the returned count, `limit` cut the rest off and there is no paging — narrow the window instead of raising it. ' +
-          'A calendar-discovery failure is reported as an error, never as an empty list.',
+          'A DATE IS A LOCAL DAY: startDate/endDate written as plain dates (2026-08-12) cover that calendar day in the account\'s configured timezone (FASTMAIL_TIMEZONE, falling back to this server\'s own zone — the same zone every email `date` is shown in), NOT the UTC day. A datetime with no Z and no offset is read as local time too. Only a value carrying Z or a numeric offset means the exact instant it names, so that is how to ask for something the local-day rule cannot express. ' +
+          'ONE-SIDED WINDOWS ARE BOUNDED: pass only startDate (or only endDate) and the missing half is filled in 366 days away, because expanding recurrences over an open-ended range would materialise every occurrence of every repeating event. The response says so in a trailing "Note:" line naming the range actually searched; pass both bounds to choose the span yourself. ' +
+          'Every calendar the account listed is queried before the results are sorted and trimmed, so `limit` is a genuine "earliest N" across all of them (a collection the server failed to list is not in that set — see the discovery clause below). The response opens with a summary line stating how many events matched in total; when that total exceeds the returned count, `limit` cut the rest off and there is no paging, so raise `limit` (up to 500) to see more, or narrow the window if the total is larger than that. ' +
+          'WHAT A RETURNED DATE IS, AND WHICH ROWS MAY SIT OUTSIDE THE WINDOW. A `start`/`end` ending in Z is a UTC instant; one with NO Z and no offset is a bare wall clock whose time zone was not preserved — the event may be stored against a named zone (TZID) and only its digits survive the read. Expanded occurrences are normalised to UTC and so carry Z; a designator-less value is an all-day date or an event read outside that normalisation. Every designator-less value is also widened by ±14 hours before the window is applied, on BOTH edges, so a row can sit outside EITHER end of the window you asked for: an all-day event on the neighbouring day, or a zone-stripped timed event on it. Which end you see follows your account\'s UTC offset, and an all-day event can land up to about 38 hours out, not one day. The filter only ever ADDS such a row, never removes a real one — so check each `start` against the window you asked for rather than assuming every row is inside it. ' +
+          'A TOTAL calendar-discovery failure is reported as an error, never as an empty list, and a calendarId matching no calendar is an error too — never an empty result. An empty or whitespace-only calendarId is that same error, not "every calendar". A PARTIAL failure is not covered: if the server answers for the account but fails on one collection, that calendar is silently missing from the results and from the total, so a cross-calendar "am I free?" can still be answered from an incomplete set (fork issue #136).',
         inputSchema: {
           type: 'object',
           properties: {
             calendarId: {
               type: 'string',
-              description: 'ID of the calendar (optional, defaults to all calendars)',
+              description: `Which calendar to read (optional; OMIT it to read every calendar — an empty string is NOT a way to ask for all of them). ${CALENDAR_ID_MATCHING_DESC}`,
             },
             startDate: {
               type: 'string',
               description:
-                'Start of the window, inclusive. Either a date (2027-03-01, meaning 00:00:00 UTC that day) or a full datetime (2027-03-01T09:00:00Z or 2027-03-01T09:00:00+10:00). Other spellings such as 2027/03/01 or "March 1 2027" are rejected rather than guessed at, and so is a day its month does not have (2027-02-30) — which would otherwise roll silently into the next month and move the window.',
+                'Start of the window, inclusive. Either a date (2027-03-01, meaning midnight LOCAL time at the start of that day — see the local-day rule in this tool\'s description) or a full datetime (2027-03-01T09:00:00Z or 2027-03-01T09:00:00+10:00, each taken exactly as written; 2027-03-01T09:00:00 with no designator is read as local time). Other spellings such as 2027/03/01 or "March 1 2027" are rejected rather than guessed at, and so is a day its month does not have (2027-02-30) — which would otherwise roll silently into the next month and move the window. THE PAIR IS VALIDATED: if both bounds are given and startDate does not resolve strictly before endDate the call is rejected, and two bounds resolving to the same instant are rejected as a zero-length window rather than answered with nothing.',
             },
             endDate: {
               type: 'string',
               description:
-                'End of the window, exclusive. Same accepted spellings as startDate, with one difference: a DATE-ONLY endDate covers the WHOLE of that day (2027-03-10 runs through to the following midnight UTC), so a single-day query is startDate and endDate on the same date. A full datetime is taken literally as the exclusive end.',
+                'End of the window, exclusive. Same accepted spellings and the same local-day rule as startDate, with one difference: a DATE-ONLY endDate covers the WHOLE of that day (2027-03-10 runs through to local midnight at the start of the 11th), so a single-day query is startDate and endDate on the same date. A datetime — with a designator or without — is taken literally as the exclusive end, with no day added. This deliberately differs from create_calendar_event\'s `end`, where a date-only value is exclusive at the START of that day (RFC 5545 DTEND): there the value names one edge of a single event, here it names the last day you are asking about, and reading it as the start of that day would make a one-day query a zero-length window that returns nothing. The pair is validated the same way startDate describes: a backwards or zero-length window is rejected, naming both values and the range they resolved to.',
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging — narrow the window with startDate/endDate instead. Recurrence expansion means this is reached sooner than it used to be; the summary line states the true total.',
+              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging: when the summary line reports a total larger than the number returned, raise `limit` to reach the rest, and narrow the window only if the total is above 500. Recurrence expansion means this is reached sooner than it used to be; the summary line states the true total.',
               default: 50,
             },
           },
@@ -1486,8 +1509,9 @@ const TOOLS = [
       {
         name: 'get_calendar_event',
         description:
-          'Get a specific calendar event by ID. Returns organizer and participants when available. ' +
-          'For a repeating event this returns the SERIES MASTER: `isRecurring` and `recurrenceRule` (the RRULE) are set, and start/end are the series\' original dates, NOT the next or nearest occurrence. To find out when the event actually falls on given days, call list_calendar_events with a startDate/endDate window, which expands the recurrence.',
+          'Get a specific calendar event by ID. Unlike list_calendar_events this returns `organizer` and `participants` when the event has them, so it is the call to make before deleting or rescheduling anything: it is the only way to see who the server will mail. ' +
+          'For a repeating event this returns the SERIES MASTER: `isRecurring` and `recurrenceRule` (the RRULE) are set, and start/end are the series\' original dates, NOT the next or nearest occurrence. To find out when the event actually falls on given days, call list_calendar_events with a startDate/endDate window, which expands the recurrence. The id is the series id, so update_calendar_event and delete_calendar_event on it act on EVERY occurrence. One exception: where a record holds only overridden instances and no master at all, what comes back is one of those overrides and carries a `recurrenceId` — so a `recurrenceId` here means you are NOT looking at the series master. ' +
+          'THE RETURNED start/end MAY HAVE LOST THEIR TIME ZONE. A value ending in Z is a UTC instant; a value with no Z and no offset (2026-04-20T10:00:00) is a bare wall clock, and the event may well be stored against a named zone (TZID) that this read does not carry through — reading such a value as local time can be hours out. This path never normalises to UTC, so it is the common case here for any event created in the Fastmail apps. Same rule as list_calendar_events: treat a designator-less value as "these digits on somebody\'s clock" and read it as local time only if you have no better information. This event\'s own start and end share whatever zone was dropped, so the difference between them is a correct duration except across a daylight-saving change; it is comparing one against anything ELSE that a wrong zone breaks.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1501,13 +1525,13 @@ const TOOLS = [
       },
       {
         name: 'create_calendar_event',
-        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. Write both as strict ISO-8601 (2026-04-07, 2026-04-07T14:00:00, 2026-04-07T14:00:00Z, or 2026-04-07T14:00:00+10:00): other spellings such as 2026/04/07 or "April 7 2026" are rejected rather than guessed at, since guessing would place the event on a day that depends on the server's own time zone, and so is a day that does not exist in its month (2026-02-31). participants entries may be { email, name? } objects or bare email-address strings. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
+        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. ONE EXEMPTION: two values carrying DIFFERENT named time zones (a flight departing one zone and landing in another) are a legal shape whose wall clocks can read backwards, so the ordering check stands down there and a backwards cross-zone pair IS written (fork issue #140). Write both as strict ISO-8601 (2026-04-07, 2026-04-07T14:00:00, 2026-04-07T14:00:00Z, or 2026-04-07T14:00:00+10:00): other spellings such as 2026/04/07 or "April 7 2026" are rejected rather than guessed at, since guessing would place the event on a day that depends on the server's own time zone, and so is a day that does not exist in its month (2026-02-31). participants entries may be { email, name? } objects or bare email-address strings. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
             calendarId: {
               type: 'string',
-              description: 'ID of the calendar to create the event in',
+              description: `Which calendar to create the event in (required). ${CALENDAR_ID_MATCHING_DESC}`,
             },
             title: {
               type: 'string',
@@ -1538,13 +1562,13 @@ const TOOLS = [
       },
       {
         name: 'update_calendar_event',
-        description: `Update an existing calendar event. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. Both are read as strict ISO-8601, matching create_calendar_event: a non-ISO spelling like 2026/04/07, or a day its month does not have (2026-02-31), is rejected rather than guessed at. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees, and its entries may be { email, name? } objects or bare email-address strings. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
+        description: `Update an existing calendar event. SINGLE (NON-REPEATING) EVENTS ONLY: a repeating event is REFUSED, and no parameter overrides that — eventId names the whole series (every occurrence row list_calendar_events returns for a repeating event carries the same id, and so does its url), a patch would move EVERY occurrence past and future, and this server cannot create a repeating event, so it will not rewrite one it has no way to put back. Change a repeating event, or one occurrence of it, in the Fastmail web interface instead; get_calendar_event still reads it here. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. ONE EXEMPTION: when both values end up carrying DIFFERENT named time zones the ordering check stands down, because a flight departing one zone and landing in another is a legal event whose wall clocks read backwards — so a backwards cross-zone pair IS written (fork issue #140). So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. Both are read as strict ISO-8601, matching create_calendar_event: a non-ISO spelling like 2026/04/07, or a day its month does not have (2026-02-31), is rejected rather than guessed at. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees, and its entries may be { email, name? } objects or bare email-address strings. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
             eventId: {
               type: 'string',
-              description: 'ID of the event to update',
+              description: 'ID of the event to update, or equivalently the `url` from a list_calendar_events row — both resolve to the same record and both are refused when it repeats. An id taken from an occurrence row of a repeating event is the SERIES id, which is why this tool refuses it.',
             },
             title: {
               type: 'string',
@@ -1574,10 +1598,6 @@ const TOOLS = [
               items: { type: 'string', enum: ['description', 'location'] },
               description: 'Property names to delete from the event. Allowed: description, location. Cannot also pass the same field as a value.',
             },
-            confirmRecurring: {
-              type: ['boolean', 'string'],
-              description: lenientBool('Required only when a start/end change would orphan an exception override — one whose recurrence-id no longer lands on an occurrence of the rule. The rejection names the orphaned dates; passing this acknowledges they will be removed. Not needed when the exceptions still line up, when the event has no overrides, or where the recurrence rule cannot be expanded safely (nothing is pruned there and no confirmation is asked for).'),
-            },
           },
           required: ['eventId'],
         },
@@ -1586,14 +1606,15 @@ const TOOLS = [
         name: 'delete_calendar_event',
         description:
           'Delete a calendar event by ID.' +
-          ' SENDS MAIL: if the event has attendees, the server emails every one of them a cancellation from this account as soon as it is deleted. That is the server scheduling layer, not a compose tool, so it happens with no send_draft call — deleting an event with a real person on it is contacting them.' +
+          ' SINGLE (NON-REPEATING) EVENTS ONLY: a repeating event is REFUSED, and no parameter overrides that. eventId names the calendar record, and every occurrence row list_calendar_events returns for a repeating event carries that same id — so deleting the row for one Thursday would destroy the entire series, every past and future occurrence with it, and mail every attendee a cancellation. This server cannot create a repeating event, so it will not destroy one it has no way to put back. Delete a repeating event, or one occurrence of it, in the Fastmail web interface instead.' +
+          ' SENDS MAIL: if the event has attendees, the server emails every one of them a cancellation from this account as soon as it is deleted. That is the server scheduling layer, not a compose tool, so it happens with no send_draft call — deleting an event with a real person on it is contacting them. For a series that is one cancellation for the whole thing, to every attendee.' +
           ' The delete is irreversible and nothing is echoed back: a calendar event does not go to Trash the way an email does, and this tool reads nothing before destroying it. Call get_calendar_event first if there is any chance the id is wrong — that response is the only copy you will have, and it is also how you find out whether anyone is about to be mailed.',
         inputSchema: {
           type: 'object',
           properties: {
             eventId: {
               type: 'string',
-              description: 'ID of the event to delete. Not verified before the destroy — a wrong id deletes a real event and mails its attendees.',
+              description: 'ID of the event to delete, or equivalently the `url` from a list_calendar_events row — the two name the same record, destroy the same amount, and are both refused when it repeats. The id is checked only for whether it repeats: a wrong id that names a real single event still deletes it and mails its attendees.',
             },
           },
           required: ['eventId'],
@@ -2315,14 +2336,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const { events, total } = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
-        // The same summary line the other listings carry, so a `limit` that trimmed the
-        // result is visible instead of being inferred from the array length. Unpaged: this
-        // tool takes no `position`, so no nextPosition is offered — passing one back would
-        // be rejected by the unknown-parameter guard. Recurrence expansion makes the count
+        const { events, total, windowClamp } = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
+        // Rendered through the shared seam every other list/search read tool uses, so the
+        // summary wording cannot drift here on its own. Unpaged: this tool takes no
+        // `position`, so formatQueryResult offers no nextPosition — passing one back would be
+        // rejected by the unknown-parameter guard. Recurrence expansion makes the count
         // load-bearing, since one fortnightly event across a quarter is now several rows.
-        const summary = formatQuerySummary({ items: events, total });
-        return { content: [{ type: 'text', text: `${summary}\n${toolJson(events)}` }] };
+        //
+        // The window note rides AFTER the JSON, like the Trash/Spam exclusion note on the
+        // email listings, so the JSON block stays parseable. It appears only when the window
+        // queried was not the window asked for. Both the wording and the blank-line separator
+        // come from the note builder, exactly as buildExclusionNote owns them for the email
+        // listings — the handler concatenates and decides nothing.
+        return { content: [{ type: 'text', text: `${formatQueryResult({ items: events, total })}${buildCalendarWindowNote(windowClamp)}` }] };
       }
 
       case 'get_calendar_event': {
@@ -2378,12 +2404,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // other field carried the update, the clear would be dropped silently on the way
         // to updateCalendarEvent. Coerce once and pass the coerced value on. (#54)
         const clearFields = coerceStringArray((args as any).clearFields);
-        // Coerce for lenient clients, and default to false. updateCalendarEvent tests this
-        // with a bare truthiness check, so an unconverted string "false" would read as true
-        // — which both skips the confirmation prompt AND authorizes pruning the orphaned
-        // recurrence exceptions the prompt exists to warn about. A non-bool like "garbage"
-        // yields undefined and so falls to false, never to the destructive direction.
-        const confirmRecurring = coerceBool((args as any).confirmRecurring) ?? false;
         if (!eventId) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
@@ -2395,7 +2415,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const fields = { title, description, start, end, location, participants, clearFields, confirmRecurring };
+        const fields = { title, description, start, end, location, participants, clearFields };
         await davClient.updateCalendarEvent(eventId, fields);
         return { content: [{ type: 'text', text: `Calendar event updated. Event ID: ${eventId}` }] };
       }
@@ -3159,7 +3179,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function runServer() {
-  // Resolve the email-date render zone once, before any tool handler can fire.
+  // Resolve the display and window-interpretation zone once, before any tool handler can fire.
+  // One stored value does both jobs: every email `date` renders in it, AND list_calendar_events
+  // interprets a date-only window bound as a whole day in it, so the day a calendar query covers
+  // and the day an email is dated cannot drift apart.
   setDefaultTimezone(getTimezone());
   const transport = new StdioServerTransport();
   await server.connect(transport);

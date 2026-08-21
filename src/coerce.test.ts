@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowEnd, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -475,7 +475,9 @@ describe('coerceUtcDate (#70)', () => {
     assert.throws(
       () => coerceUtcDate(long, 'after'),
       (err: Error) => {
-        assert.match(err.message, /x{60}\.\.\./);
+        // One ellipsis CHARACTER, not three dots: every echo in this server now goes through
+        // the same helper, so the truncation marker is the same everywhere.
+        assert.match(err.message, /x{60}…/);
         assert.ok(!err.message.includes('x'.repeat(61)));
         return true;
       },
@@ -1192,37 +1194,41 @@ describe('coerceContactName', () => {
   });
 });
 
+// Every case here passes an EXPLICIT zone. A test that leaves it to the host machine
+// passes under both the UTC-day reading and the local-day one whenever the host happens to
+// sit in the zone being asserted — which is how a whole suite stayed green while a date-only
+// window answered the wrong day (#138). 'UTC' below is a pinned zone, not "no zone".
 describe('coerceCalendarWindowEnd (#64)', () => {
   it('returns undefined for undefined/null (no window bound)', () => {
-    assert.equal(coerceCalendarWindowEnd(undefined, 'endDate'), undefined);
-    assert.equal(coerceCalendarWindowEnd(null, 'endDate'), undefined);
+    assert.equal(coerceCalendarWindowEnd(undefined, 'endDate', 'UTC'), undefined);
+    assert.equal(coerceCalendarWindowEnd(null, 'endDate', 'UTC'), undefined);
   });
 
   it('runs a date-only value to the end of that day', () => {
     // The one deliberate divergence from coerceUtcDate. CalDAV time-range ends are
     // exclusive, so the following midnight is exactly "through the end of the 10th".
-    assert.equal(coerceCalendarWindowEnd('2027-03-10', 'endDate'), '2027-03-11T00:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2027-03-10', 'endDate', 'UTC'), '2027-03-11T00:00:00Z');
   });
 
   it('rolls a date-only value at a month end into the next month', () => {
-    assert.equal(coerceCalendarWindowEnd('2027-03-31', 'endDate'), '2027-04-01T00:00:00Z');
-    assert.equal(coerceCalendarWindowEnd('2027-12-31', 'endDate'), '2028-01-01T00:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2027-03-31', 'endDate', 'UTC'), '2027-04-01T00:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2027-12-31', 'endDate', 'UTC'), '2028-01-01T00:00:00Z');
     // A leap day is a real date and must advance to 1 March, not 29 February again.
-    assert.equal(coerceCalendarWindowEnd('2028-02-28', 'endDate'), '2028-02-29T00:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2028-02-28', 'endDate', 'UTC'), '2028-02-29T00:00:00Z');
   });
 
   it('takes a full datetime literally, like coerceUtcDate', () => {
-    assert.equal(coerceCalendarWindowEnd('2027-03-10T17:00:00Z', 'endDate'), '2027-03-10T17:00:00Z');
-    assert.equal(coerceCalendarWindowEnd('2027-03-10T17:00:00+01:00', 'endDate'), '2027-03-10T16:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2027-03-10T17:00:00Z', 'endDate', 'UTC'), '2027-03-10T17:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2027-03-10T17:00:00+01:00', 'endDate', 'UTC'), '2027-03-10T16:00:00Z');
   });
 
   it('trims surrounding whitespace on a date-only value before extending it', () => {
-    assert.equal(coerceCalendarWindowEnd('  2027-03-10  ', 'endDate'), '2027-03-11T00:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('  2027-03-10  ', 'endDate', 'UTC'), '2027-03-11T00:00:00Z');
   });
 
   it('rejects a day its month does not have rather than rolling it over', () => {
     assert.throws(
-      () => coerceCalendarWindowEnd('2027-02-30', 'endDate'),
+      () => coerceCalendarWindowEnd('2027-02-30', 'endDate', 'UTC'),
       /endDate is not a real calendar date/,
     );
   });
@@ -1230,7 +1236,7 @@ describe('coerceCalendarWindowEnd (#64)', () => {
   it('rejects free text, reduced precision and non-strings, naming the parameter', () => {
     for (const value of ['next friday', '2027', '2027-03', '2027/03/10', '', '   ']) {
       assert.throws(
-        () => coerceCalendarWindowEnd(value, 'endDate'),
+        () => coerceCalendarWindowEnd(value, 'endDate', 'UTC'),
         (err: Error) => {
           assert.equal(err.name, 'InvalidInputError');
           assert.match(err.message, /endDate/);
@@ -1239,6 +1245,311 @@ describe('coerceCalendarWindowEnd (#64)', () => {
         `expected rejection for ${JSON.stringify(value)}`,
       );
     }
-    assert.throws(() => coerceCalendarWindowEnd(20270310, 'endDate'), /endDate must be a date string/);
+    assert.throws(() => coerceCalendarWindowEnd(20270310, 'endDate', 'UTC'), /endDate must be a date string/);
+  });
+});
+
+// A calendar window's DAY is a local day (#138). Every zone here is injected, and two of
+// them are chosen so a sign error cannot hide: Sydney is ahead of UTC, New York behind it,
+// so a start that should move BACKWARD in one must move FORWARD in the other.
+describe('calendar window bounds resolve a date in the configured zone (#138)', () => {
+  const SYDNEY = 'Australia/Sydney';   // +10:00 in August, +11:00 in January
+  const NEW_YORK = 'America/New_York'; // -04:00 in August, -05:00 in January
+
+  it('reads a date-only startDate as local midnight, not UTC midnight', () => {
+    // The reported defect, pinned. Asking a +10:00 account for the 12th used to search
+    // 12 Aug 10:00 to 13 Aug 10:00 local, so an 08:00 appointment ON the 12th fell outside
+    // the window and the day read as quieter than it was.
+    assert.equal(coerceCalendarWindowStart('2026-08-12', 'startDate', SYDNEY), '2026-08-11T14:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2026-08-12', 'endDate', SYDNEY), '2026-08-12T14:00:00Z');
+  });
+
+  it('moves the bound the other way for a zone behind UTC', () => {
+    assert.equal(coerceCalendarWindowStart('2026-08-12', 'startDate', NEW_YORK), '2026-08-12T04:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('2026-08-12', 'endDate', NEW_YORK), '2026-08-13T04:00:00Z');
+  });
+
+  it('uses the offset in force on the date asked about, not one fixed offset', () => {
+    // January is +11:00 in Sydney and -05:00 in New York; August is +10:00 and -04:00. A
+    // hard-coded offset would be right for half the year in each.
+    assert.equal(coerceCalendarWindowStart('2026-01-15', 'startDate', SYDNEY), '2026-01-14T13:00:00Z');
+    assert.equal(coerceCalendarWindowStart('2026-01-15', 'startDate', NEW_YORK), '2026-01-15T05:00:00Z');
+  });
+
+  it('spans a whole local day even when a DST change makes it 23 or 25 hours long', () => {
+    // Sydney springs forward on 2026-10-04 (a 23-hour day) and falls back on 2026-04-05 (a
+    // 25-hour one). Advancing the exclusive end by a fixed 24 hours would land it an hour
+    // inside the day on one and an hour into the next day on the other.
+    const springStart = coerceCalendarWindowStart('2026-10-04', 'startDate', SYDNEY)!;
+    const springEnd = coerceCalendarWindowEnd('2026-10-04', 'endDate', SYDNEY)!;
+    assert.equal((Date.parse(springEnd) - Date.parse(springStart)) / 3600000, 23);
+
+    const fallStart = coerceCalendarWindowStart('2026-04-05', 'startDate', SYDNEY)!;
+    const fallEnd = coerceCalendarWindowEnd('2026-04-05', 'endDate', SYDNEY)!;
+    assert.equal((Date.parse(fallEnd) - Date.parse(fallStart)) / 3600000, 25);
+  });
+
+  it('reads a zone-less datetime in the configured zone, deliberately', () => {
+    // This used to resolve in whatever zone the SERVER PROCESS ran in, by accident of how
+    // `new Date()` parses a value with no designator — so the same call answered differently
+    // on two machines, with nothing in the schema admitting it.
+    assert.equal(coerceCalendarWindowStart('2026-08-12T09:00:00', 'startDate', SYDNEY), '2026-08-11T23:00:00Z');
+    assert.equal(coerceCalendarWindowStart('2026-08-12T09:00:00', 'startDate', NEW_YORK), '2026-08-12T13:00:00Z');
+    // Seconds are optional in the wall-clock form.
+    assert.equal(coerceCalendarWindowStart('2026-08-12T09:00', 'startDate', SYDNEY), '2026-08-11T23:00:00Z');
+  });
+
+  it('does NOT add a day to a zone-less datetime used as the end', () => {
+    // The whole-day rule belongs to a DATE. A wall clock names a time of day, so the
+    // exclusive end is that time — the same as its Z-designated equivalent.
+    assert.equal(coerceCalendarWindowEnd('2026-08-12T17:00:00', 'endDate', SYDNEY), '2026-08-12T07:00:00Z');
+  });
+
+  it('leaves an explicit Z or numeric offset exactly as written, in any zone', () => {
+    for (const zone of [SYDNEY, NEW_YORK, 'UTC']) {
+      assert.equal(coerceCalendarWindowStart('2026-08-12T09:00:00Z', 'startDate', zone), '2026-08-12T09:00:00Z');
+      assert.equal(coerceCalendarWindowEnd('2026-08-12T09:00:00Z', 'endDate', zone), '2026-08-12T09:00:00Z');
+      assert.equal(coerceCalendarWindowStart('2026-08-12T09:00:00+05:30', 'startDate', zone), '2026-08-12T03:30:00Z');
+      // A `+00:00` offset is a zone designator too, so it is taken literally rather than
+      // being mistaken for a wall clock.
+      assert.equal(coerceCalendarWindowStart('2026-08-12T09:00:00+00:00', 'startDate', zone), '2026-08-12T09:00:00Z');
+    }
+  });
+
+  it('falls back to the host zone rather than throwing on an unusable zone name', () => {
+    // A mistyped FASTMAIL_TIMEZONE is a deployment mistake, not a caller mistake; it must
+    // not turn every calendar read into an error. Same posture as toLocalIso.
+    assert.equal(
+      coerceCalendarWindowStart('2026-08-12', 'startDate', 'Not/AZone'),
+      coerceCalendarWindowStart('2026-08-12', 'startDate', undefined),
+    );
+  });
+
+  it('rejects the same bad values the UTC coercion does, naming the zone in the hint', () => {
+    for (const value of ['next friday', '2027', '2027-03', '2027/03/10', '', '   ']) {
+      assert.throws(
+        () => coerceCalendarWindowStart(value, 'startDate', SYDNEY),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, /startDate/);
+          return true;
+        },
+        `expected rejection for ${JSON.stringify(value)}`,
+      );
+    }
+    assert.throws(() => coerceCalendarWindowStart('2027-02-30', 'startDate', SYDNEY), /is not a real calendar date/);
+    assert.throws(() => coerceCalendarWindowStart(20270310, 'startDate', SYDNEY), /must be a date string/);
+    // The accepted-shapes sentence names the zone the caller's dates will be read in, so a
+    // rejection is also the one place the rule is stated back to them.
+    assert.throws(() => coerceCalendarWindowStart('next friday', 'startDate', SYDNEY), /Australia\/Sydney/);
+  });
+
+  it('leaves the email search bounds on the UTC rule', () => {
+    // coerceUtcDate is shared with search_emails' before/after, which compare against a
+    // message's receivedAt — an instant, not a day on anybody's wall. It is deliberately
+    // NOT zone-aware, and this pins that the calendar change did not leak into it.
+    assert.equal(coerceUtcDate('2026-08-12', 'after'), '2026-08-12T00:00:00Z');
+  });
+});
+
+describe('describeTimezone', () => {
+  it('names the configured zone', () => {
+    assert.equal(describeTimezone('Australia/Sydney'), 'Australia/Sydney');
+  });
+
+  it('names the host zone when none is configured, rather than saying nothing', () => {
+    const host = describeTimezone(undefined);
+    assert.ok(host && host.length > 0);
+    assert.equal(host, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  });
+});
+
+// The window bounds read the TIME out of a caller's value, which the shape pattern alone does
+// not validate — so these are the cases where "the calendar pair rejects what coerceUtcDate
+// rejects" stops being true by construction and has to be asserted.
+describe('calendar window bounds reject a time of day that does not exist (#138)', () => {
+  const SYDNEY = 'Australia/Sydney';
+
+  it('rejects an out-of-range wall clock instead of rolling it into another day', () => {
+    // Date.UTC ROLLS these rather than failing: 25:00 became 15:00Z the same day and 99:99:99
+    // became a window starting three and a half days later — silently, since only the
+    // one-sided clamp says anything about a window that moved. coerceUtcDate throws on all
+    // three, and so does create_calendar_event, so the family accepted on a read what it
+    // refused on a write.
+    for (const value of ['2026-08-12T25:00:00', '2026-08-12T12:75:00', '2026-08-12T99:99:99', '2026-08-12T23:59:60']) {
+      for (const coerce of [coerceCalendarWindowStart, coerceCalendarWindowEnd]) {
+        assert.throws(
+          () => coerce(value, 'startDate', SYDNEY),
+          (err: Error) => {
+            assert.equal(err.name, 'InvalidInputError');
+            assert.match(err.message, /is not a valid date/);
+            return true;
+          },
+          `expected rejection for ${value}`,
+        );
+      }
+      // The pinned parity: the same value, through the UTC coercion the email bounds use.
+      assert.throws(() => coerceUtcDate(value, 'after'), /is not a valid date/);
+    }
+  });
+
+  it('accepts 24:00:00 as the end of the day, exactly as the UTC coercion does', () => {
+    // The ECMAScript Date Time String Format allows it, so `new Date()` takes it and
+    // coerceUtcDate accepts it. Rejecting it here would be the same divergence pointing the
+    // other way.
+    assert.equal(coerceCalendarWindowStart('2026-08-12T24:00:00', 'startDate', 'UTC'), '2026-08-13T00:00:00Z');
+    assert.equal(coerceUtcDate('2026-08-12T24:00:00Z', 'after'), '2026-08-13T00:00:00Z');
+  });
+
+  it('reads a year below 0100 as that year, not as the 1900s', () => {
+    // Date.UTC maps years 0-99 to 1900-1999, so `0026-08-12` resolved to a window in 1926
+    // while coerceUtcDate on the same value correctly returned the year 26.
+    assert.equal(coerceCalendarWindowStart('0026-08-12', 'startDate', 'UTC'), '0026-08-12T00:00:00Z');
+    assert.equal(coerceUtcDate('0026-08-12', 'after'), '0026-08-12T00:00:00Z');
+    // In a zone with an offset it is still that year, whatever the offset of the day turns
+    // out to have been.
+    assert.match(coerceCalendarWindowStart('0026-08-12', 'startDate', 'Australia/Sydney')!, /^0026-/);
+  });
+
+  it('reads year 0000 as year 0, not as the year Intl calls "1 BC"', () => {
+    // The offset is read back out of Intl.formatToParts, and WITHOUT an `era` in the options
+    // Intl prints the ERA-RELATIVE year: proleptic year 0 formats as "1". That number went
+    // back in as though it were the proleptic year, so the offset came out a whole year
+    // wrong and the bound landed on the wrong DAY with nothing said — `0000-12-31` resolved
+    // to 0000-01-01, a silently different window of exactly the kind this section exists for.
+    assert.equal(coerceCalendarWindowStart('0000-12-31', 'startDate', 'UTC'), '0000-12-31T00:00:00Z');
+    assert.equal(coerceCalendarWindowStart('0000-01-01', 'startDate', 'UTC'), '0000-01-01T00:00:00Z');
+    assert.equal(coerceCalendarWindowEnd('0000-12-31', 'endDate', 'UTC'), '0001-01-01T00:00:00Z');
+    // And the year either side of the era boundary, so a sign error cannot pass.
+    assert.equal(coerceCalendarWindowStart('0001-01-01', 'startDate', 'UTC'), '0001-01-01T00:00:00Z');
+    // In an offset zone the DAY still has to be the day asked for. Sydney was on LMT that
+    // far back, so the instant carries a minutes-and-seconds offset rather than a round hour;
+    // what matters is that it sits within a day of the date named, not a year away.
+    const sydney = coerceCalendarWindowStart('0000-12-31', 'startDate', 'Australia/Sydney')!;
+    assert.match(sydney, /^0000-12-3[01]T/, sydney);
+  });
+});
+
+// Caller text quoted back inside an error message is untrusted content in a channel an agent
+// reads as trusted. One helper decides how, so the policy cannot differ per message.
+describe('echoCallerText is the one echo policy (#141)', () => {
+  it('strips the control characters that would forge extra lines in a message', () => {
+    // Measured before this converged: coerceUtcDate echoed a raw ESC straight through while
+    // the calendar window's backwards-range error scrubbed the identical value.
+    const withEsc = '2026-08-12T\u001B[31mBAD\u2028INJECTED';
+    assert.throws(
+      () => coerceUtcDate(withEsc, 'after'),
+      (err: Error) => {
+        assert.ok(!err.message.includes('\u001B'), err.message);
+        assert.ok(!err.message.includes('\u2028'), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('trims, so the value quoted is the value that was judged', () => {
+    // The coercion trims before validating, so echoing the padding back quotes a string the
+    // server never looked at.
+    assert.throws(
+      () => coerceUtcDate('   2026-13-45   ', 'after'),
+      (err: Error) => {
+        assert.match(err.message, /"2026-13-45"/);
+        return true;
+      },
+    );
+  });
+
+  it('names an unresolvable timezone with a visible truncation marker', () => {
+    // Silently cutting at 40 characters printed a name the caller could neither recognise nor
+    // correct.
+    const long = `Not/AZone${'x'.repeat(80)}`;
+    const described = describeTimezone(long);
+    assert.match(described, /…/);
+    assert.ok(!described.includes('x'.repeat(41)), described);
+  });
+});
+
+// A wall clock a DST transition skips or repeats names no instant, or two. Both are resolved
+// the way RFC 5545 and Temporal's `compatible` disambiguation resolve them.
+describe('calendar window bounds resolve a DST gap forward (#138)', () => {
+  it('does not drop the last hour of a day whose midnight transition skips it', () => {
+    // Santiago springs forward AT MIDNIGHT on 2026-09-06, so local midnight that day does not
+    // exist. Resolving it backward — to the last instant before the gap — ended a single-day
+    // window at local 23:00 and an event at 23:30 on the 5th was never searched for, with
+    // nothing saying so.
+    const start = coerceCalendarWindowStart('2026-09-05', 'startDate', 'America/Santiago');
+    const end = coerceCalendarWindowEnd('2026-09-05', 'endDate', 'America/Santiago');
+    assert.equal(start, '2026-09-05T04:00:00Z');
+    assert.equal(end, '2026-09-06T04:00:00Z');
+    // 24 hours of UTC covering a 23-hour local day: the missing hour is the one the clocks
+    // skipped, not one the window dropped.
+    assert.equal((Date.parse(end!) - Date.parse(start!)) / 3600000, 24);
+  });
+
+  it('resolves a skipped wall-clock datetime forward, to the transition instant', () => {
+    // Sydney 2026-10-04 02:30 does not exist (02:00 jumps to 03:00). Forward is 03:30 AEDT.
+    assert.equal(coerceCalendarWindowStart('2026-10-04T02:30:00', 'startDate', 'Australia/Sydney'), '2026-10-03T16:30:00Z');
+  });
+
+  it('resolves a repeated wall clock to the earlier of its two instants', () => {
+    // Sydney 2026-04-05 02:30 happens twice (03:00 falls back to 02:00). The earlier one is
+    // still +11:00.
+    assert.equal(coerceCalendarWindowStart('2026-04-05T02:30:00', 'startDate', 'Australia/Sydney'), '2026-04-04T15:30:00Z');
+  });
+
+  it('still covers a whole local day either side of a mid-day transition', () => {
+    // The 23/25-hour cases, re-asserted here because the gap handling is the code that
+    // computes them now.
+    const spring = Date.parse(coerceCalendarWindowEnd('2026-10-04', 'e', 'Australia/Sydney')!) -
+      Date.parse(coerceCalendarWindowStart('2026-10-04', 's', 'Australia/Sydney')!);
+    const fall = Date.parse(coerceCalendarWindowEnd('2026-04-05', 'e', 'Australia/Sydney')!) -
+      Date.parse(coerceCalendarWindowStart('2026-04-05', 's', 'Australia/Sydney')!);
+    assert.equal(spring / 3600000, 23);
+    assert.equal(fall / 3600000, 25);
+  });
+});
+
+describe('resolveCalendarInstantMs', () => {
+  it('reads a zone-less value in the configured zone and a designated one as written', () => {
+    // The TZID is gone by the time an event start reaches here, so a bare wall clock is read
+    // the way the window bounds read one. A Z value names its own instant and is untouched.
+    assert.equal(
+      resolveCalendarInstantMs('2026-03-25T08:30:00', 'Australia/Sydney'),
+      // 25 March is still +11:00 in Sydney — the offset in force on the day, not a fixed one.
+      Date.parse('2026-03-24T21:30:00Z'),
+    );
+    assert.equal(resolveCalendarInstantMs('2026-03-25T08:00:00Z', 'Australia/Sydney'), Date.parse('2026-03-25T08:00:00Z'));
+    assert.equal(resolveCalendarInstantMs('2026-03-25T08:00:00+05:30', 'Australia/Sydney'), Date.parse('2026-03-25T02:30:00Z'));
+  });
+
+  it('places an all-day date at local midnight, where the window puts one', () => {
+    assert.equal(
+      resolveCalendarInstantMs('2026-03-25', 'Australia/Sydney'),
+      Date.parse(coerceCalendarWindowStart('2026-03-25', 'startDate', 'Australia/Sydney')!),
+    );
+  });
+
+  it('returns NaN for anything it cannot read, rather than throwing', () => {
+    // It orders SERVER data, not caller input: something unreadable is for the caller to
+    // place, and a throw here would fail a whole listing over one odd event.
+    for (const value of [undefined, '', '   ', 'whenever', 12 as any]) {
+      assert.ok(Number.isNaN(resolveCalendarInstantMs(value, 'Australia/Sydney')), `for ${String(value)}`);
+    }
+  });
+});
+
+describe('describeTimezone names the zone that actually resolved', () => {
+  it('names the host zone AND the configured value when the configured one is unusable', () => {
+    // zoneOffsetMsAt falls back to the host zone on a name ICU cannot resolve, so naming the
+    // configured value alone printed a zone the dates were not read in — on the one call
+    // where the caller is trying to work out why their days look wrong.
+    const label = describeTimezone('Not/AZone');
+    assert.match(label, new RegExp(Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/[/]/g, '\\/')));
+    assert.match(label, /Not\/AZone/);
+    assert.match(label, /not a time zone this server can resolve/);
+  });
+
+  it('says nothing extra about a zone that resolves', () => {
+    assert.equal(describeTimezone('America/New_York'), 'America/New_York');
   });
 });

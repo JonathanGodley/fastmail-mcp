@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, buildCalendarWindowNote } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -1555,5 +1555,57 @@ describe('formatArchiveResult', () => {
       );
       assert.match(text, /Fastmail offers no Archive action/);
     }
+  });
+});
+
+// A saturated bound is a bound the caller CHOSE and is not getting, so the note that names it
+// has to name the right end. Saturation happens at both ends of the four-digit-year range and
+// the two are opposite statements: a startDate pulled UP to year 0000 was reported as having
+// "resolved past the last date this server can express", which is the reverse of what
+// happened, and the bottom end had no coverage at all.
+describe('buildCalendarWindowNote names the edge a bound was saturated at', () => {
+  it('says the last date for a bound pulled back from beyond year 9999', () => {
+    const note = buildCalendarWindowNote({
+      saturated: [{ bound: 'endDate', edge: 'latest' }],
+      start: '2026-08-12T00:00:00Z',
+      end: '9999-12-31T23:59:59Z',
+    });
+    assert.match(note, /endDate resolved past the last date this server can express/);
+    assert.doesNotMatch(note, /earliest/);
+    assert.match(note, /2026-08-12T00:00:00Z \.\. 9999-12-31T23:59:59Z \(end exclusive\)/);
+  });
+
+  it('says the earliest date for a bound pulled up from before year 0000', () => {
+    const note = buildCalendarWindowNote({
+      saturated: [{ bound: 'startDate', edge: 'earliest' }],
+      start: '0000-01-01T00:00:00Z',
+      end: '0001-01-01T13:55:08Z',
+    });
+    assert.match(note, /startDate resolved before the earliest date this server can express/);
+    assert.doesNotMatch(note, /past the last date/);
+  });
+
+  // Both ends at once is a real window, not a contrived one: `0000-01-01` .. `9999-12-31` on
+  // any account with a UTC offset saturates at both. One joined sentence could only describe
+  // one of them.
+  it('gives each edge its own sentence when both bounds saturate', () => {
+    const note = buildCalendarWindowNote({
+      saturated: [
+        { bound: 'startDate', edge: 'earliest' },
+        { bound: 'endDate', edge: 'latest' },
+      ],
+      start: '0000-01-01T00:00:00Z',
+      end: '9999-12-31T23:59:59Z',
+    });
+    assert.match(note, /endDate resolved past the last date this server can express/);
+    assert.match(note, /startDate resolved before the earliest date this server can express/);
+  });
+
+  it('says nothing about saturation for a window that was honoured exactly', () => {
+    assert.equal(buildCalendarWindowNote(undefined), '');
+    assert.equal(
+      buildCalendarWindowNote({ start: '2026-08-12T00:00:00Z', end: '2026-08-13T00:00:00Z' }),
+      '',
+    );
   });
 });

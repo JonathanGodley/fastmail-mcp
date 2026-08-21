@@ -4,6 +4,8 @@ import { redactBearerTokens, toolJson } from './coerce.js';
 import { describePart } from './inline-images.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
+import { CALENDAR_OPEN_WINDOW_DAYS } from './caldav-client.js';
+import type { CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 
 // The query-level summary that heads every list/search response, so the count wording
@@ -52,8 +54,13 @@ export function formatQuerySummary(result: QueryResult, options?: { paged?: bool
   return `Showing ${items.length} of ${total} results${from}.${more}`;
 }
 
-// Raw (untransformed JMAP) rendering for a listing tool that does NOT take a
-// `position` — the contacts listings. Paging is a property of the tool, so it is
+// Raw rendering for a listing tool that does NOT take a `position`. Two callers with
+// nothing else in common: the contacts listings, whose items are raw JMAP ContactCard
+// objects, and `list_calendar_events`, whose items are the CalendarEvent shape parsed
+// out of CalDAV iCalendar. "Raw" here means only that this helper applies no
+// transformation of its own — the caller decides what the items are — and it is the
+// absence of `position`, not the protocol or the item shape, that separates these from
+// the paged listings. Paging is a property of the tool, so it is
 // carried by which renderer the handler picks rather than by a flag each call site has
 // to remember to pass: forgetting a flag would silently drop a promised signal, while
 // reaching for the wrong function is visible in the handler.
@@ -168,6 +175,52 @@ export function formatSendDraftResult(result: SendDraftResult): string {
 export const excludedCountPhrase = (roles: string) => `message(s) in ${roles} were excluded`;
 export const UNCONFIRMED_COUNT_PHRASE = "the hidden count couldn't be confirmed";
 export const NOT_EXCLUDED_PHRASE = "couldn't be found, so it was NOT excluded";
+
+/**
+ * The disclosure for a calendar window that was NOT the window the caller described.
+ *
+ * The counterpart of `buildExclusionNote` for calendar reads: the client returns structure
+ * (`CalendarWindowClamp`), this owns the wording AND the blank-line separator, and the handler
+ * only concatenates. It lives beside `buildExclusionNote` so the blank-line separator convention
+ * is written once and both disclosures are reachable from `response-formatters.test.ts`.
+ *
+ * Silence means the window was honoured exactly. A caller handed a narrower window than it
+ * asked for and not told reads "nothing after that date" as an empty calendar.
+ */
+export function buildCalendarWindowNote(clamp?: CalendarWindowClamp): string {
+  if (!clamp) return '';
+  const notes: string[] = [];
+  if (clamp.invented) {
+    const given = clamp.invented === 'startDate' ? 'endDate' : 'startDate';
+    notes.push(
+      `Note: only ${given} was given, so the window was bounded to ${CALENDAR_OPEN_WINDOW_DAYS} days and ran ` +
+      `${clamp.start} .. ${clamp.end} (end exclusive). Events outside that range were NOT searched. ` +
+      `Pass ${clamp.invented} explicitly to query a different span — an open-ended window is not queried, ` +
+      'because recurrence expansion would materialise every occurrence of every repeating event across it.',
+    );
+  }
+  if (clamp.saturated && clamp.saturated.length > 0) {
+    // A saturated bound is a bound the caller DID choose and is not getting, so it is named
+    // even though the narrowing is tiny — the same never-silently-degrade rule as above.
+    //
+    // Grouped by EDGE rather than joined into one sentence. Saturation happens at both ends of
+    // the representable range and the two are opposite statements, so a single "resolved past
+    // the last date" told a caller whose bound was pulled UP to year 0000 the reverse of what
+    // had happened — and a window that saturates at both ends at once needs both sentences.
+    for (const edge of ['latest', 'earliest'] as const) {
+      const bounds = clamp.saturated.filter((s) => s.edge === edge).map((s) => s.bound);
+      if (bounds.length === 0) continue;
+      const ran = edge === 'latest'
+        ? 'resolved past the last date this server can express'
+        : 'resolved before the earliest date this server can express';
+      notes.push(
+        `Note: ${bounds.join(' and ')} ${ran}, so the window ` +
+        `was searched as ${clamp.start} .. ${clamp.end} (end exclusive) instead.`,
+      );
+    }
+  }
+  return notes.length ? `\n\n${notes.join('\n')}` : '';
+}
 
 // Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the
 // out-of-band metadata that searchEmails/getEmails populate; the formatters above

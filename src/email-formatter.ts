@@ -123,6 +123,17 @@ export function setDefaultTimezone(tz?: string): void {
   defaultTimezone = tz && tz.trim() ? tz.trim() : undefined;
 }
 
+// The same stored value, for the paths that have to INTERPRET a local date rather than
+// render one — `list_calendar_events` reads a date-only window as local days, so it needs
+// the zone every email timestamp is already displayed in. It reads this variable instead of
+// re-deriving the zone from the environment on purpose: a second env lookup is a second
+// answer, and the two drifting would mean the day a calendar query covers and the day an
+// email's `date` is printed in disagree with nothing to say so. `undefined` means the host
+// zone, exactly as it does for rendering.
+export function getDefaultTimezone(): string | undefined {
+  return defaultTimezone;
+}
+
 // Format a UTC instant in an explicit zone (or host zone when undefined).
 // Throws RangeError for an invalid IANA name — callers handle the fallback.
 function renderLocalIso(date: Date, zone: string | undefined): string {

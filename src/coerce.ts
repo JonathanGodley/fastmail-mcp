@@ -284,6 +284,31 @@ const DATE_TIME_PATTERN = /^(\d{4}-\d{2}-\d{2})T.+$/;
 // value, short enough that a pasted blob doesn't become the error.
 const DATE_ECHO_LIMIT = 60;
 
+/**
+ * The ONE way this server quotes caller-supplied text back inside an error message.
+ *
+ * An error message is read by an agent, so any caller text inside it is untrusted content in
+ * a trusted-looking channel. Three rules, and they travel together:
+ *
+ *   TRIM, so the value quoted is the value the coercion actually looked at. Echoing
+ *     `"  2027-03-10  "` back at someone whose padding was stripped before validation quotes
+ *     a string that is not what was judged.
+ *   SCRUB the control characters — and U+2028/U+2029 with them — that would otherwise forge
+ *     extra lines in the message. A raw ESC in an echoed argument reaches a terminal intact.
+ *   BOUND it, with a VISIBLE truncation marker, so a pasted blob does not become the error
+ *     and a reader can tell a cut value from a short one.
+ *
+ * It lives here, and every echo site calls it, because the three used to disagree: the date
+ * coercions echoed raw control characters, the calendar window scrubbed them, and the zone
+ * describer scrubbed but cut silently at 40 characters with no marker. Same class of value,
+ * same message family, three policies.
+ */
+export function echoCallerText(value: unknown, limit: number = DATE_ECHO_LIMIT): string {
+  const text = typeof value === 'string' ? value : String(value);
+  const clean = text.replace(/[\u0000-\u001F\u007F\u2028\u2029]/g, ' ').trim();
+  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+}
+
 // Normalise a caller-supplied date/datetime into the JMAP UTCDate shape.
 //
 //   2026-07-20                -> 2026-07-20T00:00:00Z   (midnight UTC on that date)
@@ -300,15 +325,66 @@ const DATE_ECHO_LIMIT = 60;
 // the emitted value is the canonical seconds-precision form.
 export function coerceUtcDate(value: unknown, paramName: string): string | undefined {
   if (value === undefined || value === null) return undefined;
+  const { trimmed, kind } = classifyDateValue(value, paramName, acceptedDateFormats());
+
+  // A date-only value is expanded explicitly rather than left to Date's parse so the
+  // intent (midnight UTC, never host-local) is visible in the code, not a spec detail.
+  const parsed = new Date(kind === 'date' ? `${trimmed}T00:00:00Z` : trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new InvalidInputError(
+      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
+    );
+  }
+  return parsed.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+// What SHAPE a caller's date argument is. The distinction the calendar cares about is the
+// third one: a datetime carrying no zone designator names a wall clock, not an instant, so
+// something has to decide which zone reads it.
+type DateValueKind = 'date' | 'local-datetime' | 'zoned-datetime';
+
+// Every accepted datetime ends in `Z` or a numeric offset; anything else is a wall clock.
+const ZONE_DESIGNATOR_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+// The wall-clock datetimes the calendar resolves itself, captured so the components can be
+// placed in a zone. Deliberately stricter than DATE_TIME_PATTERN's `T.+`: a zone-less value
+// this does not match is one whose hour and minute cannot be read out, and guessing at it is
+// exactly what the strict-parsing rule above exists to prevent.
+//
+// SHAPE ONLY — the RANGES are checked separately, in `isWallClockInRange`. Matching here
+// is not acceptance: `2026-08-12T99:99:99` has a readable hour, minute and second, and every
+// one of them is out of range. See that function for why the check is not folded into this
+// pattern.
+const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/;
+
+/**
+ * The shared validation behind every date argument: type, emptiness, shape, and a real
+ * calendar day. Split out so `coerceUtcDate` (email search bounds, resolved in UTC) and the
+ * calendar-window pair below (resolved in the user's zone) reject an identical set of bad
+ * values with identical wording, and only DIVERGE where they mean to — on what an accepted
+ * value resolves to. `formats` is the accepted-shapes sentence, which differs between them
+ * because the two describe a date-only value differently.
+ *
+ * It does NOT check the TIME components, because it does not read them: `coerceUtcDate` gets
+ * that from `new Date()` refusing an out-of-range hour, and the calendar pair has to do it
+ * itself, in `isWallClockInRange`. The two therefore agree on `2026-08-12T25:00:00` only for
+ * as long as both halves stay — and they did not, once: the calendar pair read the components
+ * out with a shape-only pattern and handed them to `Date.UTC`, which rolled `99:99:99` into a
+ * window three days wide of the one asked for.
+ */
+function classifyDateValue(
+  value: unknown,
+  paramName: string,
+  formats: string,
+): { trimmed: string; kind: DateValueKind } {
   if (typeof value !== 'string') {
     throw new InvalidInputError(
-      `${paramName} must be a date string, not ${Array.isArray(value) ? 'an array' : `a ${typeof value}`}. ${acceptedDateFormats()}`,
+      `${paramName} must be a date string, not ${Array.isArray(value) ? 'an array' : `a ${typeof value}`}. ${formats}`,
     );
   }
   const trimmed = value.trim();
   if (!trimmed) {
     throw new InvalidInputError(
-      `${paramName} cannot be empty; omit it to search without that date bound. ${acceptedDateFormats()}`,
+      `${paramName} cannot be empty; omit it to search without that date bound. ${formats}`,
     );
   }
 
@@ -316,7 +392,7 @@ export function coerceUtcDate(value: unknown, paramName: string): string | undef
   const datePart = dateOnly ? trimmed : DATE_TIME_PATTERN.exec(trimmed)?.[1];
   if (!datePart) {
     throw new InvalidInputError(
-      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
+      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${formats}`,
     );
   }
 
@@ -327,51 +403,346 @@ export function coerceUtcDate(value: unknown, paramName: string): string | undef
   const dayProbe = new Date(`${datePart}T00:00:00Z`);
   if (Number.isNaN(dayProbe.getTime()) || !dayProbe.toISOString().startsWith(datePart)) {
     throw new InvalidInputError(
-      `${paramName} is not a real calendar date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
+      `${paramName} is not a real calendar date: "${echoDate(trimmed)}". ${formats}`,
     );
   }
 
-  // A date-only value is expanded explicitly rather than left to Date's parse so the
-  // intent (midnight UTC, never host-local) is visible in the code, not a spec detail.
-  const parsed = new Date(dateOnly ? `${trimmed}T00:00:00Z` : trimmed);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new InvalidInputError(
-      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
-    );
-  }
-  return parsed.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const kind: DateValueKind = dateOnly
+    ? 'date'
+    : ZONE_DESIGNATOR_PATTERN.test(trimmed)
+      ? 'zoned-datetime'
+      : 'local-datetime';
+  // `datePart` is deliberately NOT returned: it exists only for the real-calendar-date probe
+  // above, and no caller ever read it.
+  return { trimmed, kind };
 }
 
+/** A caller's date value, quoted back in a rejection under the one shared echo policy. */
 function echoDate(value: string): string {
-  return value.length > DATE_ECHO_LIMIT ? `${value.slice(0, DATE_ECHO_LIMIT)}...` : value;
+  return echoCallerText(value, DATE_ECHO_LIMIT);
 }
 
-// The EXCLUSIVE end of a calendar window (`list_calendar_events`' endDate), normalised the
-// same way coerceUtcDate normalises everything else — same two accepted shapes, same
-// rejections for an impossible day, free text, a reduced-precision `2026-07`, or an empty
-// string — with ONE deliberate difference.
+// ===========================================================================
+// Calendar window bounds: a DAY is a local day, not a UTC day.
+// ===========================================================================
 //
-//   2027-03-10                -> 2027-03-11T00:00:00Z   (the whole of the 10th)
-//   2027-03-10T17:00:00Z      -> 2027-03-10T17:00:00Z   (unchanged, like coerceUtcDate)
+// `list_calendar_events`' startDate/endDate resolve differently from every email search
+// bound, and the divergence is the whole point rather than an inconsistency to tidy away.
 //
-// A date-only value means the WHOLE DAY here, not midnight at its start. CalDAV's
-// <C:time-range> end is exclusive (RFC 4791 section 9.9), so the following midnight is
-// precisely "through the end of that day" — 23:59:59 would be an approximation that drops
-// the last second. Under coerceUtcDate's midnight-UTC rule instead, the natural
-// `startDate: 2027-03-10, endDate: 2027-03-10` would be a zero-length window and a
-// one-day query would return nothing at all, which reads as "you are free that day".
-// That is why calendar windows diverge from the email search filters rather than sharing
-// one function: a search bound names an instant, a window names days.
-export function coerceCalendarWindowEnd(value: unknown, paramName: string): string | undefined {
+//   startDate: 2026-08-12   ->  local midnight on the 12th
+//   endDate:   2026-08-12   ->  local midnight on the 13th   (the whole of the 12th)
+//   either:    2026-08-12T09:00:00      ->  09:00 local, deliberately
+//   either:    2026-08-12T09:00:00Z     ->  exactly what it says; zone rules do not apply
+//   either:    2026-08-12T09:00:00+10:00 -> exactly what it says
+//
+// WHY THIS IS NOT THE UTC RULE. "What is on the 12th?" is a question about the asker's own
+// day. Reading it as a UTC day answered a +10:00 user with the 12th 10:00 through the 13th
+// 10:00 — so a 08:00 appointment on the 12th, whose own title said "Wednesday 12 Aug 2026",
+// fell outside the window and a day with three appointments in it came back holding one.
+// Silently, because two events missing look exactly like a quiet morning. Every hour of
+// UTC offset is an hour of somebody's day answered from the wrong date, and the further a
+// user is from Greenwich the more of their day it is.
+//
+// A ZONE-LESS DATETIME follows the same rule, for the same reason and one more: it already
+// resolved in the host's zone, by accident of how `new Date()` parses a value with no
+// designator. That made the machine the server happens to run on part of the answer, with
+// nothing in the schema admitting it. Now the zone is the CONFIGURED one and it is stated.
+//
+// AN EXPLICIT Z OR OFFSET IS NEVER TOUCHED. A caller that named an instant named an
+// instant; re-reading it in another zone would be the same class of silent shift.
+//
+// The email search bounds keep the UTC rule (`coerceUtcDate` above): `before`/`after` name
+// an instant to compare a message's `receivedAt` against, and JMAP's UTCDate is that
+// instant. A calendar window names DAYS on somebody's wall. Same accepted spellings, same
+// rejections, different question — see docs/conventions.md.
+//
+// The end is EXCLUSIVE, so a date-only end resolves to local midnight of the FOLLOWING day:
+// CalDAV's <C:time-range> end is exclusive (RFC 4791 section 9.9), which makes the next
+// midnight precisely "through the end of that day", where 23:59:59 would drop the last
+// second. Without that, `startDate: 2026-08-12, endDate: 2026-08-12` would be a zero-length
+// window returning nothing, which reads as an empty day rather than as a mistake.
+//
+// `zone` is passed in rather than read from module state so the resolution is injectable —
+// a test that only ever exercises the host zone passes under either behaviour, which is how
+// the UTC-day reading survived the whole suite. `undefined` means the host zone.
+
+function acceptedWindowFormats(zoneLabel: string): string {
+  return `Accepted: a date such as 2026-08-12 (read as a whole day in ${zoneLabel}), or a full datetime such as ` +
+    '2026-08-12T14:30:00Z or 2026-08-12T14:30:00+10:00 (taken exactly as written). A datetime with no ' +
+    `Z and no offset is read as ${zoneLabel} local time.`;
+}
+
+/** The host's own IANA zone name, for the two places a configured zone is not usable. */
+function hostTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+/** Whether ICU can actually resolve an IANA name, as opposed to it merely being a string. */
+function isUsableTimezone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A misconfigured zone name is echoed back to the caller, so it is bounded and stripped of
+// the control characters that would forge extra lines in an error message.
+const ZONE_ECHO_LIMIT = 40;
+
+/**
+ * The IANA name to show a caller, resolving `undefined` to whatever the host zone is.
+ *
+ * Names the zone and nothing else in the ordinary case: this string lands in the
+ * accepted-shapes sentence on every date rejection, so where the zone came from belongs in
+ * the tool description (said once, where a model reads it) rather than repeated inside every
+ * error.
+ *
+ * The exception is a zone name ICU cannot resolve. `zoneOffsetMsAt` deliberately falls back
+ * to the HOST zone there rather than throwing, so naming the configured value alone would
+ * print a zone the dates were not read in — the disclosure and the behaviour disagreeing, on
+ * the one call where the caller is trying to work out why their days look wrong. So both are
+ * named: what actually resolved, and the configured value that did not.
+ */
+export function describeTimezone(zone: string | undefined): string {
+  if (!zone) return hostTimezone();
+  if (isUsableTimezone(zone)) return zone;
+  // Through the shared echo, so a cut zone name shows that it was cut. Slicing silently at
+  // 40 characters printed a name the caller could neither recognise nor correct.
+  const echoed = echoCallerText(zone, ZONE_ECHO_LIMIT);
+  return `${hostTimezone()} (the configured time zone "${echoed}" is not a time zone this server can resolve, ` +
+    "so this server's own zone was used)";
+}
+
+/**
+ * The UTC offset an IANA zone is at, at one instant, in milliseconds.
+ *
+ * Read by formatting the instant in the zone and treating the wall-clock components it
+ * prints as if they were UTC: the difference between that and the real instant IS the
+ * offset. No timezone database ships with this server, so ICU (through `Intl`) is the only
+ * thing here that knows when a zone changes offset.
+ *
+ * An unusable IANA name falls back to the host zone rather than throwing, matching
+ * `toLocalIso`'s posture on the same misconfiguration — a mistyped FASTMAIL_TIMEZONE must
+ * not turn every calendar read into an error, and the calendar and the rendered email
+ * timestamps then still agree with each other.
+ */
+function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hour12: false,
+      // ERA IS REQUESTED BECAUSE THE YEAR IS READ BACK, and without it `Intl` prints the
+      // ERA-RELATIVE year: proleptic year 0 formats as "1", year -1 as "2". That number then
+      // went straight back into `utcMsFromComponents` as though it were the proleptic year,
+      // so the offset came out a whole year wrong and a window bound near the start of the
+      // era resolved to the wrong DAY with nothing said — `startDate: "0000-12-31"` answered
+      // with 0000-01-01. Requesting the era makes the two eras distinguishable; the negation
+      // below puts a BC year back on the proleptic scale ICU's own year is not on.
+      era: 'short',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(new Date(utcMs));
+  } catch {
+    if (zone === undefined) return 0;
+    return zoneOffsetMsAt(utcMs, undefined);
+  }
+  const get = (type: string) => Number(parts.find(p => p.type === type)?.value);
+  // ISO 8601 / proleptic Gregorian has a year 0; the BC/AD scale does not. 1 BC IS year 0,
+  // 2 BC is year -1, so the mapping is `1 - n`.
+  const era = parts.find(p => p.type === 'era')?.value ?? '';
+  const rawYear = get('year');
+  const year = /^b/i.test(era) ? 1 - rawYear : rawYear;
+  // Intl can render midnight as hour 24 in some engines; the same normalisation toLocalIso
+  // carries, for the same reason.
+  const asIfUtc = utcMsFromComponents(year, get('month'), get('day'), get('hour') % 24, get('minute'), get('second'));
+  return asIfUtc - utcMs;
+}
+
+// A whole Gregorian cycle: 400 years is exactly 146097 days, leap rules included.
+const GREGORIAN_CYCLE_YEARS = 400;
+const GREGORIAN_CYCLE_MS = 146097 * 24 * 60 * 60 * 1000;
+
+/**
+ * `Date.UTC` without its legacy two-digit-year mapping.
+ *
+ * `Date.UTC(26, 7, 12)` is the year 1926, not the year 26 — the same rule that makes
+ * `new Date(99, 0)` a 1999 date. Every year the calendar window handles arrives as an
+ * already-validated four-digit string, so `0026-08-12` would otherwise have been answered
+ * with a window in 1926: a different window, silently, where `coerceUtcDate` on the same
+ * value correctly returns the year 26. Shifting by one whole Gregorian cycle steps over the
+ * mapping and back without disturbing the arithmetic, so a leap day still lands on the day
+ * the proleptic Gregorian calendar puts it.
+ */
+function utcMsFromComponents(y: number, mo: number, d: number, h: number, mi: number, s: number): number {
+  if (y >= 0 && y <= 99) {
+    return Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d, h, mi, s) - GREGORIAN_CYCLE_MS;
+  }
+  return Date.UTC(y, mo - 1, d, h, mi, s);
+}
+
+// Far enough either side of a wall clock to bracket the instant it names: no IANA zone has
+// ever been more than 14 hours from UTC, so the answer is always within a day of the naive
+// reading. Wide enough to see a nearby transition, narrow enough that it can only see one.
+const OFFSET_SAMPLE_SPAN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The UTC instant a wall clock names in a zone.
+ *
+ * The offset has to be sampled at the instant the wall clock names, and that instant is what
+ * is being solved for — so the offsets in force a day either side are read first, and a
+ * candidate answer is CHECKED against the offset actually in force where it lands. Without
+ * that check a wall clock within a day of a DST transition lands an hour out.
+ *
+ * The two awkward cases are the reason the check exists rather than a second blind pass:
+ *
+ *   REPEATED (clocks go back) — the wall clock names two instants. The EARLIER one is
+ *     returned, matching RFC 5545's and Temporal's `compatible` disambiguation.
+ *   SKIPPED (clocks go forward) — the wall clock names none, and the answer is resolved
+ *     FORWARD BY THE LENGTH OF THE GAP, again matching `compatible`. That equals the
+ *     transition instant only for a clock sitting at the very start of the gap:
+ *     `America/New_York 2026-03-08T02:00:00` gives 07:00:00Z (the transition), but
+ *     `…T02:29:59` gives 07:29:59Z, half an hour past it. Resolving it BACKWARD is what a
+ *     blind second pass did, and for the exclusive END of a window that quietly dropped the
+ *     last hour of the requested day: in a zone whose transition is at midnight
+ *     (America/Santiago, America/Havana) a single-day window ran local 00:00 to 23:00 and an
+ *     event at 23:30 was never searched for. Neither case is refused — a caller asking about
+ *     a day is entitled to an answer on the day a transition happens.
+ */
+function wallClockToUtcMs(y: number, mo: number, d: number, h: number, mi: number, s: number, zone: string | undefined): number {
+  const naive = utcMsFromComponents(y, mo, d, h, mi, s);
+  const before = zoneOffsetMsAt(naive - OFFSET_SAMPLE_SPAN_MS, zone);
+  const after = zoneOffsetMsAt(naive + OFFSET_SAMPLE_SPAN_MS, zone);
+  // No transition in range: one offset answers it.
+  if (before === after) return naive - before;
+
+  // `early` uses the pre-transition offset, so where both readings are valid (a repeated
+  // hour) it is the earlier instant of the two.
+  const early = naive - before;
+  if (zoneOffsetMsAt(early, zone) === before) return early;
+  const late = naive - after;
+  if (zoneOffsetMsAt(late, zone) === after) return late;
+  // Neither reading is valid: the wall clock was skipped. `early` is that wall clock shifted
+  // FORWARD by the length of the gap — which lands ON the transition instant only when the
+  // clock sat at the very start of the gap, and past it by however far into the gap it sat.
+  return early;
+}
+
+function toUtcIso(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+/** Resolve one window bound, adding `dayOffset` whole local days to a date-only value. */
+function resolveWindowBound(
+  value: unknown,
+  paramName: string,
+  zone: string | undefined,
+  dayOffset: 0 | 1,
+): string | undefined {
   if (value === undefined || value === null) return undefined;
-  const dateOnly = typeof value === 'string' && DATE_ONLY_PATTERN.test(value.trim());
-  const normalised = coerceUtcDate(value, paramName);
-  if (!normalised || !dateOnly) return normalised;
-  // Advance a whole day through Date rather than by string surgery, so month and year
-  // ends (and leap days) roll correctly. The input has already been proved a real
-  // calendar date by coerceUtcDate, so this cannot land on NaN.
-  const endOfDay = new Date(new Date(normalised).getTime() + 24 * 60 * 60 * 1000);
-  return endOfDay.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const { trimmed, kind } = classifyDateValue(value, paramName, acceptedWindowFormats(describeTimezone(zone)));
+
+  if (kind === 'zoned-datetime') {
+    // Named an instant; hand back that instant. This is the one branch the zone never
+    // touches, and it is why an offset-carrying value is the way to ask for something the
+    // local-day rule cannot express.
+    const parsed = new Date(trimmed);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new InvalidInputError(
+        `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedWindowFormats(describeTimezone(zone))}`,
+      );
+    }
+    return toUtcIso(parsed.getTime());
+  }
+
+  if (kind === 'date') {
+    const [y, mo, d] = trimmed.split('-').map(Number);
+    // The day is advanced in LOCAL days, not by adding 24 hours to the resolved instant: a
+    // day that a DST transition makes 23 or 25 hours long would otherwise land the exclusive
+    // end an hour inside or past the day the caller named. Date.UTC rolls month, year and
+    // leap-day ends for us, and the date has already been proved real.
+    return toUtcIso(wallClockToUtcMs(y, mo, d + dayOffset, 0, 0, 0, zone));
+  }
+
+  const m = LOCAL_DATETIME_PATTERN.exec(trimmed);
+  if (!m || !isWallClockInRange(Number(m[4]), Number(m[5]), Number(m[6] ?? 0))) {
+    throw new InvalidInputError(
+      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedWindowFormats(describeTimezone(zone))}`,
+    );
+  }
+  // A wall-clock datetime names a time of day, not a day, so `dayOffset` deliberately does
+  // NOT apply to it — `endDate: 2026-08-12T17:00:00` is the exclusive end at five in the
+  // afternoon, exactly as the Z-designated form is.
+  return toUtcIso(wallClockToUtcMs(Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0), zone));
+}
+
+/**
+ * Whether a wall clock's components name a time that exists.
+ *
+ * The shape check alone is not acceptance, and this is where the calendar pair would
+ * otherwise diverge from `coerceUtcDate` in the direction that matters. `Date.UTC` ROLLS an
+ * out-of-range component instead of rejecting it, so `2026-08-12T99:99:99` resolved to a
+ * window starting three and a half days later, silently, while `coerceUtcDate` and
+ * `create_calendar_event` both reject the same value — the family accepted on a read what it
+ * refused on a write, and only the clamp path says anything about a window it moved.
+ *
+ * `24:00:00` is deliberately allowed: the ECMAScript Date Time String Format accepts it as
+ * the end of the day, so `new Date('2026-08-12T24:00:00')` is valid and the UTC coercion
+ * takes it. Rejecting it here would be the same divergence pointing the other way. Date.UTC
+ * rolls it into the following midnight, which is what it names.
+ */
+function isWallClockInRange(h: number, mi: number, s: number): boolean {
+  if (h === 24) return mi === 0 && s === 0;
+  return h <= 23 && mi <= 59 && s <= 59;
+}
+
+/**
+ * The UTC instant a value parsed out of an iCalendar payload names, in milliseconds, for
+ * ORDERING two of them against each other. `NaN` when there is nothing to order on.
+ *
+ * Lives beside the window coercions because it resolves a zone-less value the same way they
+ * do — through the configured zone — and for the same reason. `formatICalDate` drops the
+ * TZID parameter, so an event stored as `DTSTART;TZID=Australia/Sydney:20260325T083000`
+ * reaches a caller as the bare `2026-03-25T08:30:00` while a UTC-stored one keeps its `Z`.
+ * Comparing those two as STRINGS puts them in the wrong order whenever the account is not on
+ * UTC (on a +10:00 account the bare one is 9.5 hours the earlier of the two), which is how a
+ * genuinely earlier event was dropped by a `limit` that kept a later one.
+ *
+ * This is a best-effort reading, not a validation: it is ordering server data, not accepting
+ * caller input, so an unreadable value returns NaN for the caller to place rather than
+ * throwing, and an out-of-range component is left to roll rather than rejected.
+ */
+export function resolveCalendarInstantMs(value: string | undefined, zone: string | undefined): number {
+  if (typeof value !== 'string') return NaN;
+  const trimmed = value.trim();
+  if (!trimmed) return NaN;
+  // Carries its own zone: it names an instant, and no local reading applies.
+  if (ZONE_DESIGNATOR_PATTERN.test(trimmed)) return Date.parse(trimmed);
+  if (DATE_ONLY_PATTERN.test(trimmed)) {
+    const [y, mo, d] = trimmed.split('-').map(Number);
+    // An all-day value is placed at local midnight, the same instant the window's own
+    // date-only bound resolves to, so the two are on one scale.
+    return wallClockToUtcMs(y, mo, d, 0, 0, 0, zone);
+  }
+  const m = LOCAL_DATETIME_PATTERN.exec(trimmed);
+  if (!m) return NaN;
+  return wallClockToUtcMs(Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0), zone);
+}
+
+/** The INCLUSIVE start of a calendar window: a date-only value is local midnight that day. */
+export function coerceCalendarWindowStart(value: unknown, paramName: string, zone?: string): string | undefined {
+  return resolveWindowBound(value, paramName, zone, 0);
+}
+
+/** The EXCLUSIVE end of a calendar window: a date-only value is local midnight the NEXT day. */
+export function coerceCalendarWindowEnd(value: unknown, paramName: string, zone?: string): string | undefined {
+  return resolveWindowBound(value, paramName, zone, 1);
 }
 
 // The pagination offset shared by the list/search tools: a 0-based index into the

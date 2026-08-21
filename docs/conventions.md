@@ -67,6 +67,15 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   can be mistaken for a legitimate outcome**, and a narrowing argument is the commonest case
   of it rather than the whole of it.
 
+  `list_calendar_events`' `calendarId` is a scalar version of the same rule, and it is worth
+  reading as one: it names the single calendar to read, so a value that is present but
+  matches nothing must be an error rather than a wider read. `''` used to slip through a
+  bare `if (calendarId)` truthiness test and quietly query **every** calendar in the account,
+  while `'   '` was correctly rejected — the same mistake answered from two different
+  calendars. It is now trimmed and tested for PRESENCE, so both spellings raise the shared
+  not-found error. A narrowing argument's failure mode is always this shape: the caller reads
+  a wider answer as though it were the narrow one it asked for.
+
   Strictness is per element, and covers the **empty string** as well as the wrong type. That
   is not pedantry: `['']` passes a `typeof entry !== 'string'` check, and the plain coercer's
   `.filter(Boolean)` runs only on the comma-split branch, so without an explicit check a
@@ -610,8 +619,8 @@ classification is a property of the shared helpers, not of email specifically. T
 calendar rejects raised in `src/caldav-client.ts` itself follow the same rule and throw
 `InvalidInputError` directly: the start/end frame and ordering checks below, the date
 format and control-character rejects, the participant-address rejects, a `calendarId` or
-`eventId` that resolves to nothing, and the recurring-exception confirmation prompt (the
-one asking for `confirmRecurring: true`). `src/contacts-calendar.ts` follows it too — its
+`eventId` that resolves to nothing, and the repeating-event refusal that
+`update_calendar_event` / `delete_calendar_event` raise (see below). `src/contacts-calendar.ts` follows it too — its
 input rejects (a contact with neither name nor address, an update naming no field, an
 empty entry array, an ambiguous entry edit, an update aimed at a contact group) and its
 not-found rejects are `InvalidInputError`, and its create/update/delete set-errors route
@@ -620,18 +629,16 @@ a `forbidden` on the operational side, so a contacts token issued read-only surf
 `InternalError` whose message names the read-only scope — the refusal is the only place a
 caller can learn that, since the session reports an identical capability either way.
 
-Two nearby throws stay a plain `Error` **on purpose**, and both look like exceptions to the
-rule until you see what they carry. The ORGANIZER address check validates the operator's
+One nearby throw stays a plain `Error` **on purpose**, and looks like an exception to the
+rule until you see what it carries. The ORGANIZER address check validates the operator's
 configured CalDAV username through the participant validator — a configuration fault no
-argument can fix, so it is re-thrown in the plain class with its own wording. And the
-recurrence-expansion guard's `skip-pruning:` throws are internal control-flow signals for a
-`catch` that re-raises only `InvalidInputError`; tagging them would let a resource guard
-escape to the caller dressed as a rejection of their input.
-That last one is the clearest case in the file — the caller resolves it by re-sending the
-same call with one more argument, which is the definition of caller-fixable, so surfacing
-it as `InternalError` was telling them a bare retry might work when it never would. Its
-`catch` re-throws on `instanceof InvalidInputError` rather than on a message substring, so
-the routing no longer depends on the wording of the prompt.
+argument can fix, so it is re-thrown in the plain class with its own wording.
+
+**The repeating-event refusal is `InvalidInputError` even though no argument fixes it**, and
+that is not a contradiction. `InvalidParams` means "re-form the call", not "add a parameter":
+the caller resolves this by not making the call — pointing a different id at it, or doing the
+edit in the web client — which is a caller-side change. `InternalError` would say a bare retry
+might work, and it never will: the event repeats, and it will still repeat next time.
 
 `assertICalTextLimits` (`src/ical-limits.ts`) follows the same rule from the other end of
 the call chain: it runs in the `create_calendar_event` / `update_calendar_event` handlers,
@@ -1269,8 +1276,12 @@ Three properties of the implementation are load-bearing and easy to undo by acci
   converting one side to UTC, requires passing both `start` and `end`.
 - **Two `zoned` values in different zones are accepted, and only their ordering is
   skipped.** A flight departing Rome and landing New York is a legal VEVENT whose wall
-  clocks read backwards. Resolving that ordering needs a timezone database this server
-  does not carry, so the check declines to guess rather than reject valid travel events.
+  clocks read backwards, so the check declines to guess rather than reject valid travel
+  events — which does mean a genuinely backwards cross-zone pair is written. That is now a
+  choice rather than a limit: both zone names are present here and ICU resolves them
+  (`zoneOffsetMsAt`, which the read window depends on). Adding the check would newly reject
+  input the tool accepts today, so it is tracked as
+  [#140](https://github.com/JonathanGodley/fastmail-mcp/issues/140) rather than folded in.
 
 The frame check is deliberately *not* applied when the caller touches neither `start` nor
 `end`: it exists to stop us writing a broken pair, not to hold a title edit hostage to an
@@ -1281,12 +1292,36 @@ inconsistency some other client left in the event.
 The four frames survive intact on the *write* path, where the property line is built and
 inspected whole. Reading is lossy: `formatICalDate` takes only the property's **value**, so
 `DTSTART;TZID=Australia/Sydney:20270305T083000` and a floating `DTSTART:20270305T083000`
-both become `2027-03-05T08:30:00`. The zone name is gone by the time a `CalendarEvent`
-exists, and nothing downstream can get it back — resolving it would need a timezone database
-this server does not carry.
+both become `2027-03-05T08:30:00`. The **name** is what is gone by the time a `CalendarEvent`
+exists, and nothing downstream can get it back.
 
-That is why `eventIntersectsWindow` (the client-side re-filter behind `list_calendar_events`)
-is built to **drop only what provably cannot intersect**, rather than to decide membership.
+Do not read that as "this server cannot resolve a zone". It can — `zoneOffsetMsAt` resolves
+any IANA name through ICU, and both the window bounds and the result ordering rely on it.
+What is missing is the name to resolve, because the parser discarded it. Carrying the TZID
+through to the parsed event is [#139](https://github.com/JonathanGodley/fastmail-mcp/issues/139);
+until it lands, three consequences follow.
+
+**One: the returned `start`/`end` may be a zone-stripped wall clock, and both tool
+descriptions say so.** This is a promised field arriving degraded, so it is disclosed rather
+than left to be discovered: a value ending in `Z` is an instant, and a value with no
+designator is digits on somebody's clock. The exposure is `get_calendar_event` (always) and
+`list_calendar_events` with no window; a windowed query is safe, because Cyrus normalises
+expanded occurrences to UTC (measured, not assumed).
+
+**Two: results are ORDERED by a resolved instant, not by the spelling.** A calendar mixes
+both forms — Fastmail writes a user-created event against a named zone, an external
+invitation usually arrives in UTC — and `localeCompare` on those two spellings interleaves
+them by their digits, putting a genuinely earlier event after a later one. `limit` slices
+that list, and expansion means the cap is reached often, so the wrong order silently drops
+events under a summary line promising the earliest N. `sortEventsByStart` therefore resolves
+each start through `resolveCalendarInstantMs`, reading a designator-less value in the
+configured zone. That is a best-effort placement of a value whose real zone was already lost,
+not a claim to have recovered it — an event stored in a third zone still sorts by the local
+reading of its wall clock — and it is never worse than comparing the text.
+
+**Three: the window re-filter can only widen.** `eventIntersectsWindow` (the client-side
+re-filter behind `list_calendar_events`) is built to **drop only what provably cannot
+intersect**, rather than to decide membership.
 Any value with no zone designator is widened by ±14 hours, the largest UTC offset any IANA
 zone has used, so a zone-carrying event near a window edge is kept even though its true
 instant is unknown here. The residue that leaves is accepted deliberately: the CalDAV server
@@ -1297,12 +1332,280 @@ that may be years outside the window (#64). Erring the other way would discard e
 server correctly matched, which turns a busy day into a free one; an extra row a caller can
 see and dismiss is the cheaper error.
 
-The window's own bounds do not have this problem, because they never touch iCal: they are
-normalised once by `coerceUtcDate` / `coerceCalendarWindowEnd` and used for both the server's
+**The residue that actually shows up is an ALL-DAY event, not a zoned one.** Measured live:
+`{startDate: "2026-08-01", endDate: "2026-08-31"}` on a UTC+10 account returns
+`{"title":"Newcastle","start":"2026-07-31","end":"2026-08-01"}` as its first row. The window
+begins at local midnight (`2026-07-31T14:00:00Z`), Cyrus matches a `VALUE=DATE` event on a
+UTC day, and the ±14h slack — granted to *any* designator-less value, which includes a bare
+date — keeps it.
+
+**That single measurement does NOT fix the DIRECTION, and reading it as a rule that it does is
+wrong for half the world's accounts.** The slack is granted on BOTH edges, so the surviving row
+can sit outside EITHER end; which end you see follows the SIGN of the account's UTC offset,
+because that is what decides which neighbouring UTC day the server itself matched. Measured
+both ways:
+
+| account | window | day before | day after |
+| --- | --- | --- | --- |
+| Australia/Sydney (+10) | `2026-07-31T14:00Z .. 2026-08-31T14:00Z` | server returns it, filter keeps it | server does not return it |
+| America/New_York (-4) | `2026-08-01T04:00Z .. 2026-09-01T04:00Z` | server does not return it | server returns it, filter keeps it |
+
+Nor is the reach one day: 14 hours of slack applied to an all-day `end` that is already the
+following midnight lands nearly two calendar days out east of UTC+11. "Bounded at one day" is
+not a property of this filter; "only ever ADDS rows" is. So it is a reporting defect rather
+than data loss, and `list_calendar_events`' description warns to check each `start` against the
+window. Narrowing it would mean resolving date-only values in the configured zone instead of
+granting them slack, which is a behaviour change to the filter and is not made here.
+
+**One thing the filter is NOT allowed to judge: a block still carrying its `RRULE`.** The
+windowed path runs this filter over blocks the server was asked to EXPAND. If a server ever
+declines to expand one, the master arrives with its rule intact and its ORIGINAL `DTSTART` —
+years before the window for a long-running weekly event — and judging that date deletes the
+row, turning a wrongly-dated event into a MISSING one, which is the exact direction the filter
+exists not to fail in. A recurrence rule is proof that `DTSTART` is not the only date the event
+has, so `getCalendarEvents` keeps such a block whatever its dates say. Unreachable against
+Fastmail today (measured in `calendar-expand.probe.mjs`), and it stays as resilience rather
+than being removed, because the claim that this filter "closes the gap if a server declines to
+expand" was false in the dangerous direction until the guard existed.
+
+The window's own bounds never lose a zone the way an iCal value does: they are normalised
+once by `coerceCalendarWindowStart` / `coerceCalendarWindowEnd` and used for both the server's
 `time-range` and this filter, so the two cannot disagree about which days were asked for.
-`coerceCalendarWindowEnd` is the one place the calendar deliberately diverges from the email
-search filters — a date-only *end* means the whole of that day, because CalDAV's `time-range`
-end is exclusive and the midnight-UTC reading would make a one-day query a zero-length window.
+
+**That is a statement about TZID loss, and it is not the whole story — the bounds had their
+own zone bug (#138).** Read the paragraph above as "the bounds cannot drift apart from each
+other", never as "the bounds are fine". They were resolved as UTC days, so on a UTC+10 account
+`startDate: 2026-08-12` searched 12 Aug 10:00 to 13 Aug 10:00 local and a day holding three
+appointments answered with one. Two missing events look exactly like a quiet morning, which is
+the same silent-under-report failure the rest of this section is about, arriving through the
+argument rather than the payload.
+
+### A calendar window's DAY is a local day
+
+`coerceCalendarWindowStart` / `coerceCalendarWindowEnd` resolve a date-only bound — and a
+datetime carrying no zone designator — in the **configured timezone**, not UTC. A value
+carrying `Z` or a numeric offset is never re-read: it named an instant, so it stays that
+instant, and it is the escape hatch from the local-day rule.
+
+Three divergences meet here, and each is right for its own question:
+
+| | date-only value means | why |
+| --- | --- | --- |
+| `search_emails` `before`/`after` (`coerceUtcDate`) | midnight **UTC** | compares against `receivedAt`, a JMAP UTCDate — an instant, not a day |
+| `list_calendar_events` `startDate`/`endDate` | the whole **local** day | "what is on the 12th?" asks about the asker's own day |
+| `create_calendar_event` `end` | exclusive at the **start** of that day | RFC 5545 DTEND, one edge of a single event |
+
+The two coercions share `classifyDateValue`, so they reject an identical set of bad values with
+identical wording and diverge only on what an accepted value resolves to. Do not "unify" them
+back into one function: the shared half already is one function, and the half that differs is
+the answer to a different question.
+
+**The shared half does not cover the TIME components, and that gap has bitten once.**
+`classifyDateValue` never reads the hour and minute out; `coerceUtcDate` gets its range check
+for free from `new Date()` refusing `25:00:00`, and the calendar pair reads the components
+itself with a shape-only pattern and hands them to `Date.UTC`, which **rolls** rather than
+refusing. So `2026-08-12T99:99:99` silently became a window starting three and a half days
+later, and `create_calendar_event` refused on a write exactly what the read accepted.
+`isWallClockInRange` restores the parity (`24:00:00` is deliberately allowed, because the
+ECMAScript date format allows it and the UTC coercion takes it). When you add a value the two
+sides read differently, check the divergence rather than assuming the shared function covers
+it.
+
+Mechanics worth knowing before touching it:
+
+- **The zone comes from `getDefaultTimezone()`**, the value `setDefaultTimezone` stores — the
+  same one every email `date` renders in. It is read rather than re-derived from the
+  environment on purpose: a second lookup is a second answer, and the two drifting would mean
+  a calendar query's day and an email's displayed date disagree with nothing to say so.
+- **The offset is sampled either side, and the candidate is CHECKED.** The offset has to be
+  read at the instant the wall clock names, and that instant is what is being solved for — so
+  `wallClockToUtcMs` reads the offsets in force a day either side and verifies a candidate
+  answer against the offset actually in force where it lands. Without that a bound within a
+  day of a DST transition lands an hour out.
+- **A skipped or repeated wall clock resolves the way RFC 5545 and Temporal's `compatible`
+  rule resolve it**: a repeated one takes the EARLIER instant, a skipped one resolves FORWARD
+  BY THE LENGTH OF THE GAP. That equals the transition instant only for a clock sitting at the
+  very start of the gap — `America/New_York 2026-03-08T02:00:00` is 07:00:00Z, but `…T02:29:59`
+  is 07:29:59Z, half an hour past it. Forward matters. Taking whatever a blind second pass produced
+  resolved a skipped time backwards, and for the exclusive END of a window that quietly
+  dropped the last hour of the requested day — in a zone whose transition is at midnight
+  (`America/Santiago` 2026-09-05, `America/Havana` 2026-03-07) a single-day window ran local
+  00:00 to 23:00 and an event at 23:30 was never searched for. Sydney and New York transition
+  at 02:00, so the deployment's own zone hid it; `FASTMAIL_TIMEZONE` is a config value.
+- **A date-only end advances by a whole LOCAL day, not by 24 hours.** A day a DST change makes
+  23 or 25 hours long would otherwise end an hour inside itself or an hour into the next day.
+  The 366-day clamp on a one-sided window is the deliberate exception: it advances in fixed
+  24-hour days because it invents a span nobody named, where a DST hour either side of an
+  arbitrary bound is not a wrong answer to anything, and the clamp note states the instant it
+  landed on.
+- **Years below 0100 are handled explicitly.** `Date.UTC(26, …)` is the year 1926 — legacy
+  two-digit-year mapping — so `0026-08-12` resolved to a window in the 1900s while
+  `coerceUtcDate` correctly returned the year 26. `utcMsFromComponents` shifts by one whole
+  Gregorian cycle (400 years, exactly 146097 days) to step over the mapping without disturbing
+  the leap arithmetic. Unreachable in practice; it is the same silent-different-window class as
+  the rest of this section, which is why it is fixed rather than noted.
+- **An unusable IANA name falls back to the host zone** rather than throwing, matching
+  `toLocalIso` on the same misconfiguration: a mistyped `FASTMAIL_TIMEZONE` must not turn every
+  calendar read into an error, and the calendar and the rendered timestamps then still agree.
+  `describeTimezone` names BOTH in that case — the host zone that resolved and the configured
+  value that did not. Naming only the configured one put the disclosure and the behaviour in
+  disagreement on the one call where a caller is trying to work out why their days look wrong.
+- **Test with an INJECTED zone.** The coercions take the zone as an argument for exactly this
+  reason. A test that leaves it to the machine passes under both the UTC-day and the local-day
+  reading whenever the host sits in the zone asserted — which is how the wrong-day window sat
+  under a green suite. The suite pins Sydney and New York so a sign error cannot pass both.
+
+### A one-sided window is bounded, and the bound is disclosed
+
+`startDate` and `endDate` are both optional, so one of them may have to be invented. It used
+to be invented as 1970-01-01 / 2099-12-31, which was harmless while the window was only a
+filter and stopped being harmless the moment `expand` was added: the window is now the range
+the SERVER materialises occurrences over, so `startDate: <today>` alone asked Fastmail to
+generate every occurrence of every repeating event for 73 years. Nothing caps that on either
+side — Cyrus's `expand_caldata` has no iteration limit, and here the whole response is
+buffered, regex-split, parsed, filtered and sorted before `limit` ever applies, so `limit` is
+not a bound on the work. Calendar content is also attacker-authored in this deployment:
+anyone who can send an invitation can put a `FREQ=MINUTELY` series in the account.
+
+So the INVENTED half is clamped to `CALENDAR_OPEN_WINDOW_DAYS` (366) from the bound that was
+given, and the clamp is surfaced in `CalendarEventQueryResult.windowClamp` — STRUCTURE, not
+finished prose. That is the shape the email listings already established for a disclosure of
+this kind (`QueryResult.exclusion` -> `buildExclusionNote` -> handler), and the calendar path
+briefly diverged from it: it built the sentence inside the client, which put the wording where
+no formatter test can reach it and gave the blank-line separator a second home. The note
+builder owns both.
+A caller silently handed a narrower window than it asked for would read "nothing after that
+date" as an empty calendar — the same never-silently-degrade rule the exclusion note and
+`unresolvedMailboxIds` exist for. A window whose bounds the caller named is never clamped:
+that span is the caller's own decision.
+
+**Saturation is the other narrowing, and it names an EDGE.** A bound that resolves outside the
+four-digit-year range every consumer of these values can express is pulled back to that range's
+edge rather than rejected — the invented half, and a caller-named one too, since the local-day
+rule resolves the caller's value through a zone and an offset alone can push `9999-12-31` over.
+Both ends saturate, and the disclosure is an opposite statement at each, so `windowClamp.saturated`
+carries `{ bound, edge }` rather than a bare bound name: a `startDate` pulled UP to year 0000 was
+otherwise reported as having "resolved past the last date this server can express", the reverse
+of what happened, and a window that saturates at both ends at once needs both sentences.
+
+**The bound therefore covers ONE of the two ways to ask for an unbounded expansion**, and the
+justification above does not stretch to cover the other. A caller naming BOTH bounds
+(`2000-01-01 .. 2100-01-01`) still asks the server to materialise every occurrence over a
+century, bounded by nothing — and while the caller chooses the SPAN, an attacker chooses the
+DENSITY, which is the same `FREQ=MINUTELY` hazard the paragraph above just described. Latent
+rather than active: a live 10-year window on this account measured 6.4s for 1237 events. Left
+as it is deliberately, because a cap on a span the caller named is a behaviour change to a
+user-visible contract rather than a fix.
+
+## iCalendar structure is decided on WHOLE CONTENT LINES, never with a `/m` regex
+
+Two different characters can end a line, and only one of them is a line break.
+
+RFC 5545 §3.1 knows exactly one: CRLF (this server tolerates a bare LF too, because real
+servers emit it). JavaScript's `^`/`$` under `/m` know three more — **U+2028 LINE SEPARATOR,
+U+2029 PARAGRAPH SEPARATOR and a bare CR** — and none of those three has to be escaped inside
+an iCalendar TEXT value. So all three survive verbatim into a `SUMMARY` or `DESCRIPTION`
+written by whoever authored the event, and under a `/m` anchor every TEXT value becomes a
+structure-editing primitive. Calendar content is attacker-authored in this deployment: anyone
+who can send an invitation can put whatever they like in a description.
+
+Three measured consequences, in ascending order of how bad they are:
+
+1. `DESCRIPTION:hi<U+2028>END:VEVENT<U+2028>BEGIN:VEVENT…` cuts one component in two. The real
+   `DTSTART`/`DTEND` land in the discarded tail, so the event comes back with **no dates at
+   all** — and `eventIntersectsWindow` keeps a dateless event (it has nothing to judge), so it
+   displays inside a window nothing placed it in.
+2. On the expanded path the same payload yields two events, one wholly attacker-authored with
+   an attacker-chosen `start`, and `blockCountProvesSeries` then marks the **real** event
+   recurring because two blocks "prove" a series.
+3. **A property read takes the FIRST match in the block**, so a `SUMMARY` of
+   `Lunch<U+2028>UID:board-meeting@victim.example<U+2028>DTSTART:…` makes the attacker's own
+   resource report **another resource's UID**. `delete_calendar_event` and
+   `update_calendar_event` resolve an id through `findCalendarObjectByUID`, which returns the
+   first object in the ACCOUNT whose UID matches — so an agent following the tool descriptions
+   ("the id names the series, act on it") irreversibly destroys a record the caller never
+   named, and mails its attendees a cancellation. The same trick places a fabricated
+   appointment on any date of the user's calendar.
+
+The write path inherits all of it: the RRULE test and the ORGANIZER/ATTENDEE presence gates
+steered an in-place patch from `/m` tests over the stored payload. The RRULE one now decides
+whether `update_calendar_event` / `delete_calendar_event` refuse the call outright
+(`isRecurringSeriesResource`), so a forged `RRULE:` line in a `SUMMARY` would either block a
+legitimate edit or, read the other way, hide a real rule inside a folded line — which is why
+that detector reads whole content lines and takes no `/m` shortcut.
+
+**The rule, then.** `src/caldav-client.ts` splits a payload with `icalContentLines` — CRLF and
+LF only — and matches WHOLE lines for `BEGIN:VEVENT` / `END:VEVENT` / `KEY[;:]`. U+2028,
+U+2029 and a bare CR are thereby inert characters inside a value, which is what the RFC says
+they are. Every structural question goes through one of three helpers (`extractVEventBlocks`,
+`hasICalProperty`, `structuralLine`), so a new caller cannot reintroduce the `/m` form by
+copying an old line. **Do not "simplify" any of it back to a regex over the blob.**
+
+**Unfolding stays per RFC and stays LATER than the component split.** A continuation line is
+one beginning with a space or a tab (`isFoldedContinuation`), and every structural scan skips
+them, so a marker at the head of a continuation is text rather than structure. That closes the
+fold-injection half of the same class: libical folds at a fixed octet count, so padding a
+description to put a chosen fold in a chosen place is deterministic to construct — measured,
+one VEVENT in and two rows out, the phantom carrying the real event's `SUMMARY` and `DTSTART`
+(the author chooses the property order). The mirror image is a `BEGIN:VEVENT` in text *before*
+the first real component — inside a `VTIMEZONE`'s `TZNAME`, say — which opens the block early
+enough to swallow the zone rule's own `DTSTART` and report the event dated 1970.
+
+**"Every structural scan" includes the one that decides where to INSERT.** `replaceICalProperty`
+runs four scans and the insert-position one was the last to be converted, which is the shape
+this class keeps taking: it looks for the first sub-component so a new property lands before a
+`VALARM` (RFC 5545's `eventprop *alarmc` order), and a trimmed compare read ` BEGIN:phase two
+of the agenda` — the head of a folded `DESCRIPTION` — as that sub-component. The new line was
+then spliced into the MIDDLE of the description: the description lost its tail and the inserted
+property swallowed it, two stored records damaged in one write with nothing reported. It is
+reachable from every `update_calendar_event` that ADDS a property the event does not already
+have, which is the ordinary case for setting a location or participants. When a scan in this
+file compares a line, it uses `structuralLine`; a `.trim()` there is a bug even when the
+function around it already looks converted.
+
+**Test with the code points explicitly.** The fold tests do NOT cover this: a `/m`-anchored
+parser and a line-based one both handle a folded terminator correctly, so nothing in the
+folding tests would notice a regression back to `/m`. `src/caldav-client.test.ts` carries a
+suite that writes U+2028/U+2029 as `\uXXXX` escapes for exactly that reason — a literal one is
+invisible in an editor and indistinguishable from a space in review.
+
+**Can such a value actually reach us? For U+2028/U+2029, yes.** Cyrus parses and re-serialises
+every stored resource through libical (`icalcomponent_as_ical_string`), so whatever libical
+preserves is what a read gets back. Reading libical's TEXT quoting: on output it escapes only
+the LINE FEED and leaves every other byte alone, and on input it decodes only the five
+single-letter escapes n, t, r, b and f. U+2028 and U+2029 are ordinary UTF-8 bytes to it and
+pass through both directions untouched. So an invitation, a shared calendar or any client's
+PUT can put one in a SUMMARY and this client will read it verbatim. A **bare CR** is the
+exception: libical DISCARDS one on output, so that third variant is unlikely to survive a round trip through Fastmail. It is still parsed as text here,
+because a defence that rests on another product's serialiser quietly dropping a byte is not a
+defence, and the JMAP/JSCalendar path is not the same code as the CalDAV one.
+
+**What was NOT done, and why.** U+2028/U+2029 are not stripped from calendar data before
+parsing. The parser no longer depends on it; stripping would silently alter a legitimate TEXT
+value, which is data loss of the kind the omit-empty convention exists to avoid; and the same
+code points already reach a caller through every email subject and body, so scrubbing calendar
+text alone would be an inconsistent half-measure rather than a defence. If output scrubbing is
+ever wanted it belongs at the serialisation seam, applied to everything, not here.
+
+## The expanded-recurrence payload shape is TOLD, never sniffed
+
+`parseCalendarObjects` takes an `expanded` flag from the caller that decided to send
+`expand`, because the payload cannot be read backwards to recover that decision. The
+plausible-looking content sniff — "every block carries a RECURRENCE-ID, therefore the server
+expanded this" — is false against Cyrus. `expand_cb` (`imap/http_caldav.c`) sets a
+RECURRENCE-ID only on instances *after* the series' first; the first instance is emitted with
+its RRULE stripped and no RECURRENCE-ID at all. So any window containing a series' original
+DTSTART returns `[first-instance, occurrence, occurrence, …]`, the sniff identifies block 0 as
+a master, and every sibling is discarded — measured live at 5 occurrences reported as 1, and
+102 blocks reduced to 75. The loss was invisible because `total` is counted after it.
+
+The same platform fact leaves one residue that cannot be closed from the payload: a lone
+expanded block with neither marker is a one-off event AND a series whose only in-window
+instance is its first. Cyrus emits both identically. `isRecurring` is therefore set from the
+block list — more than one block, or any RECURRENCE-ID, proves a series — and left off in the
+ambiguous case rather than guessed at in either direction, since claiming it would mark real
+one-off events as repeating. The tool description and README name `get_calendar_event` as the
+one-call way to settle it, because that path fetches without a window and returns the master.
 
 ## Local-time formatting and the U+202F trap
 
