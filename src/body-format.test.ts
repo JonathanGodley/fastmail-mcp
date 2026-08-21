@@ -272,7 +272,7 @@ describe('assertBodyInputs — HTML-escaped htmlBody (#71/#77)', () => {
 describe('assertBodyInputs — CDATA (#78)', () => {
   it('rejects a CDATA-wrapped htmlBody', () => {
     assert.throws(
-      () => assertBodyInputs({ htmlBody: '<![CDATA[<p>Hi Lachlan,</p><p>Just checking in</p>]]>' }),
+      () => assertBodyInputs({ htmlBody: '<![CDATA[<p>Hi Alice,</p><p>Just checking in</p>]]>' }),
       (e: any) => e instanceof InvalidInputError && /htmlBody contains a CDATA section/.test(e.message),
     );
   });

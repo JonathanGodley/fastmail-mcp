@@ -1172,13 +1172,16 @@ describe('updateDraft', () => {
   // The guard decides on the EXISTING (stored) body, so these fixtures use the RAW body shapes
   // Fastmail returns for reply drafts — captured from a live store/fetch round-trip (2026-06-28)
   // and trimmed of the bulk quoted body but BYTE-EXACT in the marker region the guard reads.
+  // Only that marker region (the attribution line and the "\n> " / "\n\n> " structure after it)
+  // is byte-exact; the quoted lines themselves carry synthetic content, because the guard never
+  // reads them. Keep it that way — a fixture must not reproduce a real message's contents.
   // Pinning to Fastmail's re-serialized shape (not our buildReplyBodies output) is the point:
   // an html-derived text fallback comes back as "wrote:\n\n> " (blank line). The coercion of
   // noQuote ("true"/"garbage") lives at the index.ts handler seam and is pinned by coerce.test.ts
   // (coerceBool) + the live harness; updateDraft only ever sees a real boolean, so it is not
   // re-tested here.
-  const RAW_HTML_QUOTE = '<p>my reply</p><div><br></div><div>On Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:</div><blockquote type="cite" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">\n  1 new planning application near 6/30-32 Doomben Ave\n</blockquote>';
-  const RAW_TEXT_QUOTE = 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:\n> 2/2 Rowe St Eastwood NSW 2122: Change of Use and Fitout of Pilates Studio\n> \n> Contact us if you have questions.';
+  const RAW_HTML_QUOTE = '<p>my reply</p><div><br></div><div>On Sun, Jun 28, 2026, at 12:46 AM, Example Alerts wrote:</div><blockquote type="cite" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">\n  1 new planning application near 1 Example Street\n</blockquote>';
+  const RAW_TEXT_QUOTE = 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Example Alerts wrote:\n> 2/2 Example St Sampleton NSW 2000: Change of Use and Fitout of a Studio\n> \n> Contact us if you have questions.';
   // Quote-LESS bodies (no marker) — for the asymmetric / oldTextQuoted-precondition cells.
   const PLAIN_TEXT = 'my reply with no quote at all';
   const PLAIN_HTML = '<p>my reply with no quote at all</p>';

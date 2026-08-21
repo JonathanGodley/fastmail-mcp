@@ -40,8 +40,11 @@ describe('hasTextQuoteMarker (#42 text reply-quote detection)', () => {
   // re-serialized bodyValues. Two shapes occur: a caller-supplied text body comes back as
   // "wrote:\n> " (one newline); the html-DERIVED text fallback comes back as "wrote:\n\n> "
   // (a blank line). The blank-line tolerance is load-bearing for the derived case.
-  const RAW_DIRECT_TEXT = 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:\n> 2/2 Rowe St Eastwood NSW 2122: Change of Use and Fitout of Pilates Studio\n> \n> Contact us if you have questions.';
-  const RAW_DERIVED_TEXT = 'my reply\n\n\n\nOn Sun, Jun 28, 2026, at 12:46 AM, PlanningAlerts wrote:\n\n> 1 new planning application near 6/30-32 Doomben Ave\n> 2/2 Rowe St Eastwood NSW 2122';
+  // Only the marker region (the attribution line and the newlines before "> ") is byte-exact from
+  // that capture; the quoted lines carry synthetic content, since the matcher never reads them.
+  // Keep it that way — a fixture must not reproduce a real message's contents.
+  const RAW_DIRECT_TEXT = 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Example Alerts wrote:\n> 2/2 Example St Sampleton NSW 2000: Change of Use and Fitout of a Studio\n> \n> Contact us if you have questions.';
+  const RAW_DERIVED_TEXT = 'my reply\n\n\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Example Alerts wrote:\n\n> 1 new planning application near 1 Example Street\n> 2/2 Example St Sampleton NSW 2000';
 
   it('matches the raw caller-supplied text shape ("wrote:\\n> ")', () => {
     assert.equal(hasTextQuoteMarker(RAW_DIRECT_TEXT), true);
