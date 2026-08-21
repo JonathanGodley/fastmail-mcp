@@ -174,7 +174,7 @@ the problem each time. This list is the sync's real cost, so keep it honest.
 - **`package.json`, `.gitignore` and `.dxtignore` are never a union.** All three
   look mergeable and all three carry deliberate fork deletions or fork-only
   stanzas — `.gitignore`'s `!.claude/skills/**/SKILL.md` un-ignore, `.dxtignore`'s
-  exclusion of `/docs/`, `/AGENTS.md`, `/.claude/` and the build droppings,
+  exclusion of `/docs/`, `/CLAUDE.md`, `/.claude/` and the build droppings,
   `package.json`'s extra dependencies and its exact `debug` pin.
 - **Test-fixture email domains diverge in `src/coerce.test.ts`** (~13 lines) and in
   `scripts/scan-secrets.mjs`'s `SAFE_EMAIL_DOMAINS`. Upstream's fixtures use real

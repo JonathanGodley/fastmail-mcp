@@ -71,6 +71,23 @@ A surfaced issue — from a review, a subagent, or a self-check — must end wit
 
 When summarizing a review, state each finding's disposition plainly rather than burying declined items in a parenthetical, so the decision can be vetoed.
 
+## Parallel work: one worktree per concern, kept alive through review
+
+**Concurrent workstreams get a `git worktree` each, one agent per worktree.** The main instance
+orchestrates: it partitions the work, routes findings, and merges. It does not implement.
+
+**Keep each worktree alive until its work is reviewed AND its findings are fixed.** Merging as
+soon as a branch is feature-complete is the mistake — review then finds defects and the fixes have
+nowhere to go but a shared checkout, where several agents edit the same files at once and the
+result is one diff that maps to no issue.
+
+**Route each finding to the worktree that owns it and RESUME that worktree's agent.** It already
+holds the context for its area: the decisions it made, what it tried, why the code is shaped the
+way it is. A fresh agent on a shared tree has none of that and re-derives it badly. Give the
+resumed agent its list, and let it verify and commit in its own worktree.
+
+**Split commits by concern**, so each commit maps to the issue it closes.
+
 ## Releasing
 
 Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). `gh` defaults to the upstream `MadLlama25/fastmail-mcp`, so pass `--repo JonathanGodley/fastmail-mcp` on every release, tag, and issue command. Cut a release only when the user asks for it. The step-by-step checklist (with the outward steps grouped behind a checkpoint) is the `/release` skill (`.claude/skills/release/SKILL.md`); this section is the rationale behind it.
@@ -87,10 +104,10 @@ The *why* behind shipped behaviour lives in two places, split by scope. Look her
 
 - **Per-feature behaviour rationale → the relevant GitHub issue** (fork repo `JonathanGodley/fastmail-mcp`). Why one tool behaves the way it does sits in that tool's closed issue, next to the work — e.g. `edit_draft` coupling (#4), reply-quote sanitiser posture (#7), the html→text fallback reject rule (#15), faithful draft recreate (#16), attachment confinement (#1).
 - **Cross-cutting rationale → the `docs/*.md` files** (checked in, version-controlled). Facts and models that span multiple tools, or that are properties of the JMAP/Fastmail platform or the shared codebase:
-  - `docs/email-bodies.md` — the body-format model (HTML as source of truth, text/plain as a derived fallback), the asymmetric `edit_draft` coupling, MIME-matched body extraction + the 12-cell edit matrix, destroy+recreate, and live-probed Fastmail body facts.
+  - `docs/email-bodies.md` — the body-format model (HTML as source of truth, text/plain as a derived fallback), the asymmetric `edit_draft` coupling, the identity signature in the body model (derived text form, placement above the quoted history, HTML-only preservation and the text path's idempotence, and every reason an append is reported as landing nowhere), MIME-matched body extraction + the 12-cell edit matrix, destroy+recreate, and live-probed Fastmail body facts.
   - `docs/security-model.md` — path confinement for download/attachment (always-on, configurable scope, the read-vs-write guard distinction).
   - `docs/fastmail-action-availability.md` — what the Fastmail web client offers per screen and what each action actually does, measured rather than inferred. The authority for any "what does Fastmail mean by this verb" question, because Cyrus implements almost none of the policy and JMAP permits far more than the client does. Extend it by measuring a view, never by inferring from a role's name.
-  - `docs/conventions.md` — lenient input coercion (and its fail-closed variant for arguments that narrow what a call touches), mailbox-query scoping (JMAP's singular `inMailbox`, the solely-in `inMailboxOtherThan`, the single unioned excluded set, and the two sites that decide whether the default Trash/Spam exclusion runs), the U+202F local-time trap, the two-pass quote sanitiser (its posture, and why a quote is rebuilt in two passes), and dependency/build gotchas.
+  - `docs/conventions.md` — lenient input coercion (and its fail-closed variant for arguments that narrow what a call touches), mailbox-query scoping (JMAP's singular `inMailbox`, the solely-in `inMailboxOtherThan`, the single unioned excluded set, and the two sites that decide whether the default Trash/Spam exclusion runs), the U+202F local-time trap, result serialisation (the two compact seams, and what the drift guard over them does and does not buy - it is not redaction), calendar window bounds (a date-only window is the caller's LOCAL day, and a one-sided window is bounded and says so), the two-pass quote sanitiser (its posture, and why a quote is rebuilt in two passes), and dependency/build gotchas.
 
 The dividing line: **an issue explains why ONE tool behaves as it does; a docs file captures a fact or model spanning multiple tools, or a property of the platform/codebase.** When you add a durable decision, file it on the side of that line — don't leave it in a local scratch file.
 

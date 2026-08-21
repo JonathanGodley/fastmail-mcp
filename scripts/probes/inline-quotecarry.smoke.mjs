@@ -3,8 +3,9 @@
 // unsupported-reference-form drop count, flag-off forwards still carrying body
 // images, asAttachment untouched, and the send_draft transmit receipt (one
 // send-to-self, swept afterwards). Fixtures are received-like messages created
-// in Inbox via raw JMAP; every artifact is trashed on exit, including the
-// sent/arrived copies of the send-to-self.
+// in Inbox via raw JMAP; every artifact is trashed on exit, including the copy the
+// transmit delivers back, and the cleanup itself is CHECKED - a sweep that quietly
+// removes nothing is the one failure this probe cannot afford.
 import { createClient } from '../mcp-harness.mjs';
 import { makeChecker, text, jsonOf, idOf, rawBodies } from './probelib.mjs';
 import { getSession, jmap, upload, makePng } from './jmaplib.mjs';
@@ -18,6 +19,9 @@ const c = createClient({ env: { ...process.env } });
 await c.init();
 const { check, failures } = makeChecker();
 const trash = [];
+// Set once step 8 transmits. The delivered copy arrives with an id nothing here has recorded,
+// so once this is true the sweep below has work it MUST find (see the note on it).
+let transmitted = false;
 
 // The send-to-self target: the account's own identity.
 const idRes = await c.call('list_identities', {});
@@ -136,6 +140,7 @@ try {
 
   // 8. send_draft transmit receipt on the edited reply (send-to-self)
   r = await c.call('send_draft', { emailId: d2 });
+  transmitted = !r.isError;
   check('send_draft: sent', !r.isError, text(r).slice(0, 300));
   check('send_draft: transmit receipt', /Sent with 1 embedded image\(s\) \(/.test(text(r)), text(r).split('\n').filter(l => /Sent|image/i.test(l)).join(' | '));
 } finally {
@@ -143,12 +148,50 @@ try {
   // mid-run failure left behind) by the unique subject mark.
   for (const id of trash) { try { await c.call('delete_email', { emailId: id }); } catch { /* swept below */ } }
   await new Promise(res => setTimeout(res, 3000));
-  try {
+
+  // Ids out of the PARSED payload, never a regex over the rendered text. Result payloads are
+  // serialised compact, so the pattern this replaced - written against pretty-printed output,
+  // with a space after the colon - matched nothing the moment that landed. It failed silently:
+  // the sweep found no ids, deleted nothing, and the run still printed a count taken from
+  // `trash` and passed, leaving two real messages live in the mailbox on every run. jsonOf is
+  // whitespace-agnostic, so it cannot rot the same way.
+  //
+  // search_emails' default scope excludes Trash, so this reads as "still live in the mailbox"
+  // both before the sweep (what to remove) and after it (what the sweep failed to remove).
+  const stillLive = async () => {
     const r = await c.call('search_emails', { query: MARK, limit: 50 });
-    const ids = [...text(r).matchAll(/"id": "([A-Za-z0-9_-]+)"/g)].map(m => m[1]).filter(id => !trash.includes(id));
-    for (const id of ids) { try { await c.call('delete_email', { emailId: id }); trash.push(id); } catch { /* report count below */ } }
-  } catch (e) { console.log('cleanup sweep failed: ' + String(e).slice(0, 120)); }
-  console.log(`trashed ${trash.length} artifacts (fixtures, drafts, sent/arrived copies)`);
+    if (r.isError) throw new Error(text(r).slice(0, 200));
+    return jsonOf(text(r)).map(e => e?.id).filter(Boolean);
+  };
+  // What the sweep is for, precisely: the ARRIVED copy of the send-to-self. The Sent copy is
+  // not a second message - EmailSubmission's onSuccessUpdateEmail patches the draft itself
+  // into Sent, so it keeps d2's id and the tracked loop above already trashed it. Delivery is
+  // asynchronous, so poll for the arrival instead of assuming one 3s wait covered it.
+  const DELIVERY_PASSES = 6;
+  let swept = 0;
+  try {
+    for (let pass = 0; pass < DELIVERY_PASSES; pass++) {
+      for (const id of await stillLive()) {
+        if (trash.includes(id)) continue;
+        try { await c.call('delete_email', { emailId: id }); trash.push(id); swept++; } catch { /* re-reported as still live below */ }
+      }
+      if (!transmitted || swept > 0) break;
+      await new Promise(res => setTimeout(res, 3000));
+    }
+    await new Promise(res => setTimeout(res, 3000));
+    // The whole point of asserting on the cleanup: a sweep nobody checks is a sweep that can
+    // stop working without anyone noticing, which is exactly what happened here.
+    const remaining = await stillLive();
+    check('cleanup: nothing matching the probe mark is still live', remaining.length === 0,
+      remaining.length ? `${remaining.length} message(s) left in the mailbox: ${remaining.join(', ')} — search_emails query "${MARK}"` : '');
+    if (transmitted) {
+      check('cleanup: the delivered copy of the send-to-self was swept', swept > 0,
+        `sweep removed ${swept} untracked message(s) over ${DELIVERY_PASSES} passes; the transmit delivers a copy back, so it must find at least one`);
+    }
+  } catch (e) {
+    check('cleanup: the sweep ran', false, `sweep failed, artifacts may still be live under "${MARK}": ${String(e).slice(0, 160)}`);
+  }
+  console.log(`trashed ${trash.length} artifacts (${trash.length - swept} tracked, ${swept} swept by subject mark)`);
   await c.close();
 }
 

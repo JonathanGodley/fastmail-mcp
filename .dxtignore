@@ -59,9 +59,7 @@ settings.local.json
 
 # Dev docs / meta
 /CLAUDE.md
-/AGENTS.md
 /CONTRIBUTING.md
 /docs/
 /.claude/
-/.agents/
 /.secret-scan-local.txt.example
