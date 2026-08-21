@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Pre-push hook: scan everything this push would publish - the message and the
+# content of every commit not yet on any remote, and the annotation of every
+# tag - before it leaves the machine. This is the backstop for the two things
+# the commit-time hooks cannot see: a commit made with --no-verify, and a tag
+# message (git has no hook that runs when a tag is created).
+# Enable once per clone with:  git config core.hooksPath .githooks
+#
+# git passes the refs being pushed on stdin; the scanner reads them from there.
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCANNER="$HOOK_DIR/../scripts/scan-secrets.mjs"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-push: node not found, so the secret scan cannot run." >&2
+  echo "  Install node (this project needs it to build and test anyway), or" >&2
+  echo "  bypass this push deliberately with: git push --no-verify" >&2
+  exit 1
+fi
+
+node "$SCANNER" --pre-push

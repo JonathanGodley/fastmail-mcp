@@ -5,23 +5,47 @@
 This repo has layered guards to keep credentials and personal information out of
 commits and published artifacts. Please keep them working.
 
-### Enable the pre-commit hook (one-time, per clone)
+### Enable the git hooks (one-time, per clone)
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-This runs `scripts/scan-secrets.mjs` on your staged content before each commit
-and blocks anything that looks like a credential or a personal email address.
-It reads the staged blobs, not your working tree, so a secret you `git add` and
-then edit out of the working copy is still caught.
+That switches on three hooks, all of which run `scripts/scan-secrets.mjs`:
+
+- **pre-commit** scans your staged content. It reads the staged blobs, not your
+  working tree, so a secret you `git add` and then edit out of the working copy
+  is still caught.
+- **commit-msg** scans the commit message, which is the text `git log`, GitHub
+  and every release note will show.
+- **pre-push** scans everything the push would publish: the message and content
+  of every commit not yet reachable from any remote-tracking ref, and the
+  annotation of every tag. It is the backstop for the two things the commit
+  hooks cannot see: a commit made with `--no-verify`, and a tag message (git
+  has no hook that runs when a tag is created).
+
+The hooks find the scanner relative to their own location, so `core.hooksPath`
+can also be an absolute path. That is useful with `git worktree`: a relative
+`.githooks` resolves inside each worktree and so runs whatever version of the
+hooks that worktree's branch has, while an absolute path to the main checkout's
+`.githooks` gives every worktree the same, current hooks.
 
 ### What the scanner checks
 
 - **Credentials**: Fastmail API tokens (`fmu…`), `Bearer`/`Basic` auth values,
   and hardcoded `token`/`secret`/`password`/`api_key` assignments.
 - **Personal information**: email addresses on any domain outside a small
-  allowlist of placeholder/service domains (`example.com`, `fastmail.com`, …).
+  allowlist of placeholder/service domains (`example.com`, `fastmail.com`, …),
+  and Australian mobile numbers (the shape a signature block carries).
+- **Your own identifiers**, if you give it a local denylist (below).
+
+A finding names the file (or message) and line and the rule that matched,
+never the matched value: printing the value would put another copy of the
+thing being protected into terminal scrollback and anything that captures it.
+Open the location named and you will see it. A denylist hit is reported
+differently from a shape hit - it means a string you have declared must never
+leave the machine reached a commit or message, so the output says to stop and
+escalate rather than to rewrite and retry.
 
 Run it manually anytime:
 
@@ -30,7 +54,7 @@ npm run scan:secrets
 ```
 
 The same scan runs in CI (`.github/workflows/secret-scan.yml`) on every push and
-pull request, so it catches anything the local hook missed, and again as a gate
+pull request, so it catches anything the local hooks missed, and again as a gate
 before the `.dxt` is packed.
 
 Every run prints its own coverage: how many files it scanned, how many it
@@ -89,9 +113,22 @@ suffixes can never be delegated to anyone, so exempting them closes the whole
 space rather than one name at a time, and costs no coverage. Do not add another
 registered domain to the exempt list without weighing what it blinds.
 
-**The local denylist is per-clone.** `.secret-scan-local.txt` is gitignored, so
-your own domains are only checked on the machine that has the file. CI and other
-contributors' hooks run without it.
+**The local denylist is per-clone.** `.secret-scan-local.txt` is gitignored and
+`git config secretscan.denylist` is local config, so your own strings are only
+checked on the machine that has them. CI and other contributors' hooks run
+without them.
+
+**The push scan decides what is "new" by your remote-tracking refs.** A commit
+already reachable from any fetched remote branch is treated as published and is
+not rescanned, so a stale fetch can make the push scan skip commits that are in
+fact new; `git fetch` before a push keeps it accurate. A merge commit is scanned
+for its own resolutions only (the paths whose merged result differs from every
+parent), since each merged commit is scanned as itself. And `git push
+--no-verify` bypasses the push scan entirely, just as `git commit --no-verify`
+bypasses the commit scans.
+
+**Messages have no suppression marker.** The `allowlist-secret` marker works in
+file content only. A commit or tag message that trips a rule is rewritten.
 
 **It matches shapes, not meaning.** Every rule is a regular expression over a
 single line. A credential in a format it has no rule for, or one split across
@@ -121,13 +158,26 @@ const sample = 'fmu0-00000000-0000…'; // allowlist-secret (synthetic token sha
 
 ### Local denylist for your own identifiers (optional but recommended)
 
-To make the scanner also flag *your* real domains/addresses without publishing
-them, copy the template and fill it in. The target file is gitignored:
+To make the scanner also flag *your* real names, domains, addresses and
+identifiers without publishing them, give it a local denylist: one literal
+string per line, `#` for comments, matched as a case-insensitive substring.
+There are two places it can live, and both are read if both exist:
 
 ```bash
+# 1. A gitignored file in the repo root:
 cp .secret-scan-local.txt.example .secret-scan-local.txt
-# then add your personal domains/addresses, one per line
+# then add your strings, one per line
+
+# 2. Any file outside the repo, named in local git config - useful when one
+#    list is shared with other tooling on the machine, and because local git
+#    config is shared by every worktree of the clone:
+git config secretscan.denylist /path/to/your/denylist.txt
 ```
+
+A configured list that cannot be read fails the scan rather than being skipped,
+so a moved file shows up as a loud failure, not a quiet loss of coverage.
+Because the match is a substring, keep entries specific: a short surname that
+is also an ordinary word will flag unrelated text.
 
 ### Packaging
 

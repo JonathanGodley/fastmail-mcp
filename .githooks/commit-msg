@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Pre-commit hook: block secrets and personal information from being committed.
+# Commit-msg hook: block secrets and personal information in the commit message
+# itself. The pre-commit hook covers the content; this covers the text that
+# `git log`, GitHub and every release note will show.
 # Enable once per clone with:  git config core.hooksPath .githooks
-#
-# The scanner is located relative to this file, not the working directory, so
-# the hook behaves the same whether core.hooksPath is the relative `.githooks`
-# or an absolute path shared by several worktrees of one clone.
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCANNER="$HOOK_DIR/../scripts/scan-secrets.mjs"
 
 if ! command -v node >/dev/null 2>&1; then
-  echo "pre-commit: node not found, so the secret scan cannot run." >&2
+  echo "commit-msg: node not found, so the secret scan cannot run." >&2
   echo "  Install node (this project needs it to build and test anyway), or" >&2
   echo "  bypass this commit deliberately with: git commit --no-verify" >&2
   exit 1
 fi
 
-node "$SCANNER" --staged
+node "$SCANNER" --message "$1"
