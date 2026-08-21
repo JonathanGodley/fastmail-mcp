@@ -895,16 +895,40 @@ Every JSON payload this server returns is serialised **compact**, through one of
   rather than over the finished document.
 
 **Neither takes an indent argument**, so the seams cannot pretty-print even by accident, and
-TypeScript rejects a second argument to either. The one way back to indented output is a
-handler reaching past them for a bare `JSON.stringify(x, null, 2)`, which is what the drift
-guard in `src/tool-schema.test.ts` scans every non-test source file for.
+TypeScript rejects a second argument to either. The way back to indented output is a handler
+reaching past them for its own `JSON.stringify`, so the drift guard in
+`src/tool-schema.test.ts` makes two separate assertions about every shipped file under `src/`
+(recursing, with `src/testing/` excluded by name):
+
+- **No three-argument call.** It counts arguments by walking brackets, after blanking comments
+  and string, template and regex literals, so it catches any indented call across any number of
+  lines whatever sits in the replacer slot. Matching only the literal `null, 2` spelling would
+  miss `JSON.stringify(x, someReplacer, 2)` - which is precisely the shape `redactedJson` had
+  before its indent parameter was removed, and so the most plausible regression there is.
+- **No bare call outside the listed exemptions.** Every `JSON.stringify` written literally in a
+  shipped file (with a plain dot or an optional one) must either go through a seam or be one of
+  the enumerated non-payload uses, with its exact count pinned; referencing `JSON.stringify`
+  without calling it is reported too, since an alias would be invoked out of the scan's sight.
+  This half is not about bytes either. What it buys is that serialisation stays in **one place**:
+  because neither seam takes an indent, keeping every payload on them makes "no payload can be
+  pretty-printed" a property of two function signatures rather than of a text scan that has to
+  keep finding every call site forever.
+
+**What redaction does and does not cover, since it is easy to state this too strongly.**
+`toolJson` is a bare `JSON.stringify` with no replacer and it is nearly every seam call site, so
+routing a payload through it redacts nothing - the drift guard buys the single seam, not
+redaction. `redactedJson` is the only serialiser that redacts, and it has one call site (the
+bulk-operations result). Success payloads on every other path are unredacted, and were before
+the compaction too. The **error** path is covered independently of both seams: every error reply
+is redacted centrally in `index.ts`'s CallTool catch, which is where a bearer token in a server
+error description is caught.
 
 The reason is that indentation is bytes the caller pays for and nothing parses. Every payload
 here is machine-read — an MCP client parses it, or a model reads it as data — and neither
 needs the whitespace. It also scales with the number of JSON *tokens* rather than with the
 content, so it costs most on exactly the payloads that are already the largest. Measured live
-against a real account: **17.3%** of a 25-message `list_emails` page, **24.9%** of the same
-page under `raw: true`, **28.5%** of a `list_mailboxes` result (many small flat objects, so the
+against one real account in August 2026, as a point-in-time reading rather than a rate:
+**17.3%** of a 25-message `list_emails` page, **24.9%** of the same page under `raw: true`, **28.5%** of a `list_mailboxes` result (many small flat objects, so the
 most delimiters per byte of content), and 6.5% of a single `get_email` (dominated by one long
 body string, which carries no delimiters to indent). That is pure whitespace in every case:
 the change removes no field and alters no value (#40).
@@ -916,8 +940,9 @@ the framed ones as a readability exception would be a carve-out the next reader 
 remember, and whitespace is not what makes a payload legible: its structure and field names
 are, and compacting changes neither.
 
-The rule is about **payloads**, not about every `JSON.stringify` in the tree. Two things
-outside `src/` stay indented on purpose, because their output is not a tool result:
+The rule is about **payloads**, not about every `JSON.stringify` in the tree - which is why the
+in-`src/` exceptions are enumerated in the test rather than left to each reader's judgement.
+Two things outside `src/` stay indented on purpose, because their output is not a tool result:
 `scripts/dump-official-surface.mjs` writes a checked-in JSON document, where indentation is
 what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a human
 running it by hand.

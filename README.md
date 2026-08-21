@@ -253,6 +253,12 @@ All data-returning tools simplify responses by default to reduce token usage. Th
 - **`raw: true`** — the original JMAP response with no transformation. Use this for debugging or when you need exact JMAP field names and structures.
 - **`fields: [...]`** — the opposite direction: return *only* the named fields. See [Field projection](#field-projection-fields).
 
+### JSON payloads are compact
+
+Every JSON payload this server returns is serialised **compact** — no indentation and no line breaks between fields — because pretty-printing is whitespace an LLM pays for by the token and reads no better for. Nothing about the data changes; only its spacing does. If you are eyeballing a payload, pipe it through your own formatter.
+
+This is not a per-tool setting. Every handler and formatter goes through a single serialisation seam, and a guard in `src/tool-schema.test.ts` fails the build if a new call site reaches past it to `JSON.stringify` with an indent. That guard is about **spacing only** — it is not a redaction or a privacy control. See [Result serialisation in `docs/conventions.md`](docs/conventions.md) for the two seams and what the guard does and does not cover.
+
 ### What each tool returns
 
 | Tool | `verbose` | `raw` | `fields` |
