@@ -1485,15 +1485,26 @@ rejected rather than silently ignored (below).
    zone) and is exactly the pre-#157 behaviour on update.
 
 **The write is canonicalised; the read is not, and that is a real round-trip asymmetry.** A read
-emits a stored `TZID` verbatim (see "Restoring the NAME" above) - a stored `NZ` reads back as
-`timeZone: "NZ"`, not `"Pacific/Auckland"`. Echo that `"NZ"` straight back as a `timeZone`
-argument and this server writes `"Pacific/Auckland"`: the same zone, a different spelling than
-what was read. A caller comparing the two spellings as strings would wrongly conclude the zone
-changed; comparing them as zones (`zoneNamesEqual`, below) is what actually agrees they didn't.
-An alias reached through a link name (`NZ` → `Pacific/Auckland`, `US/Pacific` →
-`America/Los_Angeles`) or a fixed-offset name with no daylight-saving rule (`EST` →
-`America/Panama` - **not** US Eastern) are the shapes where this is visible; an already-canonical
-spelling round-trips unchanged because canonicalising it is a no-op.
+emits a stored `TZID` verbatim (see "Restoring the NAME" above) - a stored `US/Pacific` reads
+back as `timeZone: "US/Pacific"`, not `"America/Los_Angeles"`. Echo that `"US/Pacific"` straight
+back as a `timeZone` argument and this server writes `"America/Los_Angeles"`: the same zone, a
+different spelling than what was read. A caller comparing the two spellings as strings would
+wrongly conclude the zone changed; comparing them as zones (`zoneNamesEqual`, below) is what
+actually agrees they didn't. A link name reached through a **slash-qualified** alias
+(`US/Pacific` → `America/Los_Angeles`) or a case difference (`australia/sydney` →
+`Australia/Sydney`) are the shapes where this is visible on a value the write side still
+accepts; an already-canonical spelling round-trips unchanged because canonicalising it is a
+no-op.
+
+**A stored BARE alias does not round-trip at all, on purpose ([#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157) amendment).**
+A stored `NZ` TZID still reads back as `timeZone: "NZ"` verbatim - the read side is unchanged -
+but echoing `"NZ"` straight back as a `timeZone` write argument is now **rejected**, not silently
+canonicalised, because a bare abbreviation or alias fails the slash rule below regardless of
+where it came from. The rejection names the fix: pass the slash-qualified spelling
+(`"Pacific/Auckland"`) instead. This is the deliberate cost of closing the ambiguity `EST` and
+its relatives create - a caller who only ever received a canonical name from a read never hits
+it, and one who is round-tripping a foreign client's bare-alias TZID gets an actionable message
+rather than a silently-different zone.
 
 **Create defaulting to the configured zone is a deliberate behaviour change, not a bug fix.**
 Before #157, a designator-less `create_calendar_event` call wrote a bare floating value — "a
@@ -1524,10 +1535,26 @@ error text says "applied because you named none" for a `'default'` source instea
 - **`timeZone` combined with a date-only `start` or `end`** (same function) — an all-day value
   has no time component for a zone to qualify.
 - **`timeZone` that is `null`, empty, or whitespace-only** (`validateCallerTimezone`, `src/coerce.ts`)
-  — there is no way to ask this server to force a FLOATING write via `timeZone`; omitting the
-  argument is how a caller reaches step 2/4 above, and a caller who explicitly sends `null`
-  meaning "make it floating" gets a clear rejection instead of a silent floating write that
-  looks identical to the omitted-argument case.
+  — a ratified decision, not an incidental gap: there is no way to ask this server to force a
+  FLOATING write via `timeZone`, on either tool, ever. Omitting the argument is how a caller
+  reaches step 2/4 above, and a caller who explicitly sends `null` meaning "make it floating"
+  gets a clear rejection instead of a silent floating write that looks identical to the
+  omitted-argument case.
+- **`timeZone` that does not contain a region-qualifying slash, and is not exactly `"UTC"`**
+  (`zoneRejectionReason`, `src/coerce.ts`, [#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157)
+  amendment) - a bare abbreviation or alias such as `"EST"`, `"NZ"`, `"PST"`, `"MST"`, `"GMT"` or
+  `"Zulu"` is rejected even though ICU resolves every one of them to a real zone, because the
+  resolution is ambiguous and one shape is actively dangerous: `"EST"` names a **fixed-offset**
+  zone with no daylight-saving rule, not US Eastern, and every other bare alias is exactly as
+  easy to misread. There is deliberately no safe-list of "harmless" abbreviations - the rule is
+  the same string test for all of them, checked after the leading-slash strip and before
+  canonicalisation, so `"US/Pacific"` (slash-qualified) still passes and still canonicalises to
+  `"America/Los_Angeles"`. The check order matters: a totally unresolvable string (`"Blah"`)
+  reports as unresolvable, never as "shorthand", because ICU never got to say whether it's
+  ambiguous or simply wrong; only a string ICU *can* resolve, but with no slash and no `"UTC"`
+  match, is a shorthand rejection. The comparison against `"UTC"` is case-insensitive
+  (`"utc"`/`"Utc"`/`"UTC"` all pass) - it is the rule's one deliberate exception, not an
+  oversight the rule forgot to close.
 - **`timeZone` on an update that touches neither `start` nor `end`** — `timeZone` alone has
   nothing to qualify (there is no designator-less value in the call at all), so this is rejected
   before any patching happens, naming the fix: re-send `start` and/or `end`.
@@ -1556,6 +1583,13 @@ error text says "applied because you named none" for a `'default'` source instea
   an ordinary read-modify-write caller echoing `timeZone: "NZ"` straight back was rejected by
   `rejectStrandedZoneMismatch` as a false two-zone mismatch - the stored side really was `NZ`,
   the caller really did name `NZ`, and the raw-string comparison called that "different" anyway.
+  Since the slash-rule amendment above, a caller cannot reach this exact scenario with a bare
+  alias any more - `validateCallerTimezone` now rejects `timeZone: "NZ"` before
+  `rejectStrandedZoneMismatch` ever runs - but the identical link/alias-awareness is still what a
+  slash-qualified pair needs (`US/Pacific` echoed back still has to compare equal to a stored
+  `America/Los_Angeles`), and a foreign client's stored bare-alias TZID is still read back
+  verbatim and still has to compare correctly against whatever slash-qualified spelling the
+  caller now has to send instead.
   A name ICU cannot resolve (a Windows zone id, a vendor-prefixed TZID) falls back to today's
   plain string comparison, so it is a real rejection, not a guess. Cached by exact input string
   in `src/coerce.ts` - `zoneNamesEqual` runs once per event on every calendar list read, and
@@ -1663,11 +1697,18 @@ Mechanics worth knowing before touching it:
   the leap arithmetic. Unreachable in practice; it is the same silent-different-window class as
   the rest of this section, which is why it is fixed rather than noted.
 - **An unusable IANA name falls back to the host zone** rather than throwing, matching
-  `toLocalIso` on the same misconfiguration: a mistyped `FASTMAIL_TIMEZONE` must not turn every
-  calendar read into an error, and the calendar and the rendered timestamps then still agree.
-  `describeTimezone` names BOTH in that case — the host zone that resolved and the configured
-  value that did not. Naming only the configured one put the disclosure and the behaviour in
-  disagreement on the one call where a caller is trying to work out why their days look wrong.
+  `toLocalIso` on the same kind of bad zone string. `describeTimezone` names BOTH in that case -
+  the host zone that resolved and the value that did not - because naming only the unresolved
+  one would put the disclosure and the behaviour in disagreement on the one call where a caller
+  is trying to work out why their days look wrong. `FASTMAIL_TIMEZONE` itself can no longer
+  reach this branch in production: `resolveConfiguredTimezone`
+  ([#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157), see "Writing a zone"
+  above) validates it at server startup - including the near-unreachable case where the HOST
+  zone itself fails the rule - so `getDefaultTimezone()`, the only value every current caller of
+  `describeTimezone` passes, is already guaranteed usable by the time a request runs this code.
+  The fallback stays in `describeTimezone` itself rather than being deleted: it is a general
+  utility with its own tests, not something entitled to assume every future caller pre-validates
+  its argument the way today's callers happen to.
 - **Test with an INJECTED zone.** The coercions take the zone as an argument for exactly this
   reason. A test that leaves it to the machine passes under both the UTC-day and the local-day
   reading whenever the host sits in the zone asserted — which is how the wrong-day window sat
