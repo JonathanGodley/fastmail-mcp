@@ -288,7 +288,12 @@ describe('parseCalendarObject', () => {
 // directly rather than through `setDefaultTimezone`, so these are deterministic regardless of
 // the test host's own zone.
 describe('timeZone / endTimeZone (#139)', () => {
-  const CONFIGURED = 'Australia/Sydney';
+  // NOT this test host's own zone (Australia/Sydney) — every fixture below passes CONFIGURED
+  // straight to parseCalendarObject as an explicit option, but a regression that silently
+  // ignored that option and fell back to resolveUsableTimezone(undefined) (the host zone)
+  // would still pass every omit-when-same assertion here if CONFIGURED happened to equal the
+  // host zone, exactly the unfalsifiable-pin trap the end-to-end wiring test below documents.
+  const CONFIGURED = 'Europe/London';
 
   it('emits timeZone with the name when the TZID differs from the configured zone', () => {
     const data = [
@@ -310,14 +315,14 @@ describe('timeZone / endTimeZone (#139)', () => {
       'BEGIN:VCALENDAR',
       'BEGIN:VEVENT',
       'UID:same@fm',
-      'DTSTART;TZID=Australia/Sydney:20260320T083000',
+      'DTSTART;TZID=Europe/London:20260320T083000',
       'SUMMARY:Standup',
       'END:VEVENT',
       'END:VCALENDAR',
     ].join('\r\n');
     assert.equal(parseCalendarObject({ data: exact, url: '' }, { configuredZone: CONFIGURED }).timeZone, undefined);
 
-    const differentCase = exact.replace('TZID=Australia/Sydney', 'TZID=australia/sydney');
+    const differentCase = exact.replace('TZID=Europe/London', 'TZID=europe/london');
     assert.equal(
       parseCalendarObject({ data: differentCase, url: '' }, { configuredZone: CONFIGURED }).timeZone,
       undefined,
@@ -371,7 +376,7 @@ describe('timeZone / endTimeZone (#139)', () => {
       'BEGIN:VCALENDAR',
       'BEGIN:VEVENT',
       'UID:flight@fm',
-      'DTSTART;TZID=Australia/Sydney:20260320T083000',
+      'DTSTART;TZID=Europe/London:20260320T083000',
       'DTEND;TZID=Pacific/Auckland:20260320T113000',
       'SUMMARY:Flight to Auckland',
       'END:VEVENT',
@@ -381,7 +386,7 @@ describe('timeZone / endTimeZone (#139)', () => {
     assert.equal(flightEvent.timeZone, undefined, 'start matches the configured zone');
     assert.equal(flightEvent.endTimeZone, 'Pacific/Auckland');
 
-    const sameZonePair = flight.replace('DTEND;TZID=Pacific/Auckland', 'DTEND;TZID=Australia/Sydney');
+    const sameZonePair = flight.replace('DTEND;TZID=Pacific/Auckland', 'DTEND;TZID=Europe/London');
     const sameZoneEvent = parseCalendarObject({ data: sameZonePair, url: '' }, { configuredZone: CONFIGURED });
     assert.equal(sameZoneEvent.endTimeZone, undefined);
   });
@@ -400,8 +405,30 @@ describe('timeZone / endTimeZone (#139)', () => {
     const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
     // start's own zone still comes through...
     assert.equal(event.timeZone, 'Pacific/Auckland');
-    // ...but there is no raw DTEND line to disagree with, so nothing to report.
+    // ...and end was computed from start, so there is no independent end zone to report.
     assert.equal(event.endTimeZone, undefined);
+  });
+
+  it('omits endTimeZone on the DURATION path even when a malformed, empty-valued DTEND line is present', () => {
+    // A VEVENT this malformed shouldn't exist, but `!rawEnd && rawStart` takes the DURATION
+    // branch for it anyway (parseICalValue reads the empty value as falsy) — and
+    // describeDateProperty classifies an empty value carrying a TZID parameter as `zoned`
+    // regardless of the value being unused, so calling the shared end-classifier on this raw
+    // line would report a zone (Europe/Paris) that never contributed to the computed `end`.
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:durMalformed@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000',
+      'DURATION:PT1H',
+      'DTEND;TZID=Europe/Paris:',
+      'SUMMARY:Malformed duration + empty DTEND',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Pacific/Auckland');
+    assert.equal(event.endTimeZone, undefined, 'the unused DTEND TZID must not leak into endTimeZone');
   });
 
   it('unquotes a quoted TZID value', () => {
@@ -425,7 +452,7 @@ describe('timeZone / endTimeZone (#139)', () => {
       'BEGIN:VCALENDAR',
       'BEGIN:VEVENT',
       'UID:slashMatch@fm',
-      'DTSTART;TZID=/Australia/Sydney:20260320T083000',
+      'DTSTART;TZID=/Europe/London:20260320T083000',
       'SUMMARY:Slash-prefixed, same zone',
       'END:VEVENT',
       'END:VCALENDAR',

@@ -1369,7 +1369,13 @@ describe('describeTimezone', () => {
 // internal helper of describeTimezone's wording, but returns the resolved NAME itself.
 describe('resolveUsableTimezone', () => {
   it('returns the configured zone when it is set and resolvable', () => {
-    assert.equal(resolveUsableTimezone('Australia/Sydney'), 'Australia/Sydney');
+    // NOT this test host's own zone: a regression that ignored the argument entirely and
+    // always returned hostTimezone() would still pass this assertion if the configured value
+    // happened to equal the host's zone, so the value has to differ to prove anything.
+    const configured = Intl.DateTimeFormat().resolvedOptions().timeZone === 'Europe/London'
+      ? 'Pacific/Auckland'
+      : 'Europe/London';
+    assert.equal(resolveUsableTimezone(configured), configured);
   });
 
   it('falls back to the host zone when nothing is configured', () => {

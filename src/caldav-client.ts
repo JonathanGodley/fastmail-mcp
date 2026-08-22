@@ -1185,14 +1185,17 @@ function parseVEvent(
             end: computedEnd,
             location: location ? unescapeICalText(location) : undefined,
           };
-          // endTimeZone omits on this path because a DURATION-computed end shares start's
-          // frame by construction: `parseICalDuration` returns the new instant in the same
-          // spelling it read `start` in (a `Z` start produces a `Z` end, a bare wall clock
-          // comes back bare — see its own "Return in same format as input start" comment), so
-          // there is nothing to disagree about, regardless of whether the raw source text
-          // happens to still carry a DTEND line (e.g. an empty `DTEND;TZID=X:` value, which
-          // takes this branch too since parseICalValue reads it as falsy).
-          attachZoneFields(event, vevent, configuredZone);
+          // Start's own zone only — deliberately not the shared attachZoneFields, which would
+          // also classify whatever raw DTEND line the source text happens to still contain.
+          // An empty `DTEND;TZID=Europe/Paris:` value takes this branch too (parseICalValue
+          // reads it as falsy) but still carries a TZID parameter, so describeDateProperty
+          // would read it as `zoned` even though that value was never used to compute `end`.
+          // A DURATION-computed end shares start's frame by construction — parseICalDuration
+          // returns the new instant in the same spelling it read `start` in (see its own
+          // "Return in same format as input start" comment) — so endTimeZone has nothing
+          // independent to report here, and is left unset. See attachZoneFields' own doc
+          // comment for the full reasoning.
+          attachStartZone(event, vevent, configuredZone);
           addRecurrenceToEvent(event, vevent);
           if (options?.includeParticipants) {
             addParticipantsToEvent(event, vevent);
@@ -1282,18 +1285,7 @@ function zoneDescriptorsEqual(a: ZoneDescriptor, b: ZoneDescriptor): boolean {
   return true;
 }
 
-/**
- * Set `timeZone`/`endTimeZone` on a parsed event from the VEVENT's raw DTSTART/DTEND lines
- * (#139). This is the one rule for the emit matrix documented on `CalendarEvent` and in
- * docs/conventions.md — read the descriptor comments there before changing the branches
- * below, they are not independent choices.
- *
- * `timeZone` describes start alone. `endTimeZone` describes end relative to start (the
- * flight-lands-elsewhere case `validateDateConsistency` permits on write, #140) — EXCEPT
- * when start is absent entirely, where end is compared against the configured zone instead,
- * which is exactly the rule `timeZone` itself uses.
- */
-function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: string): void {
+function attachStartZone(event: CalendarEvent, vevent: string, configuredZone: string): ZoneDescriptor {
   const startDesc = classifyZoneFromLines(parseAllICalProperties(vevent, 'DTSTART'));
 
   if (startDesc.kind === 'tzid') {
@@ -1306,7 +1298,10 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
     event.timeZone = null;
   }
   // 'none' (Z-instant or all-day) and 'absent' both omit — see the field comment.
+  return startDesc;
+}
 
+function attachEndZone(event: CalendarEvent, startDesc: ZoneDescriptor, vevent: string, configuredZone: string): void {
   const endDesc = classifyZoneFromLines(parseAllICalProperties(vevent, 'DTEND'));
   if (endDesc.kind === 'absent' || endDesc.kind === 'none') return;
 
@@ -1317,6 +1312,32 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
 
   // Trimmed for the same reason as `timeZone` above; stored spelling otherwise preserved.
   event.endTimeZone = endDesc.kind === 'tzid' ? endDesc.name.trim() : null;
+}
+
+/**
+ * Set `timeZone`, and where applicable `endTimeZone`, on a parsed event from the VEVENT's raw
+ * DTSTART/DTEND lines (#139). This is the one rule for the emit matrix documented on
+ * `CalendarEvent` and in docs/conventions.md — read the descriptor comments there before
+ * changing the branches above, they are not independent choices.
+ *
+ * `timeZone` describes start alone. `endTimeZone` describes end relative to start (the
+ * flight-lands-elsewhere case `validateDateConsistency` permits on write, #140) — EXCEPT
+ * when start is absent entirely, where end is compared against the configured zone instead,
+ * which is exactly the rule `timeZone` itself uses.
+ *
+ * The DURATION branch in `parseVEvent` does NOT call this — it calls `attachStartZone` alone
+ * and never touches `endTimeZone` at all, deliberately. Reusing `attachEndZone` there would
+ * classify whatever raw DTEND line happens to be sitting in the source text even though its
+ * VALUE was never used to compute `end` — an empty `DTEND;TZID=Europe/Paris:` still carries a
+ * TZID parameter, so `describeDateProperty` reads it as `zoned` and a genuinely unused zone
+ * would leak into the response. A DURATION-computed end shares start's frame by construction
+ * (`parseICalDuration` returns the new instant in the same spelling it read `start` in — see
+ * its own "Return in same format as input start" comment), so there is nothing independent
+ * for `endTimeZone` to report regardless of what text a DTEND line happens to still contain.
+ */
+function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: string): void {
+  const startDesc = attachStartZone(event, vevent, configuredZone);
+  attachEndZone(event, startDesc, vevent, configuredZone);
 }
 
 /**
