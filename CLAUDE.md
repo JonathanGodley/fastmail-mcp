@@ -111,7 +111,7 @@ The dividing line: **an issue explains why ONE tool behaves as it does; a docs f
 
 ## Working with upstream
 
-`upstream` = `MadLlama25/fastmail-mcp` (the fork's base); `origin` = `JonathanGodley/fastmail-mcp`. `gh` defaults to upstream, so pass `--repo JonathanGodley/fastmail-mcp` for every fork-side issue/PR/release command.
+`upstream` = `MadLlama25/fastmail-mcp` (the fork's base); `origin` = `JonathanGodley/fastmail-mcp`. `gh` resolves bare commands to the **fork**: `gh repo set-default JonathanGodley/fastmail-mcp` is stored in this checkout (`remote.origin.gh-resolved`), so `gh issue`/`gh pr`/`gh release` act on the fork with no flag. Pass `--repo MadLlama25/fastmail-mcp` only when upstream is deliberately the target, such as reading their PRs for the adopt issues below — and remember that ⛔ below forbids writing there. (Restore the untargeted behaviour with `gh repo set-default --unset` if this checkout's role ever changes.)
 
 **Strategy.** Track upstream by *generally merging it into the fork whenever that is doable* — a periodic mainline sync that re-bases the fork's differentiators (response simplification, the calendar work) on top of upstream's latest. Supplement that baseline with the fork's own fixes carried ahead of upstream as open PRs *against* upstream. The upstream maintainer is intermittent (active in bursts, absent in between), so never block fork progress on their review: land and release on the fork, offer the general fixes back, and move on whether or not they respond.
 
