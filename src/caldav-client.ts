@@ -1877,7 +1877,7 @@ export function parseICalDateAsUTC(iso: string): Date {
 // this function is never handed the descriptor for — `eventIntersectsWindow` takes only
 // `start`/`end`, not the zone fields, so tightening it is a real, independently-testable
 // change to what this filter is given and checked against, not a one-line follow-up. Left as
-// a deliberate follow-up rather than folded in here.
+// a deliberate follow-up rather than folded in here, tracked as #162.
 const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
 
 /**

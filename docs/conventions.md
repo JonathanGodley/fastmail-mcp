@@ -1400,7 +1400,8 @@ a per-event zone would trade one visible extra row today for an invisible missin
 moment a name fails to resolve, is spelled unusually, or belongs to a value
 `eventIntersectsWindow` is not even handed — its signature takes only `start`/`end`, not the
 zone fields, so tightening it is a real, separately-tested follow-up, not a one-line change
-folded in here. The residue this leaves is accepted deliberately for a second reason too: the
+folded in here, tracked as #162. The residue this leaves is accepted deliberately for a second
+reason too: the
 CalDAV server is the authority on time-range matching (RFC 4791 §9.9, occurrence-based), and
 this filter exists only to catch what that matching cannot express — the server matches per
 *occurrence* but returns whole *resources*, so an unexpanded series arrives showing a master
