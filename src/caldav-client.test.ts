@@ -3997,6 +3997,13 @@ describe('timeZone parameter (#157)', () => {
   });
 
   describe('update_calendar_event', () => {
+    // Pinned to a configured zone that is neither this repo's dev host's own zone
+    // (Australia/Sydney) nor the ZONED fixture's stored TZID below — see the inheritance
+    // test further down for why a stray fallback to either one would otherwise go
+    // unnoticed.
+    before(() => setDefaultTimezone('America/New_York'));
+    after(() => setDefaultTimezone(undefined));
+
     // End is stored a day after start (not the same evening) so that updating start alone to
     // the next morning (as the tests below do) still leaves a forward-ordered pair.
     const ZONED = storedEvent('tz@fm', 'DTSTART;TZID=Australia/Sydney:20260320T190000', 'DTEND;TZID=Australia/Sydney:20260321T200000');
@@ -4012,11 +4019,22 @@ describe('timeZone parameter (#157)', () => {
       assert.ok(written.includes('DTEND;TZID=America/New_York:20260321T100000'));
     });
 
-    it('omitting timeZone never defaults — a designator-less value still inherits the stored TZID', async () => {
-      const { client, mockDAVClient } = updateClient(ZONED);
-      await client.updateCalendarEvent('tz@fm', { start: '2026-03-21T09:00:00' });
+    it('omitting timeZone never defaults — a designator-less value still inherits the stored TZID, not the configured default', async () => {
+      // A dedicated fixture, not the shared ZONED above: this describe block previously ran
+      // with no configured-zone pin at all, so the configured default fell back to whatever
+      // zone the test host itself is in — which, on this repo's dev host, is Australia/Sydney,
+      // the same spelling ZONED's stored TZID uses. "Inherits the stored TZID" and "falls back
+      // to the configured/host default" then wrote the identical TZID, so this test could not
+      // tell the two apart (confirmed by temporarily making update default an omitted zone to
+      // the configured zone, the way create does: 8 other tests failed, and this was not one
+      // of them). Pinning the block to America/New_York and storing this fixture in
+      // Europe/London — a third zone, matching neither — closes that gap: either wrong
+      // fallback now writes a TZID this assertion does not expect.
+      const inheritZoned = storedEvent('tz-inherit@fm', 'DTSTART;TZID=Europe/London:20260321T090000', 'DTEND;TZID=Europe/London:20260321T100000');
+      const { client, mockDAVClient } = updateClient(inheritZoned);
+      await client.updateCalendarEvent('tz-inherit@fm', { start: '2026-03-21T09:30:00' });
       const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-      assert.ok(written.includes('DTSTART;TZID=Australia/Sydney:20260321T090000'));
+      assert.ok(written.includes('DTSTART;TZID=Europe/London:20260321T093000'));
     });
 
     it('rejects timeZone with neither start nor end, naming the way to still reach it', async () => {
