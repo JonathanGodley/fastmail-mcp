@@ -122,7 +122,52 @@ it cannot settle whether the Inbox test should come first. This server puts the 
 anyway — that is **our** decision, justified by being what the client rendered when confronted with
 the state and by being the least surprising reading of "archive this", not by parity. That this
 server can manufacture the state at all is tracked separately (fork #124; the label tools joining
-the role-mailbox guard is #50, the general destination guard is #43).
+the role-mailbox guard is #133, the general destination guard is #43).
+
+## Availability: what the two message-action pickers offer
+
+The toolbar's **Labels** and **Move to** entries each open a picker. Both were opened on the **same
+single message**, on 22 August 2026, on the same account and in the same labels mode as everything
+above. The rows below are what each open picker contained, read off the screen. **Nothing in either
+picker was clicked**, so this section measures what is offered and not what choosing it does.
+
+| Entry | In **Labels** | In **Move to** |
+| --- | --- | --- |
+| `Inbox` | yes, with a checkbox, ticked for a message in the Inbox | yes |
+| `Archive`, `Drafts`, `Sent`, `Spam`, `Trash` | **no** | yes |
+| `Snoozed`, `Scheduled` | **no** | yes, but rendered **greyed out** |
+| The account's user labels | yes, each with an unticked checkbox | yes |
+| Create affordance | "Create label…" | "Create…" |
+
+**Move to** lists the eight role folders first, in the order `Inbox, Snoozed, Archive, Drafts,
+Scheduled, Sent, Spam, Trash`, then the user labels, then the create affordance. Each role folder
+carries its own glyph and the user labels carry a tag glyph, so the client draws the two kinds as
+different kinds of thing. Only `Snoozed` and `Scheduled` are greyed; the other six role folders are
+rendered live.
+
+**The finding: a role mailbox is not a label, and Inbox is the sole exception.** `Inbox` is the only
+mailbox that appears in *both* pickers, so it is the one mailbox belonging to both namespaces. "Move
+to" is the folder namespace, "Labels" is the label namespace, and every other role mailbox sits in
+the folder namespace alone - a message cannot be given Archive, Trash, Spam, Drafts, Sent, Snoozed
+or Scheduled the way it is given a label, because the client never offers it. This is the general
+form of the observation in the Inbox + Trash caveat above, which reached the same conclusion for
+Trash alone by watching a client Delete replace the whole `mailboxIds` value.
+
+**Corroboration, by the second method.** The greying matches the live JMAP probe recorded in fork
+issue #43, which moved a message into each destination in turn and found `scheduled` and `snoozed` -
+and only those two - rejected by the server. That probe sorted the destinations into four groups:
+server-protected (`scheduled`, `snoozed`), accepted-but-corrupting (`drafts`, `sent`),
+destructive-or-spam (`trash`, `junk`), and normal (`archive`, `inbox`, a user label). The client
+greys exactly the server-protected pair and offers the other six live. Two independent methods
+agreeing is the standard this file sets at the top, and this row meets it.
+
+**What the greying does NOT settle.** That greyed means "not a valid manual destination" is a
+*reading* of the pixels, corroborated by #43 but not measured: neither greyed entry was clicked, so
+whether the client swallows the click, shows an error, or acts anyway is **unmeasured**. Two further
+things are unmeasured and are called out rather than left blank: folders mode, where the label
+namespace does not exist at all; and the conversation-grouping axis, since both pickers were opened
+on a single message. The grouping section above measured Archive, not the pickers, so it does not
+settle whether a grouped account applies a picker choice to every message in the conversation.
 
 ## Effect: what Archive does when it is offered
 
