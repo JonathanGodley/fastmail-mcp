@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -1387,6 +1387,73 @@ describe('resolveUsableTimezone', () => {
     assert.equal(isUsableTimezone('Australia/Sydney'), true);
     assert.equal(isUsableTimezone('Not/AZone'), false);
     assert.equal(resolveUsableTimezone('Not/AZone') === 'Not/AZone', isUsableTimezone('Not/AZone'));
+  });
+});
+
+// validateCallerTimezone is the timeZone argument's gate on create_calendar_event/
+// update_calendar_event (#157). Its B1 offset-shape denylist runs BEFORE isUsableTimezone
+// (which alone would wrongly accept an offset-shaped string like "+10:00" — ICU resolves it
+// as a fixed-offset zone), so these pin the denylist's exact boundary: what it rejects that
+// isUsableTimezone alone would have let through, and what it must still let past to
+// isUsableTimezone (Etc/GMT-10 and other legitimate names that happen to contain digits).
+describe('validateCallerTimezone', () => {
+  it('accepts a usable IANA zone name, trimmed', () => {
+    assert.equal(validateCallerTimezone('Australia/Sydney'), 'Australia/Sydney');
+    assert.equal(validateCallerTimezone('  Australia/Sydney  '), 'Australia/Sydney');
+  });
+
+  it('rejects null as a request to write floating, not a floating value itself', () => {
+    assert.throws(() => validateCallerTimezone(null), /cannot be null, empty, or whitespace-only/);
+  });
+
+  it('rejects an empty or whitespace-only string the same way as null', () => {
+    assert.throws(() => validateCallerTimezone(''), /cannot be null, empty, or whitespace-only/);
+    assert.throws(() => validateCallerTimezone('   '), /cannot be null, empty, or whitespace-only/);
+  });
+
+  it('rejects a non-string value naming its actual type', () => {
+    assert.throws(() => validateCallerTimezone(42), /must be an IANA zone name string.*not number/);
+  });
+
+  // B1: offset-shaped strings ICU resolves as a fixed-offset zone, which is exactly what a
+  // calendar time must never carry — isUsableTimezone alone would (wrongly) accept every one
+  // of these, so the denylist has to run first.
+  for (const offsetShaped of ['+10:00', '+1000', '+10', '-05:00', 'GMT+10', 'GMT-5', 'UTC+10', 'UT+10']) {
+    it(`rejects the offset-shaped string "${offsetShaped}"`, () => {
+      assert.throws(
+        () => validateCallerTimezone(offsetShaped),
+        /must be an IANA zone NAME.*not a fixed UTC offset/
+      );
+    });
+  }
+
+  it('rejects a digit-leading string even outside the GMT/UTC/UT forms', () => {
+    assert.throws(() => validateCallerTimezone('5Etc/Something'), /not a fixed UTC offset/);
+  });
+
+  // The denylist must not overreach: these are legitimate IANA names that happen to fail the
+  // GMT/UTC/UT/leading-digit shapes only superficially (Etc/GMT-10 embeds a POSIX-style sign
+  // AFTER the name, not at the start) and must still resolve via isUsableTimezone.
+  for (const legit of ['Etc/GMT-10', 'Etc/GMT+5', 'UTC', 'NZ', 'Japan', 'EST5EDT']) {
+    it(`still accepts the legitimate zone name "${legit}"`, () => {
+      assert.equal(validateCallerTimezone(legit), legit);
+    });
+  }
+
+  it('rejects a string that is not a real zone name and not offset-shaped', () => {
+    assert.throws(
+      () => validateCallerTimezone('Not/AZone'),
+      /is not a time zone this server can resolve/
+    );
+  });
+
+  it('echoes the caller-supplied value in an unresolvable-zone rejection, bounded', () => {
+    const long = 'Not/A'.repeat(20);
+    assert.throws(() => validateCallerTimezone(long), (err: Error) => {
+      // Bounded rather than reflecting the full (potentially huge) input verbatim.
+      assert.ok(err.message.length < long.length + 200);
+      return true;
+    });
   });
 });
 

@@ -10,7 +10,7 @@ import {
 import { FastmailAuth, FastmailConfig } from './auth.js';
 import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
-import { CalDAVCalendarClient } from './caldav-client.js';
+import { CalDAVCalendarClient, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone } from './coerce.js';
@@ -1553,7 +1553,9 @@ const TOOLS = [
       },
       {
         name: 'create_calendar_event',
-        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. ONE EXEMPTION: two values carrying DIFFERENT named time zones (a flight departing one zone and landing in another) are a legal shape whose wall clocks can read backwards, so the ordering check stands down there and a backwards cross-zone pair IS written (fork issue #140). Write both as strict ISO-8601 (2026-04-07, 2026-04-07T14:00:00, 2026-04-07T14:00:00Z, or 2026-04-07T14:00:00+10:00): other spellings such as 2026/04/07 or "April 7 2026" are rejected rather than guessed at, since guessing would place the event on a day that depends on the server's own time zone, and so is a day that does not exist in its month (2026-02-31). participants entries may be { email, name? } objects or bare email-address strings. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
+        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. ONE EXEMPTION: two values carrying DIFFERENT named time zones (a flight departing one zone and landing in another) are a legal shape whose wall clocks can read backwards, so the ordering check stands down there and a backwards cross-zone pair IS written (fork issue #140). Write both as strict ISO-8601 (2026-04-07, 2026-04-07T14:00:00, 2026-04-07T14:00:00Z, or 2026-04-07T14:00:00+10:00): other spellings such as 2026/04/07 or "April 7 2026" are rejected rather than guessed at, since guessing would place the event on a day that depends on the server's own time zone, and so is a day that does not exist in its month (2026-02-31). ` +
+          `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET, and this tool never asks you to compute one. \`timeZone\` only QUALIFIES a designator-less start/end — a bare wall clock with no Z and no date-only marker — because that is the one shape with no zone of its own to contradict. Pass \`timeZone\` as an IANA name (e.g. "Australia/Sydney") to say which zone that wall clock is in; OMITTING it does NOT mean floating here — it means writing the event in this server's configured zone (${CONFIGURED_TIMEZONE}), a deliberate difference from update_calendar_event, which never defaults it (see that tool). Combining \`timeZone\` with a start/end that already carries Z/an offset, or with a date-only value, is rejected — both already name their own instant or have no time component, so \`timeZone\` would contradict rather than qualify. \`timeZone: null\` and an empty/whitespace string are rejected too: there is no way to force a genuinely floating write through this parameter. The response states the zone (or \`utc\`/\`allday\`) actually written for start and for end, since a caller-named zone, an inherited one, and the configured default all read as the same "no designator" input. ` +
+          `participants entries may be { email, name? } objects or bare email-address strings. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1581,6 +1583,10 @@ const TOOLS = [
               type: 'string',
               description: `Event location (optional, max ${MAX_ICAL_FIELD_KB}KB)`,
             },
+            timeZone: {
+              type: 'string',
+              description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here).`,
+            },
             participants: participantsSchemaProperty(
               `Event participants (optional, at most ${MAX_ICAL_PARTICIPANTS}). Automatically adds ORGANIZER from CalDAV username.`,
             ),
@@ -1590,7 +1596,9 @@ const TOOLS = [
       },
       {
         name: 'update_calendar_event',
-        description: `Update an existing calendar event. SINGLE (NON-REPEATING) EVENTS ONLY: a repeating event is REFUSED, and no parameter overrides that — eventId names the whole series (every occurrence row list_calendar_events returns for a repeating event carries the same id, and so does its url), a patch would move EVERY occurrence past and future, and this server cannot create a repeating event, so it will not rewrite one it has no way to put back. Change a repeating event, or one occurrence of it, in the Fastmail web interface instead; get_calendar_event still reads it here. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. ONE EXEMPTION: when both values end up carrying DIFFERENT named time zones the ordering check stands down, because a flight departing one zone and landing in another is a legal event whose wall clocks read backwards — so a backwards cross-zone pair IS written (fork issue #140). So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. Both are read as strict ISO-8601, matching create_calendar_event: a non-ISO spelling like 2026/04/07, or a day its month does not have (2026-02-31), is rejected rather than guessed at. WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees, and its entries may be { email, name? } objects or bare email-address strings. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
+        description: `Update an existing calendar event. SINGLE (NON-REPEATING) EVENTS ONLY: a repeating event is REFUSED, and no parameter overrides that — eventId names the whole series (every occurrence row list_calendar_events returns for a repeating event carries the same id, and so does its url), a patch would move EVERY occurrence past and future, and this server cannot create a repeating event, so it will not rewrite one it has no way to put back. Change a repeating event, or one occurrence of it, in the Fastmail web interface instead; get_calendar_event still reads it here. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description/location). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. ONE EXEMPTION: when both values end up carrying DIFFERENT named time zones the ordering check stands down, because a flight departing one zone and landing in another is a legal event whose wall clocks read backwards — so a backwards cross-zone pair IS written (fork issue #140). So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. Both are read as strict ISO-8601, matching create_calendar_event: a non-ISO spelling like 2026/04/07, or a day its month does not have (2026-02-31), is rejected rather than guessed at. ` +
+          `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET. \`timeZone\` only QUALIFIES a designator-less start/end you are ALSO passing in this same call — the one shape with no zone of its own to contradict. Unlike create_calendar_event, OMITTING \`timeZone\` never defaults to the configured zone here: it leaves start/end exactly as today — an inherited stored TZID stays, or a value with no stored zone stays floating. Rejected: \`timeZone\` combined with a start/end that already carries Z/an offset or is date-only (both already name themselves); \`timeZone\` with NEITHER start nor end (still reachable — re-send start and/or end unchanged alongside it to re-zone them); \`timeZone\` with only ONE of start/end when the untouched side is stored in a DIFFERENT named zone, because re-zoning just one side would silently strand the other into a two-zone event — pass BOTH start and end (re-sending the one you are not otherwise moving, unchanged) to change the zone; and \`null\`/empty/whitespace (there is no way to force a floating write through this parameter). The response states the zone (or \`utc\`/\`allday\`/\`floating\`) that ended up on each side actually written this call. ` +
+          `WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees, and its entries may be { email, name? } objects or bare email-address strings. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated.`,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1617,6 +1625,10 @@ const TOOLS = [
             location: {
               type: 'string',
               description: `New event location (max ${MAX_ICAL_FIELD_KB}KB)`,
+            },
+            timeZone: {
+              type: 'string',
+              description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace.',
             },
             participants: participantsSchemaProperty(
               `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
@@ -2393,7 +2405,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'create_calendar_event': {
-        const { calendarId, title, description, start, end, location } = args as any;
+        const { calendarId, title, description, start, end, location, timeZone } = args as any;
         // Coerce BEFORE the size guard below, so it measures the real array rather than a
         // lenient client's JSON string (which would slip through as a non-array and be
         // left unmeasured). Per-item shape and key checks live in coerceParticipants.
@@ -2410,14 +2422,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const eventId = await davClient.createCalendarEvent({
-          calendarId, title, description, start, end, location, participants,
+        const result = await davClient.createCalendarEvent({
+          calendarId, title, description, start, end, location, participants, timeZone,
         });
-        return { content: [{ type: 'text', text: `Calendar event created. Event ID: ${eventId}` }] };
+        return { content: [{ type: 'text', text: `Calendar event created. Event ID: ${result.eventId}.${describeCreateCalendarEventResult(result)}` }] };
       }
 
       case 'update_calendar_event': {
-        const { eventId, title, description, start, end, location } = args as any;
+        const { eventId, title, description, start, end, location, timeZone } = args as any;
         // Same coercion, and the same ordering, as create_calendar_event. An omitted
         // participants stays undefined here ("leave the attendees alone"), so the
         // no-field-to-update check and updateCalendarEvent still read it correctly.
@@ -2436,16 +2448,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
         const hasClearFields = Array.isArray(clearFields) && clearFields.length > 0;
-        if (title === undefined && description === undefined && start === undefined && end === undefined && location === undefined && participants === undefined && !hasClearFields) {
-          throw new McpError(ErrorCode.InvalidParams, 'At least one field to update must be provided (title, description, start, end, location, participants, or clearFields)');
+        // timeZone counts as a field here so a timeZone-only call reaches
+        // updateCalendarEvent's own B5 rejection ("timeZone with neither start nor
+        // end") instead of this generic message masking it.
+        if (title === undefined && description === undefined && start === undefined && end === undefined && location === undefined && participants === undefined && timeZone === undefined && !hasClearFields) {
+          throw new McpError(ErrorCode.InvalidParams, 'At least one field to update must be provided (title, description, start, end, location, participants, timeZone, or clearFields)');
         }
         const davClient = initializeCalDAVClient();
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const fields = { title, description, start, end, location, participants, clearFields };
-        await davClient.updateCalendarEvent(eventId, fields);
-        return { content: [{ type: 'text', text: `Calendar event updated. Event ID: ${eventId}` }] };
+        const fields = { title, description, start, end, location, participants, clearFields, timeZone };
+        const result = await davClient.updateCalendarEvent(eventId, fields);
+        return { content: [{ type: 'text', text: `Calendar event updated. Event ID: ${eventId}${describeUpdateCalendarEventResult(result)}` }] };
       }
 
       case 'delete_calendar_event': {

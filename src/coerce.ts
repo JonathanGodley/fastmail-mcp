@@ -492,8 +492,10 @@ export function isUsableTimezone(zone: string): boolean {
 }
 
 // A misconfigured zone name is echoed back to the caller, so it is bounded and stripped of
-// the control characters that would forge extra lines in an error message.
-const ZONE_ECHO_LIMIT = 40;
+// the control characters that would forge extra lines in an error message. Exported so
+// validateCallerTimezone's own rejections (#157) use the identical bound rather than a second
+// number that could quietly drift from this one.
+export const ZONE_ECHO_LIMIT = 40;
 
 /**
  * The IANA name actually used for a configured zone: `zone` itself when it is set and ICU can
@@ -504,6 +506,58 @@ const ZONE_ECHO_LIMIT = 40;
 export function resolveUsableTimezone(zone: string | undefined): string {
   if (zone && isUsableTimezone(zone)) return zone;
   return hostTimezone();
+}
+
+/**
+ * Validate a caller-supplied `timeZone` argument (create_calendar_event / update_calendar_event,
+ * fork issue #157) and return the trimmed IANA name to write.
+ *
+ * `isUsableTimezone` alone is the WRONG gate for this. Probed on this host it returns `true`
+ * for `"+10:00"`, `"+1000"`, `"+10"` and `"Etc/GMT-10"` — ICU resolves several offset spellings
+ * as though they were legitimate zone names. Waving those through here would let a caller write
+ * `DTSTART;TZID=+10:00:...` — an offset baked into a TZID, which is the one shape this whole
+ * design exists to prevent: unresolvable to this server as a NAME, and mis-indexed for its own
+ * time-range queries. So the offset shape is rejected BEFORE the ICU check runs at all.
+ *
+ * The gate is a DENYLIST of offset spellings, not an allowlist of IANA shapes: `Etc/GMT-10`,
+ * `UTC`, `NZ`, `Japan` and `EST5EDT` are all legitimate zone names an allowlist would reject.
+ *
+ * Fails closed on `null`, empty, or whitespace-only rather than treating any of them as "write
+ * floating". The read side emits `timeZone: null` for a genuinely floating event (see
+ * `CalendarEvent` in caldav-client.ts, #139), so a read-modify-write caller can echo `null`
+ * straight back — silently reinterpreting that as "make this floating" would decide an open
+ * design question by accident rather than ask. Omit `timeZone` instead: on `create` an omitted
+ * `timeZone` writes the account's configured zone (never floating, see docs/conventions.md); on
+ * `update` it leaves whatever the event already has unchanged.
+ */
+export function validateCallerTimezone(value: unknown): string {
+  if (value === null || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new InvalidInputError(
+      'timeZone cannot be null, empty, or whitespace-only. A floating time (no zone at all) cannot ' +
+      'be written through this parameter. Omit timeZone instead: on create that writes the ' +
+      "account's configured zone, and on update it leaves whatever the event already has unchanged."
+    );
+  }
+  if (typeof value !== 'string') {
+    throw new InvalidInputError(`timeZone must be an IANA zone name string (e.g. "Australia/Sydney"), not ${typeof value}.`);
+  }
+  const trimmed = value.trim();
+  // Offset-shape denylist — see the function comment for why this runs before isUsableTimezone.
+  if (/^[+-]/.test(trimmed) || /^(GMT|UTC|UT)[+-]/i.test(trimmed) || /^\d/.test(trimmed)) {
+    throw new InvalidInputError(
+      `timeZone must be an IANA zone NAME such as "Australia/Sydney" or "America/New_York", not a ` +
+      `fixed UTC offset ("${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}"). A calendar time is never ` +
+      'written with an offset — pass the zone the wall clock is actually in and this server works ' +
+      'out the offset itself.'
+    );
+  }
+  if (!isUsableTimezone(trimmed)) {
+    throw new InvalidInputError(
+      `timeZone "${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}" is not a time zone this server can ` +
+      'resolve. Pass a standard IANA name such as "Australia/Sydney" or "America/New_York".'
+    );
+  }
+  return trimmed;
 }
 
 /**
