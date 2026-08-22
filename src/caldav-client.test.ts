@@ -2616,6 +2616,36 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
   });
 
+  // The same forgery for RDATE, the other marker isRecurringSeriesResource reads (#162), driven
+  // through both write tools: a forged RDATE must not refuse a legitimate edit or delete of a
+  // one-off event, and the delete is the irreversible half this gate fronts. Separators written
+  // as escapes on purpose — a literal U+2028 or U+2029 here is invisible in an editor.
+  const FORGED_RDATE_SEPARATORS = ['\u{2028}', '\u{2029}', '\r'];
+  const forgedRdateIcal = (sep: string) => SINGLE_ICAL.replace(
+    'SUMMARY:One-off Meeting',
+    `SUMMARY:One-off Meeting${sep}RDATE:20260413T100000Z`,
+  );
+
+  it('does not treat an RDATE forged inside a SUMMARY as a recurrence', async () => {
+    for (const sep of FORGED_RDATE_SEPARATORS) {
+      const { client, mockDAVClient } = createMockedRecurringClient(forgedRdateIcal(sep), '/cal/single.ics');
+      await client.updateCalendarEvent('single@fm', { title: 'Renamed' });
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1, `separator ${JSON.stringify(sep)}`);
+    }
+    // …and the escaped form an honest client would write, which is not a line break at all.
+    const { client, mockDAVClient } = createMockedRecurringClient(forgedRdateIcal('\\n'), '/cal/single.ics');
+    await client.updateCalendarEvent('single@fm', { title: 'Renamed' });
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
+  });
+
+  it('deletes a one-off event whose SUMMARY carries a forged RDATE', async () => {
+    for (const sep of FORGED_RDATE_SEPARATORS) {
+      const { client, mockDAVClient } = createMockedRecurringClient(forgedRdateIcal(sep), '/cal/single.ics');
+      await client.deleteCalendarEvent('single@fm');
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 1, `separator ${JSON.stringify(sep)}`);
+    }
+  });
+
   // RFC 5545 §3.1 makes property names case-INSENSITIVE. libical re-serialises them upper
   // case, so this shape does not come from Fastmail's own client — but it is legal, a third
   // party can PUT it, and reading it as "no rule" would let the delete destroy the series.
@@ -5702,10 +5732,12 @@ describe('non-RFC line terminators inside a value are text, not structure', () =
   // `/m`-based. The RRULE / RDATE / ORGANIZER / ATTENDEE gates on the write path all go through
   // hasICalProperty, and it is the ONLY thing they go through \u2014 an earlier version of this
   // test drove parseAllICalProperties instead, which passed identically before and after the
-  // fix and left every one of those gates unpinned. ORGANIZER and ATTENDEE are also driven end
-  // to end through updateCalendarEvent (see the patch-based suite); the two recurrence markers
-  // are not observable that way, because every read inside that branch is already
-  // line-model-based. RDATE is here because it fronts the same irreversible destroy as RRULE:
+  // fix and left every one of those gates unpinned. All four are also driven end to end through
+  // updateCalendarEvent: ORGANIZER and ATTENDEE in the patch-based suite, because they steer the
+  // patch, and the recurrence markers in the refusal suite ("does not treat an RRULE forged
+  // inside a SUMMARY as a recurrence", and its RDATE pair), because a forged marker
+  // short-circuits into the REFUSAL, which is itself observable. RDATE is here for the same
+  // reason it is there — it fronts the same irreversible destroy as RRULE:
   // isRecurringSeriesResource takes it as a recurrence marker too, so a forged RDATE in a TEXT
   // value reaching that gate would refuse a legitimate edit or delete of a one-off event.
   for (const [name, sep] of TERMINATORS) {

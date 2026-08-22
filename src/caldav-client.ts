@@ -285,9 +285,9 @@ function isFoldedContinuation(line: string): boolean {
 /**
  * Whether an iCalendar block contains the named property as a whole content line.
  *
- * The one place a "does this component have an RRULE / a RECURRENCE-ID / an ATTENDEE?"
- * question is answered. Every such test used to be its own `/^KEY[;:]/m` literal, which is
- * exactly the shape described above — and the RRULE gate now decides whether
+ * The one place a "does this component have an RRULE / an RDATE / a RECURRENCE-ID / an
+ * ATTENDEE?" question is answered. Every such test used to be its own `/^KEY[;:]/m` literal,
+ * which is exactly the shape described above — and the recurrence gate now decides whether
  * `update_calendar_event` / `delete_calendar_event` refuse the call outright, while the
  * ORGANIZER/ATTENDEE gates steer an in-place patch, so a forged one mis-routes a write.
  *
@@ -303,8 +303,8 @@ function isFoldedContinuation(line: string): boolean {
  * continuation is APPENDED to the line above and so can never begin a logical line: a
  * `DESCRIPTION:x\r\n UID:evil` still yields one line starting `DESCRIPTION:`, not a `UID:`.
  *
- * Exported for its own test, and still worth having one: a caller-level test of the RRULE gate
- * pins the refusal's own reads rather than this presence test, and the two can disagree.
+ * Exported for its own test, and still worth having one: a caller-level test of the recurrence
+ * gate pins the refusal's own reads rather than this presence test, and the two can disagree.
  */
 export function hasICalProperty(block: string, key: string): boolean {
   const test = new RegExp(`^${key}[;:]`, 'i');
@@ -391,11 +391,13 @@ export function extractVEvent(data: string): string | null {
  *
  * The marker scan is VEVENT-WIDE and NOT position-aware: it asks whether the block's content
  * lines contain the property anywhere, so a line nested inside a subcomponent of the VEVENT
- * (a VALARM, say) counts as present. Neither RRULE nor RDATE is a legal VALARM property, so a
- * payload placing one there is malformed, and the resulting refusal is the fail-closed
- * direction this whole test already prefers. The identical reach applied to RRULE long before
- * RDATE joined it; do not narrow either of them into a position-aware read without settling
- * what the write path should then do with a malformed resource.
+ * (a VALARM, say) counts as present — `hasRecurrenceId` included, being the same call. None of
+ * RRULE, RDATE or RECURRENCE-ID is a DEFINED VALARM property (RFC 5545 §3.6.6 admits any
+ * `iana-prop`, so such a line still parses), so a payload placing one there is malformed, and
+ * the resulting refusal is the fail-closed direction this whole test already prefers. The
+ * identical reach applied to RRULE long before RDATE joined it; do not narrow any of them into
+ * a position-aware read without settling what the write path should then do with a malformed
+ * resource.
  *
  * Line-model reads (hasICalProperty / extractVEventBlocks), never a `/m`-anchored regex over
  * the raw payload. Calendar content is attacker-authored here (anyone who can send an
@@ -2662,13 +2664,14 @@ export class CalDAVCalendarClient {
     // one shared seam every other zone-resolving call site here already goes through, and
     // this stays consistent with them rather than being a special case that assumes its
     // input differently from the rest. `zone` above stays the raw configured value only for
-    // `coerceCalendarWindowStart`/`End`, which resolve it themselves where each needs to.
-    // `sortEventsByStart` is handed `configuredZone`, the same value the window filter gets:
-    // the sort has no `resolveUsableTimezone` of its own, so passing it the raw value left it
-    // leaning on `zoneOffsetMsAt`'s SILENT host-zone fallback for the fallback leg, and the
-    // sort and the filter would then be ordering and filtering the same events against two
-    // different zones. Inert in production while #157 guarantees the configured zone is
-    // ICU-usable, but this removes the dependency rather than documenting it.
+    // `coerceCalendarWindowStart`/`End`, which do not resolve it either — they hand it
+    // through to the same `zoneOffsetMsAt`, whose own catch tolerates an unresolvable zone.
+    // `sortEventsByStart` is handed `configuredZone`, the same value the window filter gets.
+    // The raw value would order the same events the same way — canonicalising a usable zone
+    // changes its spelling and not its offset, and for an unresolvable one `zoneOffsetMsAt`
+    // falls back to the host zone `resolveUsableTimezone` falls back to — but passing one
+    // resolved value removes the dependency on those two fallbacks coinciding rather than
+    // documenting it.
     const configuredZone = resolveUsableTimezone(zone);
     const rawStart = coerceCalendarWindowStart(startDate, 'startDate', zone);
     const rawEnd = coerceCalendarWindowEnd(endDate, 'endDate', zone);
