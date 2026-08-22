@@ -366,11 +366,16 @@ export function extractVEvent(data: string): string | null {
  * RRULE the server has stripped, so a row is not evidence either way — the payload behind the
  * id is. This is what `update_calendar_event` and `delete_calendar_event` refuse on.
  *
- * Three markers, ANY of which is enough, because this gates a refusal in front of an
+ * Four markers, ANY of which is enough, because this gates a refusal in front of an
  * irreversible write and so fails CLOSED — the cost of calling a one-off event a series is one
  * edit the caller does in the web client, the cost of the reverse is a destroyed series:
  *
  *  - a VEVENT carrying an RRULE — the ordinary series master;
+ *  - a VEVENT carrying an RDATE — a series that LISTS its occurrences rather than stating a
+ *    rule (RFC 5545 §3.8.5.2). It carries no rule at all, so an RRULE-only test read a
+ *    single-block master of one as a one-off and let `delete_calendar_event` destroy the whole
+ *    series and mail every attendee a cancellation (#162). `create_calendar_event` has no RDATE
+ *    parameter either, so the same "cannot recreate it, must not destroy it" rule applies;
  *  - more than one VEVENT block in the resource — one CalDAV resource is one UID, so a second
  *    block can only be an overridden occurrence of a recurrence;
  *  - any block carrying a RECURRENCE-ID — that block IS an overridden occurrence, and a
@@ -378,8 +383,11 @@ export function extractVEvent(data: string): string | null {
  *
  * The last two are the same test the read path uses to set `isRecurring`
  * (`blockCountProvesSeries`), deliberately, so the two halves of the server cannot disagree
- * about what a series is. Note what is NOT required: the RRULE and the overrides do not have
- * to agree, and a malformed resource carrying an override with no rule still refuses.
+ * about what a series is — and the RDATE marker is here for that same reason: the read path
+ * sets `isRecurring` and emits `recurrenceDates` on exactly such a block, and the tool
+ * descriptions promise that update and delete act on every occurrence of it. Note what is NOT
+ * required: the RRULE and the overrides do not have to agree, and a malformed resource
+ * carrying an override with no rule still refuses.
  *
  * Line-model reads (hasICalProperty / extractVEventBlocks), never a `/m`-anchored regex over
  * the raw payload. Calendar content is attacker-authored here (anyone who can send an
@@ -392,7 +400,8 @@ export function isRecurringSeriesResource(icalData: string | null | undefined): 
   const blocks = extractVEventBlocks(icalData || '');
   if (blocks.length === 0) return false;
   if (blocks.length > 1) return true;
-  return blocks.some((block) => hasICalProperty(block, 'RRULE') || hasRecurrenceId(block));
+  return blocks.some((block) =>
+    hasICalProperty(block, 'RRULE') || hasICalProperty(block, 'RDATE') || hasRecurrenceId(block));
 }
 
 /**

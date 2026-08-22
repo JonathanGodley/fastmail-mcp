@@ -2522,6 +2522,53 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
 
+  // A series that LISTS its occurrences as RDATEs instead of stating a rule (RFC 5545
+  // §3.8.5.2). One block, no RRULE, no RECURRENCE-ID — so an RRULE-only detector read it as an
+  // ordinary one-off and delete_calendar_event destroyed all four occurrences and mailed every
+  // attendee a cancellation. The read path already calls it recurring and emits its
+  // recurrenceDates, and create_calendar_event has no RDATE parameter, so it is exactly the
+  // kind of record this refusal exists for (#162).
+  const RDATE_ONLY_ICAL = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0',
+    'BEGIN:VEVENT',
+    'UID:rdates@fm', 'DTSTAMP:20260401T000000Z',
+    'DTSTART:20260406T100000Z', 'DTEND:20260406T110000Z',
+    'RDATE:20260413T100000Z,20260420T100000Z',
+    'RDATE:20260427T100000Z',
+    'SUMMARY:Irregular Catch-up',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+
+  it('refuses to DELETE a series that recurs only by RDATE', async () => {
+    const { client, mockDAVClient } = createMockedRecurringClient(RDATE_ONLY_ICAL, '/cal/rdates.ics');
+    await assert.rejects(
+      () => client.deleteCalendarEvent('rdates@fm'),
+      (err: unknown) => {
+        assert.ok(isInvalidInput(err), `expected InvalidInputError, got ${err}`);
+        const message = (err as Error).message;
+        assert.match(message, /"Irregular Catch-up"/);
+        assert.match(message, /every occurrence, past and future/);
+        assert.match(message, /cancellation to every attendee/);
+        return true;
+      },
+    );
+    assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
+  });
+
+  it('refuses to UPDATE a series that recurs only by RDATE', async () => {
+    const { client, mockDAVClient } = createMockedRecurringClient(RDATE_ONLY_ICAL, '/cal/rdates.ics');
+    await assert.rejects(
+      () => client.updateCalendarEvent('rdates@fm', { title: 'New Title' }),
+      (err: unknown) => {
+        assert.ok(isInvalidInput(err), `expected InvalidInputError, got ${err}`);
+        assert.match((err as Error).message, /repeating event/);
+        return true;
+      },
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
   // Two VEVENT blocks in one resource can only be a recurrence — one CalDAV resource is one
   // UID — so the count alone refuses, even with no RRULE and no RECURRENCE-ID to read. This is
   // the same test the read path uses to set isRecurring, on purpose.

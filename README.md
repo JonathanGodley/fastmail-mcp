@@ -1003,7 +1003,9 @@ Non-IANA names pass straight through rather than being rejected or resolved. A c
 
 `update_calendar_event` and `delete_calendar_event` **refuse** any `eventId` that resolves to a repeating event. There is no flag, parameter or confirmation that overrides this, and the error message says so - if you are looking for one, there isn't one. `get_calendar_event` is read-only and still works on the same id.
 
-The reason is that the create side cannot match it. `create_calendar_event` has no recurrence-rule parameter, so this server cannot make a repeating event at all - which means it must not destroy or rewrite one it has no way to put back. Concretely:
+**What counts as repeating** is read off the stored record, not off the row you passed, and any one of four markers is enough: an `RRULE`; an `RDATE`, which is how a series **lists** its occurrences instead of stating a rule ([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)); more than one `VEVENT` in the record, since one CalDAV resource is one UID; or a `RECURRENCE-ID` on any block, which makes that block an edited occurrence. The test fails **closed** on purpose - miscalling a one-off a series costs one edit in the web client, and the reverse costs a destroyed series.
+
+The reason is that the create side cannot match it. `create_calendar_event` has no recurrence-rule parameter and no `RDATE` parameter, so this server cannot make a repeating event at all - which means it must not destroy or rewrite one it has no way to put back. Concretely:
 
 - A **delete** removes the whole calendar record: every occurrence, past and future, irreversibly, and the server then mails a cancellation to every attendee. Nothing is echoed back that could rebuild it.
 - An **update** patches the series master, which moves every occurrence. Where the series has occurrences that were edited individually, RFC 5545 does not settle whether those follow the master or stay where they are - so there is no correct answer to implement, and guessing would move somebody's calendar without saying which way.
