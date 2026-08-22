@@ -71,8 +71,18 @@ The sharpest local example of a scope call that wasn't a disposition: #37 guarde
 
 ## Parallel work: one worktree per concern, kept alive through review
 
-**Concurrent workstreams get a `git worktree` each, one agent per worktree.** The main instance
-orchestrates: it partitions the work, routes findings, and merges. It does not implement.
+**Concurrent workstreams get a `git worktree` each, one agent per worktree — and so does a single
+implementing agent working alone.** The main instance orchestrates: it partitions the work, routes
+findings, and merges. It does not implement, and it does not leave an implementer in the primary
+checkout just because there is only one of them.
+
+**The reason is the index, and it binds sessions as much as subagents.** A checkout has ONE index,
+so `git add` there is not a private workspace: any `git commit` from anyone in that tree takes
+everything staged, and a second Claude Code session the user has open is another writer with the
+same index. Nothing enforces this, so run `git status` before staging in the primary checkout and
+read a dirty tree you did not make as someone else mid-task — wait, or move to a worktree. (A
+two-line `CLAUDE.md` commit from a concurrent session swallowed the whole of #133 that way, and
+undoing it meant rewriting a pushed commit.)
 
 **Keep each worktree alive until its work is reviewed AND its findings are fixed.** Merging as
 soon as a branch is feature-complete is the mistake — review then finds defects and the fixes have
