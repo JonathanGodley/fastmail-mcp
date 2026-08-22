@@ -62,9 +62,9 @@
       "required": false
     },
     "fastmail_timezone": {
-      "title": "Email Date Timezone",
+      "title": "Timezone",
       "type": "string",
-      "description": "IANA timezone name (e.g. America/New_York) used to render email date fields in local time with a UTC offset. Defaults to the server host's timezone. Set this if the server runs in a different timezone than you.",
+      "description": "Full IANA timezone name (e.g. America/New_York) - must contain a region-qualifying slash, or be exactly UTC; an abbreviation such as EST or NZ is rejected and stops the server from starting rather than being guessed at. Renders email date fields in local time with a UTC offset, reads date-only list_calendar_events windows as local days, and is the zone create_calendar_event writes a designator-less start/end in. Defaults to the server host's timezone.",
       "required": false
     },
     "fastmail_caldav_username": {

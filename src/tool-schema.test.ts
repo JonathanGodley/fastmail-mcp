@@ -176,6 +176,56 @@ describe('lenient-boolean convention', () => {
   });
 });
 
+// timeZone accepts null as a real, deliberately-rejected input (create_calendar_event and
+// update_calendar_event, #157) — not absence. Omitting timeZone is what absence means, and
+// that is already handled by the parameter being optional; `null` is a caller explicitly
+// asking to force a floating write, which validateCallerTimezone rejects with a tailored
+// message ("there is no way to force a floating write through this parameter"). The schema
+// has to say `type: ['string', 'null']` for that message to ever be reached: a narrowing edit
+// back to `type: 'string'` makes a validating client reject `timeZone: null` with a generic
+// type-mismatch error before this server's own handler ever runs — the same failure mode the
+// lenient-boolean guard above exists for, one type union over.
+function collectTimeZoneNullableParams(): { nullable: string[]; narrow: string[] } {
+  const lines = readLines('index.ts');
+  const nullable: string[] = [];
+  const narrow: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    const isNullable = line === "type: ['string', 'null'],";
+    const isNarrow = line === "type: 'string',";
+    if (!isNullable && !isNarrow) continue;
+    // The property name is the nearest non-comment, non-blank line above this one — timeZone's
+    // own declaration carries an explanatory comment between the property name and its type.
+    let j = i - 1;
+    while (j >= 0 && (lines[j].trim() === '' || lines[j].trim().startsWith('//'))) j--;
+    const name = lines[j].trim().replace(/:\s*\{$/, '');
+    if (name !== 'timeZone') continue;
+    if (isNullable) nullable.push(`${name} (src/index.ts:${i + 1})`);
+    else narrow.push(`${name} (src/index.ts:${i + 1})`);
+  }
+  return { nullable, narrow };
+}
+
+describe('timeZone parameter accepts null (#157)', () => {
+  it('declares every timeZone parameter as type: [string, null], not narrowed to string', () => {
+    const { nullable, narrow } = collectTimeZoneNullableParams();
+    // A sanity floor matching the two tools that declare timeZone today (create_calendar_event,
+    // update_calendar_event): if the scan ever matches nothing, this would pass vacuously.
+    assert.ok(
+      nullable.length >= 2,
+      `found only ${nullable.length} timeZone parameters declared type: ['string', 'null']; ` +
+        'the schema scan has probably stopped matching.',
+    );
+    assert.deepEqual(
+      narrow,
+      [],
+      `these timeZone parameters declare a narrow type: 'string', dropping 'null' from the union — ` +
+        `a validating client would then reject timeZone: null with a generic type-mismatch error ` +
+        `before this server's own tailored rejection is ever reached: ${narrow.join(', ')}`,
+    );
+  });
+});
+
 // The parameter names each tool declares, keyed by tool name, read off the TOOLS literal.
 // Property keys sit one indent level inside `properties: {`, and every nested shape (an
 // array's `items`, an object property's own keys) is indented deeper, so the fixed-depth

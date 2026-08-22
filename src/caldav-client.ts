@@ -4,7 +4,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText } from './coerce.js';
+import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName } from './coerce.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -80,6 +80,30 @@ export interface CalendarEvent {
   // `recurrenceRule` is that block's own rule rather than the series'. The tool description
   // states it the same way.
   recurrenceRule?: string;
+  // ---- time zone (#139) ----
+  // The IANA name DTSTART was written in, when it is anything other than the zone this
+  // server would otherwise assume. NEVER an offset: an offset is only valid at the one
+  // instant it was computed for, and `start` above stays a bare local wall clock precisely
+  // so DST is worked out by the READER's own zone database rather than baked in here.
+  //
+  // OMITTED — not set to the configured zone's own name — for the overwhelming majority of
+  // rows, which are already in that zone; a caller reads "absent" as "the zone I asked
+  // about". `null` means something different and narrower: `start` carries a genuinely
+  // FLOATING value (RFC 5545 §3.3.5 — no TZID and no `Z`, a different instant for every
+  // reader), and there is no zone name to give it. A `Z`-designated instant is also
+  // omitted, because it already names its own instant; so is an all-day (date-only) value,
+  // which has no zone at all by definition — emitting `null` for either would assert
+  // "floating", which is a different, wrong fact.
+  timeZone?: string | null;
+  // The IANA name `end` was written in, but ONLY when it differs from `start`'s — RFC 5545
+  // §3.8.5.3 and the write path (`validateDateConsistency`, fork issue #140) both allow a
+  // start and an end in two different named zones, which is legal for the ordinary reason a
+  // flight has one: it departs in one zone and lands in another. Omitted whenever end's zone
+  // matches start's (the common case), whenever `end` is absent, and whenever `end` was
+  // computed from a DURATION rather than a stored DTEND (it inherits start's zone by
+  // construction, so there is nothing to disagree about). `null` means end is floating while
+  // start is not, or the reverse.
+  endTimeZone?: string | null;
 }
 
 // What `getCalendarEvents` returns: the page, plus how many events matched before `limit`
@@ -1053,7 +1077,7 @@ function extractAllVEvents(data: string): string[] {
  */
 export function parseCalendarObjects(
   obj: DAVCalendarObject,
-  options?: { includeParticipants?: boolean; expanded?: boolean },
+  options?: { includeParticipants?: boolean; expanded?: boolean; configuredZone?: string },
 ): CalendarEvent[] {
   const blocks = extractAllVEvents(obj.data || '');
   if (blocks.length === 0) {
@@ -1121,17 +1145,27 @@ function blockCountProvesSeries(blocks: string[]): boolean {
  * resource is the series master — the right answer for `get_calendar_event`, which fetches
  * without a time range and so has no occurrence to report.
  */
-export function parseCalendarObject(obj: DAVCalendarObject, options?: { includeParticipants?: boolean }): CalendarEvent {
+export function parseCalendarObject(obj: DAVCalendarObject, options?: { includeParticipants?: boolean; configuredZone?: string }): CalendarEvent {
   return parseCalendarObjects(obj, options)[0];
 }
 
-function parseVEvent(obj: DAVCalendarObject, vevent: string, options?: { includeParticipants?: boolean }): CalendarEvent {
+function parseVEvent(
+  obj: DAVCalendarObject,
+  vevent: string,
+  options?: { includeParticipants?: boolean; configuredZone?: string },
+): CalendarEvent {
   const title = parseICalValue(vevent, 'SUMMARY') || 'Untitled';
   const description = parseICalValue(vevent, 'DESCRIPTION');
   const rawStart = parseICalValue(vevent, 'DTSTART');
   let rawEnd = parseICalValue(vevent, 'DTEND');
   const location = parseICalValue(vevent, 'LOCATION');
   const uid = parseICalValue(vevent, 'UID') || obj.url || '';
+
+  // The zone this account is configured for, resolved to a name ICU can actually use. Passed
+  // in rather than read from module state (see resolveUsableTimezone's own comment in
+  // coerce.ts on why), so a test that pins a zone exercises the omit-when-same branch
+  // deterministically rather than passing only when it happens to match the host.
+  const configuredZone = options?.configuredZone ?? resolveUsableTimezone(undefined);
 
   // DURATION parsing: compute end from start + duration if DTEND absent
   if (!rawEnd && rawStart) {
@@ -1151,6 +1185,17 @@ function parseVEvent(obj: DAVCalendarObject, vevent: string, options?: { include
             end: computedEnd,
             location: location ? unescapeICalText(location) : undefined,
           };
+          // Start's own zone only — deliberately not the shared attachZoneFields, which would
+          // also classify whatever raw DTEND line the source text happens to still contain.
+          // An empty `DTEND;TZID=Europe/Paris:` value takes this branch too (parseICalValue
+          // reads it as falsy) but still carries a TZID parameter, so describeDateProperty
+          // would read it as `zoned` even though that value was never used to compute `end`.
+          // A DURATION-computed end shares start's frame by construction — parseICalDuration
+          // returns the new instant in the same spelling it read `start` in (see its own
+          // "Return in same format as input start" comment) — so endTimeZone has nothing
+          // independent to report here, and is left unset. See attachZoneFields' own doc
+          // comment for the full reasoning.
+          attachStartZone(event, vevent, configuredZone);
           addRecurrenceToEvent(event, vevent);
           if (options?.includeParticipants) {
             addParticipantsToEvent(event, vevent);
@@ -1171,12 +1216,141 @@ function parseVEvent(obj: DAVCalendarObject, vevent: string, options?: { include
     location: location ? unescapeICalText(location) : undefined,
   };
 
+  attachZoneFields(event, vevent, configuredZone);
   addRecurrenceToEvent(event, vevent);
   if (options?.includeParticipants) {
     addParticipantsToEvent(event, vevent);
   }
 
   return event;
+}
+
+// Where a DTSTART/DTEND property's zone comes from, for the `timeZone`/`endTimeZone`
+// response fields (#139). Four outcomes rather than `describeDateProperty`'s three,
+// because `describeDateProperty` needs a raw line to classify and a missing property
+// never produces one — `absent` is that fourth case.
+type ZoneDescriptor =
+  | { kind: 'tzid'; name: string }
+  | { kind: 'floating' }
+  | { kind: 'none' }
+  | { kind: 'absent' };
+
+/**
+ * Classify a DTSTART/DTEND property's zone from its raw line(s).
+ *
+ * Built on `describeDateProperty` rather than re-deriving the TZID extraction, so the read
+ * path and the write path's DTSTART/DTEND consistency check (`describeDateProperty`,
+ * `validateDateConsistency`) agree about what a `zoned` value even is — including sharing
+ * its `;TZID=("[^"]*"|[^;:]+)` extraction and unquoting, the same shape `formatDateTimeProperty`
+ * uses to preserve a TZID on a floating rewrite.
+ *
+ * `describeDateProperty`'s `date` (all-day) and `utc` (Z-suffixed) frames collapse to one
+ * `none` outcome here: both are already self-describing and neither carries a zone name, so
+ * from this field's point of view they are the same fact — "nothing to say".
+ */
+function classifyZoneFromLines(rawLines: string[]): ZoneDescriptor {
+  if (rawLines.length === 0) return { kind: 'absent' };
+  const d = describeDateProperty(rawLines[0]);
+  if (d.frame === 'zoned') return { kind: 'tzid', name: d.tzid! };
+  if (d.frame === 'floating') return { kind: 'floating' };
+  return { kind: 'none' };
+}
+
+// RFC 5545 §3.2.19 lets a TZID carry a leading '/', naming a zone registered by its creator
+// rather than the plain IANA form — the simple case is '/Zone/Name', the same IANA-style name
+// with one slash in front, and other clients emit it. libical strips exactly this one
+// character before comparing, so stripping it here matches the platform rather than inventing
+// a rule. This is comparison-only: `attachZoneFields` emits the stored spelling verbatim, slash
+// and all, so the field always reflects what the calendar actually stored.
+//
+// A vendor-prefixed TZID ('/vendor.example/20050126_1/Australia/Sydney') still compares
+// unequal after stripping one slash — that is the safe direction, an extra emitted field
+// rather than a false claim that two differently-registered names are the same zone.
+//
+// After the strip, each side is canonicalised through `canonicalZoneName` (coerce.ts) when ICU
+// can resolve it — the same seam `validateCallerTimezone` and `resolveUsableTimezone` route
+// through to decide what actually lands on the wire (#157). Without this, a link/alias spelling
+// compared unequal to the canonical name it resolves to: a caller echoing back a stored 'NZ'
+// TZID as timeZone 'NZ' read as a DIFFERENT zone from the 'Pacific/Auckland' this server itself
+// writes for it, producing a false "stranded two-zone event" rejection on an ordinary
+// read-modify-write round trip (#139). A name ICU cannot resolve at all (a Windows zone id, a
+// vendor-prefixed TZID) falls back to the trimmed/stripped string unchanged — still today's
+// conservative string comparison, and still a real rejection when the two sides genuinely
+// differ.
+function normalizeZoneForComparison(name: string): string {
+  const trimmed = name.trim();
+  const stripped = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+  return canonicalZoneName(stripped);
+}
+
+// Zone names compare trimmed, slash-normalized and ICU-alias-canonicalised (see above), then
+// case-insensitively ("Australia/Sydney" == "australia/sydney" == "/Australia/Sydney" ==
+// "NZ" == "Pacific/Auckland") and no other way: emitting an extra field when two spellings of
+// the same zone differ only in these ways is the safe direction, claiming two genuinely
+// different zones are the same is not.
+function zoneNamesEqual(a: string, b: string): boolean {
+  return normalizeZoneForComparison(a).toLowerCase() === normalizeZoneForComparison(b).toLowerCase();
+}
+
+function zoneDescriptorsEqual(a: ZoneDescriptor, b: ZoneDescriptor): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'tzid' && b.kind === 'tzid') return zoneNamesEqual(a.name, b.name);
+  return true;
+}
+
+function attachStartZone(event: CalendarEvent, vevent: string, configuredZone: string): ZoneDescriptor {
+  const startDesc = classifyZoneFromLines(parseAllICalProperties(vevent, 'DTSTART'));
+
+  if (startDesc.kind === 'tzid') {
+    // Trimmed because a padded TZID that DIFFERS from the configured zone must still emit a
+    // name isUsableTimezone (and everything downstream, e.g. sortEventsByStart) can resolve —
+    // isUsableTimezone("Australia/Sydney ") is false. NOT slash-normalized: the stored
+    // spelling, leading '/' and all, is what actually named the zone.
+    if (!zoneNamesEqual(startDesc.name, configuredZone)) event.timeZone = startDesc.name.trim();
+  } else if (startDesc.kind === 'floating') {
+    event.timeZone = null;
+  }
+  // 'none' (Z-instant or all-day) and 'absent' both omit — see the field comment.
+  return startDesc;
+}
+
+function attachEndZone(event: CalendarEvent, startDesc: ZoneDescriptor, vevent: string, configuredZone: string): void {
+  const endDesc = classifyZoneFromLines(parseAllICalProperties(vevent, 'DTEND'));
+  if (endDesc.kind === 'absent' || endDesc.kind === 'none') return;
+
+  const compareDesc: ZoneDescriptor = startDesc.kind === 'absent'
+    ? { kind: 'tzid', name: configuredZone }
+    : startDesc;
+  if (zoneDescriptorsEqual(endDesc, compareDesc)) return;
+
+  // Trimmed for the same reason as `timeZone` above; stored spelling otherwise preserved.
+  event.endTimeZone = endDesc.kind === 'tzid' ? endDesc.name.trim() : null;
+}
+
+/**
+ * Set `timeZone`, and where applicable `endTimeZone`, on a parsed event from the VEVENT's raw
+ * DTSTART/DTEND lines (#139). This is the one rule for the emit matrix documented on
+ * `CalendarEvent` and in docs/conventions.md — read the descriptor comments there before
+ * changing the branches above, they are not independent choices.
+ *
+ * `timeZone` describes start alone. `endTimeZone` describes end relative to start (the
+ * flight-lands-elsewhere case `validateDateConsistency` permits on write, #140) — EXCEPT
+ * when start is absent entirely, where end is compared against the configured zone instead,
+ * which is exactly the rule `timeZone` itself uses.
+ *
+ * The DURATION branch in `parseVEvent` does NOT call this — it calls `attachStartZone` alone
+ * and never touches `endTimeZone` at all, deliberately. Reusing `attachEndZone` there would
+ * classify whatever raw DTEND line happens to be sitting in the source text even though its
+ * VALUE was never used to compute `end` — an empty `DTEND;TZID=Europe/Paris:` still carries a
+ * TZID parameter, so `describeDateProperty` reads it as `zoned` and a genuinely unused zone
+ * would leak into the response. A DURATION-computed end shares start's frame by construction
+ * (`parseICalDuration` returns the new instant in the same spelling it read `start` in — see
+ * its own "Return in same format as input start" comment), so there is nothing independent
+ * for `endTimeZone` to report regardless of what text a DTEND line happens to still contain.
+ */
+function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: string): void {
+  const startDesc = attachStartZone(event, vevent, configuredZone);
+  attachEndZone(event, startDesc, vevent, configuredZone);
 }
 
 /**
@@ -1405,12 +1579,29 @@ export function quoteParamValue(value: string): string {
   return cleaned;
 }
 
+// Where a freshly-WRITTEN property's TZID came from (#157) — used only for the
+// designator-less (floating-input) branch of formatDateTimeProperty, since that is the only
+// branch that can attach a TZID at all. Threaded onto `describeDateProperty`'s result as
+// `tzidSource` so a frame-mismatch error can say "your account's configured zone, applied
+// because you named none" instead of naming a zone the caller never wrote:
+//   - 'caller' — the caller passed `timeZone` on this call.
+//   - 'stored' — inherited from the event's own existing TZID (the long-standing behaviour).
+//   - 'default' — no caller zone and nothing to inherit; `create` filled in the configured zone.
+export type TzidSource = 'caller' | 'stored' | 'default';
+
+interface FormattedDateProperty {
+  line: string;
+  /** Set only when a TZID was actually written onto `line`. */
+  tzidSource?: TzidSource;
+}
+
 /**
  * Format a start/end input value into the correct iCal property line.
- * Handles three cases:
+ * Handles four cases:
  * 1. Date-only (2026-04-01) → DTXXX;VALUE=DATE:20260401
- * 2. Floating time (2026-03-20T09:30:00) → preserve original TZID
- * 3. UTC/offset (2026-03-20T09:30:00Z) → DTXXX:20260320T093000Z
+ * 2. Floating time (2026-03-20T09:30:00), `callerZone` given → DTXXX;TZID=<callerZone>:...
+ * 3. Floating time, no `callerZone` → preserve original TZID, else `defaultZone`, else floating
+ * 4. UTC/offset (2026-03-20T09:30:00Z) → DTXXX:20260320T093000Z
  *
  * Validation and serialization of the caller's string are delegated wholesale to
  * validateAndFormatICalDate; this function only decides which property FORM the
@@ -1419,29 +1610,51 @@ export function quoteParamValue(value: string): string {
  * all-day date, a trailing Z is an instant, anything else is a floating wall-clock
  * time — so the two functions cannot disagree about what the caller wrote, which is
  * exactly what went wrong while each of them parsed the input separately.
+ *
+ * `callerZone`/`defaultZone` only ever matter for case 2/3 — a designator-less value has no
+ * zone of its own to override, which is exactly what qualifies it for one. Precedence for that
+ * case (#157): the caller's own `timeZone` wins first, then the stored TZID this function has
+ * always inherited, then `defaultZone`, then plain floating. `create_calendar_event` passes the
+ * account's configured zone as `defaultZone`; `update_calendar_event` passes none at all, which
+ * is what keeps its designator-less behaviour exactly as it was before `timeZone` existed —
+ * inherit-then-floating, never defaulted. See docs/conventions.md for why that split is
+ * deliberate rather than an inconsistency to "fix".
  */
 function formatDateTimeProperty(
   propName: string,
   value: string,
   originalVevent: string | null,
-  lineEnding: string
-): string {
+  lineEnding: string,
+  callerZone?: string,
+  defaultZone?: string
+): FormattedDateProperty {
   const serialized = validateAndFormatICalDate(value, propName);
 
   // Date-only
   if (/^\d{8}$/.test(serialized)) {
-    return foldICalLine(`${propName};VALUE=DATE:${serialized}`, lineEnding);
+    return { line: foldICalLine(`${propName};VALUE=DATE:${serialized}`, lineEnding) };
   }
 
   // Floating time (no offset, no Z)
   if (!serialized.endsWith('Z')) {
+    // The caller's own `timeZone` wins over everything this function would otherwise infer.
+    // Interpolated with no escaping — sound only because `callerZone` reaches here already
+    // validated by `validateCallerTimezone`, which returns ICU's canonical spelling for a name
+    // `isUsableTimezone` proved resolvable. No zone name ICU resolves can contain `:`, `;`, `"`,
+    // CR or LF, so there is no character here `foldICalLine` could mis-fold or that would forge
+    // a second property line. This guard is load-bearing for this call site specifically: it
+    // does not extend to `tzMatch[1]` below, which is read back from whatever a PREVIOUS write
+    // (by this server or another CalDAV client) already stored.
+    if (callerZone) {
+      return { line: foldICalLine(`${propName};TZID=${callerZone}:${serialized}`, lineEnding), tzidSource: 'caller' };
+    }
     // Try to preserve original TZID
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
         const tzMatch = rawLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
         if (tzMatch) {
-          return foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding);
+          return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding), tzidSource: 'stored' };
         }
       }
       // If propName is DTEND and no TZID found (DURATION-based), fall back to DTSTART's TZID
@@ -1450,17 +1663,22 @@ function formatDateTimeProperty(
         if (startLines.length > 0) {
           const tzMatch = startLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
           if (tzMatch) {
-            return foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding);
+            return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding), tzidSource: 'stored' };
           }
         }
       }
     }
-    // No TZID to preserve — emit as floating
-    return foldICalLine(`${propName}:${serialized}`, lineEnding);
+    // Nothing to inherit — fall back to the caller-independent default (create's configured
+    // zone; absent on update, which is what leaves update's no-timeZone behaviour untouched).
+    if (defaultZone) {
+      return { line: foldICalLine(`${propName};TZID=${defaultZone}:${serialized}`, lineEnding), tzidSource: 'default' };
+    }
+    // No TZID to preserve or default — emit as floating
+    return { line: foldICalLine(`${propName}:${serialized}`, lineEnding) };
   }
 
   // UTC or offset — already normalized to a UTC instant
-  return foldICalLine(`${propName}:${serialized}`, lineEnding);
+  return { line: foldICalLine(`${propName}:${serialized}`, lineEnding) };
 }
 
 /**
@@ -1487,6 +1705,13 @@ interface DatePropertyFrame {
   frame: DateFrame;
   /** TZID parameter value, unquoted. Set only when frame === 'zoned'. */
   tzid?: string;
+  /**
+   * Where a `zoned` frame's TZID came from (#157) — passed in by the caller who built the
+   * line, since a raw property line alone cannot say whether its TZID was written because the
+   * caller asked for it, inherited from what was already stored, or defaulted by `create` when
+   * neither applied. Only ever set alongside `frame === 'zoned'`; see `describeFrame`.
+   */
+  tzidSource?: TzidSource;
   /**
    * Serialized iCal value (20260320 / 20260320T093000 / 20260320T093000Z).
    * Fixed-width within a frame, so lexical order is chronological order.
@@ -1515,8 +1740,11 @@ interface DatePropertyFrame {
  *
  * @param displayOverride the caller's own input, when the line was built from
  *   it — error messages should echo what the caller wrote, not our rendering.
+ * @param tzidSourceOverride where the line's TZID came from (#157), when the caller of this
+ *   function knows — see `DatePropertyFrame.tzidSource`. Omitted for a line read straight from
+ *   storage, which is always `stored` in spirit but has no wording that depends on saying so.
  */
-function describeDateProperty(rawLine: string, displayOverride?: string): DatePropertyFrame {
+function describeDateProperty(rawLine: string, displayOverride?: string, tzidSourceOverride?: TzidSource): DatePropertyFrame {
   // Unfold first: a long TZID can push the line past the 75-octet fold width.
   const line = rawLine.replace(/\r?\n[ \t]/g, '');
   const colonIdx = findValueBoundary(line);
@@ -1531,7 +1759,7 @@ function describeDateProperty(rawLine: string, displayOverride?: string): DatePr
   }
   const tzMatch = params.match(/;TZID=("[^"]*"|[^;:]+)/);
   if (tzMatch) {
-    return { frame: 'zoned', tzid: tzMatch[1].replace(/^"|"$/g, ''), value, display };
+    return { frame: 'zoned', tzid: tzMatch[1].replace(/^"|"$/g, ''), tzidSource: tzidSourceOverride, value, display };
   }
   if (/Z$/.test(value)) {
     return { frame: 'utc', value, display };
@@ -1544,7 +1772,16 @@ function describeFrame(d: DatePropertyFrame): string {
     case 'date': return 'a date-only (all-day) value';
     case 'floating': return 'a date-time with no time zone';
     case 'utc': return 'a UTC date-time';
-    case 'zoned': return `a date-time in time zone ${d.tzid}`;
+    case 'zoned':
+      // A `default` TZID (#157) is one this server filled in on `create` because the caller
+      // named no zone at all — naming it the same way as a caller-chosen or inherited zone
+      // would tell someone who wrote `2026-04-07T14:00:00Z` and no `timeZone` that they typed
+      // a zone they never touched. `caller`/`stored`/undefined all read as an ordinary named
+      // zone, which is the correct reading for each of those.
+      if (d.tzidSource === 'default') {
+        return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}), applied because you named none`;
+      }
+      return `a date-time in time zone ${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}`;
   }
 }
 
@@ -1578,7 +1815,7 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
   // exactly that for the read window). Checking the order here would newly
   // reject input this tool accepts today, which is a behaviour change rather
   // than a fix, so it is left alone and tracked in #140.
-  if (start.frame === 'zoned' && start.tzid !== end.tzid) return;
+  if (start.frame === 'zoned' && start.tzid && end.tzid && !zoneNamesEqual(start.tzid, end.tzid)) return;
 
   if (start.value < end.value) return;
 
@@ -1630,13 +1867,17 @@ export function parseICalDateAsUTC(iso: string): Date {
 // which is indistinguishable from a floating time and, read as UTC, can be up to fourteen
 // hours away from the instant it names.
 //
-// WHAT IS AND IS NOT MISSING. ICU can resolve an IANA name — `resolveCalendarInstantMs` does
-// exactly that, and the sort above relies on it. What is gone by this point is the NAME: the
-// parser discarded it, so there is nothing left to resolve and this filter has only the
-// configured zone to guess with. Tightening the slack to that guess would narrow the filter
-// on a guess about somebody else's event, so the widest-offset bound stays. Carrying the TZID
-// through to the parsed event is the fix that would make a tighter bound honest, and it is a
-// response-shape change tracked in #139 rather than something to fold in here.
+// THE NAME IS NO LONGER MISSING, AND THE WIDTH IS LEFT WIDE ANYWAY (#139). The parsed event
+// now carries its own TZID on `timeZone`/`endTimeZone` (see `attachZoneFields`), so for any
+// value whose zone actually resolves this slack COULD be tightened to that zone's real
+// offset at the instant in question. It deliberately still is not, here: this function's job
+// is to drop only what PROVABLY cannot intersect the window (see the doc comment below), and
+// narrowing the bound trades one visible extra row (today's residue) for an invisible missing
+// one the moment a zone name fails to resolve, is spelled unusually, or belongs to a value
+// this function is never handed the descriptor for — `eventIntersectsWindow` takes only
+// `start`/`end`, not the zone fields, so tightening it is a real, independently-testable
+// change to what this filter is given and checked against, not a one-line follow-up. Left as
+// a deliberate follow-up rather than folded in here, tracked as #162.
 const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
 
 /**
@@ -1715,11 +1956,17 @@ export function eventIntersectsWindow(
  * wrong order silently cuts a genuinely earlier event and keeps a later one — under a summary
  * line promising the earliest N.
  *
- * Each start is resolved through the same machinery the window bounds use, in the same
- * configured zone, so a zone-less value is placed where the caller's own clock puts it. That
- * is a best-effort reading of a value whose real zone was already lost, not a claim to have
- * recovered it: an event stored in a THIRD zone still sorts by the local reading of its wall
- * clock. It is right for the common case and never worse than comparing the spellings.
+ * Each start is resolved through the same machinery the window bounds use — but no longer
+ * always in the CONFIGURED zone (#139). An event whose own start carries a `timeZone` ICU
+ * can resolve is now sorted in ITS zone, the correct reading rather than a best-effort one;
+ * the configured zone is only the fallback, used for a genuinely floating value (RFC 5545
+ * §3.3.5 — no zone exists to sort it in, so the caller's own clock is the least-wrong guess)
+ * and for a `timeZone` this server was handed but ICU cannot resolve (a Windows zone name
+ * such as "AUS Eastern Standard Time" passed through verbatim rather than rejected — see
+ * `isUsableTimezone`). That fallback matters beyond correctness: `zoneOffsetMsAt` silently
+ * falls back to the HOST zone for an unresolvable name, so sorting by an unresolvable
+ * `timeZone` directly would place that one event in the host zone instead of the account's
+ * configured one — a regression `isUsableTimezone` is what guards against.
  *
  * An unreadable or absent start sorts FIRST. It cannot be placed, and placing it last would
  * put it where `limit` truncates — the one position that turns "cannot order this" into
@@ -1727,7 +1974,10 @@ export function eventIntersectsWindow(
  */
 export function sortEventsByStart(events: CalendarEvent[], zone: string | undefined): void {
   const instants = new Map<CalendarEvent, number>();
-  for (const event of events) instants.set(event, resolveCalendarInstantMs(event.start, zone));
+  for (const event of events) {
+    const eventZone = event.timeZone && isUsableTimezone(event.timeZone) ? event.timeZone : zone;
+    instants.set(event, resolveCalendarInstantMs(event.start, eventZone));
+  }
   events.sort((a, b) => {
     const aMs = instants.get(a)!;
     const bMs = instants.get(b)!;
@@ -1925,6 +2175,148 @@ function assertDavOk(resp: unknown, action: string): void {
   }
 }
 
+// ---- write-side time zone result (#157) ----
+//
+// What createCalendarEvent/updateCalendarEvent actually put on the wire for `start`/`end`,
+// computed from the WRITTEN property line — never from the caller's input — so a stored
+// inherit or a create default is reported exactly as truthfully as a caller-supplied
+// `timeZone`. describe{Create,Update}CalendarEventResult below turn this into the response
+// sentence index.ts's handlers append; they live here rather than in index.ts (where the
+// handler that calls them lives) because index.ts's CallTool switch has no test harness and
+// the module itself runs `server.connect()` as a load-time side effect, which makes it unsafe
+// to `import` from a unit test — CLAUDE.md's "Handler logic must be unit-testable" pattern
+// (composeReply/reply-handler.ts) is to extract into a safely-importable module instead. This
+// one is co-located with the types it formats rather than a third file, since it has no
+// dependency of its own beyond them.
+export interface CalendarZoneWriteInfo {
+  /**
+   * 'zoned'    — a TZID was written (from `timeZone`, inherited, or create's default).
+   * 'utc'      — the value carries Z; the caller passed (or the stored line already named) a
+   *              fixed instant.
+   * 'floating' — no TZID, no Z: nothing to inherit and no default applied (only reachable on
+   *              update — create always has a default zone to fall back to).
+   * 'allday'   — date-only; there is no time component and so no zone to report.
+   */
+  kind: 'zoned' | 'utc' | 'floating' | 'allday';
+  /** The IANA zone name written. Set only when kind === 'zoned'. */
+  zone?: string;
+}
+
+export interface CreateCalendarEventResult {
+  eventId: string;
+  start: CalendarZoneWriteInfo;
+  end: CalendarZoneWriteInfo;
+}
+
+export interface UpdateCalendarEventResult {
+  eventId: string;
+  /** Present only when this call actually wrote (touched) that side. */
+  start?: CalendarZoneWriteInfo;
+  end?: CalendarZoneWriteInfo;
+}
+
+function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWriteInfo {
+  const d = describeDateProperty(formatted.line);
+  switch (d.frame) {
+    case 'date': return { kind: 'allday' };
+    case 'utc': return { kind: 'utc' };
+    case 'floating': return { kind: 'floating' };
+    case 'zoned': return { kind: 'zoned', zone: d.tzid! };
+  }
+}
+
+function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
+  switch (info.kind) {
+    case 'zoned': return `zone ${info.zone}`;
+    case 'utc': return 'UTC';
+    case 'floating': return 'floating (no zone)';
+    case 'allday': return 'all-day (no time component)';
+  }
+}
+
+// Given only the structured write result (never the caller's input — a caller-named zone, an
+// inherited stored TZID, and create's configured-zone default all arrive at createCalendarEvent
+// as the same "no designator" input, so only the WRITTEN line can say which one actually
+// happened), returns the sentence index.ts's create_calendar_event handler appends to its
+// response text. Pure and exported for direct unit testing (#157).
+export function describeCreateCalendarEventResult(result: CreateCalendarEventResult): string {
+  const startDesc = describeCalendarZoneWrite(result.start);
+  const endDesc = describeCalendarZoneWrite(result.end);
+  return startDesc === endDesc
+    ? ` Written in ${startDesc}.`
+    : ` Start written in ${startDesc}, end written in ${endDesc}.`;
+}
+
+// Same idea as describeCreateCalendarEventResult, but update only ever touches the sides the
+// caller actually supplied (start/end are each optional on the result), so an untouched side
+// is omitted rather than described.
+export function describeUpdateCalendarEventResult(result: UpdateCalendarEventResult): string {
+  const parts: string[] = [];
+  if (result.start) parts.push(`start ${describeCalendarZoneWrite(result.start)}`);
+  if (result.end) parts.push(`end ${describeCalendarZoneWrite(result.end)}`);
+  if (parts.length === 0) return '';
+  return ` (${parts.join(', ')})`;
+}
+
+/**
+ * `timeZone` only qualifies a designator-less value — one that carries neither its own
+ * `Z`/offset nor a date-only marker. A value that already names its own instant, or an all-day
+ * value that has no time component at all, makes `timeZone` a contradiction rather than a
+ * qualifier, and this repo rejects a contradicting argument instead of silently ignoring one of
+ * the two (docs/conventions.md, fail-closed narrowing arguments). Runs BEFORE
+ * formatDateTimeProperty ever sees `callerZone`, so a rejected call never reaches the point of
+ * writing anything.
+ *
+ * Validates through the same field name (`DTSTART`/`DTEND`) the real formatting call downstream
+ * uses, not the human-readable `label` — otherwise the same malformed date string produces two
+ * different rejection sentences depending only on whether `timeZone` happened to be passed
+ * alongside it.
+ */
+function rejectTimezoneConflict(value: string, label: 'start' | 'end', callerZone: string): void {
+  const propName = label === 'start' ? 'DTSTART' : 'DTEND';
+  const serialized = validateAndFormatICalDate(value, propName);
+  if (/^\d{8}$/.test(serialized)) {
+    throw new InvalidInputError(
+      `timeZone cannot be combined with a date-only ${label} ('${value}') — an all-day value has ` +
+      `no time zone. Drop timeZone, or pass ${label} with a time component for it to qualify.`
+    );
+  }
+  if (serialized.endsWith('Z')) {
+    throw new InvalidInputError(
+      `timeZone cannot be combined with a ${label} that already carries Z or a UTC offset ('${value}') ` +
+      `— that value already names a fixed instant of its own. Drop timeZone, or pass ${label} as a ` +
+      `bare wall-clock value (no Z, no offset) for timeZone to qualify.`
+    );
+  }
+}
+
+/**
+ * On `update_calendar_event`, `timeZone` combined with only ONE of `start`/`end` can silently
+ * strand the untouched side in a different, still-stored zone — manufacturing a two-zone event
+ * (the flight-lands-elsewhere shape #140 legitimises) that nobody asked for, and doing it past
+ * `validateDateConsistency`'s ordering check rather than through it: two `zoned` values in
+ * different TZIDs is the one case that check deliberately stands down on, so this is the one
+ * case it will not catch. Only a STORED, DIFFERENTLY-NAMED `zoned` value is a problem — a
+ * stored floating or `Z` value already trips the ordinary frame mismatch inside
+ * `validateDateConsistency`, and a stored TZID matching `callerZone` produces no discrepancy —
+ * so this only ever fires for the one shape that check cannot see.
+ */
+function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start' | 'end', callerZone: string): void {
+  const strandedProp = updatedSide === 'start' ? 'DTEND' : 'DTSTART';
+  const strandedLabel = updatedSide === 'start' ? 'end' : 'start';
+  const strandedLines = parseAllICalProperties(originalVevent, strandedProp);
+  if (strandedLines.length === 0) return;
+  const desc = describeDateProperty(strandedLines[0]);
+  if (desc.frame === 'zoned' && desc.tzid && !zoneNamesEqual(desc.tzid, callerZone)) {
+    throw new InvalidInputError(
+      `timeZone would rewrite ${updatedSide} into '${callerZone}' while the stored ${strandedLabel} stays ` +
+      `in '${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}' untouched — silently producing a two-zone event. ` +
+      `Pass BOTH start and end alongside timeZone (re-send the ${strandedLabel} you are not otherwise ` +
+      `moving, unchanged, to keep its wall clock), or omit timeZone.`
+    );
+  }
+}
+
 export class CalDAVCalendarClient {
   private config: CalDAVConfig;
   private client: DAVClient | null = null;
@@ -2092,6 +2484,17 @@ export class CalDAVCalendarClient {
     // said. The zone is the SAME stored value every email timestamp renders in, so the day a
     // calendar query covers and the day an email is dated cannot drift apart.
     const zone = getDefaultTimezone();
+    // The resolved (ICU-usable) form of `zone`, for the `timeZone`/`endTimeZone` fields
+    // (#139) — those compare a stored TZID against the zone actually in force. Since #157,
+    // `getDefaultTimezone()` is already guaranteed usable (an unusable configured or host
+    // zone now stops the server at startup instead), so this call is a defensive no-op in
+    // production rather than doing real work — kept because `resolveUsableTimezone` is the
+    // one shared seam every other zone-resolving call site here already goes through, and
+    // this stays consistent with them rather than being a special case that assumes its
+    // input differently from the rest. `zone` above stays the raw configured value:
+    // `coerceCalendarWindowStart`/`End` and `sortEventsByStart` already resolve it themselves
+    // where each needs to.
+    const configuredZone = resolveUsableTimezone(zone);
     const rawStart = coerceCalendarWindowStart(startDate, 'startDate', zone);
     const rawEnd = coerceCalendarWindowEnd(endDate, 'endDate', zone);
 
@@ -2191,7 +2594,7 @@ export class CalDAVCalendarClient {
         // Every VEVENT in the blob, not the first: with `expand` a single resource carries
         // one block per in-window occurrence, so a first-match read drops all but one.
         // `expanded` is passed rather than sniffed — see parseCalendarObjects.
-        for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand })) {
+        for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone })) {
           // A block that STILL CARRIES ITS RRULE is never dropped here, whatever its dates
           // say. This branch runs on an expanded query, so a surviving master means the server
           // declined to expand that resource — and the master then shows the series' ORIGINAL
@@ -2263,7 +2666,7 @@ export class CalDAVCalendarClient {
     if (!obj) {
       throw new InvalidInputError(`Calendar event not found: ${eventId}`);
     }
-    return parseCalendarObject(obj, { includeParticipants: true });
+    return parseCalendarObject(obj, { includeParticipants: true, configuredZone: resolveUsableTimezone(getDefaultTimezone()) });
   }
 
   async createCalendarEvent(event: {
@@ -2274,7 +2677,15 @@ export class CalDAVCalendarClient {
     end: string;
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
-  }): Promise<string> {
+    /**
+     * IANA zone name for a designator-less `start`/`end` (fork issue #157). Omitted means the
+     * account's configured zone is written — never floating; see docs/conventions.md for why
+     * `create` defaults where `update` does not. `null` and an empty/whitespace string are
+     * rejected (validateCallerTimezone) rather than read as "write floating", and so is a
+     * value that already carries `Z`/an offset or is date-only (rejectTimezoneConflict).
+     */
+    timeZone?: string | null;
+  }): Promise<CreateCalendarEventResult> {
     const client = await this.getClient();
     const calendars = await this.discoverCalendars();
 
@@ -2299,16 +2710,37 @@ export class CalDAVCalendarClient {
     const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@fastmail-mcp`;
     const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
+    // --- timeZone validation (#157) ---
+    // Offset-shape/resolvability rejection and the null/empty/whitespace fail-closed live in
+    // validateCallerTimezone; the two conflict rules below (timeZone combined with a
+    // Z/offset-designated or date-only value) need the start/end VALUES, so they run here.
+    let callerZone: string | undefined;
+    if (event.timeZone !== undefined) {
+      callerZone = validateCallerTimezone(event.timeZone);
+      rejectTimezoneConflict(event.start, 'start', callerZone);
+      rejectTimezoneConflict(event.end, 'end', callerZone);
+    }
+
+    // The account's configured zone, resolved to a name ICU can actually use — `create`'s
+    // default for a designator-less value with no caller `timeZone` (#157). Never floating:
+    // a bare `2026-04-07T14:00:00` used to be written verbatim (a different instant for every
+    // reader); this is the deliberate behaviour change docs/conventions.md documents.
+    const configuredZone = resolveUsableTimezone(getDefaultTimezone());
+
     // Format start/end with all-day event support
-    const startLine = formatDateTimeProperty('DTSTART', event.start, null, '\r\n');
-    const endLine = formatDateTimeProperty('DTEND', event.end, null, '\r\n');
+    const startFormatted = formatDateTimeProperty('DTSTART', event.start, null, '\r\n', callerZone, configuredZone);
+    const endFormatted = formatDateTimeProperty('DTEND', event.end, null, '\r\n', callerZone, configuredZone);
+    const startLine = startFormatted.line;
+    const endLine = endFormatted.line;
 
     // Time frame + ordering consistency. Classifying the serialized lines rather
     // than the raw inputs is the same thing the update path does, so create and
-    // update reject an identical set of bad pairs.
+    // update reject an identical set of bad pairs. tzidSource is threaded through so a
+    // frame-mismatch error names a DEFAULTED zone as defaulted, not as something the caller
+    // wrote.
     validateDateConsistency(
-      describeDateProperty(startLine, event.start),
-      describeDateProperty(endLine, event.end)
+      describeDateProperty(startLine, event.start, startFormatted.tzidSource),
+      describeDateProperty(endLine, event.end, endFormatted.tzidSource)
     );
 
     const icalLines = [
@@ -2367,7 +2799,11 @@ export class CalDAVCalendarClient {
     });
     assertDavOk(createResp, 'create calendar event');
 
-    return uid;
+    return {
+      eventId: uid,
+      start: classifyWrittenLine(startFormatted),
+      end: classifyWrittenLine(endFormatted),
+    };
   }
 
   async updateCalendarEvent(eventId: string, fields: {
@@ -2378,7 +2814,13 @@ export class CalDAVCalendarClient {
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
     clearFields?: string[];
-  }): Promise<string> {
+    // Explicit zone for a designator-less start/end (#157). Unlike create,
+    // update NEVER defaults this when omitted — omitting it preserves
+    // whatever the event already has (inherited stored TZID, or floating).
+    // See validateCallerTimezone and the module-level reject* helpers above
+    // the class for the full set of rejection rules this triggers.
+    timeZone?: string | null;
+  }): Promise<UpdateCalendarEventResult> {
     const client = await this.getClient();
     const obj = await this.findCalendarObjectByUID(eventId);
     if (!obj) {
@@ -2440,7 +2882,38 @@ export class CalDAVCalendarClient {
     const existingUid = parseICalValue(originalVevent, 'UID') || eventId;
     let data = normalizedData;
 
+    // --- timeZone validation (#157) ---
+    // Runs before any patching so a rejection never leaves the object half-modified.
+    let callerZone: string | undefined;
+    if (fields.timeZone !== undefined) {
+      callerZone = validateCallerTimezone(fields.timeZone);
+      // timeZone with neither side supplied has nothing to qualify.
+      // Still reachable — re-send start/end unchanged alongside timeZone to re-zone them.
+      if (fields.start === undefined && fields.end === undefined) {
+        throw new InvalidInputError(
+          `timeZone was supplied ('${callerZone}') but neither start nor end was. timeZone only ` +
+          "qualifies a start/end value being written in this same call — it cannot be applied to a " +
+          "stored value on its own. Re-send start and/or end (even unchanged) alongside timeZone, " +
+          "or drop timeZone."
+        );
+      }
+      // timeZone can't be combined with a value that already names its own instant
+      // (Z/offset) or has no time component (all-day).
+      if (fields.start !== undefined) rejectTimezoneConflict(fields.start, 'start', callerZone);
+      if (fields.end !== undefined) rejectTimezoneConflict(fields.end, 'end', callerZone);
+      // A single-sided update that would re-zone one side while leaving the other
+      // stranded in a DIFFERENT stored zone would silently produce a two-zone event.
+      if (fields.start !== undefined && fields.end === undefined) {
+        rejectStrandedZoneMismatch(originalVevent, 'start', callerZone);
+      }
+      if (fields.end !== undefined && fields.start === undefined) {
+        rejectStrandedZoneMismatch(originalVevent, 'end', callerZone);
+      }
+    }
+
     // --- Patch fields ---
+    let newStartFormatted: FormattedDateProperty | null = null;
+    let newEndFormatted: FormattedDateProperty | null = null;
     let newStartLine: string | null = null;
     let newEndLine: string | null = null;
     let timeChanged = false;
@@ -2456,13 +2929,16 @@ export class CalDAVCalendarClient {
     }
 
     if (fields.start !== undefined) {
-      newStartLine = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding);
+      // No defaultZone: update never defaults an omitted zone, only create does.
+      newStartFormatted = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding, callerZone);
+      newStartLine = newStartFormatted.line;
       data = replaceICalProperty(data, 'DTSTART', newStartLine);
       timeChanged = true;
     }
 
     if (fields.end !== undefined) {
-      newEndLine = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding);
+      newEndFormatted = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding, callerZone);
+      newEndLine = newEndFormatted.line;
       data = replaceICalProperty(data, 'DTEND', newEndLine);
       // Remove DURATION — DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1)
       data = removeAllICalProperties(data, 'DURATION');
@@ -2483,8 +2959,8 @@ export class CalDAVCalendarClient {
       // A DURATION-based event has no stored DTEND — nothing to compare against.
       if (startLine && endLine) {
         validateDateConsistency(
-          describeDateProperty(startLine, newStartLine ? fields.start : undefined),
-          describeDateProperty(endLine, newEndLine ? fields.end : undefined)
+          describeDateProperty(startLine, newStartLine ? fields.start : undefined, newStartFormatted?.tzidSource),
+          describeDateProperty(endLine, newEndLine ? fields.end : undefined, newEndFormatted?.tzidSource)
         );
       }
     }
@@ -2563,7 +3039,11 @@ export class CalDAVCalendarClient {
     const updateResp = await client.updateCalendarObject({ calendarObject: obj });
     assertDavOk(updateResp, 'update calendar event');
 
-    return existingUid;
+    return {
+      eventId: existingUid,
+      start: newStartFormatted ? classifyWrittenLine(newStartFormatted) : undefined,
+      end: newEndFormatted ? classifyWrittenLine(newEndFormatted) : undefined,
+    };
   }
 
   async deleteCalendarEvent(eventId: string): Promise<void> {

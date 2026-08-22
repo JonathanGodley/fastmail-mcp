@@ -482,7 +482,7 @@ function hostTimezone(): string {
 }
 
 /** Whether ICU can actually resolve an IANA name, as opposed to it merely being a string. */
-function isUsableTimezone(zone: string): boolean {
+export function isUsableTimezone(zone: string): boolean {
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: zone });
     return true;
@@ -492,8 +492,303 @@ function isUsableTimezone(zone: string): boolean {
 }
 
 // A misconfigured zone name is echoed back to the caller, so it is bounded and stripped of
-// the control characters that would forge extra lines in an error message.
-const ZONE_ECHO_LIMIT = 40;
+// the control characters that would forge extra lines in an error message. Exported so
+// validateCallerTimezone's own rejections (#157) use the identical bound rather than a second
+// number that could quietly drift from this one.
+export const ZONE_ECHO_LIMIT = 40;
+
+const zoneCanonicalizationCache = new Map<string, string>();
+
+/**
+ * ICU's canonical spelling for a zone name — `Intl.DateTimeFormat`'s own name for whatever the
+ * string resolves to — or the string unchanged when ICU cannot resolve it at all. This is the
+ * one canonicalization seam every zone comparison and every zone actually written routes
+ * through: `validateCallerTimezone` (the create/update write path, #157) and
+ * `resolveUsableTimezone` below both return through here, and so does the read-side comparison
+ * in caldav-client.ts's `zoneNamesEqual` (#139). An alias spelling ('NZ', 'US/Pacific', a
+ * lowercase 'australia/sydney') therefore canonicalises identically wherever it is checked —
+ * without a single seam, the same string could compare equal to itself on write but not on
+ * read, or vice versa.
+ *
+ * Cached by exact input string: `zoneNamesEqual` runs once per event on every calendar list
+ * read, and constructing an `Intl.DateTimeFormat` per call is not free.
+ *
+ * The cache is deliberately unbounded. Its keys are TZID strings out of the account holder's own
+ * calendar plus the configured and caller-supplied zone names, so the distinct set is the handful
+ * of zones that account actually uses — there is no path by which an untrusted party feeds it
+ * unbounded distinct strings. An eviction policy here would cost more than it could ever save.
+ */
+export function canonicalZoneName(zone: string): string {
+  const cached = zoneCanonicalizationCache.get(zone);
+  if (cached !== undefined) return cached;
+  const resolved = isUsableTimezone(zone)
+    ? new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone
+    : zone;
+  zoneCanonicalizationCache.set(zone, resolved);
+  return resolved;
+}
+
+/**
+ * The IANA name actually used for a configured zone: `zone` itself, canonicalised through
+ * `canonicalZoneName`, when it is set and ICU can resolve it — otherwise the host's own zone.
+ * This is the one place that decides which zone wins — `describeTimezone` and every calendar
+ * read path call through here rather than re-deriving the fallback, so there is exactly one
+ * rule for "which zone is really in force."
+ *
+ * Canonicalising here (not just on the caller-supplied `timeZone` argument) matters because the
+ * configured default is interpolated straight into a written TZID on `create_calendar_event`
+ * when no `timeZone` is passed: without this, `FASTMAIL_TIMEZONE=australia/sydney` would write
+ * `TZID=australia/sydney` while the same zone arriving as a caller's `timeZone` argument writes
+ * the canonical `Australia/Sydney` — two different spellings for the same zone depending on
+ * which path set it, which then falsely compare unequal on a later read-modify-write.
+ */
+export function resolveUsableTimezone(zone: string | undefined): string {
+  if (zone && isUsableTimezone(zone)) return canonicalZoneName(zone);
+  return hostTimezone();
+}
+
+// The three ways a zone candidate can fail the rule shared by validateCallerTimezone (the
+// caller-supplied `timeZone` parameter, #157) and resolveConfiguredTimezone (FASTMAIL_TIMEZONE
+// and the host zone it falls back to, #157 amendment below). Kept as a closed set of reasons
+// rather than a bare boolean so each call site can compose its own framing sentence around
+// WHICH way the candidate failed, without re-deriving that classification itself.
+type ZoneRejectionReason = 'offset-shaped' | 'unresolvable' | 'shorthand';
+
+// The specific abbreviation that decided the shorthand rule, and why it is dangerous rather
+// than merely nonstandard: "EST" resolves through ICU to a real, fixed-offset zone (Panama's,
+// with no daylight saving) that is NOT US Eastern. Both places that reject a shorthand zone name
+// quote this same sentence, so the warning cannot read differently depending on which path a
+// caller happened to hit.
+const SHORTHAND_ZONE_WARNING =
+  '"EST" resolves to a fixed-offset zone with no daylight saving, not US Eastern, and other ' +
+  'abbreviations and aliases ("NZ", "PST", "GMT", "Zulu"...) are just as ambiguous';
+
+/**
+ * Classify a zone candidate against the rule validateCallerTimezone and
+ * resolveConfiguredTimezone both enforce, or return `null` when it is acceptable. The candidate
+ * must already be pre-canonical and have any leading `/` stripped (RFC 5545 §3.2.19) — see
+ * validateCallerTimezone's own comment for why: checking a CANONICAL name would let a shorthand
+ * like `NZ` (which canonicalises to `Pacific/Auckland`, a slash-bearing name) straight through.
+ *
+ * Order is part of the contract, not an implementation detail:
+ *   1. Offset-shaped strings (`+10:00`, `GMT+10`, ...) are rejected before the ICU check even
+ *      runs — ICU resolves several offset spellings as though they were legitimate zone names,
+ *      so checking resolvability first would wrongly accept them. See the offset-shape comment
+ *      inline below for the exact denylist.
+ *   2. ICU resolvability is checked next, so a string ICU cannot resolve AT ALL (`Blah`) gets
+ *      "not a time zone this server can resolve" — not the shorthand message, which would wrongly
+ *      imply that adding a slash is all that string needed.
+ *   3. Only then the slash rule (#157 amendment, decided by "EST" silently resolving to a
+ *      fixed-offset Panama zone rather than US Eastern): a zone name must contain a
+ *      region-qualifying slash, with the literal name "UTC" (compared case-insensitively) as the
+ *      rule's one exception. This rejects every abbreviation and alias that ICU nonetheless
+ *      resolves — "EST", "NZ", "PST", "GMT", "Zulu" and similar — even the harmless ones; there
+ *      is no safe-list, the caller writes the region name instead ("Pacific/Auckland", not
+ *      "NZ"). A slash-bearing alias like "US/Pacific" is unaffected and keeps resolving exactly
+ *      as it does today.
+ */
+function zoneRejectionReason(zoneCandidate: string): ZoneRejectionReason | null {
+  // Offset-shape denylist — see point 1 above for why this runs before isUsableTimezone.
+  if (/^[+-]/.test(zoneCandidate) || /^(GMT|UTC|UT)[+-]/i.test(zoneCandidate) || /^\d/.test(zoneCandidate)) {
+    return 'offset-shaped';
+  }
+  if (!isUsableTimezone(zoneCandidate)) {
+    return 'unresolvable';
+  }
+  if (!zoneCandidate.includes('/') && zoneCandidate.toUpperCase() !== 'UTC') {
+    return 'shorthand';
+  }
+  return null;
+}
+
+/**
+ * Validate a caller-supplied `timeZone` argument (create_calendar_event / update_calendar_event,
+ * fork issue #157) and return the canonical IANA name to write.
+ *
+ * `isUsableTimezone` alone is the WRONG gate for this. Probed on this host it returns `true`
+ * for `"+10:00"`, `"+1000"`, `"+10"` and `"Etc/GMT-10"` — ICU resolves several offset spellings
+ * as though they were legitimate zone names. Waving those through here would let a caller write
+ * `DTSTART;TZID=+10:00:...` — an offset baked into a TZID, which is the one shape this whole
+ * design exists to prevent: unresolvable to this server as a NAME, and mis-indexed for its own
+ * time-range queries. So the offset shape is rejected BEFORE the ICU check runs at all.
+ *
+ * The gate is a DENYLIST of offset spellings, not an allowlist of IANA shapes: `Etc/GMT-10`,
+ * `UTC`, `Japan` and `EST5EDT` are all legitimate zone SHAPES an allowlist would reject — though
+ * `EST5EDT` is separately rejected below, by the slash rule rather than the offset denylist.
+ *
+ * ALSO REJECTED (#157 amendment): a zone name that ICU resolves but that has no region-qualifying
+ * slash and is not literally "UTC" — an abbreviation or alias such as "EST", "NZ", "PST", "GMT"
+ * or "Zulu". "EST" resolving to a fixed-offset Panama zone with no daylight saving, silently and
+ * with no way to tell from the input, is the case that decided this: ICU accepting a spelling
+ * says nothing about whether the caller meant the zone ICU picked. There is no safe-list of
+ * harmless abbreviations (a caller writing "NZ" almost certainly does mean Pacific/Auckland) —
+ * the caller writes the region name instead. See `zoneRejectionReason` for the exact rule and
+ * why it runs after the ICU check.
+ *
+ * Fails closed on `null`, empty, or whitespace-only rather than treating any of them as "write
+ * floating". The read side emits `timeZone: null` for a genuinely floating event (see
+ * `CalendarEvent` in caldav-client.ts, #139), so a read-modify-write caller can echo `null`
+ * straight back — silently reinterpreting that as "make this floating" would decide an open
+ * design question by accident rather than ask. Omit `timeZone` instead: on `create` an omitted
+ * `timeZone` writes the account's configured zone (never floating, see docs/conventions.md); on
+ * `update` it leaves whatever the event already has unchanged. This narrowing is deliberate, not
+ * incidental to the null rejection: there is no benefit to this server ever writing a zone-less
+ * calendar time, so nothing here exists to make that possible (see docs/conventions.md).
+ *
+ * Not an IANA name and not accepted: a non-IANA name such as a Windows zone id ("AUS Eastern
+ * Standard Time") still rejects here even though it is a real zone identifier somewhere — ICU
+ * cannot resolve it, so there is nothing to canonicalise it against. That is a genuine
+ * round-trip limit, not an oversight; both tools' descriptions say `timeZone` takes an IANA name
+ * for this reason.
+ */
+export function validateCallerTimezone(value: unknown): string {
+  if (value === null || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new InvalidInputError(
+      'timeZone cannot be null, empty, or whitespace-only. A floating time (no zone at all) cannot ' +
+      'be written through this parameter. Omit timeZone instead: on create that writes the ' +
+      "account's configured zone, and on update it leaves whatever the event already has unchanged."
+    );
+  }
+  if (typeof value !== 'string') {
+    throw new InvalidInputError(`timeZone must be an IANA zone name string (e.g. "Australia/Sydney"), not ${typeof value}.`);
+  }
+  const trimmed = value.trim();
+  // RFC 5545 §3.2.19 permits a leading '/' on a TZID (a zone registered by its own creator
+  // rather than plain IANA form); normalizeZoneForComparison in caldav-client.ts already strips
+  // it for comparison, and the read half (#139) emits it verbatim when a stored event carries
+  // it. Strip it here too so a caller echoing a `timeZone` this server just handed back
+  // (read-modify-write) is not rejected for a spelling this server itself produced. This has to
+  // run before both the offset-shape check and the canonicalisation call below: ICU throws
+  // outright on a leading slash (`new Intl.DateTimeFormat('en-US', { timeZone:
+  // '/Australia/Sydney' })` throws), so an unstripped value never reaches isUsableTimezone as
+  // true in the first place. A vendor-prefixed form ('/vendor.example/.../Zone/Name') still
+  // fails after stripping only the one leading slash — that is the safe direction, a real
+  // rejection rather than a guess at which registry the rest of the string names.
+  const zoneCandidate = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+  // Runs the shared rule (offset-shape, then ICU resolvability, then the slash rule — see
+  // zoneRejectionReason's own comment for why that order matters) and composes this call site's
+  // own framing around whichever way it failed.
+  const rejection = zoneRejectionReason(zoneCandidate);
+  if (rejection === 'offset-shaped') {
+    throw new InvalidInputError(
+      `timeZone must be an IANA zone NAME such as "Australia/Sydney" or "America/New_York", not a ` +
+      `fixed UTC offset ("${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}"). A calendar time is never ` +
+      'written with an offset — pass the zone the wall clock is actually in and this server works ' +
+      'out the offset itself.'
+    );
+  }
+  if (rejection === 'unresolvable') {
+    throw new InvalidInputError(
+      `timeZone "${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}" is not a time zone this server can ` +
+      'resolve. Pass a standard IANA name such as "Australia/Sydney" or "America/New_York".'
+    );
+  }
+  if (rejection === 'shorthand') {
+    throw new InvalidInputError(
+      `timeZone "${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}" is a zone abbreviation or alias, not a ` +
+      'full IANA zone name. Pass a name that contains a region, such as "Australia/Sydney" or ' +
+      `"America/New_York" — "UTC" is the one accepted exception. ${SHORTHAND_ZONE_WARNING}.`
+    );
+  }
+  // ICU resolves a zone name case-insensitively and through backward-compatibility links
+  // ("australia/sydney", "NZ", "Zulu" all resolve to a real zone) but the CalDAV server behind
+  // this account (Cyrus) looks a TZID up with an exact-string match against its own tzdata,
+  // which is far stricter than ICU. Writing the caller's raw spelling would let an ICU-blessed
+  // string reach the calendar as a TZID Cyrus itself cannot resolve — the same failure class the
+  // offset-shape check above exists to prevent, one dimension over: a string ICU accepts that
+  // the calendar server cannot read back as a name. `canonicalZoneName` returns ICU's own
+  // canonical spelling for whatever was resolved (guaranteed not to fall back here, since
+  // `isUsableTimezone` above already proved `zoneCandidate` resolves), so returning THAT is what
+  // actually lands on a name Cyrus recognises, and it is also what the create/update response
+  // reports as written. Do not "simplify" this back to returning the caller's input — the
+  // canonical name is deliberately not an echo of what was typed.
+  return canonicalZoneName(zoneCandidate);
+}
+
+/**
+ * Resolve the zone the server actually runs with, from FASTMAIL_TIMEZONE (or the host zone when
+ * it is unset) — held to the same rule `validateCallerTimezone` enforces on the caller-supplied
+ * `timeZone` parameter (#157 amendment). Called once, from `runServer()` in index.ts, before
+ * `setDefaultTimezone` — see that call site for why it is not called at module load instead.
+ *
+ * The two sources are handled ASYMMETRICALLY on purpose, because only one of them was actually
+ * chosen by anyone:
+ *
+ * - FASTMAIL_TIMEZONE, when set, was written by whoever configured this server. A shorthand or
+ *   unresolvable value there is exactly the silent-wrong-day failure the rule exists to prevent
+ *   — today it silently falls back to the host zone with nothing said, and a caller has no way
+ *   to learn that "EST" was never US Eastern. So a set-and-invalid value THROWS here, and
+ *   `runServer()` turns that into a refusal to start: printing the exact value and the rule to
+ *   stderr and exiting is strictly better than starting up and quietly working out of the wrong
+ *   zone for every calendar read from then on.
+ * - The host's own zone (`hostZone`, defaulted to `hostTimezone()` so a test can pass a fixed
+ *   value instead of depending on the machine it runs on) is used only when FASTMAIL_TIMEZONE is
+ *   unset — nobody configured it, so refusing to start over it would punish the operator for a
+ *   setting they never touched. A rejected host zone instead falls back to `zone: 'UTC'` (the
+ *   rule's own exception, and unambiguous by construction — the rejected name is, by definition,
+ *   ambiguous) with a `warning` string the caller MUST print loudly rather than swallow: the
+ *   server still starts, but a bare date-only window bound (list_calendar_events) now reads as a
+ *   UTC day rather than this machine's local day, which is exactly the kind of change that must
+ *   not happen silently.
+ *
+ * In practice the host-zone branch is close to unreachable: `Intl.DateTimeFormat().
+ * resolvedOptions().timeZone` returns ICU's own canonical name for whatever the OS/TZ env
+ * reports, and a canonical IANA zone name is either slash-bearing or is `UTC` itself — this is a
+ * guard against a misconfigured HOST (e.g. a TZ environment variable ICU cannot canonicalise),
+ * not an expected path.
+ */
+export function resolveConfiguredTimezone(
+  configuredValue: string | undefined,
+  hostZone: string = hostTimezone(),
+): { zone: string; warning?: string } {
+  if (configuredValue !== undefined) {
+    const trimmed = configuredValue.trim();
+    const zoneCandidate = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+    const rejection = zoneRejectionReason(zoneCandidate);
+    if (rejection === 'offset-shaped') {
+      throw new InvalidInputError(
+        `FASTMAIL_TIMEZONE is set to "${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}", a fixed UTC offset, not a zone ` +
+        'name — a calendar time is never written with an offset. This server refuses to start on an unusable ' +
+        'configured time zone rather than falling back to it silently, because that silence is exactly how a ' +
+        'wrong day happens with nothing said. Set FASTMAIL_TIMEZONE to a full IANA zone name such as ' +
+        '"Australia/Sydney" or "America/New_York" (or "UTC"), or unset it to use this server\'s own zone.'
+      );
+    }
+    if (rejection === 'unresolvable') {
+      throw new InvalidInputError(
+        `FASTMAIL_TIMEZONE is set to "${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}", which is not a time zone this ` +
+        'server can resolve. This server refuses to start on an unusable configured time zone rather than ' +
+        'falling back to it silently, because that silence is exactly how a wrong day happens with nothing ' +
+        'said. Set FASTMAIL_TIMEZONE to a full IANA zone name such as "Australia/Sydney" or "America/New_York" ' +
+        '(or "UTC"), or unset it to use this server\'s own zone.'
+      );
+    }
+    if (rejection === 'shorthand') {
+      throw new InvalidInputError(
+        `FASTMAIL_TIMEZONE is set to "${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}", a zone abbreviation or alias, ` +
+        `not a full IANA zone name. ${SHORTHAND_ZONE_WARNING}. This server refuses to start on an unusable ` +
+        'configured time zone rather than falling back to it silently, because that silence is exactly how a ' +
+        'wrong day happens with nothing said. Set FASTMAIL_TIMEZONE to a name that contains a region, such as ' +
+        '"Australia/Sydney" or "America/New_York" (or "UTC"), or unset it to use this server\'s own zone.'
+      );
+    }
+    return { zone: canonicalZoneName(zoneCandidate) };
+  }
+  const rejection = zoneRejectionReason(hostZone);
+  if (rejection) {
+    return {
+      zone: 'UTC',
+      warning:
+        `This server's own time zone ("${echoCallerText(hostZone, ZONE_ECHO_LIMIT)}") is not a full IANA zone ` +
+        'name this server will use unqualified (it has no region-qualifying slash and is not "UTC"), so it ' +
+        'falls back to UTC rather than writing an ambiguous zone into every calendar read. This also means a ' +
+        'bare date-only window bound (list_calendar_events) is now read as a UTC day, not this machine\'s ' +
+        'local day. Set FASTMAIL_TIMEZONE to a full IANA zone name (one containing a slash, e.g. ' +
+        '"Australia/Sydney") to fix this.'
+    };
+  }
+  return { zone: canonicalZoneName(hostZone) };
+}
 
 /**
  * The IANA name to show a caller, resolving `undefined` to whatever the host zone is.
@@ -508,6 +803,14 @@ const ZONE_ECHO_LIMIT = 40;
  * print a zone the dates were not read in — the disclosure and the behaviour disagreeing, on
  * the one call where the caller is trying to work out why their days look wrong. So both are
  * named: what actually resolved, and the configured value that did not.
+ *
+ * Since `resolveConfiguredTimezone` (#157) validates `FASTMAIL_TIMEZONE` at startup and
+ * refuses to start on a value that would land here, every production caller of this function
+ * now always passes an already-usable zone, so this branch is not reachable through a
+ * misconfigured `FASTMAIL_TIMEZONE` any more. It stays: `describeTimezone` is a general
+ * utility, not something that gets to assume its argument was pre-validated by any one
+ * caller, and covering the branch directly is cheaper than proving every future call site
+ * always will be.
  */
 export function describeTimezone(zone: string | undefined): string {
   if (!zone) return hostTimezone();
@@ -515,7 +818,7 @@ export function describeTimezone(zone: string | undefined): string {
   // Through the shared echo, so a cut zone name shows that it was cut. Slicing silently at
   // 40 characters printed a name the caller could neither recognise nor correct.
   const echoed = echoCallerText(zone, ZONE_ECHO_LIMIT);
-  return `${hostTimezone()} (the configured time zone "${echoed}" is not a time zone this server can resolve, ` +
+  return `${resolveUsableTimezone(zone)} (the configured time zone "${echoed}" is not a time zone this server can resolve, ` +
     "so this server's own zone was used)";
 }
 
@@ -528,9 +831,13 @@ export function describeTimezone(zone: string | undefined): string {
  * thing here that knows when a zone changes offset.
  *
  * An unusable IANA name falls back to the host zone rather than throwing, matching
- * `toLocalIso`'s posture on the same misconfiguration — a mistyped FASTMAIL_TIMEZONE must
- * not turn every calendar read into an error, and the calendar and the rendered email
- * timestamps then still agree with each other.
+ * `toLocalIso`'s posture on the same kind of bad zone string. Every current caller passes
+ * `getDefaultTimezone()` down through `coerceCalendarWindowStart`/`End`, and since #157
+ * `resolveConfiguredTimezone` validates that value at server startup — refusing to start
+ * rather than let an unusable configured (or host) zone reach request time at all — so this
+ * fallback is not reachable in production today. It stays because this is a low-level helper
+ * with no way to enforce that every future caller pre-validates its `zone` argument the same
+ * way, and because it is covered directly by its own unit tests.
  */
 function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
   let parts;
