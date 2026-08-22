@@ -1185,9 +1185,13 @@ function parseVEvent(
             end: computedEnd,
             location: location ? unescapeICalText(location) : undefined,
           };
-          // No raw DTEND line exists on this path (that is exactly why DURATION ran), so
-          // classifying it comes back `absent` and endTimeZone omits by construction — a
-          // computed end shares start's zone and there is nothing to disagree about.
+          // endTimeZone omits on this path because a DURATION-computed end shares start's
+          // frame by construction: `parseICalDuration` returns the new instant in the same
+          // spelling it read `start` in (a `Z` start produces a `Z` end, a bare wall clock
+          // comes back bare — see its own "Return in same format as input start" comment), so
+          // there is nothing to disagree about, regardless of whether the raw source text
+          // happens to still carry a DTEND line (e.g. an empty `DTEND;TZID=X:` value, which
+          // takes this branch too since parseICalValue reads it as falsy).
           attachZoneFields(event, vevent, configuredZone);
           addRecurrenceToEvent(event, vevent);
           if (options?.includeParticipants) {
@@ -1249,12 +1253,27 @@ function classifyZoneFromLines(rawLines: string[]): ZoneDescriptor {
   return { kind: 'none' };
 }
 
-// Zone names compare trimmed and case-insensitively ("Australia/Sydney" ==
-// "australia/sydney") and no other way: emitting an extra field when two spellings of the
-// same zone differ only in case is the safe direction, claiming two DIFFERENTLY spelled
-// names are the same zone is not.
+// RFC 5545 §3.2.19 lets a TZID carry a leading '/', naming a zone registered by its creator
+// rather than the plain IANA form — the simple case is '/Zone/Name', the same IANA-style name
+// with one slash in front, and other clients emit it. libical strips exactly this one
+// character before comparing, so stripping it here matches the platform rather than inventing
+// a rule. This is comparison-only: `attachZoneFields` emits the stored spelling verbatim, slash
+// and all, so the field always reflects what the calendar actually stored.
+//
+// A vendor-prefixed TZID ('/vendor.example/20050126_1/Australia/Sydney') still compares
+// unequal after stripping one slash — that is the safe direction, an extra emitted field
+// rather than a false claim that two differently-registered names are the same zone.
+function normalizeZoneForComparison(name: string): string {
+  const trimmed = name.trim();
+  return trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+}
+
+// Zone names compare trimmed, slash-normalized (see above) and case-insensitively
+// ("Australia/Sydney" == "australia/sydney" == "/Australia/Sydney") and no other way:
+// emitting an extra field when two spellings of the same zone differ only in these ways is
+// the safe direction, claiming two DIFFERENTLY spelled names are the same zone is not.
 function zoneNamesEqual(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
+  return normalizeZoneForComparison(a).toLowerCase() === normalizeZoneForComparison(b).toLowerCase();
 }
 
 function zoneDescriptorsEqual(a: ZoneDescriptor, b: ZoneDescriptor): boolean {
@@ -1278,7 +1297,11 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
   const startDesc = classifyZoneFromLines(parseAllICalProperties(vevent, 'DTSTART'));
 
   if (startDesc.kind === 'tzid') {
-    if (!zoneNamesEqual(startDesc.name, configuredZone)) event.timeZone = startDesc.name;
+    // Trimmed because a padded TZID that DIFFERS from the configured zone must still emit a
+    // name isUsableTimezone (and everything downstream, e.g. sortEventsByStart) can resolve —
+    // isUsableTimezone("Australia/Sydney ") is false. NOT slash-normalized: the stored
+    // spelling, leading '/' and all, is what actually named the zone.
+    if (!zoneNamesEqual(startDesc.name, configuredZone)) event.timeZone = startDesc.name.trim();
   } else if (startDesc.kind === 'floating') {
     event.timeZone = null;
   }
@@ -1292,7 +1315,8 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
     : startDesc;
   if (zoneDescriptorsEqual(endDesc, compareDesc)) return;
 
-  event.endTimeZone = endDesc.kind === 'tzid' ? endDesc.name : null;
+  // Trimmed for the same reason as `timeZone` above; stored spelling otherwise preserved.
+  event.endTimeZone = endDesc.kind === 'tzid' ? endDesc.name.trim() : null;
 }
 
 /**

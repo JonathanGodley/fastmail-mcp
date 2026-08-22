@@ -40,7 +40,7 @@ import { callArguments } from './testing/mock-calls.js';
 import { setDefaultTimezone } from './email-formatter.js';
 // For the timeZone/endTimeZone serialisation check: `toolJson` is the seam get_calendar_event
 // renders through, `formatQueryResult` is the one list_calendar_events renders through.
-import { toolJson } from './coerce.js';
+import { toolJson, isUsableTimezone } from './coerce.js';
 import { formatQueryResult } from './response-formatters.js';
 
 // The mocked DAVClient methods below declare these parameter lists rather than
@@ -414,6 +414,66 @@ describe('timeZone / endTimeZone (#139)', () => {
     ].join('\r\n');
     const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
     assert.equal(event.timeZone, 'Pacific/Auckland');
+  });
+
+  it('treats a leading-slash TZID (RFC 5545 §3.2.19) as the same zone, but emits it unstripped when different', () => {
+    // libical strips exactly one leading '/' before comparing, so this matches the platform.
+    // The simple '/Zone/Name' form is a globally-registered alias for the plain IANA name.
+    const matching = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:slashMatch@fm',
+      'DTSTART;TZID=/Australia/Sydney:20260320T083000',
+      'SUMMARY:Slash-prefixed, same zone',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    assert.equal(parseCalendarObject({ data: matching, url: '' }, { configuredZone: CONFIGURED }).timeZone, undefined);
+
+    const differing = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:slashDiff@fm',
+      'DTSTART;TZID=/Pacific/Auckland:20260320T083000',
+      'SUMMARY:Slash-prefixed, different zone',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data: differing, url: '' }, { configuredZone: CONFIGURED });
+    // Emitted with the stored spelling, slash and all — comparison is normalized, the value
+    // reported to the caller is not.
+    assert.equal(event.timeZone, '/Pacific/Auckland');
+
+    // A vendor-registered form keeps comparing unequal even after stripping one slash, which
+    // is the safe direction: an extra field, never a false "same zone" claim.
+    const vendorPrefixed = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:vendor@fm',
+      'DTSTART;TZID=/vendor.example/20050126_1/Australia/Sydney:20260320T083000',
+      'SUMMARY:Vendor-prefixed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const vendorEvent = parseCalendarObject({ data: vendorPrefixed, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(vendorEvent.timeZone, '/vendor.example/20050126_1/Australia/Sydney');
+  });
+
+  it('compares trimmed but emits the trimmed form, so a padded differing TZID still names a resolvable zone', () => {
+    // isUsableTimezone("Australia/Sydney ") is false — an untrimmed emit here would poison
+    // both the field itself and anything downstream that resolves it (sortEventsByStart).
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:padded@fm',
+      'DTSTART;TZID=Pacific/Auckland :20260320T083000',
+      'SUMMARY:Padded TZID',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Pacific/Auckland');
+    assert.equal(isUsableTimezone(event.timeZone!), true);
   });
 
   it('passes a non-IANA (Windows) TZID through verbatim, neither rejecting nor resolving it', () => {
