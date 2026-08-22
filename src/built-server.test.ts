@@ -21,7 +21,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -237,6 +237,108 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
         `value ${JSON.stringify(value)} unexpectedly enabled the capability`,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1c. FASTMAIL_TIMEZONE refuses to start the real process (#157 amendment)
+// ---------------------------------------------------------------------------
+//
+// resolveConfiguredTimezone's throw path (coerce.test.ts) proves the pure logic; this proves
+// the thing that actually matters operationally — that runServer() in index.ts really does
+// call process.exit(1) with the message on stderr, rather than starting up and silently
+// working out of the wrong zone. That wiring lives in runServer() itself and is not covered by
+// any in-process unit test (importing src/index.ts would run runServer() for real and try to
+// open a stdio transport), so a spawned real process is the only way to prove it.
+
+describe('an unusable FASTMAIL_TIMEZONE refuses to start the built server', () => {
+  before(() => assertDistIsCurrent());
+
+  // No FASTMAIL_API_TOKEN in either env helper below: the timezone gate runs before any
+  // credential is needed, so a startup failure here must not be mistaken for a missing-token
+  // failure.
+  function envWithTimezone(value: string | undefined): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+    }
+    if (value !== undefined) env.FASTMAIL_TIMEZONE = value;
+    return env;
+  }
+
+  function spawnWithTimezone(value: string | undefined) {
+    // A rejected config exits on its own almost immediately, so spawnSync (blocking until
+    // exit) is safe here — unlike the "starts normally" cases below, which never exit by
+    // themselves.
+    return spawnSync(process.execPath, [SERVER_ENTRY], { encoding: 'utf8', env: envWithTimezone(value), timeout: 10_000 });
+  }
+
+  it('exits non-zero and names the value and the rule for a shorthand configured zone', () => {
+    const result = spawnWithTimezone('EST');
+    assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /FASTMAIL_TIMEZONE is set to "EST"/);
+    assert.match(result.stderr, /"EST" resolves to a fixed-offset zone with no daylight saving, not US Eastern/);
+    assert.doesNotMatch(result.stdout, /running on stdio/);
+  });
+
+  it('exits non-zero for an offset-shaped configured zone', () => {
+    const result = spawnWithTimezone('+10:00');
+    assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /FASTMAIL_TIMEZONE is set to "\+10:00"/);
+  });
+
+  it('exits non-zero for an unresolvable configured zone', () => {
+    const result = spawnWithTimezone('Not/AZone');
+    assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /FASTMAIL_TIMEZONE is set to "Not\/AZone"/);
+    assert.match(result.stderr, /is not a time zone this server can resolve/);
+  });
+
+  // A server that starts successfully keeps running (it awaits requests on stdio), so it never
+  // exits on its own — spawnSync would just hang until its timeout and report a kill, not a
+  // clean exit. These spawn asynchronously instead, wait for the "running on stdio" line on
+  // stderr (or a timeout), then kill the process explicitly — the same shape mcp-harness.mjs
+  // uses for its own client, but scoped down to only what a stderr assertion needs.
+  function spawnAndCaptureStartupLine(env: Record<string, string>): Promise<{ stderr: string; exited: boolean }> {
+    return new Promise((resolve) => {
+      const child = spawn(process.execPath, [SERVER_ENTRY], { env });
+      let stderr = '';
+      let settled = false;
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+        if (!settled && /running on stdio/.test(stderr)) {
+          settled = true;
+          clearTimeout(timer);
+          child.kill();
+          resolve({ stderr, exited: false });
+        }
+      });
+      child.on('exit', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ stderr, exited: true });
+        }
+      });
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          child.kill();
+          resolve({ stderr, exited: false });
+        }
+      }, 5_000);
+    });
+  }
+
+  it('starts normally with a valid configured zone', async () => {
+    const { stderr, exited } = await spawnAndCaptureStartupLine(envWithTimezone('Australia/Sydney'));
+    assert.match(stderr, /running on stdio/, `server did not report starting; exited early: ${exited}; stderr: ${stderr}`);
+  });
+
+  it('starts normally with FASTMAIL_TIMEZONE unset (host zone)', async () => {
+    const { stderr, exited } = await spawnAndCaptureStartupLine(envWithTimezone(undefined));
+    assert.match(stderr, /running on stdio/, `server did not report starting; exited early: ${exited}; stderr: ${stderr}`);
   });
 });
 

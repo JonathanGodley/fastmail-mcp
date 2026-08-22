@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { CalDAVCalendarClient, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
@@ -1591,7 +1591,7 @@ const TOOLS = [
               // a client reject a null timeZone with a generic schema-mismatch error instead of
               // ever reaching that tailored rejection.
               type: ['string', 'null'],
-              description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. Written as its CANONICAL IANA spelling, which may differ from what you passed: "NZ" is written as "Pacific/Auckland", and "EST" is written as "America/Panama" — a fixed-offset zone with no daylight saving, NOT US Eastern. Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here).`,
+              description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here — this server never creates a floating calendar time).`,
             },
             participants: participantsSchemaProperty(
               `Event participants (optional, at most ${MAX_ICAL_PARTICIPANTS}). Automatically adds ORGANIZER from CalDAV username.`,
@@ -1638,7 +1638,7 @@ const TOOLS = [
               // absence, so it must stay a valid schema type or a validating client would reject
               // it with a generic error before this server's own tailored message is reached.
               type: ['string', 'null'],
-              description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. Written as its CANONICAL IANA spelling, which may differ from what you passed: "NZ" is written as "Pacific/Auckland", and "EST" is written as "America/Panama" — a fixed-offset zone with no daylight saving, NOT US Eastern. Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace.',
+              description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace.',
             },
             participants: participantsSchemaProperty(
               `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
@@ -3236,7 +3236,27 @@ async function runServer() {
   // One stored value does both jobs: every email `date` renders in it, AND list_calendar_events
   // interprets a date-only window bound as a whole day in it, so the day a calendar query covers
   // and the day an email is dated cannot drift apart.
-  setDefaultTimezone(getTimezone());
+  //
+  // FASTMAIL_TIMEZONE (or the host zone it falls back to when unset) is held to the same slash
+  // rule as the caller-supplied `timeZone` parameter (#157 amendment): a shorthand or
+  // unresolvable OPERATOR-SET value refuses to start this server, rather than silently rendering
+  // every date in the wrong zone with nothing said. A rejected HOST zone is different — nobody
+  // configured it, so it falls back to UTC with a loud one-time warning instead of making an
+  // unconfigured machine unusable. This has to run here, not at module load: a module-level throw
+  // would make src/index.ts unimportable, breaking every test that imports it, and would produce
+  // a stack trace instead of an operator-readable refusal. See resolveConfiguredTimezone's own
+  // comment in coerce.ts for the full reasoning.
+  let resolvedTimezone: { zone: string; warning?: string };
+  try {
+    resolvedTimezone = resolveConfiguredTimezone(getTimezone());
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+  if (resolvedTimezone.warning) {
+    console.error(resolvedTimezone.warning);
+  }
+  setDefaultTimezone(resolvedTimezone.zone);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('Fastmail MCP server running on stdio');

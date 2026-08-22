@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -1452,13 +1452,13 @@ describe('validateCallerTimezone', () => {
   // Cyrus (the CalDAV server behind this account) looks a TZID up with an exact-string match
   // against its own tzdata — far stricter than ICU. So the return value is ICU's own canonical
   // spelling for whatever resolved, not an echo of what the caller typed, and these pin actual
-  // resolutions on this runtime (Node's ICU) rather than assuming case alone changes.
+  // resolutions on this runtime (Node's ICU) rather than assuming case alone changes. Both
+  // inputs here are slash-qualified, so the slash rule below (#157 amendment) does not affect
+  // them — a bare alias like "NZ" or "Zulu" used to canonicalise the same way but no longer
+  // passes at all; see the "slash rule" describe block for those.
   for (const [input, canonical] of [
     ['australia/sydney', 'Australia/Sydney'],
     ['AUSTRALIA/SYDNEY', 'Australia/Sydney'],
-    ['NZ', 'Pacific/Auckland'],
-    ['Zulu', 'UTC'],
-    ['GMT0', 'UTC'],
   ] as const) {
     it(`canonicalises "${input}" to "${canonical}", not the caller's own spelling`, () => {
       assert.equal(validateCallerTimezone(input), canonical);
@@ -1522,14 +1522,14 @@ describe('validateCallerTimezone', () => {
 
   // The denylist must not overreach: these are legitimate IANA names that happen to fail the
   // GMT/UTC/UT/leading-digit shapes only superficially (Etc/GMT-10 embeds a POSIX-style sign
-  // AFTER the name, not at the start) and must still resolve via isUsableTimezone. Most of
-  // these are also unchanged by canonicalisation (an Etc/GMT offset name and UTC are already
-  // ICU-canonical); EST5EDT is not, and is pinned to what it actually resolves to.
+  // AFTER the name, not at the start) and must still resolve via isUsableTimezone. Both are
+  // also unchanged by canonicalisation (an Etc/GMT offset name is already ICU-canonical).
+  // EST5EDT used to belong in this list too — it is a real, non-offset-shaped IANA name — but
+  // it has no region-qualifying slash, so the slash rule below now rejects it as shorthand; see
+  // that describe block.
   for (const [legit, canonical] of [
     ['Etc/GMT-10', 'Etc/GMT-10'],
     ['Etc/GMT+5', 'Etc/GMT+5'],
-    ['UTC', 'UTC'],
-    ['EST5EDT', 'America/New_York'],
   ] as const) {
     it(`still accepts the legitimate zone name "${legit}"${legit === canonical ? '' : `, canonicalised to "${canonical}"`}`, () => {
       assert.equal(validateCallerTimezone(legit), canonical);
@@ -1550,6 +1550,147 @@ describe('validateCallerTimezone', () => {
       assert.ok(err.message.length < long.length + 200);
       return true;
     });
+  });
+});
+
+// The slash rule (#157 amendment): a `timeZone` argument must contain a region-qualifying
+// slash, or be exactly "UTC" (compared case-insensitively) — the rule's one exception. "EST"
+// silently resolving to a fixed-offset Panama zone rather than US Eastern is the case that
+// decided this: ICU resolving an abbreviation says nothing about whether the caller meant the
+// zone ICU happened to pick, so every abbreviation and alias is rejected, not just the
+// dangerous-looking ones — there is no safe-list, the caller writes the region name instead.
+describe('validateCallerTimezone rejects zone abbreviations and aliases with no slash (#157)', () => {
+  for (const shorthand of ['EST', 'NZ', 'Zulu', 'GMT', 'PST', 'MST', 'EST5EDT', 'GMT0']) {
+    it(`rejects "${shorthand}"`, () => {
+      assert.throws(
+        () => validateCallerTimezone(shorthand),
+        /is a zone abbreviation or alias, not a full IANA zone name/
+      );
+    });
+  }
+
+  // The rejection has to explain WHY, not just what: the worked "EST" example names the actual
+  // danger (a fixed-offset zone with no daylight saving standing in for a real one) regardless
+  // of which abbreviation the caller actually passed.
+  it('names the EST danger in the rejection message, not just the rule', () => {
+    assert.throws(
+      () => validateCallerTimezone('NZ'),
+      /"EST" resolves to a fixed-offset zone with no daylight saving, not US Eastern/
+    );
+  });
+
+  // The literal name "UTC" is the rule's one exception, checked case-insensitively.
+  for (const utcSpelling of ['UTC', 'utc', 'Utc']) {
+    it(`accepts "${utcSpelling}" as the rule's one exception`, () => {
+      assert.equal(validateCallerTimezone(utcSpelling), 'UTC');
+    });
+  }
+
+  // Aliases that DO contain a slash are unaffected — the rule targets bare abbreviations, not
+  // every non-canonical spelling. US/Pacific still canonicalises to America/Los_Angeles exactly
+  // as it did before this rule existed.
+  for (const [slashed, canonical] of [
+    ['US/Pacific', 'America/Los_Angeles'],
+    ['Etc/GMT-10', 'Etc/GMT-10'],
+    ['Australia/Sydney', 'Australia/Sydney'],
+  ] as const) {
+    it(`still accepts the slash-qualified alias "${slashed}"`, () => {
+      assert.equal(validateCallerTimezone(slashed), canonical);
+    });
+  }
+
+  // The leading-slash strip (RFC 5545 §3.2.19) runs before the slash rule, so a stored
+  // '/Australia/Sydney' TZID echoed straight back still passes — the slash rule looks at what
+  // is LEFT after the strip, which itself contains a slash.
+  it('accepts a leading-slash TZID echoed back, past the strip', () => {
+    assert.equal(validateCallerTimezone('/Australia/Sydney'), 'Australia/Sydney');
+  });
+
+  // Message selection order matters: a string ICU cannot resolve AT ALL must get the
+  // unresolvable message, never the shorthand one — the shorthand message would wrongly imply
+  // that adding a slash is all "Blah" needed. isUsableTimezone runs before the slash check for
+  // exactly this reason (see zoneRejectionReason's own comment in coerce.ts).
+  it('gives the unresolvable message, not the shorthand one, for a string ICU cannot resolve at all', () => {
+    assert.throws(
+      () => validateCallerTimezone('Blah'),
+      (err: Error) => {
+        assert.match(err.message, /is not a time zone this server can resolve/);
+        assert.doesNotMatch(err.message, /zone abbreviation or alias/);
+        return true;
+      },
+    );
+  });
+});
+
+// resolveConfiguredTimezone is the FASTMAIL_TIMEZONE / host-zone gate runServer() calls in
+// index.ts (#157 amendment). It is held to the same rule as validateCallerTimezone, but the two
+// sources — an operator-set FASTMAIL_TIMEZONE and the unset-fallback host zone — are handled
+// asymmetrically: a set-and-invalid value THROWS (a genuine refusal to start), while a rejected
+// HOST zone falls back to UTC with a `warning` instead, because nobody configured the host zone.
+// The `hostZone` parameter lets these pin the host-zone branch without depending on the machine
+// the tests happen to run on.
+describe('resolveConfiguredTimezone', () => {
+  it('canonicalises a valid configured value and reports no warning', () => {
+    const result = resolveConfiguredTimezone('australia/sydney');
+    assert.deepEqual(result, { zone: 'Australia/Sydney' });
+  });
+
+  it('throws naming the value and the rule when the configured value is offset-shaped', () => {
+    assert.throws(
+      () => resolveConfiguredTimezone('+10:00'),
+      (err: Error) => {
+        assert.match(err.message, /FASTMAIL_TIMEZONE is set to "\+10:00"/);
+        assert.match(err.message, /fixed UTC offset/);
+        return true;
+      },
+    );
+  });
+
+  it('throws naming the value and the rule when the configured value is unresolvable', () => {
+    assert.throws(
+      () => resolveConfiguredTimezone('Blah'),
+      (err: Error) => {
+        assert.match(err.message, /FASTMAIL_TIMEZONE is set to "Blah"/);
+        assert.match(err.message, /is not a time zone this server can resolve/);
+        return true;
+      },
+    );
+  });
+
+  it('throws naming the value, the EST danger, and the rule when the configured value is shorthand', () => {
+    assert.throws(
+      () => resolveConfiguredTimezone('EST'),
+      (err: Error) => {
+        assert.match(err.message, /FASTMAIL_TIMEZONE is set to "EST"/);
+        assert.match(err.message, /zone abbreviation or alias/);
+        assert.match(err.message, /"EST" resolves to a fixed-offset zone with no daylight saving, not US Eastern/);
+        return true;
+      },
+    );
+  });
+
+  it('uses the host zone, canonicalised, when FASTMAIL_TIMEZONE is unset and the host zone is usable', () => {
+    assert.deepEqual(resolveConfiguredTimezone(undefined, 'Australia/Sydney'), { zone: 'Australia/Sydney' });
+  });
+
+  it('falls back to UTC with a warning when FASTMAIL_TIMEZONE is unset and the host zone fails the rule', () => {
+    const result = resolveConfiguredTimezone(undefined, 'EST');
+    assert.equal(result.zone, 'UTC');
+    assert.match(result.warning ?? '', /"EST"/);
+    assert.match(result.warning ?? '', /falls back to UTC/);
+    // The disclosure names the concrete, observable behaviour change (not just "a zone was
+    // rejected") — a bare date-only calendar window bound now reads as a UTC day.
+    assert.match(result.warning ?? '', /date-only window bound.*read as a UTC day/);
+  });
+
+  it('does not warn when FASTMAIL_TIMEZONE is unset and the host zone already passes the rule', () => {
+    const result = resolveConfiguredTimezone(undefined, 'Australia/Sydney');
+    assert.equal(result.warning, undefined);
+  });
+
+  it('does not warn for the literal host zone "UTC"', () => {
+    const result = resolveConfiguredTimezone(undefined, 'UTC');
+    assert.deepEqual(result, { zone: 'UTC' });
   });
 });
 

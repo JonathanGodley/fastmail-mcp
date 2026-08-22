@@ -2485,10 +2485,15 @@ export class CalDAVCalendarClient {
     // calendar query covers and the day an email is dated cannot drift apart.
     const zone = getDefaultTimezone();
     // The resolved (ICU-usable) form of `zone`, for the `timeZone`/`endTimeZone` fields
-    // (#139) — those compare a stored TZID against the zone actually in force, which for an
-    // unresolvable FASTMAIL_TIMEZONE is the host zone, not the misconfigured value itself.
-    // `zone` above stays the raw configured value: `coerceCalendarWindowStart`/`End` and
-    // `sortEventsByStart` already resolve it themselves where each needs to.
+    // (#139) — those compare a stored TZID against the zone actually in force. Since #157,
+    // `getDefaultTimezone()` is already guaranteed usable (an unusable configured or host
+    // zone now stops the server at startup instead), so this call is a defensive no-op in
+    // production rather than doing real work — kept because `resolveUsableTimezone` is the
+    // one shared seam every other zone-resolving call site here already goes through, and
+    // this stays consistent with them rather than being a special case that assumes its
+    // input differently from the rest. `zone` above stays the raw configured value:
+    // `coerceCalendarWindowStart`/`End` and `sortEventsByStart` already resolve it themselves
+    // where each needs to.
     const configuredZone = resolveUsableTimezone(zone);
     const rawStart = coerceCalendarWindowStart(startDate, 'startDate', zone);
     const rawEnd = coerceCalendarWindowEnd(endDate, 'endDate', zone);

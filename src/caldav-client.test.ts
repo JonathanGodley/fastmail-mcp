@@ -4173,17 +4173,18 @@ describe('timeZone parameter (#157)', () => {
 
     // zoneNamesEqual used to compare TZIDs with raw string equality, so a stored TZID that
     // named the same zone through an ICU link/alias spelling — not just a different case —
-    // read as a DIFFERENT zone from the caller's echoed-back spelling. That produced a false
-    // "stranded two-zone event" rejection on the most ordinary read-modify-write there is: a
-    // caller reading a stored 'NZ' TZID back off this server and passing that exact string —
-    // 'NZ' itself, not a case variant — straight back as timeZone.
+    // read as a DIFFERENT zone from a caller's re-affirmed spelling. That produced a false
+    // "stranded two-zone event" rejection on an ordinary read-modify-write: reading a stored
+    // 'NZ' TZID off this server (the read side emits it verbatim — #139 — since it was written
+    // by some other client) and then re-zoning the touched side to the equivalent canonical
+    // name. The caller cannot pass 'NZ' itself here any more (#157 amendment rejects bare
+    // shorthand on write), so this exercises the canonical spelling a caller is now required to
+    // send — 'Pacific/Auckland' — against a STORED side that still carries the raw alias.
     it('recognises the stranded side as the SAME zone through a link/alias spelling ("NZ" == "Pacific/Auckland")', async () => {
       const nzZoned = storedEvent('nz-tz@fm', 'DTSTART;TZID=NZ:20260320T190000', 'DTEND;TZID=NZ:20260321T200000');
       const { client, mockDAVClient } = updateClient(nzZoned);
-      await client.updateCalendarEvent('nz-tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'NZ' });
+      await client.updateCalendarEvent('nz-tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'Pacific/Auckland' });
       const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-      // Written as the canonical spelling, same as every other timeZone write on this path —
-      // not an echo of the caller's 'NZ'.
       assert.ok(written.includes('DTSTART;TZID=Pacific/Auckland:20260321T090000'));
     });
 
