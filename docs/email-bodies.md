@@ -445,9 +445,10 @@ the identical drift, one step to the left of the sign-off.
 
 One consequence of this order is a documented residual, not a bug: a draft whose `from`
 matches no verified identity (an address removed from the account, or a draft made
-elsewhere) keeps whatever name it already carried against that foreign address, because
-there is no identity name to fall back to and no verified identity to overwrite it with.
-`edit_draft` never invents or strips a name for an address the account cannot send as.
+elsewhere) keeps whatever non-blank name it already carried against that foreign address
+(blank/whitespace-only counts as no name), because there is no identity name to fall back to
+and no verified identity to overwrite it with. `edit_draft` never invents or strips a name
+for an address the account cannot send as.
 
 ## Reply-quote preservation on edit (#37, redesigned #42)
 

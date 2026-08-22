@@ -2566,13 +2566,24 @@ export class JmapClient {
     // either — it is the account default's name, and on the very path the hoisted address
     // exists for (a stored `from` matching no verified identity) pairing the two would put
     // the default identity's name in front of a foreign address.
-    const storedFromName = existingEmail.from?.[0]?.email === writtenFromAddress
+    // Case-folded, not matchesIdentity: both sides here are concrete addresses (a stored
+    // `from` is never a `*@` pattern), so only matchesIdentity's case-folding half applies —
+    // its wildcard branch would wrongly let a wildcard-shaped stored address match. The
+    // explicit `!== undefined` on the LHS stops two absent addresses from comparing equal.
+    const storedFromEmailLower = existingEmail.from?.[0]?.email?.toLowerCase();
+    const storedFromName = storedFromEmailLower !== undefined && storedFromEmailLower === writtenFromAddress?.toLowerCase()
       ? existingEmail.from?.[0]?.name
       : undefined;
     // A blank or whitespace-only stored name is treated as no name at all, so it cannot
     // beat a real identity name below; a genuine stored name is written through unchanged.
+    // (The identity-name arm below is NOT similarly normalised — see its own note.)
     const storedFromNameIfPresent: string | undefined =
       storedFromName && storedFromName.trim() !== '' ? storedFromName : undefined;
+    // `signingIdentity?.name` is deliberately NOT given the same blank/whitespace
+    // normalisation: it is unchanged from before #152 (the old `??` chain short-circuited on
+    // it identically). Only the stored arm needed normalising, because #152 is what made
+    // that arm load-bearing in the first place; a whitespace-only identity name is a
+    // pre-existing, unrelated cosmetic gap, not something this change introduces or fixes.
     const writtenFromName: string | null = storedFromNameIfPresent ?? signingIdentity?.name ?? null;
     const editSignature = signatureOf(signingIdentity);
     let reAppendedSignature = false;
