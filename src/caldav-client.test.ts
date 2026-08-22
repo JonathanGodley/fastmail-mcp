@@ -42,7 +42,7 @@ import { callArguments } from './testing/mock-calls.js';
 import { setDefaultTimezone } from './email-formatter.js';
 // For the timeZone/endTimeZone serialisation check: `toolJson` is the seam get_calendar_event
 // renders through, `formatQueryResult` is the one list_calendar_events renders through.
-import { toolJson, isUsableTimezone } from './coerce.js';
+import { toolJson, isUsableTimezone, resolveCalendarInstantMs } from './coerce.js';
 import { formatQueryResult } from './response-formatters.js';
 
 // The mocked DAVClient methods below declare these parameter lists rather than
@@ -4903,6 +4903,110 @@ describe('eventIntersectsWindow', () => {
       false,
     );
   });
+
+  it('resolves a TZID written in the RFC 5545 global (leading-slash) form (#162)', () => {
+    // The stored spelling is emitted verbatim, leading '/' and all, so it reaches the filter
+    // as '/America/New_York' — which ICU rejects outright. Testing the raw string sent a real
+    // New York event to the configured zone and DROPPED it: a missing event, arriving only for
+    // calendars whose TZID happens to be written this way. The name is normalised first.
+    const windowStart = Date.parse('2027-03-05T14:00:00Z');
+    const windowEnd = Date.parse('2027-03-05T16:00:00Z');
+    assert.equal(
+      eventIntersectsWindow(
+        { start: '2027-03-05T09:30:00', end: '2027-03-05T10:30:00', timeZone: '/America/New_York' },
+        windowStart,
+        windowEnd,
+        'Australia/Sydney',
+      ),
+      true,
+    );
+    // The control, and the boundary of the normalisation: a vendor-prefixed TZID names a zone
+    // out of somebody else's registry, so it still does not resolve and still falls back to
+    // the configured zone, where 09:30 Sydney time is nowhere near this window.
+    assert.equal(
+      eventIntersectsWindow(
+        {
+          start: '2027-03-05T09:30:00',
+          end: '2027-03-05T10:30:00',
+          timeZone: '/vendor.example/20050126_1/America/New_York',
+        },
+        windowStart,
+        windowEnd,
+        'Australia/Sydney',
+      ),
+      false,
+    );
+  });
+
+  it('inherits START\'s zone for an end carrying no endTimeZone of its own', () => {
+    // `endTimeZone` is emitted ONLY when it differs from start's, so undefined means "same as
+    // start" and must NOT fall back to the configured zone. Reading this end as Sydney time
+    // puts it before its own start; Math.max then collapses the event to a zero-width instant
+    // at 14:30Z, which a window covering only its TAIL does not contain.
+    const windowStart = Date.parse('2027-03-05T15:00:00Z');
+    const windowEnd = Date.parse('2027-03-05T16:00:00Z');
+    assert.equal(
+      eventIntersectsWindow(
+        // 09:30-10:30 New York on 5 March 2027 is 14:30Z-15:30Z (EST; DST starts on the 14th).
+        { start: '2027-03-05T09:30:00', end: '2027-03-05T10:30:00', timeZone: 'America/New_York' },
+        windowStart,
+        windowEnd,
+        'Australia/Sydney',
+      ),
+      true,
+    );
+  });
+
+  it('places an unresolvable zone name in the CONFIGURED zone, never the host\'s', () => {
+    // A Windows zone id is passed through verbatim rather than rejected, and `zoneOffsetMsAt`
+    // silently resolves a name it cannot parse against the HOST zone — so dropping the
+    // usability guard would place this one event in whichever zone the deployment runs in.
+    // Asserted from two different configured zones so that neither answer can be the host's
+    // by coincidence: whichever machine runs this, at most one of them is the host.
+    const event = {
+      start: '2027-03-05T09:30:00',
+      end: '2027-03-05T10:30:00',
+      timeZone: 'AUS Eastern Standard Time',
+    };
+    // 09:30-10:30 New York on 5 March 2027 (EST, -05:00).
+    const newYorkWindow = [Date.parse('2027-03-05T14:00:00Z'), Date.parse('2027-03-05T16:00:00Z')] as const;
+    // 09:30-10:30 Sydney on the same date (AEDT, +11:00) is the evening of the 4th in UTC.
+    const sydneyWindow = [Date.parse('2027-03-04T22:00:00Z'), Date.parse('2027-03-05T00:00:00Z')] as const;
+    assert.equal(eventIntersectsWindow(event, newYorkWindow[0], newYorkWindow[1], 'America/New_York'), true);
+    assert.equal(eventIntersectsWindow(event, sydneyWindow[0], sydneyWindow[1], 'Australia/Sydney'), true);
+    // And the cross pairs are false, so neither assertion above can pass on a window wide
+    // enough to contain both readings.
+    assert.equal(eventIntersectsWindow(event, newYorkWindow[0], newYorkWindow[1], 'Australia/Sydney'), false);
+    assert.equal(eventIntersectsWindow(event, sydneyWindow[0], sydneyWindow[1], 'America/New_York'), false);
+  });
+
+  it('rolls a two-digit-year all-day date over to the RIGHT next day', () => {
+    // `Date.UTC(26, 7, 13)` is 1926, not the year 26, so the day after an all-day event in
+    // year 0026 has to be reached by stepping over a whole Gregorian cycle and back. Get that
+    // wrong and the event's end lands nineteen centuries away, making it overlap windows it
+    // has nothing to do with. The window bounds resolve through the same machinery the real
+    // caller's do, so both sides stay on one scale.
+    const dayOf = resolveCalendarInstantMs('0026-08-12', 'UTC');
+    const dayAfter = resolveCalendarInstantMs('0026-08-13', 'UTC');
+    const twoDaysAfter = resolveCalendarInstantMs('0026-08-14', 'UTC');
+    assert.equal(eventIntersectsWindow({ start: '0026-08-12' }, dayOf, dayAfter, 'UTC'), true);
+    assert.equal(eventIntersectsWindow({ start: '0026-08-12' }, dayAfter, twoDaysAfter, 'UTC'), false);
+  });
+
+  it('still covers a whole day for an all-day event on the last representable date (#162)', () => {
+    // The day after '9999-12-31' is '10000-01-01', which is not a four-digit-year date and so
+    // does not resolve. That NaN used to collapse the event to local midnight, so a window
+    // later that morning answered "nothing on" for an event that covers the whole day.
+    assert.equal(
+      eventIntersectsWindow(
+        { start: '9999-12-31' },
+        Date.parse('9999-12-31T09:00:00Z'),
+        Date.parse('9999-12-31T12:00:00Z'),
+        'UTC',
+      ),
+      true,
+    );
+  });
 });
 
 describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () => {
@@ -5667,6 +5771,22 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
     // Read in the same (Sydney) fallback zone, identical wall-clock digits are simultaneous,
     // so the pre-existing stable order is preserved rather than either one jumping ahead.
     assert.deepEqual(events.map(e => e.id), ['windows', 'sydney']);
+  });
+
+  it('reads a leading-slash TZID the same way the window filter does (#162)', () => {
+    // The sort and the filter share one zone rule (`zoneForValue`) rather than each stating
+    // its own, because a read that ordered an event in one zone and filtered it in another
+    // would put it at the wrong place in a list `limit` then truncates. This is the case that
+    // separated them: the RFC 5545 global form of a TZID, which ICU rejects until the leading
+    // slash is stripped.
+    const events = [
+      { id: 'newyork', title: 'US', start: '2026-03-25T08:00:00', timeZone: '/America/New_York' },
+      { id: 'sydney', title: 'AU', start: '2026-03-25T08:00:00' },
+    ] as any[];
+    sortEventsByStart(events, 'Australia/Sydney');
+    // New York is behind Sydney, so the same wall-clock digits there are a LATER instant.
+    // Falling back to Sydney would make the two simultaneous and leave the input order.
+    assert.deepEqual(events.map(e => e.id), ['sydney', 'newyork']);
   });
 });
 

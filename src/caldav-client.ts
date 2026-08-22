@@ -4,7 +4,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName } from './coerce.js';
+import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -90,10 +90,24 @@ export interface CalendarEvent {
   // DTSTART alone, and a series that recurs only by RDATE carries no rule at all — so without
   // this field the guard in `getCalendarEvents` could not see it and dropped the row (#162).
   //
-  // The VALUES are carried; the PARAMETERS on the line (TZID, VALUE=DATE, VALUE=PERIOD) are
-  // not, for the same reason `start` carries no offset — the value is kept in the spelling the
-  // server wrote it in, and the reader's own zone database does the rest. Absent on the
-  // ordinary listing path, because Cyrus strips RDATE from an expanded block; it shows up on
+  // THE VALUES ARE CARRIED AND THE PARAMETERS ARE NOT — TZID, VALUE=DATE and VALUE=PERIOD are
+  // all dropped, and that is a real limit rather than a detail. `RDATE;TZID=America/New_York:
+  // 20270302T090000` arrives here as a bare `20270302T090000`, which under the rule that
+  // governs `start` would read as FLOATING, and two RDATE lines in different zones join into
+  // one list with nothing left to tell them apart. So the designator-less values in this field
+  // do NOT follow the `timeZone` rule; they are only evidence that other dates exist. Both tool
+  // descriptions say so.
+  //
+  // The shape stays values-only deliberately. A caller cannot act on an individual RDATE
+  // through this server at all — there are no per-occurrence tools, and update/delete refuse
+  // the whole series — so the field's entire job is to prove `start` is not the only date this
+  // entry has. Carrying parameters would invite a precision it cannot back up. Read a real
+  // occurrence date out of `list_calendar_events` with a window, which the server expands.
+  //
+  // Expected to be absent on the ordinary listing path: Cyrus is understood to strip RDATE
+  // from an expanded block, the way it strips RRULE. That much has NOT been measured — the
+  // expand probe settles RRULE and nothing in scripts/probes/ looks at RDATE under
+  // `<C:expand>` — so treat it as derived, not observed. It shows up for certain on
   // `get_calendar_event`, which returns the unexpanded master, and on any block the server
   // declined to expand.
   recurrenceDates?: string;
@@ -1881,12 +1895,18 @@ function nextDay(dateStr: string): string {
  * readings it compares have to be placed on one scale, and a frame that varied with the
  * deployment would make the same comparison answer differently by machine.
  *
- * ITS ONE REMAINING CALLER IS ORPHANED-EXCEPTION REMOVAL, which matches a RECURRENCE-ID
- * against a set of orphaned ones — both sides go through here, so the frame cancels out and
- * only its fixedness matters. The window filter used this too and no longer does (#162):
- * placing an event against a window is not a comparison of two like values, and reading a
- * naive value as UTC there is precisely what put a floating time in the wrong day. That path
- * resolves each value in the zone it belongs to, through `resolveCalendarInstantMs`.
+ * THE WINDOW FILTER USED THIS AND NO LONGER DOES (#162). Placing an event against a window is
+ * not a comparison of two like values, and reading a naive value as UTC there is precisely
+ * what put a floating time in the wrong day; that path now resolves each value in the zone it
+ * belongs to, through `resolveCalendarInstantMs`.
+ *
+ * SO NOTHING LIVE CALLS THIS. Its only caller in the source is `removeExceptionVEvents`, which
+ * matches a RECURRENCE-ID against a set of orphaned ones — and that function has no caller of
+ * its own outside its unit tests, because the write path refuses a recurring event outright
+ * (see `recurringSeriesRefusal`), so no tool can reach it. Both are kept for their tests and
+ * because the fixed frame is what would make that two-sided comparison meaningful if the
+ * orphan-removal path is ever wired back up: both sides go through here, so the frame cancels
+ * out and only its fixedness matters.
  */
 export function parseICalDateAsUTC(iso: string): Date {
   if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return new Date(iso + 'T00:00:00Z');
@@ -1913,14 +1933,29 @@ const DATE_ONLY_EVENT_VALUE = /^\d{4}-\d{2}-\d{2}$/;
  *     it cannot resolve, which would place that one event in the deployment's zone instead of
  *     the account's.
  *
- * Same rule, and the same reasoning, as `sortEventsByStart` uses to order the same values.
+ * THE NAME IS NORMALISED BEFORE IT IS TESTED, and that is load-bearing rather than tidying.
+ * `attachStartZone` deliberately emits the STORED spelling, so a TZID written in the RFC 5545
+ * §3.2.19 global form ('/America/New_York') reaches here with its leading slash, and
+ * `isUsableTimezone` says no to it. Testing the raw string would send a genuine New York event
+ * to the configured zone and the exact filter would then DROP it — a missing event, which is
+ * the direction #64 exists to prevent, arriving only for calendars whose zone happens to be
+ * spelled that way. `normalizeZoneForComparison` strips the one leading slash and canonicalises
+ * through ICU, so the global form resolves and an alias spelling ('NZ') resolves to the same
+ * zone the comparison seam already treats it as. A VENDOR-PREFIXED name
+ * ('/vendor.example/Australia/Sydney') still fails the test after the strip and still falls back
+ * to configured, which is correct: nothing here can say which registry that name came from.
+ *
+ * Same rule, and the same reasoning, as `sortEventsByStart` uses to order the same values —
+ * literally the same function, so the two cannot drift apart again.
  */
-function zoneForValue(name: string | null | undefined, configuredZone: string): string {
-  return name && isUsableTimezone(name) ? name : configuredZone;
+function zoneForValue<Z extends string | undefined>(
+  name: string | null | undefined,
+  configuredZone: Z,
+): string | Z {
+  if (!name) return configuredZone;
+  const normalized = normalizeZoneForComparison(name);
+  return isUsableTimezone(normalized) ? normalized : configuredZone;
 }
-
-// A whole Gregorian cycle: 400 years, over which the leap rules repeat exactly.
-const GREGORIAN_CYCLE_YEARS = 400;
 
 /**
  * The date-only value one calendar day after a date-only one.
@@ -2002,8 +2037,14 @@ export function eventIntersectsWindow(
     // instant at local midnight is what dropped it from every window that started later that
     // morning. The next day is reached in LOCAL days, not by adding 24 hours, so a day a DST
     // transition makes 23 or 25 hours long still ends where the calendar says it does.
+    //
+    // The NaN arm is reachable only at the very end of the representable range: the day after
+    // '9999-12-31' is '10000-01-01', which is not a four-digit-year date and so does not
+    // resolve. Falling back to a flat 24 hours there is wrong about a DST transition and right
+    // about the thing that matters — an all-day event is never NARROWER than its own day, and
+    // collapsing it to local midnight is exactly the drop this branch exists to prevent.
     const nextMidnight = resolveCalendarInstantMs(nextDateOnly(event.start.trim()), anchorZone);
-    endMs = Number.isNaN(nextMidnight) ? startMs : nextMidnight;
+    endMs = Number.isNaN(nextMidnight) ? startMs + 24 * 60 * 60 * 1000 : nextMidnight;
   } else {
     // A missing or unreadable end makes the event a point in time, not an unbounded one.
     endMs = startMs;
@@ -2034,11 +2075,19 @@ export function eventIntersectsWindow(
  * the configured zone is only the fallback, used for a genuinely floating value (RFC 5545
  * §3.3.5 — no zone exists to sort it in, so the caller's own clock is the least-wrong guess)
  * and for a `timeZone` this server was handed but ICU cannot resolve (a Windows zone name
- * such as "AUS Eastern Standard Time" passed through verbatim rather than rejected — see
- * `isUsableTimezone`). That fallback matters beyond correctness: `zoneOffsetMsAt` silently
- * falls back to the HOST zone for an unresolvable name, so sorting by an unresolvable
- * `timeZone` directly would place that one event in the host zone instead of the account's
- * configured one — a regression `isUsableTimezone` is what guards against.
+ * such as "AUS Eastern Standard Time" passed through verbatim rather than rejected). That
+ * fallback matters beyond correctness: `zoneOffsetMsAt` silently falls back to the HOST zone
+ * for an unresolvable name, so sorting by an unresolvable `timeZone` directly would place that
+ * one event in the host zone instead of the account's configured one.
+ *
+ * That choice is `zoneForValue`, CALLED rather than restated. The sort and the window filter
+ * have to agree about which zone an event is in — a read that filtered an event in one zone
+ * and ordered it in another would put it at the wrong place in a list `limit` then truncates —
+ * and two copies of the rule are two things to keep in step. One copy is what let a
+ * slash-prefixed TZID be normalised on one side and not the other (#162).
+ *
+ * `zone` may be undefined here, unlike in the filter, because a sort still has to produce an
+ * order when no zone was configured at all; `resolveCalendarInstantMs` takes it from there.
  *
  * An unreadable or absent start sorts FIRST. It cannot be placed, and placing it last would
  * put it where `limit` truncates — the one position that turns "cannot order this" into
@@ -2047,8 +2096,7 @@ export function eventIntersectsWindow(
 export function sortEventsByStart(events: CalendarEvent[], zone: string | undefined): void {
   const instants = new Map<CalendarEvent, number>();
   for (const event of events) {
-    const eventZone = event.timeZone && isUsableTimezone(event.timeZone) ? event.timeZone : zone;
-    instants.set(event, resolveCalendarInstantMs(event.start, eventZone));
+    instants.set(event, resolveCalendarInstantMs(event.start, zoneForValue(event.timeZone, zone)));
   }
   events.sort((a, b) => {
     const aMs = instants.get(a)!;

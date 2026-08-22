@@ -872,8 +872,10 @@ function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
   return asIfUtc - utcMs;
 }
 
-// A whole Gregorian cycle: 400 years is exactly 146097 days, leap rules included.
-const GREGORIAN_CYCLE_YEARS = 400;
+// A whole Gregorian cycle: 400 years is exactly 146097 days, leap rules included. Exported
+// because caldav-client.ts's date-only rollover steps over the same legacy two-digit-year
+// mapping by the same trick, and two copies of this number could drift apart.
+export const GREGORIAN_CYCLE_YEARS = 400;
 const GREGORIAN_CYCLE_MS = 146097 * 24 * 60 * 60 * 1000;
 
 /**
