@@ -1591,7 +1591,7 @@ const TOOLS = [
               // a client reject a null timeZone with a generic schema-mismatch error instead of
               // ever reaching that tailored rejection.
               type: ['string', 'null'],
-              description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here).`,
+              description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. Written as its CANONICAL IANA spelling, which may differ from what you passed: "NZ" is written as "Pacific/Auckland", and "EST" is written as "America/Panama" — a fixed-offset zone with no daylight saving, NOT US Eastern. Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here).`,
             },
             participants: participantsSchemaProperty(
               `Event participants (optional, at most ${MAX_ICAL_PARTICIPANTS}). Automatically adds ORGANIZER from CalDAV username.`,
@@ -1638,7 +1638,7 @@ const TOOLS = [
               // absence, so it must stay a valid schema type or a validating client would reject
               // it with a generic error before this server's own tailored message is reached.
               type: ['string', 'null'],
-              description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace.',
+              description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. Written as its CANONICAL IANA spelling, which may differ from what you passed: "NZ" is written as "Pacific/Auckland", and "EST" is written as "America/Panama" — a fixed-offset zone with no daylight saving, NOT US Eastern. Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace.',
             },
             participants: participantsSchemaProperty(
               `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,

@@ -4152,6 +4152,48 @@ describe('timeZone parameter (#157)', () => {
       const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
       assert.ok(written.includes('DTSTART;TZID=Australia/Sydney:20260321T090000'));
     });
+
+    // zoneNamesEqual used to compare TZIDs with raw string equality, so a stored TZID that
+    // named the same zone through an ICU link/alias spelling — not just a different case —
+    // read as a DIFFERENT zone from the caller's echoed-back spelling. That produced a false
+    // "stranded two-zone event" rejection on the most ordinary read-modify-write there is: a
+    // caller reading a stored 'NZ' TZID back off this server and passing that exact string —
+    // 'NZ' itself, not a case variant — straight back as timeZone.
+    it('recognises the stranded side as the SAME zone through a link/alias spelling ("NZ" == "Pacific/Auckland")', async () => {
+      const nzZoned = storedEvent('nz-tz@fm', 'DTSTART;TZID=NZ:20260320T190000', 'DTEND;TZID=NZ:20260321T200000');
+      const { client, mockDAVClient } = updateClient(nzZoned);
+      await client.updateCalendarEvent('nz-tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'NZ' });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      // Written as the canonical spelling, same as every other timeZone write on this path —
+      // not an echo of the caller's 'NZ'.
+      assert.ok(written.includes('DTSTART;TZID=Pacific/Auckland:20260321T090000'));
+    });
+
+    it('recognises the stranded side as the SAME zone through a link/alias spelling ("US/Pacific" == "America/Los_Angeles")', async () => {
+      const usPacificZoned = storedEvent('uspac-tz@fm', 'DTSTART;TZID=US/Pacific:20260320T190000', 'DTEND;TZID=US/Pacific:20260321T200000');
+      const { client, mockDAVClient } = updateClient(usPacificZoned);
+      await client.updateCalendarEvent('uspac-tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'US/Pacific' });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(written.includes('DTSTART;TZID=America/Los_Angeles:20260321T090000'));
+    });
+
+    // Recognising 'NZ' and 'Pacific/Auckland' as the same zone is not a one-way relaxation:
+    // validateDateConsistency's own "different zones, flight lands elsewhere" allowance
+    // (#140) reads through the identical zoneNamesEqual, so a pair that used to look
+    // cross-zone (and so skipped ordering entirely) is now ordering-checked like any
+    // same-zone pair — and a genuinely backwards alias pair is still rejected, not silently
+    // written. More checking, not less.
+    it('an alias pair that clears the stranding check is still ordering-checked, and a backwards one is rejected', async () => {
+      const nzZoned = storedEvent('nz-order@fm', 'DTSTART;TZID=NZ:20260320T190000', 'DTEND;TZID=NZ:20260321T080000');
+      const { client, mockDAVClient } = updateClient(nzZoned);
+      await assert.rejects(
+        // Stored end is 08:00 on the 21st; a new start of 09:00 the same day, in the "same"
+        // zone under the alias spelling 'Pacific/Auckland', is backwards.
+        () => client.updateCalendarEvent('nz-order@fm', { start: '2026-03-21T09:00:00', timeZone: 'Pacific/Auckland' }),
+        /DTEND must be later than DTSTART/
+      );
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+    });
   });
 });
 

@@ -497,14 +497,48 @@ export function isUsableTimezone(zone: string): boolean {
 // number that could quietly drift from this one.
 export const ZONE_ECHO_LIMIT = 40;
 
+const zoneCanonicalizationCache = new Map<string, string>();
+
 /**
- * The IANA name actually used for a configured zone: `zone` itself when it is set and ICU can
- * resolve it, otherwise the host's own zone. This is the one place that decides which zone
- * wins — `describeTimezone` and every calendar read path call through here rather than
- * re-deriving the fallback, so there is exactly one rule for "which zone is really in force."
+ * ICU's canonical spelling for a zone name — `Intl.DateTimeFormat`'s own name for whatever the
+ * string resolves to — or the string unchanged when ICU cannot resolve it at all. This is the
+ * one canonicalization seam every zone comparison and every zone actually written routes
+ * through: `validateCallerTimezone` (the create/update write path, #157) and
+ * `resolveUsableTimezone` below both return through here, and so does the read-side comparison
+ * in caldav-client.ts's `zoneNamesEqual` (#139). An alias spelling ('NZ', 'US/Pacific', a
+ * lowercase 'australia/sydney') therefore canonicalises identically wherever it is checked —
+ * without a single seam, the same string could compare equal to itself on write but not on
+ * read, or vice versa.
+ *
+ * Cached by exact input string: `zoneNamesEqual` runs once per event on every calendar list
+ * read, and constructing an `Intl.DateTimeFormat` per call is not free.
+ */
+export function canonicalZoneName(zone: string): string {
+  const cached = zoneCanonicalizationCache.get(zone);
+  if (cached !== undefined) return cached;
+  const resolved = isUsableTimezone(zone)
+    ? new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone
+    : zone;
+  zoneCanonicalizationCache.set(zone, resolved);
+  return resolved;
+}
+
+/**
+ * The IANA name actually used for a configured zone: `zone` itself, canonicalised through
+ * `canonicalZoneName`, when it is set and ICU can resolve it — otherwise the host's own zone.
+ * This is the one place that decides which zone wins — `describeTimezone` and every calendar
+ * read path call through here rather than re-deriving the fallback, so there is exactly one
+ * rule for "which zone is really in force."
+ *
+ * Canonicalising here (not just on the caller-supplied `timeZone` argument) matters because the
+ * configured default is interpolated straight into a written TZID on `create_calendar_event`
+ * when no `timeZone` is passed: without this, `FASTMAIL_TIMEZONE=australia/sydney` would write
+ * `TZID=australia/sydney` while the same zone arriving as a caller's `timeZone` argument writes
+ * the canonical `Australia/Sydney` — two different spellings for the same zone depending on
+ * which path set it, which then falsely compare unequal on a later read-modify-write.
  */
 export function resolveUsableTimezone(zone: string | undefined): string {
-  if (zone && isUsableTimezone(zone)) return zone;
+  if (zone && isUsableTimezone(zone)) return canonicalZoneName(zone);
   return hostTimezone();
 }
 
@@ -581,13 +615,13 @@ export function validateCallerTimezone(value: unknown): string {
   // which is far stricter than ICU. Writing the caller's raw spelling would let an ICU-blessed
   // string reach the calendar as a TZID Cyrus itself cannot resolve — the same failure class the
   // offset-shape check above exists to prevent, one dimension over: a string ICU accepts that
-  // the calendar server cannot read back as a name. `resolvedOptions().timeZone` is ICU's own
-  // canonical spelling for whatever was resolved (guaranteed not to throw here, since
-  // `isUsableTimezone` above already proved `zoneCandidate` resolves), so writing THAT is what
+  // the calendar server cannot read back as a name. `canonicalZoneName` returns ICU's own
+  // canonical spelling for whatever was resolved (guaranteed not to fall back here, since
+  // `isUsableTimezone` above already proved `zoneCandidate` resolves), so returning THAT is what
   // actually lands on a name Cyrus recognises, and it is also what the create/update response
   // reports as written. Do not "simplify" this back to returning the caller's input — the
   // canonical name is deliberately not an echo of what was typed.
-  return new Intl.DateTimeFormat('en-US', { timeZone: zoneCandidate }).resolvedOptions().timeZone;
+  return canonicalZoneName(zoneCandidate);
 }
 
 /**

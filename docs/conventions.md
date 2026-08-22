@@ -1469,15 +1469,30 @@ rejected rather than silently ignored (below).
 
 **Precedence, in the order `formatDateTimeProperty` actually applies it:**
 
-1. `callerZone` — the validated `timeZone` argument, when the caller passed one.
+1. `callerZone` — the validated, **canonicalised** `timeZone` argument, when the caller passed
+   one. `validateCallerTimezone` returns ICU's canonical spelling for whatever the argument
+   resolved to, not an echo of what was typed - see the round-trip note below.
 2. the STORED `TZID`, read off the existing property line — **update only**, and only when
    `timeZone` was not supplied. This is the pre-#157 preserve-the-timezone behaviour, kept
    byte-for-byte: an update that touches only one side of an already-zoned event keeps the
    other side's zone without the caller having to re-state it.
 3. `defaultZone` — the account's configured zone (`getDefaultTimezone()`, `resolveUsableTimezone`
-   gated) — **create only**.
+   gated) — **create only**. Also canonicalised: `resolveUsableTimezone` returns the SAME
+   `canonicalZoneName` spelling `validateCallerTimezone` does, so the identical operator-configured
+   string ends up as the identical written TZID regardless of which of the two paths supplied it.
 4. floating — no `TZID` at all. This is now unreachable on create (step 3 always supplies a
    zone) and is exactly the pre-#157 behaviour on update.
+
+**The write is canonicalised; the read is not, and that is a real round-trip asymmetry.** A read
+emits a stored `TZID` verbatim (see "Restoring the NAME" above) - a stored `NZ` reads back as
+`timeZone: "NZ"`, not `"Pacific/Auckland"`. Echo that `"NZ"` straight back as a `timeZone`
+argument and this server writes `"Pacific/Auckland"`: the same zone, a different spelling than
+what was read. A caller comparing the two spellings as strings would wrongly conclude the zone
+changed; comparing them as zones (`zoneNamesEqual`, below) is what actually agrees they didn't.
+An alias reached through a link name (`NZ` → `Pacific/Auckland`, `US/Pacific` →
+`America/Los_Angeles`) or a fixed-offset name with no daylight-saving rule (`EST` →
+`America/Panama` - **not** US Eastern) are the shapes where this is visible; an already-canonical
+spelling round-trips unchanged because canonicalising it is a no-op.
 
 **Create defaulting to the configured zone is a deliberate behaviour change, not a bug fix.**
 Before #157, a designator-less `create_calendar_event` call wrote a bare floating value — "a
@@ -1530,6 +1545,20 @@ error text says "applied because you named none" for a `'default'` source instea
   backwards pair that a same-spelling stored/caller pair would have correctly rejected. It now
   reads `zoneNamesEqual`, so ordering is checked whenever the two sides genuinely name the same
   zone, however each was spelled.
+  `zoneNamesEqual` is also **link/alias-aware**, not just case- and separator-normalising:
+  after the trim and leading-slash strip, each side routes through `canonicalZoneName`
+  (`src/coerce.ts`, the same seam `validateCallerTimezone`/`resolveUsableTimezone` use to decide
+  what gets written) whenever ICU can resolve it, so `NZ` and `Pacific/Auckland` compare equal -
+  not just two case variants of one string. This closed a regression `validateCallerTimezone`'s
+  own canonicalisation introduced: once the read half started emitting a stored `NZ` TZID
+  verbatim and the write half started canonicalising a caller's `timeZone` to `Pacific/Auckland`,
+  an ordinary read-modify-write caller echoing `timeZone: "NZ"` straight back was rejected by
+  `rejectStrandedZoneMismatch` as a false two-zone mismatch - the stored side really was `NZ`,
+  the caller really did name `NZ`, and the raw-string comparison called that "different" anyway.
+  A name ICU cannot resolve (a Windows zone id, a vendor-prefixed TZID) falls back to today's
+  plain string comparison, so it is a real rejection, not a guess. Cached by exact input string
+  in `src/coerce.ts` - `zoneNamesEqual` runs once per event on every calendar list read, and
+  constructing an `Intl.DateTimeFormat` per call is not free.
 - **A GENUINE two-zone pair is still legal and still not rejected** — `timeZone` cannot itself
   produce one (it applies identically to whichever side(s) are designator-less in a single
   call), so the only way to reach it is the pattern `rejectStrandedZoneMismatch` exists to catch:

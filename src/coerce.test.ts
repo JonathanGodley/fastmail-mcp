@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -1393,6 +1393,46 @@ describe('resolveUsableTimezone', () => {
     assert.equal(isUsableTimezone('Australia/Sydney'), true);
     assert.equal(isUsableTimezone('Not/AZone'), false);
     assert.equal(resolveUsableTimezone('Not/AZone') === 'Not/AZone', isUsableTimezone('Not/AZone'));
+  });
+
+  // A configured zone reaches DTSTART/DTEND on create_calendar_event verbatim when omitted
+  // (see resolveUsableTimezone's own comment), so an alias spelling left uncanonicalised here
+  // would write a different TZID string than the identical zone arriving as a caller's
+  // timeZone argument (which validateCallerTimezone always canonicalises) — the same zone then
+  // compares unequal to itself depending on which path set it. Canonicalising here closes that.
+  it('canonicalises an alias configured zone, not the operator\'s own spelling', () => {
+    assert.equal(resolveUsableTimezone('australia/sydney'), 'Australia/Sydney');
+    assert.equal(resolveUsableTimezone('NZ'), 'Pacific/Auckland');
+    assert.equal(resolveUsableTimezone('US/Pacific'), 'America/Los_Angeles');
+  });
+});
+
+// canonicalZoneName is the single seam both resolveUsableTimezone (above) and the read-side
+// stranded-zone comparison in caldav-client.ts's zoneNamesEqual (#139) route through, so an
+// alias spelling canonicalises identically wherever a zone name is compared or written (#157).
+describe('canonicalZoneName', () => {
+  it('resolves a link/alias name to its canonical IANA spelling', () => {
+    assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
+    assert.equal(canonicalZoneName('US/Pacific'), 'America/Los_Angeles');
+    assert.equal(canonicalZoneName('australia/sydney'), 'Australia/Sydney');
+  });
+
+  it('leaves an already-canonical name unchanged', () => {
+    assert.equal(canonicalZoneName('Australia/Sydney'), 'Australia/Sydney');
+  });
+
+  it('returns a name ICU cannot resolve unchanged, rather than throwing or guessing', () => {
+    assert.equal(canonicalZoneName('Not/AZone'), 'Not/AZone');
+    // A Windows zone id (a real TZID an external client can hand back, #157) is exactly the
+    // shape this has to leave alone, not just an arbitrary unresolvable string.
+    assert.equal(canonicalZoneName('AUS Eastern Standard Time'), 'AUS Eastern Standard Time');
+  });
+
+  it('caches by exact input string — a second call with a different-case alias resolves independently', () => {
+    // Not a correctness assertion on the cache's internals (there is nothing to observe from
+    // outside it); this just exercises the same input twice, which is the path the cache is for.
+    assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
+    assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
   });
 });
 

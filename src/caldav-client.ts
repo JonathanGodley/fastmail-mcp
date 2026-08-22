@@ -4,7 +4,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone } from './coerce.js';
+import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName } from './coerce.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -1266,15 +1266,28 @@ function classifyZoneFromLines(rawLines: string[]): ZoneDescriptor {
 // A vendor-prefixed TZID ('/vendor.example/20050126_1/Australia/Sydney') still compares
 // unequal after stripping one slash — that is the safe direction, an extra emitted field
 // rather than a false claim that two differently-registered names are the same zone.
+//
+// After the strip, each side is canonicalised through `canonicalZoneName` (coerce.ts) when ICU
+// can resolve it — the same seam `validateCallerTimezone` and `resolveUsableTimezone` route
+// through to decide what actually lands on the wire (#157). Without this, a link/alias spelling
+// compared unequal to the canonical name it resolves to: a caller echoing back a stored 'NZ'
+// TZID as timeZone 'NZ' read as a DIFFERENT zone from the 'Pacific/Auckland' this server itself
+// writes for it, producing a false "stranded two-zone event" rejection on an ordinary
+// read-modify-write round trip (#139). A name ICU cannot resolve at all (a Windows zone id, a
+// vendor-prefixed TZID) falls back to the trimmed/stripped string unchanged — still today's
+// conservative string comparison, and still a real rejection when the two sides genuinely
+// differ.
 function normalizeZoneForComparison(name: string): string {
   const trimmed = name.trim();
-  return trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+  const stripped = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+  return canonicalZoneName(stripped);
 }
 
-// Zone names compare trimmed, slash-normalized (see above) and case-insensitively
-// ("Australia/Sydney" == "australia/sydney" == "/Australia/Sydney") and no other way:
-// emitting an extra field when two spellings of the same zone differ only in these ways is
-// the safe direction, claiming two DIFFERENTLY spelled names are the same zone is not.
+// Zone names compare trimmed, slash-normalized and ICU-alias-canonicalised (see above), then
+// case-insensitively ("Australia/Sydney" == "australia/sydney" == "/Australia/Sydney" ==
+// "NZ" == "Pacific/Auckland") and no other way: emitting an extra field when two spellings of
+// the same zone differ only in these ways is the safe direction, claiming two genuinely
+// different zones are the same is not.
 function zoneNamesEqual(a: string, b: string): boolean {
   return normalizeZoneForComparison(a).toLowerCase() === normalizeZoneForComparison(b).toLowerCase();
 }
