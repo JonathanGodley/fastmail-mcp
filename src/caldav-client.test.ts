@@ -725,9 +725,14 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
     await client.getCalendarEvents(undefined, 50, '2026-03-25T00:00:00Z', '2026-03-26T00:00:00Z');
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
+    // WIDENED BY FOURTEEN HOURS AT EACH EDGE (#162). The range the caller asked for is
+    // 25 March 00:00Z .. 26 March 00:00Z; the range SENT runs from the 24th at 10:00Z to the
+    // 26th at 14:00Z, because the server withholds all-day and floating events from a window
+    // that only touches their UTC day. What comes back is then filtered exactly against the
+    // caller's own window.
     assert.deepEqual(callArgs.timeRange, {
-      start: '2026-03-25T00:00:00Z',
-      end: '2026-03-26T00:00:00Z',
+      start: '2026-03-24T10:00:00Z',
+      end: '2026-03-26T14:00:00Z',
     });
     // Expansion rides with the time range: without it a recurring series comes back as its
     // master, dated wherever the series began, and no in-window occurrence exists to report.
@@ -4790,18 +4795,22 @@ describe('eventIntersectsWindow', () => {
   const WINDOW_START = Date.parse('2027-03-01T00:00:00Z');
   const WINDOW_END = Date.parse('2027-03-10T00:00:00Z');
 
+  // The zone is passed explicitly on every call, never left to the host: it is a required
+  // parameter precisely so that a zone-less value cannot be placed in whatever zone the
+  // machine running the tests happens to be in. 'UTC' keeps the cases below about what they
+  // are about; the zone behaviour itself is asserted separately, in zones that are not UTC.
   it('excludes a series master dated years before the window', () => {
     // The exact failure #64 reported: a ten-day window in March 2027 answered with an
     // August 2020 date.
     assert.equal(
-      eventIntersectsWindow({ start: '2020-08-28', end: '2020-08-29' }, WINDOW_START, WINDOW_END),
+      eventIntersectsWindow({ start: '2020-08-28', end: '2020-08-29' }, WINDOW_START, WINDOW_END, 'UTC'),
       false,
     );
   });
 
   it('includes an occurrence inside the window', () => {
     assert.equal(
-      eventIntersectsWindow({ start: '2027-03-05', end: '2027-03-06' }, WINDOW_START, WINDOW_END),
+      eventIntersectsWindow({ start: '2027-03-05', end: '2027-03-06' }, WINDOW_START, WINDOW_END, 'UTC'),
       true,
     );
   });
@@ -4810,31 +4819,89 @@ describe('eventIntersectsWindow', () => {
     // The window end is exclusive, so an all-day event on 9 March runs [09, 10) and must
     // survive; getting this wrong silently loses the last day of every query.
     assert.equal(
-      eventIntersectsWindow({ start: '2027-03-09', end: '2027-03-10' }, WINDOW_START, WINDOW_END),
+      eventIntersectsWindow({ start: '2027-03-09', end: '2027-03-10' }, WINDOW_START, WINDOW_END, 'UTC'),
       true,
     );
   });
 
   it('excludes an event that starts after the window ends', () => {
     assert.equal(
-      eventIntersectsWindow({ start: '2027-04-05T09:00:00Z', end: '2027-04-05T10:00:00Z' }, WINDOW_START, WINDOW_END),
+      eventIntersectsWindow({ start: '2027-04-05T09:00:00Z', end: '2027-04-05T10:00:00Z' }, WINDOW_START, WINDOW_END, 'UTC'),
       false,
     );
   });
 
-  it('keeps a zone-free value just outside the window, within the maximum UTC offset', () => {
-    // TZID is dropped during formatting, so a zoned value is indistinguishable from a
-    // floating one here and may be up to fourteen hours from the instant it names. The
-    // filter widens rather than narrows, because dropping an event the server correctly
-    // matched is the failure that reports a busy day as free.
+  it('DROPS a zone-free value just outside the window, which the old margin kept (#162)', () => {
+    // THIS ASSERTION USED TO BE `true`. The filter granted any designator-less value fourteen
+    // hours of slack on both edges, so a value one morning past the window survived it and the
+    // caller saw a row outside the days they asked about. That margin now widens the range
+    // REQUESTED of the server instead, where it does work a filter cannot do, and what comes
+    // back is judged exactly: resolved in the configured zone, 10 March 08:00 is past a window
+    // that ends at midnight on the 10th.
     assert.equal(
-      eventIntersectsWindow({ start: '2027-03-10T08:00:00', end: '2027-03-10T09:00:00' }, WINDOW_START, WINDOW_END),
-      true,
+      eventIntersectsWindow({ start: '2027-03-10T08:00:00', end: '2027-03-10T09:00:00' }, WINDOW_START, WINDOW_END, 'UTC'),
+      false,
     );
   });
 
   it('keeps an event with no readable dates rather than dropping it silently', () => {
-    assert.equal(eventIntersectsWindow({}, WINDOW_START, WINDOW_END), true);
+    assert.equal(eventIntersectsWindow({}, WINDOW_START, WINDOW_END, 'UTC'), true);
+  });
+
+  it('keeps a multi-day date span queried on its MIDDLE day (#162)', () => {
+    // A date-only DTEND is ALREADY exclusive in iCalendar, so a three-day all-day event is
+    // stored as 05 .. 08 and covers the 5th, 6th and 7th. Adding a further day to the end (or
+    // collapsing the span to its start) is what would make a query on the 6th miss it.
+    const midDay = Date.parse('2027-03-06T00:00:00Z');
+    const nextDay = Date.parse('2027-03-07T00:00:00Z');
+    assert.equal(
+      eventIntersectsWindow({ start: '2027-03-05', end: '2027-03-08' }, midDay, nextDay, 'UTC'),
+      true,
+    );
+  });
+
+  it('keeps an all-day event with no end when the window starts mid-morning (#162)', () => {
+    // A missing end used to collapse the event to a zero-width instant at local midnight, so
+    // any window that started later that morning contained no part of it and the whole day's
+    // entry vanished. An all-day value covers its whole LOCAL day.
+    const midMorning = Date.parse('2027-03-05T09:00:00Z');
+    const midday = Date.parse('2027-03-05T12:00:00Z');
+    assert.equal(
+      eventIntersectsWindow({ start: '2027-03-05' }, midMorning, midday, 'UTC'),
+      true,
+    );
+  });
+
+  it('resolves a naive datetime in the CONFIGURED zone, not as UTC (#162)', () => {
+    // The floating-evening bug from the other end. 20:00 with no designator is 20:00 where the
+    // account lives, so on a +10 account it falls inside that evening's window and on a -05
+    // one it does not. Read as UTC — which is what the old fixed frame did — the same value
+    // answered both the same way, and the +10 account's evening came back empty.
+    const eveningStart = Date.parse('2027-03-05T09:00:00Z'); // 20:00 in Sydney, 04:00 in New York
+    const eveningEnd = Date.parse('2027-03-05T12:00:00Z');
+    const floating = { start: '2027-03-05T20:00:00', end: '2027-03-05T21:00:00' };
+    assert.equal(eventIntersectsWindow(floating, eveningStart, eveningEnd, 'Australia/Sydney'), true);
+    assert.equal(eventIntersectsWindow(floating, eveningStart, eveningEnd, 'America/New_York'), false);
+  });
+
+  it('resolves a wall clock carrying its own resolvable TZID in ITS zone (#162)', () => {
+    // The configured zone is the FALLBACK, not an override. With no slack left, reading a
+    // New York wall clock as though it were Sydney time is fifteen hours out — far enough to
+    // drop a real event, which is the failure this whole issue is about.
+    const window = { start: Date.parse('2027-03-05T14:00:00Z'), end: Date.parse('2027-03-05T16:00:00Z') };
+    const newYorkEvent = {
+      start: '2027-03-05T09:30:00',
+      end: '2027-03-05T10:30:00',
+      timeZone: 'America/New_York',
+    };
+    // 09:30 in New York is 14:30Z, inside the window.
+    assert.equal(eventIntersectsWindow(newYorkEvent, window.start, window.end, 'Australia/Sydney'), true);
+    // The control: the same wall clock with no TZID falls back to the configured zone, where
+    // 09:30 Sydney time is 22:30Z the previous day and nowhere near the window.
+    assert.equal(
+      eventIntersectsWindow({ start: newYorkEvent.start, end: newYorkEvent.end }, window.start, window.end, 'Australia/Sydney'),
+      false,
+    );
   });
 });
 
@@ -4925,9 +4992,11 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     await client.getCalendarEvents(undefined, 50, '2027-03-10', '2027-03-10');
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
+    // The caller's window is the 10th, 00:00Z .. 11th 00:00Z; the request carries the #162
+    // margin of fourteen hours at each edge on top of it.
     assert.deepEqual(callArgs.timeRange, {
-      start: '2027-03-10T00:00:00Z',
-      end: '2027-03-11T00:00:00Z',
+      start: '2027-03-09T10:00:00Z',
+      end: '2027-03-11T14:00:00Z',
     });
   });
 
@@ -5001,11 +5070,15 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.deepEqual(callArgs.timeRange, {
-      start: '2027-03-01T00:00:00Z',
-      end: '2028-03-01T00:00:00Z',
+      start: '2027-02-28T10:00:00Z',
+      end: '2028-03-01T14:00:00Z',
     });
     // Never silently narrowed: a caller handed a shorter window than it asked for has to be
     // told, or "nothing after that date" reads as an empty calendar.
+    //
+    // AND THE CLAMP REPORTS THE CALLER'S WINDOW, not the widened request range (#162). The
+    // margin is a fact about what is asked of the server; describing the caller's window as
+    // fourteen hours wider than they asked for would be a false disclosure.
     assert.ok(windowClamp, 'a clamped window must be disclosed');
     assert.equal(windowClamp!.invented, 'endDate');
     assert.equal(windowClamp!.start, '2027-03-01T00:00:00Z');
@@ -5028,8 +5101,8 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     // A date-only endDate still covers the whole of the 10th, so the exclusive end is the
     // following midnight and the clamp counts back from there.
     assert.deepEqual(callArgs.timeRange, {
-      start: '2026-03-10T00:00:00Z',
-      end: '2027-03-11T00:00:00Z',
+      start: '2026-03-09T10:00:00Z',
+      end: '2027-03-11T14:00:00Z',
     });
     assert.ok(windowClamp, 'a clamped window must be disclosed');
     assert.equal(windowClamp!.invented, 'startDate');
@@ -5052,9 +5125,11 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.deepEqual(callArgs.timeRange, {
-      start: '2020-01-01T00:00:00Z',
-      end: '2030-01-01T00:00:00Z',
+      start: '2019-12-31T10:00:00Z',
+      end: '2030-01-01T14:00:00Z',
     });
+    // The request margin is not a clamp: the caller's own window was honoured exactly, so
+    // there is nothing to disclose.
     assert.equal(windowClamp, undefined);
   });
 
@@ -5079,9 +5154,11 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     }
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
+    // The local day is 11 Aug 14:00Z .. 12 Aug 14:00Z, and the #162 margin puts fourteen
+    // hours either side of it on the wire.
     assert.deepEqual(callArgs.timeRange, {
-      start: '2026-08-11T14:00:00Z',
-      end: '2026-08-12T14:00:00Z',
+      start: '2026-08-11T00:00:00Z',
+      end: '2026-08-13T04:00:00Z',
     });
   });
 
@@ -5104,8 +5181,8 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.deepEqual(callArgs.timeRange, {
-      start: '2026-08-12T04:00:00Z',
-      end: '2026-08-13T04:00:00Z',
+      start: '2026-08-11T14:00:00Z',
+      end: '2026-08-13T18:00:00Z',
     });
   });
 
@@ -5128,9 +5205,12 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     }
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
+    // The instants the caller named are taken exactly as written and the #162 margin is added
+    // to the REQUEST around them — the margin is about what the server will withhold, not
+    // about how the caller's bounds are read, so it applies to a Z-designated window too.
     assert.deepEqual(callArgs.timeRange, {
-      start: '2026-08-11T14:00:00Z',
-      end: '2026-08-12T14:00:00Z',
+      start: '2026-08-11T00:00:00Z',
+      end: '2026-08-13T04:00:00Z',
     });
   });
 
@@ -5746,6 +5826,127 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     const { client: c2 } = mockedClient([{ data: oneOff, url: '/cal/oneoff.ics' }]);
     const { total: t2 } = await c2.getCalendarEvents(undefined, 50, '2027-03-01', '2027-03-10');
     assert.equal(t2, 0);
+  });
+
+  it('keeps an unexpanded master that recurs by RDATE alone, which carries no rule (#162)', async () => {
+    // A series may list its occurrences individually instead of stating a rule. Such a master
+    // has no RRULE at all, so an RRULE-only guard read it as an ordinary one-off, judged it on
+    // its original DTSTART years before the window, and deleted the row — the missing-event
+    // direction the guard exists to prevent.
+    const master = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:listed@fm',
+      'SUMMARY:Board meeting',
+      'DTSTART:20200106T090000Z',
+      'DTEND:20200106T103000Z',
+      'RDATE:20270302T090000Z,20270309T090000Z',
+      'RDATE:20270316T090000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client } = mockedClient([{ data: master, url: '/cal/listed.ics' }]);
+    const { events, total } = await client.getCalendarEvents(undefined, 50, '2027-03-01', '2027-03-10');
+
+    // Two target calendars in the mock, both returning the same object.
+    assert.equal(total, 2, JSON.stringify(events));
+    assert.equal(events[0].id, 'listed@fm');
+    // EVERY RDATE line, not the first: the property may repeat, and a first-match read would
+    // report two of the three dates this event has.
+    assert.equal(events[0].recurrenceDates, '20270302T090000Z,20270309T090000Z,20270316T090000Z');
+    assert.equal(events[0].isRecurring, true);
+    assert.equal(events[0].recurrenceRule, undefined);
+
+    // The control: strip the RDATEs and the same out-of-window row IS dropped, so this is the
+    // recurrence guard doing the work rather than the filter having been switched off.
+    const oneOff = master
+      .replace('RDATE:20270302T090000Z,20270309T090000Z\r\n', '')
+      .replace('RDATE:20270316T090000Z\r\n', '');
+    const { client: c2 } = mockedClient([{ data: oneOff, url: '/cal/oneoff.ics' }]);
+    const { total: t2 } = await c2.getCalendarEvents(undefined, 50, '2027-03-01', '2027-03-10');
+    assert.equal(t2, 0);
+  });
+
+  it('widens the REQUEST so the server cannot withhold an all-day event from a sub-day window (#162)', async () => {
+    // The measured bug. Cyrus matches a date-only value on its UTC day and <C:expand> emits
+    // nothing for a window that merely touches that day, so "the morning of the 12th" on a
+    // +10 account came back with no occurrence of the 12th's all-day event at all. No filter
+    // can keep what the server never sent, which is why the margin is on the request.
+    const allDay = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:allday@fm',
+      'SUMMARY:Public holiday',
+      'DTSTART;VALUE=DATE:20260812',
+      'DTEND;VALUE=DATE:20260813',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client, mockDAVClient } = mockedClient([{ data: allDay, url: '/cal/allday.ics' }]);
+    // 09:00 to 12:00 on the 12th, local: 11 Aug 23:00Z .. 12 Aug 02:00Z.
+    const { events } = await client.getCalendarEvents(undefined, 50, '2026-08-12T09:00:00', '2026-08-12T12:00:00');
+
+    const range = callArguments(mockDAVClient.fetchCalendarObjects)[0].timeRange!;
+    assert.deepEqual(range, { start: '2026-08-11T09:00:00Z', end: '2026-08-12T16:00:00Z' });
+
+    // And the RE-FILTER still uses the caller's own window, not the widened one: the all-day
+    // event runs 11 Aug 14:00Z .. 12 Aug 14:00Z locally, which genuinely covers that morning.
+    assert.equal(events.length, 2, JSON.stringify(events));
+    assert.equal(events[0].id, 'allday@fm');
+  });
+
+  it('drops the neighbouring-day all-day row the old margin left behind (#162)', async () => {
+    // The residue, measured: a Sydney account asking about the 12th was shown the all-day
+    // event on the 11th, because the server matched it on its UTC day and fourteen hours of
+    // client-side slack then reached back far enough to keep it. The exact filter resolves it
+    // as the LOCAL day it is — 11 Aug 14:00Z .. 12 Aug 14:00Z — which ends exactly where the
+    // caller's window begins, and a half-open interval does not overlap there.
+    const dayBefore = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:neighbour@fm',
+      'SUMMARY:Yesterday all day',
+      'DTSTART;VALUE=DATE:20260811',
+      'DTEND;VALUE=DATE:20260812',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client } = mockedClient([{ data: dayBefore, url: '/cal/neighbour.ics' }]);
+    const { events, total } = await client.getCalendarEvents(undefined, 50, '2026-08-12', '2026-08-12');
+    assert.equal(total, 0, JSON.stringify(events));
+
+    // The control: the same event on the day the caller DID ask about is kept, so this is the
+    // window edge being read correctly rather than all-day events being dropped wholesale.
+    const sameDay = dayBefore
+      .replace('DTSTART;VALUE=DATE:20260811', 'DTSTART;VALUE=DATE:20260812')
+      .replace('DTEND;VALUE=DATE:20260812', 'DTEND;VALUE=DATE:20260813');
+    const { client: c2 } = mockedClient([{ data: sameDay, url: '/cal/today.ics' }]);
+    const { total: t2 } = await c2.getCalendarEvents(undefined, 50, '2026-08-12', '2026-08-12');
+    assert.equal(t2, 2);
+  });
+
+  it('saturates the WIDENED bounds without disclosing them as a clamp (#162)', async () => {
+    // Fourteen hours past 9999-12-31 runs off the four-digit year, `toISOString` answers with
+    // the expanded +010000-… form and tsdav throws a plain Error over it — an InternalError
+    // raised for a caller-fixable argument. Both bounds here sit INSIDE the representable
+    // range and only the margin added to them runs off the end, so this is the widening's own
+    // saturation and nothing else's.
+    const { client, mockDAVClient } = mockedClient();
+    const { windowClamp } = await client.getCalendarEvents(
+      undefined, 50, '0000-01-01T05:00:00Z', '9999-12-31T20:00:00Z',
+    );
+
+    const range = callArguments(mockDAVClient.fetchCalendarObjects)[0].timeRange!;
+    assert.equal(range.start, '0000-01-01T00:00:00Z');
+    assert.equal(range.end, '9999-12-31T23:59:59Z');
+    assert.ok(!range.start.startsWith('-'), range.start);
+    assert.ok(!range.end.startsWith('+'), range.end);
+
+    // AND NOTHING IS DISCLOSED. The clamp array reports what happened to bounds the CALLER
+    // named, and both of theirs were honoured exactly; the shortfall is in the margin, which
+    // only ever reaches rows the exact filter drops anyway. Reporting it would tell the caller
+    // their own window had been moved when it had not.
+    assert.equal(windowClamp, undefined);
   });
 
   // End-to-end wiring check for #139: the configured zone must reach the parser as an injected

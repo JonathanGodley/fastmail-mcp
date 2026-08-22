@@ -80,6 +80,23 @@ export interface CalendarEvent {
   // `recurrenceRule` is that block's own rule rather than the series'. The tool description
   // states it the same way.
   recurrenceRule?: string;
+  // The raw RDATE values of a block that lists its occurrences individually instead of (or as
+  // well as) stating a rule — "20260612T090000Z,20260619T090000Z", every RDATE line in the
+  // block joined into one comma-separated list, which is well-formed because an RDATE value is
+  // already such a list.
+  //
+  // It exists for the same reason `recurrenceRule` does: it is proof that `start` is NOT the
+  // only date this entry has. The window filter is not entitled to judge such a block on its
+  // DTSTART alone, and a series that recurs only by RDATE carries no rule at all — so without
+  // this field the guard in `getCalendarEvents` could not see it and dropped the row (#162).
+  //
+  // The VALUES are carried; the PARAMETERS on the line (TZID, VALUE=DATE, VALUE=PERIOD) are
+  // not, for the same reason `start` carries no offset — the value is kept in the spelling the
+  // server wrote it in, and the reader's own zone database does the rest. Absent on the
+  // ordinary listing path, because Cyrus strips RDATE from an expanded block; it shows up on
+  // `get_calendar_event`, which returns the unexpanded master, and on any block the server
+  // declined to expand.
+  recurrenceDates?: string;
   // ---- time zone (#139) ----
   // The IANA name DTSTART was written in, when it is anything other than the zone this
   // server would otherwise assume. NEVER an offset: an offset is only valid at the one
@@ -1361,6 +1378,11 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
  * server and carries a RECURRENCE-ID, a master carries the rule and no RECURRENCE-ID.
  * Both set `isRecurring`; nothing is set for an ordinary one-off event, per the
  * omit-empty-fields convention.
+ *
+ * RDATE is read the same way and for the same reason as RRULE (#162): a block may list its
+ * occurrences individually rather than state a rule, and such a block repeats just as much as
+ * a ruled one does. EVERY RDATE line is read, not the first — RFC 5545 §3.8.5.2 allows the
+ * property to appear any number of times, and a first-match read would hide the rest.
  */
 function addRecurrenceToEvent(event: CalendarEvent, vevent: string): void {
   const rrule = parseICalValue(vevent, 'RRULE');
@@ -1372,6 +1394,19 @@ function addRecurrenceToEvent(event: CalendarEvent, vevent: string): void {
   if (rrule) {
     event.isRecurring = true;
     event.recurrenceRule = rrule;
+  }
+  // Parameters are deliberately dropped and the values kept verbatim — see the field's own
+  // comment on `CalendarEvent`. `findValueBoundary` is what splits the two, quote-aware, so a
+  // colon inside a quoted parameter value cannot be mistaken for the boundary.
+  const rdateValues = parseAllICalProperties(vevent, 'RDATE')
+    .map(line => {
+      const colonIdx = findValueBoundary(line);
+      return colonIdx === -1 ? '' : line.substring(colonIdx + 1).trim();
+    })
+    .filter(value => value.length > 0);
+  if (rdateValues.length > 0) {
+    event.isRecurring = true;
+    event.recurrenceDates = rdateValues.join(',');
   }
 }
 
@@ -1842,16 +1877,16 @@ function nextDay(dateStr: string): string {
  * Parse an ISO-ish date/datetime string in a fixed UTC frame.
  *
  * A naive datetime ("2026-03-20T09:30:00") is read as UTC rather than in the process's local
- * timezone, which is what `new Date(...)` would do. The FIXED frame is the point: its callers
- * are `eventIntersectsWindow`'s comparisons, which judge an event's start and end against a
- * window, and a value whose zone the parser already dropped (see docs/conventions.md on
- * zone-less reads) would otherwise be placed differently depending on where the server runs —
- * so the same query would include or exclude the same event by deployment.
+ * timezone, which is what `new Date(...)` would do. The FIXED frame is the point: the two
+ * readings it compares have to be placed on one scale, and a frame that varied with the
+ * deployment would make the same comparison answer differently by machine.
  *
- * It was originally written for orphaned-exception detection, which needed to agree with
- * rrule's naive-as-UTC convention. That code is gone — recurring events are refused on the
- * write path now (see recurringSeriesRefusal) — but the window comparisons need the same
- * fixed frame for their own reason, so the function stays.
+ * ITS ONE REMAINING CALLER IS ORPHANED-EXCEPTION REMOVAL, which matches a RECURRENCE-ID
+ * against a set of orphaned ones — both sides go through here, so the frame cancels out and
+ * only its fixedness matters. The window filter used this too and no longer does (#162):
+ * placing an event against a window is not a comparison of two like values, and reading a
+ * naive value as UTC there is precisely what put a floating time in the wrong day. That path
+ * resolves each value in the zone it belongs to, through `resolveCalendarInstantMs`.
  */
 export function parseICalDateAsUTC(iso: string): Date {
   if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return new Date(iso + 'T00:00:00Z');
@@ -1859,88 +1894,125 @@ export function parseICalDateAsUTC(iso: string): Date {
   return new Date(iso + 'Z');
 }
 
-// The widest UTC offset any IANA zone has ever used (+14:00 for Kiritimati; the negative
-// extreme is smaller, so one bound covers both directions).
-//
-// It is needed because `formatICalDate` DROPS the TZID parameter: a value that arrived as
-// `DTSTART;TZID=Australia/Sydney:20270305T083000` becomes the bare `2027-03-05T08:30:00`,
-// which is indistinguishable from a floating time and, read as UTC, can be up to fourteen
-// hours away from the instant it names.
-//
-// THE NAME IS NO LONGER MISSING, AND THE WIDTH IS LEFT WIDE ANYWAY (#139). The parsed event
-// now carries its own TZID on `timeZone`/`endTimeZone` (see `attachZoneFields`), so for any
-// value whose zone actually resolves this slack COULD be tightened to that zone's real
-// offset at the instant in question. It deliberately still is not, here: this function's job
-// is to drop only what PROVABLY cannot intersect the window (see the doc comment below), and
-// narrowing the bound trades one visible extra row (today's residue) for an invisible missing
-// one the moment a zone name fails to resolve, is spelled unusually, or belongs to a value
-// this function is never handed the descriptor for — `eventIntersectsWindow` takes only
-// `start`/`end`, not the zone fields, so tightening it is a real, independently-testable
-// change to what this filter is given and checked against, not a one-line follow-up. Left as
-// a deliberate follow-up rather than folded in here, tracked as #162.
-const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
+const DATE_ONLY_EVENT_VALUE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
- * Whether a parsed event could fall inside the requested window.
+ * Which zone one of an event's values is really written in: its own TZID where ICU can
+ * resolve that name, and the configured zone otherwise.
  *
- * This is a RESIDUE filter, not a reimplementation of RFC 4791 time-range matching. The
- * server does the authoritative, timezone-correct matching; this exists because the server
- * matches per OCCURRENCE but returns whole RESOURCES, so without expansion a series whose
- * occurrence lands in the window comes back showing a master DTSTART years earlier (#64 —
- * a ten-day window in March 2027 returning an event dated August 2020).
+ * The four cases, and why each lands where it does:
+ *   ABSENT — `attachZoneFields` omits the field for a value already in the configured zone
+ *     (and for a `Z`-designated or date-only one, which the resolver handles by shape), so
+ *     absent means "the zone the caller asked about". Configured.
+ *   `null` — a genuinely FLOATING value (RFC 5545 §3.3.5). No zone exists to place it in, so
+ *     the caller's own clock is the least-wrong reading. Configured.
+ *   A RESOLVABLE TZID — the correct reading rather than a best-effort one. Its own zone.
+ *   AN UNRESOLVABLE NAME — a Windows zone name such as "AUS Eastern Standard Time" passed
+ *     through verbatim rather than rejected. Configured, and the `isUsableTimezone` check is
+ *     what makes that happen: `zoneOffsetMsAt` silently falls back to the HOST zone for a name
+ *     it cannot resolve, which would place that one event in the deployment's zone instead of
+ *     the account's.
  *
- * IT DOES NOT CLOSE THE "SERVER DECLINED TO EXPAND" GAP, and an earlier version of this
- * comment claimed it did. On an expanded query a surviving master carries its RRULE and its
- * original DTSTART, and judging that date drops the row entirely — turning a wrongly-dated
- * event into a MISSING one, which is the direction this filter exists not to fail in. The
- * caller keeps such a block regardless of its dates (see the `recurrenceRule` guard in
+ * Same rule, and the same reasoning, as `sortEventsByStart` uses to order the same values.
+ */
+function zoneForValue(name: string | null | undefined, configuredZone: string): string {
+  return name && isUsableTimezone(name) ? name : configuredZone;
+}
+
+// A whole Gregorian cycle: 400 years, over which the leap rules repeat exactly.
+const GREGORIAN_CYCLE_YEARS = 400;
+
+/**
+ * The date-only value one calendar day after a date-only one.
+ *
+ * `Date.UTC` maps a two-digit year to 19xx, so the arithmetic steps over a whole 400-year
+ * Gregorian cycle and back: leap rules repeat exactly across that cycle, so the rollover of
+ * month, year and leap day is unaffected while the legacy mapping is not reachable.
+ */
+function nextDateOnly(dateOnly: string): string {
+  const [y, mo, d] = dateOnly.split('-').map(Number);
+  const shifted = new Date(Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d + 1));
+  const year = shifted.getUTCFullYear() - GREGORIAN_CYCLE_YEARS;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${String(year).padStart(4, '0')}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
+}
+
+/**
+ * Whether a parsed event falls inside the requested window. EXACT, and authoritative for what
+ * the caller is shown (#162).
+ *
+ * It used to be a residue filter that granted fourteen hours of slack on both edges to any
+ * value with no zone designator, on the reasoning that such a value's real instant was
+ * unknowable here and keeping an extra row beat dropping a real one. The keeping half of that
+ * was right and stays; the fourteen hours were in the wrong place. A FILTER CANNOT KEEP WHAT
+ * THE SERVER NEVER SENT, and the server withholds two kinds of event from a narrow window: it
+ * matches a date-only value on its UTC day, and it resolves a floating time as UTC. Widening
+ * here did nothing about either, while leaving visible residue at both edges. The margin now
+ * widens the range REQUESTED (see `getCalendarEvents`), which is the only place it works, and
+ * this function judges what comes back against the window the caller actually asked for.
+ *
+ * Exact does not mean eager to drop. Every value is resolved by WHAT IT IS, never guessed at
+ * and never discarded for being hard to read:
+ *   - a `Z` or offset value is the instant it names;
+ *   - a date-only value is local midnight in the zone the value belongs to, and a date-only
+ *     `end` is ALREADY exclusive in iCalendar (measured, docs/fastmail-action-availability.md),
+ *     so a DTSTART..DTEND date span is the full multi-day local span with no day added;
+ *   - a wall clock resolves in its own TZID where that resolves, and in the CONFIGURED zone
+ *     otherwise — see `zoneForValue`, and note that a naive value must never be read as UTC
+ *     here, which on a +10 account is what put a floating 20:00 outside the local evening;
+ *   - an event with nothing readable to judge is KEPT. A promised event vanishing with no
+ *     trace is worse than one extra row the caller can see and dismiss, and a missing event is
+ *     the failure #64 exists to prevent.
+ *
+ * IT STILL DOES NOT CLOSE THE "SERVER DECLINED TO EXPAND" GAP. On an expanded query a
+ * surviving master carries its recurrence carrier and its ORIGINAL DTSTART, and judging that
+ * date drops the row entirely — turning a wrongly-dated event into a MISSING one. The caller
+ * keeps such a block regardless of its dates (see the recurrence guard in
  * `getCalendarEvents`); this function is not the thing that saves it.
  *
- * Because it is a safety net rather than the authority, it is built to DROP ONLY WHAT
- * PROVABLY CANNOT INTERSECT. Any value with no zone designator gets MAX_UTC_OFFSET_MS of
- * slack on both sides, so a zoned event near a window edge is kept even though its real
- * instant is unknown here. That deliberately leaves a little genuine residue — a zoned
- * event just outside the window survives this filter — and that is the right way to be
- * wrong: the alternative is discarding events the server correctly matched, which is the
- * "you are free when you are not" failure this whole issue is about.
- *
- * THE RESIDUE IS NOT ONE-SIDED AND IS NOT BOUNDED AT A DAY. The slack is granted on BOTH
- * edges, to ANY designator-less value, so the row that survives can sit outside EITHER end;
- * which end you actually see follows the sign of the account's UTC offset, because that
- * decides which neighbouring day the server itself matched. Measured: a Sydney account sees
- * the all-day event on the day BEFORE the window, a New York account sees the one on the day
- * AFTER, and both keep a designator-less TIMED value on the neighbouring day too. And 14
- * hours of slack applied to an all-day `end` that is already the following midnight reaches
- * nearly two calendar days, not one.
+ * `zone` is REQUIRED rather than defaulted so that no call site can silently fall through to
+ * the host zone: `zoneOffsetMsAt` treats an undefined zone as the deployment's own, which
+ * would make the same query include or exclude the same event depending on where this server
+ * runs.
  */
 export function eventIntersectsWindow(
-  event: Pick<CalendarEvent, 'start' | 'end'>,
+  event: Pick<CalendarEvent, 'start' | 'end' | 'timeZone' | 'endTimeZone'>,
   windowStartMs: number,
   windowEndMs: number,
+  zone: string,
 ): boolean {
-  // Nothing to judge: keep it rather than guess. A promised event vanishing with no trace
-  // is worse than one extra row the caller can see and dismiss.
   const anchor = event.start || event.end;
   if (!anchor) return true;
 
-  const startMs = parseICalDateAsUTC(anchor).getTime();
+  const startZone = zoneForValue(event.timeZone, zone);
+  // `endTimeZone` is emitted ONLY when end's zone differs from start's, so `undefined` here
+  // means "same as start" and must inherit start's zone rather than fall back to configured.
+  const endZone = event.endTimeZone === undefined ? startZone : zoneForValue(event.endTimeZone, zone);
+  const anchorZone = event.start ? startZone : endZone;
+
+  const startMs = resolveCalendarInstantMs(anchor, anchorZone);
   if (Number.isNaN(startMs)) return true;
 
-  const parsedEnd = event.end ? parseICalDateAsUTC(event.end).getTime() : NaN;
-  // A missing or unreadable end makes the event a point in time, not an unbounded one.
-  const endMs = Number.isNaN(parsedEnd) ? startMs : Math.max(parsedEnd, startMs);
+  const parsedEnd = event.end ? resolveCalendarInstantMs(event.end, endZone) : NaN;
+  let endMs: number;
+  if (!Number.isNaN(parsedEnd)) {
+    endMs = Math.max(parsedEnd, startMs);
+  } else if (event.start && DATE_ONLY_EVENT_VALUE.test(event.start.trim())) {
+    // An all-day event with no end covers its whole day. Collapsing it to a zero-width
+    // instant at local midnight is what dropped it from every window that started later that
+    // morning. The next day is reached in LOCAL days, not by adding 24 hours, so a day a DST
+    // transition makes 23 or 25 hours long still ends where the calendar says it does.
+    const nextMidnight = resolveCalendarInstantMs(nextDateOnly(event.start.trim()), anchorZone);
+    endMs = Number.isNaN(nextMidnight) ? startMs : nextMidnight;
+  } else {
+    // A missing or unreadable end makes the event a point in time, not an unbounded one.
+    endMs = startMs;
+  }
 
-  const zoneless = (v?: string) => !!v && !/Z$|[+-]\d{2}:?\d{2}$/.test(v);
-  const slack = zoneless(event.start) || zoneless(event.end) ? MAX_UTC_OFFSET_MS : 0;
-
-  const lo = startMs - slack;
-  const hi = endMs + slack;
-
-  // A zero-width instant (a zone-designated event with no duration) has no interval to
-  // overlap, so it counts as inside when the window contains it. `windowEnd` is exclusive,
-  // matching CalDAV.
-  if (lo === hi) return lo >= windowStartMs && lo < windowEndMs;
-  return lo < windowEndMs && hi > windowStartMs;
+  // A zero-width instant (an event with no duration) has no interval to overlap, so it counts
+  // as inside when the window contains it. `windowEnd` is exclusive, matching CalDAV.
+  if (startMs === endMs) return startMs >= windowStartMs && startMs < windowEndMs;
+  return startMs < windowEndMs && endMs > windowStartMs;
 }
 
 /**
@@ -2073,11 +2145,44 @@ function saturationEdge(saturatedValue: string): 'earliest' | 'latest' {
  * that end, so the two directions are not interchangeable in an example.
  */
 function shiftIsoDays(iso: string, days: number): string {
-  const shifted = new Date(Date.parse(iso) + days * 24 * 60 * 60 * 1000)
+  return shiftIsoMs(iso, days * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Shift an ISO-8601 UTC instant by milliseconds, keeping the seconds-precision form and
+ * SATURATING at the ends of the representable range.
+ *
+ * Saturation is not optional here. `endDate: "9999-12-31"` plus the request margin below runs
+ * off the four-digit year, `toISOString` answers with the expanded `+010000-…` form, and
+ * tsdav's `^\d{4}` check throws a plain Error — an InternalError ("server-side, a bare retry
+ * might work") raised over an argument the caller could have fixed.
+ */
+function shiftIsoMs(iso: string, ms: number): string {
+  const shifted = new Date(Date.parse(iso) + ms)
     .toISOString()
     .replace(/\.\d{3}Z$/, 'Z');
   return saturateInstant(shifted);
 }
+
+// The widest UTC offset any IANA zone has ever used (+14:00 for Kiritimati; the negative
+// extreme is smaller, so one bound covers both directions), and therefore how far the range
+// SENT TO THE SERVER runs past the window the caller asked for, at each edge (#162).
+//
+// The margin lives here, on the request, because that is the only place it does any work. A
+// client-side filter cannot keep an event the server never sent, and the server withholds two
+// kinds of event from a narrow window — both measured against the live server by
+// scripts/probes/calendar-window-frames.probe.mjs, neither fixable downstream:
+//
+//   AN ALL-DAY EVENT. Cyrus matches a date-only value on its UTC day, and `<C:expand>` emits
+//     zero VEVENTs for a window that touches that UTC day without containing it. "The morning
+//     of the 12th" on a UTC+10 account therefore returned no occurrence at all.
+//   A FLOATING TIME. It is resolved as UTC server-side, so a floating 20:00 sits outside the
+//     same account's local-evening window.
+//
+// Fourteen hours covers the worst case of either, in either direction. What comes back is then
+// judged EXACTLY, by `eventIntersectsWindow`, against the window the caller actually asked
+// for — so widening the request costs the caller nothing but the rows the filter then trims.
+const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
 
 // The window arguments quoted back in a rejection go through the SHARED echo in coerce.ts:
 // scrubbed of the control characters that would forge extra lines, trimmed so the value shown
@@ -2515,6 +2620,13 @@ export class CalDAVCalendarClient {
 
     const fetchOptions: any = {};
     let windowClamp: CalendarWindowClamp | undefined;
+    // THE WINDOW THE CALLER ASKED FOR, kept separate from the widened range sent to the server
+    // (#162). Everything caller-facing — the re-filter below and the clamp note — is derived
+    // from these, never from `fetchOptions.timeRange`. Reading the request range back out of
+    // `fetchOptions` is what would silently reinstate the fourteen hours of residue the
+    // exact filter exists to remove.
+    let trueWindowStart: string | undefined;
+    let trueWindowEnd: string | undefined;
     if (start || end) {
       let windowStart = start;
       let windowEnd = end;
@@ -2573,19 +2685,40 @@ export class CalDAVCalendarClient {
         );
       }
 
+      // The clamp reports the window the CALLER asked for, and it is checked against the
+      // pre-widening bounds for the same reason: the caller has to be told when the window
+      // they described was not the window searched, and the margin below does not change that
+      // window — it changes what is asked of the server so the window can be honoured.
       if (invented || saturated.length > 0) {
         windowClamp = { invented, saturated: saturated.length > 0 ? saturated : undefined, start: windowStart!, end: windowEnd! };
       }
-      fetchOptions.timeRange = { start: windowStart, end: windowEnd };
+      trueWindowStart = windowStart;
+      trueWindowEnd = windowEnd;
+
+      // WIDENED BY THE REQUEST MARGIN ON BOTH EDGES — see MAX_UTC_OFFSET_MS for what the
+      // server otherwise withholds. The widened bounds are saturated because 14 hours past
+      // `9999-12-31` runs off the four-digit year and tsdav throws a plain Error over it.
+      //
+      // That saturation is deliberately NOT added to `saturated[]`. The disclosure array
+      // reports what happened to bounds the CALLER named, and the caller's window is
+      // untouched by the widening: the row the extra hours would have reached is one the
+      // exact filter drops anyway, so nothing the caller asked for is lost by the shortfall.
+      fetchOptions.timeRange = {
+        start: shiftIsoMs(windowStart!, -MAX_UTC_OFFSET_MS),
+        end: shiftIsoMs(windowEnd!, MAX_UTC_OFFSET_MS),
+      };
       // Expansion is what makes a recurring event report the occurrence that actually falls
       // in the window instead of the series' original DTSTART (#64). tsdav only forwards
       // <C:expand> when a timeRange accompanies it, which is why this sits inside the same
-      // branch rather than being set unconditionally.
+      // branch rather than being set unconditionally. It expands over the range REQUESTED, so
+      // widening that range is also what makes the server materialise the occurrences a
+      // narrow window would otherwise see none of.
       fetchOptions.expand = true;
     }
 
-    const windowStartMs = fetchOptions.timeRange ? Date.parse(fetchOptions.timeRange.start) : NaN;
-    const windowEndMs = fetchOptions.timeRange ? Date.parse(fetchOptions.timeRange.end) : NaN;
+    // Derived from the TRUE window, never from `fetchOptions.timeRange`.
+    const windowStartMs = trueWindowStart === undefined ? NaN : Date.parse(trueWindowStart);
+    const windowEndMs = trueWindowEnd === undefined ? NaN : Date.parse(trueWindowEnd);
 
     const allEvents: CalendarEvent[] = [];
     for (const cal of targetCalendars) {
@@ -2595,18 +2728,24 @@ export class CalDAVCalendarClient {
         // one block per in-window occurrence, so a first-match read drops all but one.
         // `expanded` is passed rather than sniffed — see parseCalendarObjects.
         for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone })) {
-          // A block that STILL CARRIES ITS RRULE is never dropped here, whatever its dates
-          // say. This branch runs on an expanded query, so a surviving master means the server
-          // declined to expand that resource — and the master then shows the series' ORIGINAL
-          // DTSTART, which for a long-running weekly event is years before the window. Judged
-          // on that date it fails the intersection test and the row disappears: the filter
-          // whose whole purpose is "drop only what provably cannot intersect" would be turning
-          // a wrongly-dated row into a missing one, on exactly the resource the server told us
-          // repeats. A recurrence rule is proof that DTSTART is not the only date this event
-          // has, so it is not a date the filter is entitled to judge.
+          // A block that STILL CARRIES A RECURRENCE CARRIER is never dropped here, whatever
+          // its dates say. This branch runs on an expanded query, so a surviving master means
+          // the server declined to expand that resource — and the master then shows the
+          // series' ORIGINAL DTSTART, which for a long-running weekly event is years before
+          // the window. Judged on that date it fails the intersection test and the row
+          // disappears: the filter would be turning a wrongly-dated row into a missing one, on
+          // exactly the resource the server told us repeats. A recurrence carrier is proof
+          // that DTSTART is not the only date this event has, so it is not a date the filter
+          // is entitled to judge.
+          //
+          // BOTH CARRIERS COUNT, not just RRULE (#162). A series may list its occurrences as
+          // RDATEs instead of stating a rule; such a master carries no RRULE at all, so an
+          // RRULE-only guard read it as an ordinary one-off and dropped it on its original
+          // DTSTART — the missing-event direction this guard exists to prevent.
           const provablyOutside = fetchOptions.timeRange
             && !event.recurrenceRule
-            && !eventIntersectsWindow(event, windowStartMs, windowEndMs);
+            && !event.recurrenceDates
+            && !eventIntersectsWindow(event, windowStartMs, windowEndMs, configuredZone);
           if (provablyOutside) continue;
           allEvents.push(event);
         }

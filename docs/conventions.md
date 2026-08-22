@@ -1323,7 +1323,7 @@ The frame check is deliberately *not* applied when the caller touches neither `s
 `end`: it exists to stop us writing a broken pair, not to hold a title edit hostage to an
 inconsistency some other client left in the event.
 
-### The read path carries the zone name now; its window filter still only widens, on purpose
+### The read path carries the zone name now, and the window filter uses it
 
 The four frames survive intact on the *write* path, where the property line is built and
 inspected whole. Reading USED TO be lossy: `formatICalDate` takes only the property's
@@ -1387,68 +1387,96 @@ lets a caller that understands Windows zone names use it. `resolveUsableTimezone
 `describeTimezone` and every calendar read path call through it rather than re-deriving the
 host-zone fallback separately.
 
-**Three: the window re-filter can still only widen, and that is now a choice, not a gap.**
-`eventIntersectsWindow` (the client-side re-filter behind `list_calendar_events`) is built to
-**drop only what provably cannot intersect**, rather than to decide membership, and it is
-unchanged by #139: `MAX_UTC_OFFSET_MS` still grants ±14 hours of slack to any
-zone-designator-less value, on both edges, so a zone-carrying event near a window edge is
-kept even though its true instant is unknown here. Before #139 that width was FORCED — the
-parser had already discarded the name, so there was nothing narrower to check a value
-against. The name is no longer missing: it sits on the parsed event as
-`timeZone`/`endTimeZone`. The slack stays wide anyway, deliberately, because narrowing it to
-a per-event zone would trade one visible extra row today for an invisible missing one the
-moment a name fails to resolve, is spelled unusually, or belongs to a value
-`eventIntersectsWindow` is not even handed — its signature takes only `start`/`end`, not the
-zone fields, so tightening it is a real, separately-tested follow-up, not a one-line change
-folded in here, tracked as #162. The residue this leaves is accepted deliberately for a second
-reason too: the
-CalDAV server is the authority on time-range matching (RFC 4791 §9.9, occurrence-based), and
-this filter exists only to catch what that matching cannot express — the server matches per
-*occurrence* but returns whole *resources*, so an unexpanded series arrives showing a master
-`DTSTART` that may be years outside the window (#64). Erring the other way would discard
-events the server correctly matched, which turns a busy day into a free one; an extra row a
-caller can see and dismiss is the cheaper error.
+**Three: the margin belongs on the REQUEST, and the re-filter is exact
+([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)).**
+`eventIntersectsWindow` (the client-side re-filter behind `list_calendar_events`) used to
+grant ±14 hours of slack to any zone-designator-less value, on both edges, on the reasoning
+that the parser had discarded the TZID so the true instant was unknowable here and keeping an
+extra row beat dropping a real one. #139 restored the name (`timeZone`/`endTimeZone` on the
+parsed event) and the slack was left wide anyway, deliberately, as a follow-up.
 
-**The residue that actually shows up is an ALL-DAY event, not a zoned one.** Measured live:
-`{startDate: "2026-08-01", endDate: "2026-08-31"}` on a UTC+10 account returns
-`{"title":"Newcastle","start":"2026-07-31","end":"2026-08-01"}` as its first row. The window
-begins at local midnight (`2026-07-31T14:00:00Z`), Cyrus matches a `VALUE=DATE` event on a
-UTC day, and the ±14h slack — granted to *any* designator-less value, which includes a bare
-date — keeps it.
+**The follow-up found the slack was in the wrong PLACE, not merely too wide.** A client-side
+filter cannot keep an event the server never sent, and the server withholds two kinds of event
+from a narrow window — both measured live by `scripts/probes/calendar-window-frames.probe.mjs`,
+neither reachable from anything downstream:
 
-**That single measurement does NOT fix the DIRECTION, and reading it as a rule that it does is
-wrong for half the world's accounts.** The slack is granted on BOTH edges, so the surviving row
-can sit outside EITHER end; which end you see follows the SIGN of the account's UTC offset,
-because that is what decides which neighbouring UTC day the server itself matched. Measured
-both ways:
+- **an all-day event.** Cyrus matches a `VALUE=DATE` value on its **UTC day**, and `<C:expand>`
+  emits zero VEVENTs for a window that touches that UTC day without containing it. "The morning
+  of the 12th" on a UTC+10 account came back with no occurrence at all.
+- **a floating time.** It is resolved as UTC server-side, so a floating 20:00 sits outside the
+  same account's local-evening window.
+
+So the ±14 hours now widens the `time-range` and `expand` range **sent to the server**, at each
+edge, where it is the only thing that can stop either event being withheld. What comes back is
+judged EXACTLY against the window the caller asked for, with no slack: a `Z`/offset value is the
+instant it names, a date-only value is the configured zone's local day, a `DTSTART..DTEND` date
+span is the full multi-day local span (a date-only `DTEND` is already exclusive in iCalendar —
+see `docs/fastmail-action-availability.md` — so no day is added), and a wall clock resolves in
+its own TZID where ICU can resolve that name and in the configured zone otherwise. The zone
+fallback rule is `sortEventsByStart`'s, for the same reason: `zoneOffsetMsAt` silently falls
+back to the HOST zone for an unresolvable name, so an unusable `timeZone` must land on the
+account's configured zone rather than the deployment's. `zone` is a required parameter of
+`eventIntersectsWindow` precisely so no call site can fall through to the host by omission.
+
+The CalDAV server remains the authority on time-range matching (RFC 4791 §9.9,
+occurrence-based); the exact filter is not a reimplementation of it. It exists because the
+server matches per *occurrence* but returns whole *resources*, so an unexpanded series arrives
+showing a master `DTSTART` that may be years outside the window (#64) — and because the
+widened request deliberately asks for more than the caller wants, so something has to trim it
+back. Its posture on anything it cannot read is unchanged: an event with no readable dates is
+KEPT, because a missing event is the failure this whole area exists to prevent.
+
+**What the server matches is unchanged, and the measurement of it still stands.** Measured
+live before the fix: `{startDate: "2026-08-01", endDate: "2026-08-31"}` on a UTC+10 account
+returned `{"title":"Newcastle","start":"2026-07-31","end":"2026-08-01"}` as its first row. The
+window begins at local midnight (`2026-07-31T14:00:00Z`), and Cyrus matched that `VALUE=DATE`
+event on a UTC day. **The server still returns that row** — that half is a fact about Cyrus,
+not about this client. What changed is the second half: the ±14h slack used to keep it, and the
+exact filter now trims it, because 31 July as a LOCAL day ends at `2026-07-31T14:00:00Z`, which
+is exactly where the window begins, and a half-open interval does not overlap there.
+
+**Which neighbouring day the server returns follows the SIGN of the account's UTC offset**, so
+a single measurement never established a direction. Measured both ways:
 
 | account | window | day before | day after |
 | --- | --- | --- | --- |
-| Australia/Sydney (+10) | `2026-07-31T14:00Z .. 2026-08-31T14:00Z` | server returns it, filter keeps it | server does not return it |
-| America/New_York (-4) | `2026-08-01T04:00Z .. 2026-09-01T04:00Z` | server does not return it | server returns it, filter keeps it |
+| Australia/Sydney (+10) | `2026-07-31T14:00Z .. 2026-08-31T14:00Z` | server returns it, exact filter now trims it | server does not return it |
+| America/New_York (-4) | `2026-08-01T04:00Z .. 2026-09-01T04:00Z` | server does not return it | server returns it, exact filter now trims it |
 
-Nor is the reach one day: 14 hours of slack applied to an all-day `end` that is already the
-following midnight lands nearly two calendar days out east of UTC+11. "Bounded at one day" is
-not a property of this filter; "only ever ADDS rows" is. So it is a reporting defect rather
-than data loss, and `list_calendar_events`' description warns to check each `start` against the
-window. Narrowing it would mean resolving date-only values in the configured zone instead of
-granting them slack, which is a behaviour change to the filter and is not made here.
+The old reach was not one day either: 14 hours of slack applied to an all-day `end` that is
+already the following midnight landed nearly two calendar days out east of UTC+11. That whole
+class of residue is gone.
 
-**One thing the filter is NOT allowed to judge: a block still carrying its `RRULE`.** The
-windowed path runs this filter over blocks the server was asked to EXPAND. If a server ever
-declines to expand one, the master arrives with its rule intact and its ORIGINAL `DTSTART` —
-years before the window for a long-running weekly event — and judging that date deletes the
-row, turning a wrongly-dated event into a MISSING one, which is the exact direction the filter
-exists not to fail in. A recurrence rule is proof that `DTSTART` is not the only date the event
-has, so `getCalendarEvents` keeps such a block whatever its dates say. Unreachable against
-Fastmail today (measured in `calendar-expand.probe.mjs`), and it stays as resilience rather
-than being removed, because the claim that this filter "closes the gap if a server declines to
-expand" was false in the dangerous direction until the guard existed.
+**Two things the filter is still NOT allowed to judge.** First, **a block still carrying its
+own recurrence — `RRULE` *or* `RDATE`.** The windowed path runs this filter over blocks the
+server was asked to EXPAND. If a server declines to expand one, the master arrives with its
+recurrence intact and its ORIGINAL `DTSTART` — years before the window for a long-running
+weekly event — and judging that date deletes the row, turning a wrongly-dated event into a
+MISSING one, the exact direction the filter exists not to fail in. A recurrence carrier is
+proof that `DTSTART` is not the only date the event has, so `getCalendarEvents` keeps such a
+block whatever its dates say. **Both carriers count**, and an `RRULE`-only guard was a real
+hole: a series that lists its occurrences as `RDATE`s states no rule at all, so it read as an
+ordinary one-off and was dropped. The parsed event carries `recurrenceDates` (the raw RDATE
+values, joined) beside `recurrenceRule` so the guard and the caller can read the same fact.
+Unreachable against Fastmail today (measured in `calendar-expand.probe.mjs`), and it stays as
+resilience rather than being removed, because the claim that this filter "closes the gap if a
+server declines to expand" was false in the dangerous direction until the guard existed.
+
+Second, **a floating timed value that has been through expansion.** The server rewrites it to
+`Z` and destroys the floating marker, so nothing on this side can tell it apart from a genuine
+UTC instant, let alone relocate it to the caller's clock. It is judged on UTC and can land in
+the wrong day for an account far from UTC. That residual is DOCUMENTED rather than fixed —
+there is no information left to fix it with — and #157's write-side changes stop this server
+creating new floating values.
 
 The window's own bounds are a separate concern from an event's stored zone entirely: they
 never carry a TZID at all, and are normalised once by `coerceCalendarWindowStart` /
-`coerceCalendarWindowEnd` and used for both the server's `time-range` and this filter, so the
-two cannot disagree about which days were asked for.
+`coerceCalendarWindowEnd`, so the server's `time-range` and this filter cannot disagree about
+which days were asked for. Since #162 they are not the same VALUE on both sides — the request
+carries the margin, the filter does not — but they are still the same window: both are derived
+from one pair of normalised bounds held in `trueWindowStart`/`trueWindowEnd`, and reading the
+filter's bounds back out of `fetchOptions.timeRange` is the one mistake that would silently
+reinstate the old residue.
 
 **That is a statement about the bounds agreeing with EACH OTHER, and it is not the whole
 story — the bounds had their own zone bug (#138).** Read the paragraph above as "the bounds
@@ -1746,6 +1774,32 @@ Both ends saturate, and the disclosure is an opposite statement at each, so `win
 carries `{ bound, edge }` rather than a bare bound name: a `startDate` pulled UP to year 0000 was
 otherwise reported as having "resolved past the last date this server can express", the reverse
 of what happened, and a window that saturates at both ends at once needs both sentences.
+
+**What goes on the wire is NOT the window the caller asked for, and that is deliberate
+([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)).** After the bounds are
+resolved, clamped and saturated, the `time-range` and `expand` range actually SENT is widened
+by `MAX_UTC_OFFSET_MS` (14 hours, the widest UTC offset any IANA zone has used) at each edge.
+The reason is a property of the platform rather than of this server: Cyrus matches a date-only
+value on its UTC day and reads a floating time as UTC, so a window narrower than a day can
+touch an all-day or floating event without the server returning it at all — and no client-side
+filter can keep what was never sent. The extra rows the widening pulls in are trimmed by the
+exact re-filter above.
+
+Three consequences worth stating, because each is a place this could go quietly wrong:
+
+- **The caller-facing window is never the widened one.** `windowClamp.start`/`end` report the
+  bounds the caller's arguments resolved to, and the re-filter judges against those same
+  bounds. Both come from `trueWindowStart`/`trueWindowEnd`, held separately from
+  `fetchOptions.timeRange` for exactly this reason.
+- **The widened bounds saturate, and that saturation is NOT disclosed.** 14 hours past
+  `9999-12-31` runs off the four-digit year and reaches tsdav's `^\d{4}` check as a plain
+  Error, so `shiftIsoMs` pulls it back to the representable edge. It is not added to
+  `windowClamp.saturated`, which reports what happened to bounds the CALLER named: the caller's
+  window is unaffected by the shortfall, and the rows those last hours would have reached are
+  ones the exact filter drops anyway. Disclosing it would say a bound had moved when none had.
+- **The margin applies to a `Z`-designated window too.** It is a statement about what the
+  server will withhold, not about how the caller's bounds are read, so "the caller named an
+  instant" does not exempt it.
 
 **The bound therefore covers ONE of the two ways to ask for an unbounded expansion**, and the
 justification above does not stretch to cover the other. A caller naming BOTH bounds

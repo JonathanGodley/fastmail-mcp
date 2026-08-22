@@ -234,9 +234,11 @@ configured zone rather than leaving the value floating. The client would author 
 
 **All-day means `VALUE=DATE`, not a midnight-to-midnight timed span.** Both all-day shapes carry a
 date-only `DTSTART`, and the multi-day one ends with a date-only `DTEND` one day past the last day
-it covers. So an all-day event is a run of local days with no zone attached, and the exact
-re-filter in the #162 window redesign has to treat it as a local-day span rather than convert it.
-This server's create path already serialises date-only input the same way.
+it covers. So an all-day event is a run of local days with no zone attached, and this is the
+measurement `list_calendar_events`' exact window filter rests on (#162): a date-only value is the
+configured zone's local day, a date-only `DTEND` is already exclusive so a `DTSTART..DTEND` span is
+read as the full multi-day local span with no day added, and an all-day value is never converted to
+an instant. This server's create path already serialises date-only input the same way.
 
 **Storage serialisation varies by path, within one account.** Among the six, some resources carry
 `PRODID:-//Fastmail/2020.5/EN` and others `PRODID:-//CyrusIMAP.org/Cyrus …//EN`, and the end of an
