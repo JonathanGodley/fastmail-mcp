@@ -202,6 +202,73 @@ behaviour. Their `archive_email` documents no refusal and is annotated `idempote
 absence of a documented refusal is not evidence of no refusal — do not cite it as a contrast with
 the client. Settling it needs a real call against their endpoint.
 
+## Authoring: what the client writes for a calendar event
+
+Same charter, a different surface. Everything above measures the message-action screens; this
+section measures what the client *writes*, because the client's own stored bytes are the reference
+for what this server's write path should author. Nothing here is inferred from what iCalendar
+permits — RFC 5545 allows floating time, UTC and offsets, and the client uses none of them.
+
+**Method, and the instrument.** Six reference events were authored in the Fastmail **mobile** app on
+22 August 2026, one per shape below, and the stored iCalendar was fetched back over CalDAV the same
+day. The mobile and web clients share their authoring logic, so these are recorded as the client's
+shapes rather than the mobile app's; that sharing is the operator's statement and is not measured
+here. This is a third method alongside the two at the top of the file — not a reading of pixels and
+not a `mailboxIds` diff, but the resource's bytes as the server stored them. Bytes need no second
+method to corroborate them, which is why one pass settles these rows.
+
+| Event kind | What the client wrote |
+| --- | --- |
+| Timed, all defaults | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `DURATION:PT1H`, with an embedded `VTIMEZONE` for the zone |
+| Timed, zone chosen in the picker | `DTSTART;TZID=Asia/Hong_Kong:20260822T090000` + `DTEND;TZID=Asia/Hong_Kong:20260822T100000`, with an embedded `VTIMEZONE` carrying `TZID:Asia/Hong_Kong` |
+| All-day, single day | `DTSTART;VALUE=DATE:20260822` + `DURATION:P1D`, plus `TRANSP:TRANSPARENT` |
+| All-day, three days | `DTSTART;VALUE=DATE:20260822` + `DTEND;VALUE=DATE:20260825` — an **exclusive** end |
+| Weekly timed series | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `RRULE:FREQ=WEEKLY;COUNT=4` |
+| Yearly all-day series | `DTSTART;VALUE=DATE:20260822` + `RRULE:FREQ=YEARLY;COUNT=3` + `DURATION:P1D` |
+
+**The client never writes a floating or absolute time.** Every timed value in all six is an IANA
+zone *name* plus a local wall clock. Not one `Z` form, not one numeric offset, not one bare
+`DTSTART:20260822T090000`. That is the measured ratification of the write model this server ships
+(#139, #157): a zone name plus wall clock in both directions, and an omitted zone writing the
+configured zone rather than leaving the value floating. The client would author the same bytes.
+
+**All-day means `VALUE=DATE`, not a midnight-to-midnight timed span.** Both all-day shapes carry a
+date-only `DTSTART`, and the multi-day one ends with a date-only `DTEND` one day past the last day
+it covers. So an all-day event is a run of local days with no zone attached, and the exact
+re-filter in the #162 window redesign has to treat it as a local-day span rather than convert it.
+This server's create path already serialises date-only input the same way.
+
+**Storage serialisation varies by path, within one account.** Among the six, some resources carry
+`PRODID:-//Fastmail/2020.5/EN` and others `PRODID:-//CyrusIMAP.org/Cyrus …//EN`, and the end of an
+event is spelled sometimes as `DURATION` and sometimes as `DTEND`. Both end-shapes are real on the
+wire from the same account and from the same client, so neither can be treated as the canonical
+one; a reader must handle both, and this server's parser does.
+
+### Editing one occurrence of a series
+
+The weekly series was edited twice in the client: the third occurrence deleted, the second moved
+half an hour later. Both edits landed in **one resource under one UID**, as two VEVENT blocks.
+
+- The deleted occurrence became `EXDATE;TZID=Australia/Sydney:20260905T090000` on the master — an
+  exclusion date, **not** a `STATUS:CANCELLED` override block.
+- The moved occurrence became a sibling override VEVENT:
+  `RECURRENCE-ID;TZID=Australia/Sydney:20260829T090000` with
+  `DTSTART;TZID=Australia/Sydney:20260829T093000`.
+- `SEQUENCE` was bumped to 1 on both blocks.
+
+Note that the `RECURRENCE-ID` carries the same zone-name-plus-wall-clock form as everything else,
+so identifying an occurrence uses the same model as scheduling one.
+
+**Client noise a parser must tolerate.** The six carry `VALARM` blocks,
+`X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, and empty `DESCRIPTION:` lines. None of it is
+optional to survive: it is what the client writes by default, so it is present on ordinary events
+nobody configured specially.
+
+**Unmeasured.** These six cover single events and two simple `COUNT`-bounded rules. `UNTIL`,
+`BYDAY`/`BYMONTHDAY` expansions, all-day events spanning a DST boundary, and what the client writes
+when a *whole series* is edited rather than one occurrence were not authored and are left explicit
+rather than blank.
+
 ## Extending this file
 
 Add a row by **measuring the view**, never by inferring from a role's name. A role that has not been
