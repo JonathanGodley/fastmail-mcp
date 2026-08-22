@@ -2616,10 +2616,12 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
   });
 
-  // The same forgery for RDATE, the other marker isRecurringSeriesResource reads (#162), driven
-  // through both write tools: a forged RDATE must not refuse a legitimate edit or delete of a
-  // one-off event, and the delete is the irreversible half this gate fronts. Separators written
-  // as escapes on purpose — a literal U+2028 or U+2029 here is invisible in an editor.
+  // The same forgery for RDATE, the second recurrence marker isRecurringSeriesResource reads
+  // (#162, RECURRENCE-ID being the third), driven through both write tools: a forged RDATE must
+  // not refuse a legitimate edit or delete of a one-off event, and the delete is the irreversible
+  // half this gate fronts. Separators written as escapes on purpose — a literal U+2028 or U+2029
+  // here is invisible in an editor — and the braced code-point form below is deliberate, not a
+  // drifted spelling of the plain form used above.
   const FORGED_RDATE_SEPARATORS = ['\u{2028}', '\u{2029}', '\r'];
   const forgedRdateIcal = (sep: string) => SINGLE_ICAL.replace(
     'SUMMARY:One-off Meeting',
@@ -5735,8 +5737,8 @@ describe('non-RFC line terminators inside a value are text, not structure', () =
   // fix and left every one of those gates unpinned. All four are also driven end to end through
   // updateCalendarEvent: ORGANIZER and ATTENDEE in the patch-based suite, because they steer the
   // patch, and the recurrence markers in the refusal suite ("does not treat an RRULE forged
-  // inside a SUMMARY as a recurrence", and its RDATE pair), because a forged marker
-  // short-circuits into the REFUSAL, which is itself observable. RDATE is here for the same
+  // inside a SUMMARY as a recurrence", and its RDATE pair), because a marker the gate reads as
+  // present short-circuits into the REFUSAL, which is itself observable. RDATE is here for the same
   // reason it is there — it fronts the same irreversible destroy as RRULE:
   // isRecurringSeriesResource takes it as a recurrence marker too, so a forged RDATE in a TEXT
   // value reaching that gate would refuse a legitimate edit or delete of a one-off event.

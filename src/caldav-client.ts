@@ -2663,7 +2663,7 @@ export class CalDAVCalendarClient {
     // production rather than doing real work — kept because `resolveUsableTimezone` is the
     // one shared seam every other zone-resolving call site here already goes through, and
     // this stays consistent with them rather than being a special case that assumes its
-    // input differently from the rest. `zone` above stays the raw configured value only for
+    // input differently from the rest. `zone` above stays the raw configured value for
     // `coerceCalendarWindowStart`/`End`, which do not resolve it either — they hand it
     // through to the same `zoneOffsetMsAt`, whose own catch tolerates an unresolvable zone.
     // `sortEventsByStart` is handed `configuredZone`, the same value the window filter gets.
