@@ -3223,10 +3223,12 @@ describe('label mailboxId resolution (#50)', () => {
 
 
   it('resolves a ROLE to its id and emits the mailboxIds/<id> patch', async () => {
+    // `inbox` rather than `archive`: the label tools take labels, and the Inbox is the one
+    // role mailbox that is one (#133), so it is the role form these tools can resolve.
     const makeReq = stubSet(client, 'addLabels');
-    await client.addLabels('e1', ['archive']); // role
+    await client.addLabels('e1', ['inbox']); // role
     const update = callArguments(makeReq)[0].methodCalls[0][1].update;
-    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+    assert.equal(update.e1['mailboxIds/mb-inbox'], true);
   });
 
   it('resolves a NAME (name-only mailbox, no role) to its id', async () => {
@@ -3238,9 +3240,9 @@ describe('label mailboxId resolution (#50)', () => {
 
   it('accepts a raw id (resolves to itself)', async () => {
     const makeReq = stubSet(client, 'addLabels');
-    await client.addLabels('e1', ['mb-archive']);
+    await client.addLabels('e1', ['mb-inbox']);
     const update = callArguments(makeReq)[0].methodCalls[0][1].update;
-    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+    assert.equal(update.e1['mailboxIds/mb-inbox'], true);
   });
 
   it('collapses a duplicate id + its own name into one patch key', async () => {
@@ -3305,18 +3307,18 @@ describe('label mailboxId resolution (#50)', () => {
 
   it('removeLabels resolves a role and emits the null patch', async () => {
     // The message keeps Receipts, so this exercises resolution without the rescue.
-    const makeReq = stubRemoval(client, { e1: { 'mb-archive': true, 'mb-receipts': true } });
-    await client.removeLabels('e1', ['archive']);
+    const makeReq = stubRemoval(client, { e1: { 'mb-inbox': true, 'mb-receipts': true } });
+    await client.removeLabels('e1', ['inbox']);
     const update = setUpdateOf(makeReq);
-    assert.equal(update.e1['mailboxIds/mb-archive'], null);
+    assert.equal(update.e1['mailboxIds/mb-inbox'], null);
   });
 
   it('bulkAddLabels resolves a name/role across the array', async () => {
     const makeReq = stubSet(client, 'bulkAddLabels');
-    await client.bulkAddLabels(['e1'], ['Receipts', 'archive']);
+    await client.bulkAddLabels(['e1'], ['Receipts', 'inbox']);
     const update = callArguments(makeReq)[0].methodCalls[0][1].update;
     assert.equal(update.e1['mailboxIds/mb-receipts'], true);
-    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+    assert.equal(update.e1['mailboxIds/mb-inbox'], true);
   });
 
   it('bulkAddLabels still rejects a genuinely-unresolvable value', async () => {
@@ -3375,46 +3377,6 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     const update = setUpdateOf(makeReq);
     assert.equal(update.e1['mailboxIds/mb-sent'], undefined);
     assert.equal(update.e1['mailboxIds/mb-archive'], true, 'mb-sent was not a real membership, so this empties');
-  });
-
-  it('asserts Archive last, so naming it for removal cannot cancel the rescue', async () => {
-    // The single most safety-critical line in this path, and the cheapest to break. The
-    // patch writes every removed id as null, THEN every kept id as true, so on the one key
-    // the two loops can share the rescue wins. Swap the loops and this same call emits
-    // {receipts: null, archive: null} — an emptying patch, which is the destroyed message
-    // the whole function exists to prevent — while every other test still passes.
-    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
-    await client.removeLabels('e1', ['Receipts', 'archive']);
-    const update = setUpdateOf(makeReq);
-    assert.equal(update.e1['mailboxIds/mb-receipts'], null);
-    assert.equal(update.e1['mailboxIds/mb-archive'], true);
-  });
-
-  it('rejects removing Archive from a message held only by Archive', async () => {
-    const makeReq = stubRemoval(client, { e1: { 'mb-archive': true } });
-    await assert.rejects(
-      () => client.removeLabels('e1', ['archive']),
-      (err: Error) => {
-        assert.ok(err instanceof InvalidInputError);
-        // The refusal has to say the consequence, not just the mechanism: a caller who reads
-        // only "cannot be the fallback" does not learn that the message would be deleted.
-        assert.match(err.message, /including Archive itself.*would be deleted/s);
-        return true;
-      },
-    );
-    assert.equal(issuedEmailSet(makeReq), false, 'nothing may be written when the rescue cannot serve');
-  });
-
-  it('rejects removing Archive alongside every other mailbox holding the message', async () => {
-    // The refusal is not "the message is in Archive and nothing else" — it is "the removal
-    // would empty the message, and Archive is one of the things being removed". A two-mailbox
-    // message hits it too, and the advertised precondition has to cover that.
-    const makeReq = stubRemoval(client, { e1: { 'mb-archive': true, 'mb-receipts': true } });
-    await assert.rejects(
-      () => client.removeLabels('e1', ['archive', 'Receipts']),
-      (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
-    );
-    assert.equal(issuedEmailSet(makeReq), false);
   });
 
   it('rejects an emptying removal when the account has no archive-role mailbox', async () => {
@@ -3506,16 +3468,16 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     assert.deepEqual(Object.keys(update), ['e2']);
   });
 
-  it('writes nothing for the whole batch when one message cannot be rescued', async () => {
+  it('writes nothing for the whole batch when one message cannot be served', async () => {
     // The refusals are raised before the write, so a batch containing an unservable
     // message leaves every message in it untouched rather than half-applying.
     const makeReq = stubRemoval(client, {
       e1: { 'mb-receipts': true, 'mb-sent': true },  // ordinary, would be served
-      e2: { 'mb-archive': true },                    // Archive removing Archive
+      e2: undefined,                                 // filing unreadable -> unservable
     });
     await assert.rejects(
-      () => client.bulkRemoveLabels(['e1', 'e2'], ['Receipts', 'archive']),
-      (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
+      () => client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']),
+      (err: Error) => { assert.match(err.message, /nothing was changed/); return true; },
     );
     assert.equal(issuedEmailSet(makeReq), false);
   });
@@ -3758,6 +3720,166 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-sent': true } });
     await client.bulkRemoveLabels(['e1', 'e1'], ['Receipts']);
     assert.equal(Object.keys(setUpdateOf(makeReq)).length, 1);
+  });
+});
+
+// ---------- a role mailbox is a folder, not a label (#133) ----------
+//
+// Measured from Fastmail's own two pickers: the Labels picker offers the Inbox and the
+// account's user labels and NOTHING else, while Archive, Trash, Spam, Drafts, Sent, Snoozed
+// and Scheduled appear only under "Move to". So the four label tools refuse a mailbox
+// carrying any role but `inbox`, in both directions, before anything is written — and the
+// Inbox itself is served in both, because removing the inbox label is what archiving is.
+describe('label tools take labels, not folders (#133)', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client, LABEL_MAILBOXES);
+  });
+
+  // A stub that fails the test if any request reaches it. The refusal has to land before the
+  // Email/set, so on the add paths the only correct number of requests is zero.
+  function stubNoWrite(c: JmapClient) {
+    return stubRequests(c, async () => { throw new Error('no request may be issued'); });
+  }
+
+  function assertRefusal(err: Error): true {
+    assert.ok(err instanceof InvalidInputError);
+    assert.match(err.message, /is a folder in Fastmail's model, not a label/);
+    assert.match(err.message, /move_email \(or bulk_move\)/);
+    return true;
+  }
+
+  it('add_labels refuses a role mailbox', async () => {
+    const makeReq = stubNoWrite(client);
+    await assert.rejects(() => client.addLabels('e1', ['archive']), (err: Error) => {
+      assertRefusal(err);
+      assert.match(err.message, /'Archive' \(archive\)/); // names the offending mailbox
+      return true;
+    });
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('remove_labels refuses a role mailbox', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-trash': true, 'mb-receipts': true } });
+    await assert.rejects(() => client.removeLabels('e1', ['trash']), assertRefusal);
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('bulk_add_labels refuses a role mailbox', async () => {
+    const makeReq = stubNoWrite(client);
+    await assert.rejects(() => client.bulkAddLabels(['e1', 'e2'], ['sent']), assertRefusal);
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('bulk_remove_labels refuses a role mailbox', async () => {
+    const makeReq = stubRemoval(client, {
+      e1: { 'mb-drafts': true, 'mb-receipts': true },
+      e2: { 'mb-receipts': true, 'mb-sent': true },
+    });
+    await assert.rejects(() => client.bulkRemoveLabels(['e1', 'e2'], ['drafts']), assertRefusal);
+    assert.equal(issuedEmailSet(makeReq), false, 'no message in the batch may be written');
+  });
+
+  it('refuses a role mailbox named by NAME, not only by role', async () => {
+    // The check runs AFTER resolution, which is the whole reason it can be trusted: a caller
+    // naming the junk-role mailbox by its display name "Spam" is refused exactly as a caller
+    // naming it by its role is. A check on the raw argument would see only the string "Spam".
+    const makeReq = stubNoWrite(client);
+    await assert.rejects(() => client.addLabels('e1', ['Spam']), (err: Error) => {
+      assertRefusal(err);
+      assert.match(err.message, /'Spam' \(junk\)/);
+      return true;
+    });
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('refuses a role mailbox named by its raw id', async () => {
+    const makeReq = stubNoWrite(client);
+    await assert.rejects(() => client.addLabels('e1', ['mb-archive']), assertRefusal);
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('names every offending mailbox in one error, and each one once', async () => {
+    // Same single-retry property the resolver's aggregate error has. 'mb-archive' and
+    // 'Archive' are one mailbox named twice, so they are one entry, not two.
+    const makeReq = stubNoWrite(client);
+    await assert.rejects(
+      () => client.addLabels('e1', ['mb-archive', 'Archive', 'Spam']),
+      (err: Error) => {
+        assert.match(err.message, /are folders in Fastmail's model, not labels/);
+        assert.equal(err.message.match(/'Archive' \(archive\)/g)?.length, 1);
+        assert.match(err.message, /'Spam' \(junk\)/);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('refuses on the namespace regardless of what the message is filed under', async () => {
+    // The old refusal for naming Archive depended on the message's filing (it fired only
+    // when the removal would empty the message). This one does not: a message filed in
+    // Archive AND a user label is refused just the same, before its filing is consulted.
+    const makeReq = stubRemoval(client, { e1: { 'mb-archive': true, 'mb-receipts': true } });
+    await assert.rejects(() => client.removeLabels('e1', ['archive', 'Receipts']), assertRefusal);
+    assert.equal(issuedEmailSet(makeReq), false);
+  });
+
+  it('accepts the Inbox on add_labels, which is how a message returns to the Inbox', async () => {
+    const makeReq = stubRequests(client, async () =>
+      ({ methodResponses: [['Email/set', { updated: { e1: null } }, 'addLabels']] }));
+    await client.addLabels('e1', ['inbox']);
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].update.e1['mailboxIds/mb-inbox'], true);
+  });
+
+  it('accepts the Inbox on remove_labels, which is exactly what archiving is', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-inbox': true, 'mb-receipts': true } });
+    await client.removeLabels('e1', ['inbox']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-inbox'], null);
+    assert.equal(update.e1['mailboxIds/mb-receipts'], true); // the rest of the filing survives
+  });
+
+  it('accepts the Inbox on both bulk tools', async () => {
+    const addReq = stubRequests(client, async () =>
+      ({ methodResponses: [['Email/set', { updated: { e1: null, e2: null } }, 'bulkAddLabels']] }));
+    await client.bulkAddLabels(['e1', 'e2'], ['inbox']);
+    assert.equal(callArguments(addReq)[0].methodCalls[0][1].update.e2['mailboxIds/mb-inbox'], true);
+
+    client = makeClient();
+    stubMailboxes(client, LABEL_MAILBOXES);
+    const removeReq = stubRemoval(client, {
+      e1: { 'mb-inbox': true, 'mb-receipts': true },
+      e2: { 'mb-inbox': true, 'mb-sent': true },
+    });
+    await client.bulkRemoveLabels(['e1', 'e2'], ['inbox']);
+    const update = setUpdateOf(removeReq);
+    assert.equal(update.e1['mailboxIds/mb-inbox'], null);
+    assert.equal(update.e2['mailboxIds/mb-inbox'], null);
+  });
+
+  it('serves a user label untouched, rescue included', async () => {
+    // The namespace gate must not have moved the line for the case it was never about: a
+    // role-less mailbox is a label, and removing a message's last one still files it in
+    // Archive rather than destroying it.
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
+    const result = await client.removeLabels('e1', ['Receipts']);
+    const update = setUpdateOf(makeReq);
+    assert.equal(update.e1['mailboxIds/mb-receipts'], null);
+    assert.equal(update.e1['mailboxIds/mb-archive'], true);
+    assert.deepEqual(result.rescued, ['e1']);
+  });
+
+  it('accepts a role-less mailbox that merely LOOKS like a folder', async () => {
+    // The test is the role, never the name: a user label someone called "Archive" carries no
+    // role, so it is a label and is served. A name list would refuse it.
+    client = makeClient();
+    stubMailboxes(client, [INBOX_MAILBOX, ARCHIVE_MAILBOX, { id: 'mb-my-archive', name: 'Archive', parentId: 'mb-inbox' }]);
+    const makeReq = stubRequests(client, async () =>
+      ({ methodResponses: [['Email/set', { updated: { e1: null } }, 'addLabels']] }));
+    await client.addLabels('e1', ['Inbox/Archive']); // the path form reaches the user label
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].update.e1['mailboxIds/mb-my-archive'], true);
   });
 });
 

@@ -1234,6 +1234,77 @@ function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailbox
 }
 
 /**
+ * The mailboxes named for a label write that Fastmail does not treat as labels (#133),
+ * rendered name-and-role for the refusal below.
+ *
+ * MEASURED from the client's own two pickers, not inferred. Its "Labels" picker offers the
+ * Inbox and the account's user labels and nothing else — no Archive, Trash, Spam, Drafts,
+ * Sent, Snoozed or Scheduled — while all of those appear only under "Move to". So in
+ * Fastmail's model a role mailbox is a FOLDER, with the Inbox as the sole exception: the
+ * Inbox is in both pickers, so it belongs to both namespaces.
+ *
+ * The test is therefore the ROLE, never a hardcoded name list: any role other than `inbox`
+ * is a folder, and a role-less mailbox is a user label. Deriving it this way is what keeps
+ * the rule correct as Fastmail adds roles — a fixed set would silently start accepting the
+ * next one, and a name list would refuse a user label someone happened to call "Archive".
+ *
+ * Deliberately NOT reusing ARCHIVE_REFUSING_ROLES. That set answers a different measured
+ * question (which views offer no Archive action) and has a different answer: it excludes
+ * `archive`, which is a folder here, and it says nothing about `inbox`. Folding the two
+ * together would make either measurement quietly change the other tool's behaviour.
+ */
+function findNonLabelMailboxes(resolvedIds: string[], mailboxes: any[]): string[] {
+  const byId = new Map<string, any>();
+  for (const mailbox of mailboxes || []) {
+    if (mailbox && typeof mailbox.id === 'string') byId.set(mailbox.id, mailbox);
+  }
+  const named: string[] = [];
+  const seen = new Set<string>();
+  for (const id of resolvedIds) {
+    // One mailbox named twice (as an id and as its own name, which the resolver does not
+    // collapse) is one offender, not two.
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const mailbox = byId.get(id);
+    const role = mailbox && typeof mailbox.role === 'string' ? mailbox.role.trim().toLowerCase() : '';
+    if (!role || role === 'inbox') continue;
+    const name = mailbox && typeof mailbox.name === 'string' && mailbox.name.trim() !== ''
+      ? mailbox.name
+      : id;
+    named.push(`'${clampUnresolvedValue(name)}' (${role})`);
+  }
+  return named;
+}
+
+/**
+ * The label tools' namespace check, raised through ONE message so add and remove read as a
+ * single rule rather than two lookalike refusals that can drift (the same shape
+ * delete_contact and update_contact share for the contact-group refusal).
+ *
+ * Runs AFTER mailbox resolution and BEFORE any Email/set: a caller may name a mailbox by
+ * name, role or path, so a check on the raw argument would miss every form but a role, and
+ * the whole point is that nothing is written.
+ *
+ * All-or-nothing, matching the two refusals in applyLabelRemoval next to it: one
+ * unservable entry rejects the call rather than being dropped from it. Serving the rest
+ * would apply a subset of what the caller asked for and report it as success.
+ */
+function assertLabelNamespace(resolvedIds: string[], mailboxes: any[]): void {
+  const offenders = findNonLabelMailboxes(resolvedIds, mailboxes);
+  if (offenders.length === 0) return;
+  const one = offenders.length === 1;
+  throw new InvalidInputError(
+    `${joinCapped(offenders)} ${one ? 'is a folder' : 'are folders'} in Fastmail's model, not ` +
+    `${one ? 'a label' : 'labels'}, so ${one ? 'it' : 'they'} cannot be added to or removed from a ` +
+    'message as a label. Fastmail\'s label picker offers only the Inbox and your own labels; every ' +
+    'other role mailbox (Archive, Trash, Spam, Drafts, Sent, Snoozed, Scheduled) is offered under ' +
+    '"Move to" instead. Nothing was changed. Use move_email (or bulk_move) to file a message ' +
+    `${one ? 'there' : 'in one of them'} instead. The Inbox is the one exception, because it is both: ` +
+    'removing the inbox label (which is what archiving a message is) and adding it back are served here.'
+  );
+}
+
+/**
  * The outcome of resolving ONE mailbox reference.
  *
  * `findMailboxExact` RETURNS this rather than throwing, because its two callers need
@@ -4201,7 +4272,11 @@ export class JmapClient {
 
   async addLabels(emailId: string, mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    const resolvedIds = await this.resolveMailboxIdList(mailboxIds);
+    // The list is fetched here rather than left to the resolver so the namespace check can
+    // read the resolved mailboxes' roles off the same fetch — one Mailbox/get, as before.
+    const mailboxes = await this.getMailboxes();
+    const resolvedIds = await this.resolveMailboxIdList(mailboxIds, mailboxes);
+    assertLabelNamespace(resolvedIds, mailboxes);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};
@@ -4332,6 +4407,11 @@ export class JmapClient {
     }
 
     const resolvedIds = await this.resolveMailboxIdList(mailboxIds, mailboxes);
+    // The namespace gate, before anything is written and shared with the add side. It also
+    // subsumes two guards this function used to carry: because a role mailbox can no longer
+    // enter `removing`, an emptying removal can never be one that takes Archive away, and the
+    // removed ids can never collide with the ids the rescue keeps.
+    assertLabelNamespace(resolvedIds, mailboxes);
     const removing = new Set(resolvedIds);
 
     // A non-array `list` or `notFound` must NOT degrade to empty. Degrading `list` would put
@@ -4358,16 +4438,15 @@ export class JmapClient {
     // Collected rather than thrown from inside the loop, so the error can name the ids that
     // caused it. A caller batching fifty messages cannot retry without them.
     //
-    // All three abort the WHOLE batch, and two of them (unknownFiling, archiveIsBeingRemoved)
-    // are per-message conditions — which is the opposite of the split archiveEmails draws,
-    // where a per-message problem becomes a per-message outcome and only account-wide
-    // misconfiguration throws. The difference is the result shape, not the principle: these
-    // two tools return no per-message report, so the only honest answers available are "all
-    // of it" and "none of it". Serving the servable subset would leave the caller a bare
-    // success line and no way to learn which messages were skipped. If either tool ever gains
-    // a per-message result, move these two to it rather than keeping the whole-batch abort.
+    // Both abort the WHOLE batch, and unknownFiling is a per-message condition — which is the
+    // opposite of the split archiveEmails draws, where a per-message problem becomes a
+    // per-message outcome and only account-wide misconfiguration throws. The difference is the
+    // result shape, not the principle: these two tools return no per-message report, so the
+    // only honest answers available are "all of it" and "none of it". Serving the servable
+    // subset would leave the caller a bare success line and no way to learn which messages were
+    // skipped. If either tool ever gains a per-message result, move it there rather than
+    // keeping the whole-batch abort.
     const needArchiveRole: string[] = [];
-    const archiveIsBeingRemoved: string[] = [];
     const rescued: string[] = [];
     const unchanged: string[] = [];
 
@@ -4424,30 +4503,16 @@ export class JmapClient {
           needArchiveRole.push(id);
           continue;
         }
-        // A message whose only mailbox is Archive cannot have Archive removed: that is a
-        // request to delete it, and this tool does not delete. The refusal is the answer
-        // rather than quietly serving the call and leaving the message in Archive, because
-        // a caller told "labels removed successfully" about a label that is still there has
-        // been misled about the one thing they asked for. They get told to use a tool that
-        // does what they meant instead.
-        //
-        // Refusing only when Archive is a membership this message ACTUALLY has. Removing an
-        // Archive the message was never in is inert, so it must not block the rescue — the
-        // tool description promises naming an absent label changes nothing, and a guard that
-        // fired on the mere mention of Archive broke that promise.
-        if (removing.has(archiveMailbox.id) && currentIds.includes(archiveMailbox.id)) {
-          archiveIsBeingRemoved.push(id);
-          continue;
-        }
+        // Unconditional now. This branch used to refuse when Archive was itself among the
+        // labels being removed — a request to delete the message, which this tool does not
+        // do. assertLabelNamespace above makes that unreachable: Archive carries a role, so
+        // it can never be named as a label in the first place.
         keptIds.push(archiveMailbox.id);
         rescued.push(id);
       }
 
       const patch: Record<string, any> = {};
       for (const mbId of resolvedIds) patch[`mailboxIds/${mbId}`] = null;
-      // Written after the nulls, so on the one key they can share — an Archive named for
-      // removal that this message does not carry, where the rescue still applies — the
-      // rescue's `true` replaces the no-op `null` rather than being overwritten by it.
       for (const keptId of keptIds) patch[`mailboxIds/${keptId}`] = true;
       update[id] = patch;
     }
@@ -4462,12 +4527,6 @@ export class JmapClient {
       throw new InvalidInputError(
         `This account has no mailbox with the archive role, and removing these labels would leave ${needArchiveRole.length} message(s) filed nowhere, which would destroy them: ${JmapClient.nameEmailIds(needArchiveRole)}. ` +
         'Nothing was changed, for any message in this call. Use move_email (or bulk_move) to file them somewhere else instead.'
-      );
-    }
-    if (archiveIsBeingRemoved.length > 0) {
-      throw new InvalidInputError(
-        `Removing these labels would take away every mailbox holding ${archiveIsBeingRemoved.length} message(s), including Archive itself, so there is nothing left to fall back to and they would be deleted: ${JmapClient.nameEmailIds(archiveIsBeingRemoved)}. ` +
-        'Nothing was changed, for any message in this call. Use move_email or bulk_move to file them somewhere else, or delete_email or bulk_delete to move them to Trash.'
       );
     }
 
@@ -4548,7 +4607,10 @@ export class JmapClient {
 
   async bulkAddLabels(emailIds: string[], mailboxIds: string[]): Promise<void> {
     const session = await this.getSession();
-    const resolvedIds = await this.resolveMailboxIdList(mailboxIds);
+    // Same one fetch shared by the resolver and the namespace check as addLabels.
+    const mailboxes = await this.getMailboxes();
+    const resolvedIds = await this.resolveMailboxIdList(mailboxIds, mailboxes);
+    assertLabelNamespace(resolvedIds, mailboxes);
 
     // Build patch object to add specific mailboxIds
     const patch: Record<string, any> = {};

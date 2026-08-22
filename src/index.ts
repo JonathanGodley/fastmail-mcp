@@ -543,14 +543,21 @@ const CREATE_PARENT_PARAM_DESC =
 // constants so the add/remove verb is the only thing that differs.
 const labelMailboxIdsDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
-  ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once.';
+  ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.';
+
+// Shared by all four label tools (#133). States the namespace the tools operate in, which a
+// caller cannot infer from "label" alone: Fastmail's own label picker offers the Inbox and
+// the account's user labels and nothing else, while every other role mailbox appears only
+// under "Move to".
+const LABEL_NAMESPACE_DESC =
+  ' Labels here means the Inbox and the account\'s own user labels ONLY. A mailbox with any other JMAP role (archive, trash, junk/Spam, drafts, sent, snoozed, scheduled) is a FOLDER in Fastmail\'s model, not a label — Fastmail\'s label picker does not offer it — so naming one rejects the whole call before anything is written; use move_email or bulk_move to put a message in a folder. The Inbox is the one mailbox in both namespaces: removing the inbox label is exactly what archiving a message is, and adding it is how a message is put back in the Inbox.';
 
 // Shared by remove_labels and bulk_remove_labels. A message must be filed somewhere, so a
 // removal that would take away its last mailbox needs an answer; this states the one the
 // Fastmail client gives, since a caller cannot otherwise predict where the message lands.
 const LABEL_REMOVAL_RESCUE_DESC =
-  ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. TWO cases are rejected instead of served. First: the removal would take away every mailbox holding the message AND Archive is one of them — a message held only by Archive cannot have Archive removed, because that is a request to delete it, and this tool does not delete. Second: the account has no archive-role mailbox at all, so there is no fallback to reach for. Both say so and point at move_email/bulk_move or delete_email/bulk_delete.' +
-  ' Naming a label the message does not carry changes nothing for that message, with one exception: if the SAME call empties the message, the rescue still files it in Archive even when Archive was one of the labels named for removal. That is reported.' +
+  ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. One case is rejected instead of served: the account has no archive-role mailbox at all, so there is no fallback to reach for. It says so and points at move_email/bulk_move or delete_email/bulk_delete. (Removing Archive itself never reaches that question — Archive is a folder, so the namespace rule above rejects it whatever the message is filed under.)' +
+  ' Naming a label the message does not carry changes nothing for that message.' +
   ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so. Per-message server failures are reported per message as usual.' +
   ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request (see issue #130). That combination has not been measured.';
 
@@ -692,7 +699,7 @@ const targetMailboxParamDesc = (deleteTool: 'delete_email' | 'bulk_delete') =>
 // pointer at all.
 const membershipReplaceDesc = (additiveTool: 'add_labels' | 'bulk_add_labels') =>
   'This REPLACES the message\'s entire mailbox membership: every other label/folder it was filed under is removed. ' +
-  `To file it somewhere while KEEPING its existing labels, use ${additiveTool} instead.`;
+  `To file it somewhere while KEEPING its existing labels, use ${additiveTool} instead — with one limit: the label tools take the Inbox and the account's own labels only, so a folder (any other role mailbox: Archive, Trash, Spam, Drafts, Sent, Snoozed, Scheduled) is reachable only by moving. Archiving is the exception, and archive_email is the tool for it: it drops the Inbox membership and keeps every other label.`;
 
 // What the three contacts READ tools return, written once. All three had a hand-copied
 // duplicate of this sentence and of the `verbose` parameter text below, which is how the
@@ -1790,7 +1797,7 @@ const TOOLS = [
       },
       {
         name: 'add_labels',
-        description: 'Add labels (mailboxes) to an email without removing existing ones. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
+        description: 'Add labels (mailboxes) to an email without removing existing ones. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1809,7 +1816,7 @@ const TOOLS = [
       },
       {
         name: 'remove_labels',
-        description: 'Remove specific labels (mailboxes) from an email. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_REMOVAL_RESCUE_DESC,
+        description: 'Remove specific labels (mailboxes) from an email. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC + LABEL_REMOVAL_RESCUE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1994,7 +2001,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_add_labels',
-        description: 'Add labels to multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.',
+        description: 'Add labels to multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -2014,7 +2021,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_remove_labels',
-        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. archive, trash), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_REMOVAL_RESCUE_DESC + ' The rescue is decided per message, so a batch can archive some and merely unlabel others. A rejection is NOT decided per message: one unservable id rejects the whole batch before anything is written. When some messages succeed and others fail at the server, the error still names any message the call filed in Archive.',
+        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC + LABEL_REMOVAL_RESCUE_DESC + ' The rescue is decided per message, so a batch can archive some and merely unlabel others. A rejection is NOT decided per message: one unservable id rejects the whole batch before anything is written. When some messages succeed and others fail at the server, the error still names any message the call filed in Archive.',
         inputSchema: {
           type: 'object',
           properties: {

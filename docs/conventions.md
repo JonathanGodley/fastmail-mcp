@@ -403,23 +403,34 @@ What differs is the trigger, not the resolution. `archive_email` adds Archive wh
 the only filing; `remove_labels`/`bulk_remove_labels` add it, per message, when the named labels
 were the only filing. The evidence is the same in both cases and it is narrow: removing a message's
 last **user label** in the Fastmail client leaves it in Archive, does not delete it and does not
-refuse. The client offers no remove-label action on a message in Trash, Spam or the other role
-folders, so nothing there was measured, and the rescue's behaviour for those is an extrapolation -
-fork issue #133 is where that gets settled.
+refuse. What the rescue should do for a message in Trash, Spam or the other role folders used to be
+an open extrapolation, because the client offers no remove-label action there. Fork issue #133
+settled it by measuring the client's two message-action pickers against each other: the Labels
+picker offers the Inbox and the account's own labels and nothing else, while Archive, Trash, Spam,
+Drafts, Sent, Snoozed and Scheduled appear only under "Move to". So a role mailbox is a **folder**
+in Fastmail's model, with the Inbox as the sole exception, and the label tools reject one before
+reading any message's filing - the extrapolation is not needed, because the case cannot arise. The
+test is the **role**, never a name list, so a user label someone called "Archive" is still a label
+and a role Fastmail adds later is a folder from the day it appears.
 
 Three conditions are refused rather than written, all raised before the write, so a batch
 containing one unservable message changes nothing at all:
 
-- the removal would take away every mailbox holding the message and Archive is one of them. A
-  message held only by Archive cannot have Archive removed, because that is a request to delete
-  it, and these tools do not delete. Serving the call quietly - leaving the message in Archive and
-  reporting success - was considered and rejected: a caller told "labels removed successfully"
-  about a label that is still there has been misled about the one thing they asked for;
+- some mailbox named for adding or removing is a folder rather than a label, per the namespace rule
+  above. `add_labels`, `bulk_add_labels`, `remove_labels` and `bulk_remove_labels` share one
+  message for this so the two sides read as a single rule, and it names `move_email`/`bulk_move` as
+  the tool that does what the caller meant;
 - the account has no archive-role mailbox, so there is no fallback to reach for;
 - the server did not report a readable current filing for some message in the batch, which is the
   state a removal destroys a message from.
 
-Two of those are per-message conditions aborting a whole batch, which is the opposite of the split
+The namespace rule made a fourth refusal unreachable and it was deleted rather than kept as a
+backstop: the removal emptying a message *and* taking Archive away with it cannot happen once
+Archive can never be named as a label. The same goes for the patch's null-then-true ordering, which
+existed so a rescue could win a key collision with a removal; removed ids and kept ids can no longer
+overlap.
+
+One of the three is a per-message condition aborting a whole batch, which is the opposite of the split
 `archive_email` draws. The difference is the result shape: the label tools return no per-message
 report, so "all of it" and "none of it" are the only honest answers available, and serving the
 servable subset would leave the caller a bare success line and no way to learn what was skipped.
