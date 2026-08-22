@@ -512,6 +512,11 @@ const zoneCanonicalizationCache = new Map<string, string>();
  *
  * Cached by exact input string: `zoneNamesEqual` runs once per event on every calendar list
  * read, and constructing an `Intl.DateTimeFormat` per call is not free.
+ *
+ * The cache is deliberately unbounded. Its keys are TZID strings out of the account holder's own
+ * calendar plus the configured and caller-supplied zone names, so the distinct set is the handful
+ * of zones that account actually uses — there is no path by which an untrusted party feeds it
+ * unbounded distinct strings. An eviction policy here would cost more than it could ever save.
  */
 export function canonicalZoneName(zone: string): string {
   const cached = zoneCanonicalizationCache.get(zone);
