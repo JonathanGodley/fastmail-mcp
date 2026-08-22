@@ -2477,6 +2477,104 @@ describe('updateDraft wildcard identity', () => {
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
   });
+
+  // Both fixtures above are nameless drafts, so they stayed green under the old precedence
+  // too and don't pin #152 for the wildcard-identity path specifically. This one does.
+  it('keeps the draft\'s own name over a wildcard identity on a metadata-only edit (#152)', async () => {
+    const namedWild = { ...EXISTING_DRAFT, from: [{ name: 'Work Sender', email: 'work@example.com' }] };
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [namedWild] }, 'getEmail']] };
+      }
+      return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+    });
+
+    await client.updateDraft('draft-1', { subject: 'Changed subject only' });
+
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Work Sender', email: 'work@example.com' }]);
+  });
+});
+
+// ---------- updateDraft display-name resolution (#152) ----------
+//
+// Reversed precedence: the name the stored draft already carries against the address being
+// written wins over the verified identity's configured name, which is now only a fallback
+// for a draft that carries none. See writtenFromName in src/jmap-client.ts.
+describe('updateDraft display name resolution', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient(); // getIdentities -> [IDENTITY] = { name: 'Test User', email: 'me@example.com' }
+  });
+
+  it('keeps the draft\'s own display name over a differently-named identity (#152)', async () => {
+    const named = { ...EXISTING_DRAFT, from: [{ name: 'Custom Sender', email: 'me@example.com' }] };
+    const makeReq = mockUpdate(client, named);
+
+    await client.updateDraft('draft-1', { subject: 'New Subject' });
+
+    assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Custom Sender', email: 'me@example.com' }]);
+  });
+
+  it('falls back to the identity\'s name when the stored draft carries none', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT); // from: [{ email: 'me@example.com' }], no name
+
+    await client.updateDraft('draft-1', { subject: 'New Subject' });
+
+    assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Test User', email: 'me@example.com' }]);
+  });
+
+  it('falls back to the identity\'s name when the stored name is empty/whitespace-only (#152)', async () => {
+    const blankName = { ...EXISTING_DRAFT, from: [{ name: '   ', email: 'me@example.com' }] };
+    const makeReq = mockUpdate(client, blankName);
+
+    await client.updateDraft('draft-1', { subject: 'New Subject' });
+
+    assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Test User', email: 'me@example.com' }]);
+  });
+
+  it('keeps a foreign-address draft\'s own name, with no identity name leaking in', async () => {
+    const foreign = { ...EXISTING_DRAFT, from: [{ name: 'Elsewhere Sender', email: 'gone@elsewhere.example' }] };
+    const makeReq = mockUpdate(client, foreign);
+
+    await client.updateDraft('draft-1', { subject: 'New Subject' });
+
+    assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Elsewhere Sender', email: 'gone@elsewhere.example' }]);
+  });
+
+  it('writes the new identity\'s name when the caller switches to a different own address, not the old stored name', async () => {
+    const altIdentity = { id: 'id-2', name: 'Alias User', email: 'alias@example.com', mayDelete: true };
+    mock.method(client, 'getIdentities', async () => [IDENTITY, altIdentity]);
+    const named = { ...EXISTING_DRAFT, from: [{ name: 'Custom Sender', email: 'me@example.com' }] };
+    const makeReq = mockUpdate(client, named);
+
+    await client.updateDraft('draft-1', { from: 'alias@example.com' });
+
+    assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Alias User', email: 'alias@example.com' }]);
+  });
+
+  // The stored-name address match must be case-insensitive: matchesIdentity (used to find
+  // signingIdentity) lowercases both sides, so a caller re-passing the SAME mailbox in a
+  // different case must not make the stored-name comparison miss and fall through to the
+  // identity's name — that fallthrough is exactly the revert #152 exists to stop.
+  it('keeps the draft\'s own name when the caller re-passes the same address in a different case (#152)', async () => {
+    const mixedCase = { ...EXISTING_DRAFT, from: [{ name: 'Custom Sender', email: 'Me@Example.com' }] };
+    const makeReq = mockUpdate(client, mixedCase);
+
+    await client.updateDraft('draft-1', { from: 'me@example.com' });
+
+    assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Custom Sender', email: 'me@example.com' }]);
+  });
+
+  it('keeps the draft\'s own name when the caller re-passes the identical stored address', async () => {
+    const named = { ...EXISTING_DRAFT, from: [{ name: 'Custom Sender', email: 'me@example.com' }] };
+    const makeReq = mockUpdate(client, named);
+
+    await client.updateDraft('draft-1', { from: 'me@example.com' });
+
+    assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Custom Sender', email: 'me@example.com' }]);
+  });
 });
 
 // ---------- version sync ----------
