@@ -2554,16 +2554,26 @@ export class JmapClient {
     const signingIdentity = writtenFromAddress
       ? identities.find((id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, writtenFromAddress))
       : undefined;
-    // The display name written alongside that address, resolved in the SAME order the
-    // address was: the verified identity that owns it, else the name the stored draft
-    // already carried against it, else none. `selectedIdentity.name` is deliberately not a
-    // fallback — it is the account default's name, and on the very path the hoisted address
-    // exists for (a stored `from` matching no verified identity) pairing the two puts the
-    // default identity's name in front of a foreign address.
+    // The display name written alongside that address, resolved in the OPPOSITE order from
+    // the address itself (#152): the name the stored draft already carries against that
+    // address wins first, and the verified identity's name is only a fallback for a draft
+    // that carries none. `edit_draft`'s contract is that only passed fields change — a
+    // caller who deliberately set a display name on their own address must not have it
+    // silently reverted to the identity's configured name by a later edit that never even
+    // touched `from`. A stored name against a FOREIGN address (signingIdentity undefined)
+    // survives for the same reason: there is no identity name to fall back to, so the
+    // draft's own name is kept. `selectedIdentity.name` is deliberately not a fallback here
+    // either — it is the account default's name, and on the very path the hoisted address
+    // exists for (a stored `from` matching no verified identity) pairing the two would put
+    // the default identity's name in front of a foreign address.
     const storedFromName = existingEmail.from?.[0]?.email === writtenFromAddress
       ? existingEmail.from?.[0]?.name
       : undefined;
-    const writtenFromName: string | null = signingIdentity?.name ?? storedFromName ?? null;
+    // A blank or whitespace-only stored name is treated as no name at all, so it cannot
+    // beat a real identity name below; a genuine stored name is written through unchanged.
+    const storedFromNameIfPresent: string | undefined =
+      storedFromName && storedFromName.trim() !== '' ? storedFromName : undefined;
+    const writtenFromName: string | null = storedFromNameIfPresent ?? signingIdentity?.name ?? null;
     const editSignature = signatureOf(signingIdentity);
     let reAppendedSignature = false;
     // Armed by the stored draft (preserve) or by the flag (add), and dropped when neither.

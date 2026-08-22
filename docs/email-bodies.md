@@ -433,11 +433,21 @@ from that fallback would put one identity's sign-off under another identity's ad
 signature is resolved against the written address instead, and the draft losing its signature
 that way is reported.
 
-The **display name** follows the same address, and for the same reason. It resolves in the
-same order: the verified identity that owns the written address, else the name the stored
-draft already carried against it, else none. The account default's name is deliberately *not*
-a fallback — pairing it with a foreign address is the identical drift, one step to the left of
-the sign-off.
+The **display name** follows the same address, but resolves in the *opposite* order (#152):
+the name the stored draft already carries against that address wins first, and the verified
+identity that owns the address is only a fallback for a draft that carries none.
+`edit_draft`'s contract is that only passed fields change, so a caller who deliberately set a
+display name on their own address must not have it silently reverted to the identity's
+configured name by a later edit that never even touched `from` — a metadata-only edit (say,
+changing only the subject or a recipient) was doing exactly that before #152. The account
+default's name is still deliberately *not* a fallback — pairing it with a foreign address is
+the identical drift, one step to the left of the sign-off.
+
+One consequence of this order is a documented residual, not a bug: a draft whose `from`
+matches no verified identity (an address removed from the account, or a draft made
+elsewhere) keeps whatever name it already carried against that foreign address, because
+there is no identity name to fall back to and no verified identity to overwrite it with.
+`edit_draft` never invents or strips a name for an address the account cannot send as.
 
 ## Reply-quote preservation on edit (#37, redesigned #42)
 
