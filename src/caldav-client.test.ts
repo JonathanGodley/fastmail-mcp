@@ -38,6 +38,10 @@ import { callArguments } from './testing/mock-calls.js';
 // The calendar window's local-day resolution reads the deployment's configured zone from
 // the single place it is stored, so a test that asserts on a window has to pin that zone.
 import { setDefaultTimezone } from './email-formatter.js';
+// For the timeZone/endTimeZone serialisation check: `toolJson` is the seam get_calendar_event
+// renders through, `formatQueryResult` is the one list_calendar_events renders through.
+import { toolJson } from './coerce.js';
+import { formatQueryResult } from './response-formatters.js';
 
 // The mocked DAVClient methods below declare these parameter lists rather than
 // taking no arguments. A `mock.fn(async () => …)` stub records its arguments as an
@@ -273,6 +277,198 @@ describe('parseCalendarObject', () => {
     assert.equal(event.description, undefined);
     assert.equal(event.location, undefined);
     assert.equal(event.end, undefined);
+  });
+});
+
+// The emit matrix for `timeZone`/`endTimeZone` (#139) — see the field comments on
+// `CalendarEvent` in src/caldav-client.ts and the "Calendar times: a name, never an offset"
+// section of docs/conventions.md for the rule these tests hold to. `configuredZone` is passed
+// directly rather than through `setDefaultTimezone`, so these are deterministic regardless of
+// the test host's own zone.
+describe('timeZone / endTimeZone (#139)', () => {
+  const CONFIGURED = 'Australia/Sydney';
+
+  it('emits timeZone with the name when the TZID differs from the configured zone', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:diff@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000',
+      'DTEND;TZID=Pacific/Auckland:20260320T093000',
+      'SUMMARY:NZ meeting',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Pacific/Auckland');
+  });
+
+  it('omits timeZone when the TZID matches the configured zone, including a different case', () => {
+    const exact = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:same@fm',
+      'DTSTART;TZID=Australia/Sydney:20260320T083000',
+      'SUMMARY:Standup',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    assert.equal(parseCalendarObject({ data: exact, url: '' }, { configuredZone: CONFIGURED }).timeZone, undefined);
+
+    const differentCase = exact.replace('TZID=Australia/Sydney', 'TZID=australia/sydney');
+    assert.equal(
+      parseCalendarObject({ data: differentCase, url: '' }, { configuredZone: CONFIGURED }).timeZone,
+      undefined,
+    );
+  });
+
+  it('emits timeZone: null for a genuinely floating start (no TZID, no Z)', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:floating@fm',
+      'DTSTART:20260320T083000',
+      'SUMMARY:Floating',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, null);
+  });
+
+  it('omits timeZone for a Z-designated instant', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:utc@fm',
+      'DTSTART:20260320T083000Z',
+      'SUMMARY:UTC',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, undefined);
+  });
+
+  it('omits timeZone for a date-only (all-day) value', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:allday@fm',
+      'DTSTART;VALUE=DATE:20260320',
+      'SUMMARY:All day',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, undefined);
+  });
+
+  it('emits endTimeZone only when end is in a different TZID from start', () => {
+    const flight = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:flight@fm',
+      'DTSTART;TZID=Australia/Sydney:20260320T083000',
+      'DTEND;TZID=Pacific/Auckland:20260320T113000',
+      'SUMMARY:Flight to Auckland',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const flightEvent = parseCalendarObject({ data: flight, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(flightEvent.timeZone, undefined, 'start matches the configured zone');
+    assert.equal(flightEvent.endTimeZone, 'Pacific/Auckland');
+
+    const sameZonePair = flight.replace('DTEND;TZID=Pacific/Auckland', 'DTEND;TZID=Australia/Sydney');
+    const sameZoneEvent = parseCalendarObject({ data: sameZonePair, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(sameZoneEvent.endTimeZone, undefined);
+  });
+
+  it('omits endTimeZone when end was computed from DURATION rather than a stored DTEND', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:dur@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000',
+      'DURATION:PT1H',
+      'SUMMARY:Duration event',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    // start's own zone still comes through...
+    assert.equal(event.timeZone, 'Pacific/Auckland');
+    // ...but there is no raw DTEND line to disagree with, so nothing to report.
+    assert.equal(event.endTimeZone, undefined);
+  });
+
+  it('unquotes a quoted TZID value', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:quoted@fm',
+      'DTSTART;TZID="Pacific/Auckland":20260320T083000',
+      'SUMMARY:Quoted TZID',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Pacific/Auckland');
+  });
+
+  it('passes a non-IANA (Windows) TZID through verbatim, neither rejecting nor resolving it', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:windows@fm',
+      'DTSTART;TZID=AUS Eastern Standard Time:20260320T083000',
+      'SUMMARY:Third-party invite',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'AUS Eastern Standard Time');
+  });
+
+  it('compares endTimeZone against the configured zone when start is absent entirely', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:noStart@fm',
+      'DTEND;TZID=Pacific/Auckland:20260320T093000',
+      'SUMMARY:No DTSTART',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, undefined);
+    assert.equal(event.endTimeZone, 'Pacific/Auckland');
+  });
+
+  it('survives the toolJson (get_calendar_event) and formatQueryResult (list_calendar_events) serialisation seams', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:floating@fm',
+      'DTSTART:20260320T083000',
+      'SUMMARY:Floating',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, null);
+
+    // toolJson: JSON.stringify keeps a null key; a lossy formatter would drop it like undefined.
+    const single = JSON.parse(toolJson(event));
+    assert.equal(single.timeZone, null);
+    assert.ok('timeZone' in single, 'timeZone key must survive toolJson, not just its value');
+
+    // formatQueryResult: summary line followed by a JSON array of items.
+    const rendered = formatQueryResult({ items: [event], total: 1 });
+    const jsonLine = rendered.split('\n')[1];
+    const parsed = JSON.parse(jsonLine);
+    assert.equal(parsed[0].timeZone, null);
+    assert.ok('timeZone' in parsed[0], 'timeZone key must survive formatQueryResult, not just its value');
   });
 });
 
@@ -4697,6 +4893,35 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
     sortEventsByStart(events, 'Australia/Sydney');
     assert.deepEqual(events.map(e => e.id), ['bad', 'good']);
   });
+
+  it('orders by an event\'s OWN named zone (#139), not the configured zone passed in', () => {
+    // Both starts read as the same bare wall-clock digits, but one event carries its own
+    // timeZone naming a zone hours behind the one passed as the fallback. Sorting on the
+    // fallback alone would treat them as simultaneous; sorting on each event's own zone
+    // does not.
+    const events = [
+      { id: 'auckland', title: 'NZ', start: '2026-03-25T08:00:00', timeZone: 'Pacific/Auckland' },
+      { id: 'sydney', title: 'AU', start: '2026-03-25T08:00:00' },
+    ] as any[];
+    sortEventsByStart(events, 'Australia/Sydney');
+    // Auckland is ahead of Sydney, so the same wall-clock digits there are an EARLIER instant.
+    assert.deepEqual(events.map(e => e.id), ['auckland', 'sydney']);
+  });
+
+  it('falls back to the configured zone for an event whose own timeZone cannot be resolved', () => {
+    // zoneOffsetMsAt silently resolves an unusable name against the HOST zone, not the
+    // configured one — sorting a Windows TZID straight through it would place the event in
+    // whichever zone the test happens to run on. The isUsableTimezone guard is what keeps
+    // this event pinned to the configured (Sydney) fallback instead.
+    const events = [
+      { id: 'windows', title: 'Third-party', start: '2026-03-25T08:00:00', timeZone: 'AUS Eastern Standard Time' },
+      { id: 'sydney', title: 'AU', start: '2026-03-25T08:00:00' },
+    ] as any[];
+    sortEventsByStart(events, 'Australia/Sydney');
+    // Read in the same (Sydney) fallback zone, identical wall-clock digits are simultaneous,
+    // so the pre-existing stable order is preserved rather than either one jumping ahead.
+    assert.deepEqual(events.map(e => e.id), ['windows', 'sydney']);
+  });
 });
 
 describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () => {
@@ -4855,6 +5080,42 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     const { client: c2 } = mockedClient([{ data: oneOff, url: '/cal/oneoff.ics' }]);
     const { total: t2 } = await c2.getCalendarEvents(undefined, 50, '2027-03-01', '2027-03-10');
     assert.equal(t2, 0);
+  });
+
+  // End-to-end wiring check for #139: the configured zone this `describe` block pins in
+  // `before` (Australia/Sydney, deliberately NOT whatever zone the test host happens to run
+  // in) must reach the parser as an injected parameter and drive the omit-when-same rule for
+  // real, not just when `configuredZone` is passed directly to `parseCalendarObject`.
+  it('wires the pinned configured zone through to timeZone omit-when-same and emit-when-different', async () => {
+    const sameZone = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:same@fm',
+      'DTSTART;TZID=Australia/Sydney:20260320T083000',
+      'DTEND;TZID=Australia/Sydney:20260320T093000',
+      'SUMMARY:Standup',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const differentZone = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:different@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000',
+      'DTEND;TZID=Pacific/Auckland:20260320T093000',
+      'SUMMARY:Standup NZ',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client } = mockedClient([
+      { data: sameZone, url: '/cal/same.ics' },
+      { data: differentZone, url: '/cal/different.ics' },
+    ]);
+    const { events } = await client.getCalendarEvents(undefined, 50);
+    const same = events.find(e => e.id === 'same@fm')!;
+    const different = events.find(e => e.id === 'different@fm')!;
+    assert.equal(same.timeZone, undefined);
+    assert.equal(different.timeZone, 'Pacific/Auckland');
   });
 
   it('will not write into, or delete from, a calendar the read path refuses to read', async () => {

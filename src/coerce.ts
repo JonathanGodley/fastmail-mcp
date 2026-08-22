@@ -482,7 +482,7 @@ function hostTimezone(): string {
 }
 
 /** Whether ICU can actually resolve an IANA name, as opposed to it merely being a string. */
-function isUsableTimezone(zone: string): boolean {
+export function isUsableTimezone(zone: string): boolean {
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: zone });
     return true;
@@ -494,6 +494,17 @@ function isUsableTimezone(zone: string): boolean {
 // A misconfigured zone name is echoed back to the caller, so it is bounded and stripped of
 // the control characters that would forge extra lines in an error message.
 const ZONE_ECHO_LIMIT = 40;
+
+/**
+ * The IANA name actually used for a configured zone: `zone` itself when it is set and ICU can
+ * resolve it, otherwise the host's own zone. This is the one place that decides which zone
+ * wins — `describeTimezone` and every calendar read path call through here rather than
+ * re-deriving the fallback, so there is exactly one rule for "which zone is really in force."
+ */
+export function resolveUsableTimezone(zone: string | undefined): string {
+  if (zone && isUsableTimezone(zone)) return zone;
+  return hostTimezone();
+}
 
 /**
  * The IANA name to show a caller, resolving `undefined` to whatever the host zone is.
@@ -515,7 +526,7 @@ export function describeTimezone(zone: string | undefined): string {
   // Through the shared echo, so a cut zone name shows that it was cut. Slicing silently at
   // 40 characters printed a name the caller could neither recognise nor correct.
   const echoed = echoCallerText(zone, ZONE_ECHO_LIMIT);
-  return `${hostTimezone()} (the configured time zone "${echoed}" is not a time zone this server can resolve, ` +
+  return `${resolveUsableTimezone(zone)} (the configured time zone "${echoed}" is not a time zone this server can resolve, ` +
     "so this server's own zone was used)";
 }
 

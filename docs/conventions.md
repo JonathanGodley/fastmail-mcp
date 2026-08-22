@@ -1323,50 +1323,90 @@ The frame check is deliberately *not* applied when the caller touches neither `s
 `end`: it exists to stop us writing a broken pair, not to hold a title edit hostage to an
 inconsistency some other client left in the event.
 
-### The read path loses one frame, so its window filter can only widen
+### The read path carries the zone name now; its window filter still only widens, on purpose
 
 The four frames survive intact on the *write* path, where the property line is built and
-inspected whole. Reading is lossy: `formatICalDate` takes only the property's **value**, so
-`DTSTART;TZID=Australia/Sydney:20270305T083000` and a floating `DTSTART:20270305T083000`
-both become `2027-03-05T08:30:00`. The **name** is what is gone by the time a `CalendarEvent`
-exists, and nothing downstream can get it back.
+inspected whole. Reading USED TO be lossy: `formatICalDate` takes only the property's
+**value**, so `DTSTART;TZID=Australia/Sydney:20270305T083000` and a floating
+`DTSTART:20270305T083000` both become the bare `2027-03-05T08:30:00`, and by the time a
+`CalendarEvent` existed the frame had collapsed to indistinguishable digits — the **name**
+was gone and nothing downstream could get it back.
 
-Do not read that as "this server cannot resolve a zone". It can — `zoneOffsetMsAt` resolves
-any IANA name through ICU, and both the window bounds and the result ordering rely on it.
-What is missing is the name to resolve, because the parser discarded it. Carrying the TZID
-through to the parsed event is [#139](https://github.com/JonathanGodley/fastmail-mcp/issues/139);
-until it lands, three consequences follow.
+That is fixed ([#139](https://github.com/JonathanGodley/fastmail-mcp/issues/139)). `start`/
+`end` themselves are UNCHANGED — still a bare local wall clock, a `Z` instant, or a date-only
+value, because this server never puts an offset in a calendar value on read any more than it
+accepts one on write. What changed is that `parseVEvent` now ALSO reads the raw DTSTART/DTEND
+**lines** (`parseAllICalProperties`, not just `parseICalValue`) and classifies each one with
+`describeDateProperty` — the same classifier `validateDateConsistency` uses on write, so read
+and write agree about what a `zoned` value is — and carries the result forward as `timeZone`
+(describing `start`) and `endTimeZone` (describing `end`, relative to `start`) on the parsed
+`CalendarEvent`. Never an offset: the whole reason for a NAME here is the same reason
+`validateDateConsistency`'s zoned/zoned exemption exists on write — an offset is only valid
+at one instant, and delegating DST to the reader's own zone database is the entire point.
 
-**One: the returned `start`/`end` may be a zone-stripped wall clock, and both tool
-descriptions say so.** This is a promised field arriving degraded, so it is disclosed rather
-than left to be discovered: a value ending in `Z` is an instant, and a value with no
-designator is digits on somebody's clock. The exposure is `get_calendar_event` (always) and
-`list_calendar_events` with no window; a windowed query is safe, because Cyrus normalises
-expanded occurrences to UTC (measured, not assumed).
+**The emit rule.** `timeZone` is set from `start`'s classification: a `tzid` differing from
+the account's configured zone emits the name; a `tzid` MATCHING it omits, because the
+overwhelming majority of rows are already in the configured zone and silence there is the
+token-cheap default (a caller reads "absent" as "the configured zone"); `floating` emits
+`null`, because "no zone, a different instant per reader" is the whole fact and there is
+nothing else to say; `date` (all-day) and `utc` (`Z`-suffixed) both OMIT rather than emit
+`null` — both frames already fully describe themselves, and `null` there would assert
+"floating", a different and wrong fact. `endTimeZone` applies the identical rule to `end`,
+but compared against `start`'s own classification (falling back to the configured zone only
+when `start` itself is absent) rather than against the configured zone directly — RFC 5545
+§3.8.5.3 and `validateDateConsistency`'s zoned/zoned exemption both permit a start and an end
+in two different named zones, the flight-lands-elsewhere case (#140), so `endTimeZone` is how
+that legal shape is disclosed on read. A `DURATION`-computed `end` has no raw `DTEND` line to
+classify at all, so it reads back `absent` and `endTimeZone` omits — a computed end shares
+`start`'s zone by construction, so there is nothing to disagree about.
 
-**Two: results are ORDERED by a resolved instant, not by the spelling.** A calendar mixes
-both forms — Fastmail writes a user-created event against a named zone, an external
-invitation usually arrives in UTC — and `localeCompare` on those two spellings interleaves
-them by their digits, putting a genuinely earlier event after a later one. `limit` slices
-that list, and expansion means the cap is reached often, so the wrong order silently drops
-events under a summary line promising the earliest N. `sortEventsByStart` therefore resolves
-each start through `resolveCalendarInstantMs`, reading a designator-less value in the
-configured zone. That is a best-effort placement of a value whose real zone was already lost,
-not a claim to have recovered it — an event stored in a third zone still sorts by the local
-reading of its wall clock — and it is never worse than comparing the text.
+**One: the returned `start`/`end` is still a bare wall clock, but a caller no longer has to
+guess whether that means "floating" or "the configured zone".** Both read tools' descriptions
+state the emit rule once, naming the configured zone, rather than leaving a model to infer it
+from a disclosure written for the old, lossy behaviour.
 
-**Three: the window re-filter can only widen.** `eventIntersectsWindow` (the client-side
-re-filter behind `list_calendar_events`) is built to **drop only what provably cannot
-intersect**, rather than to decide membership.
-Any value with no zone designator is widened by ±14 hours, the largest UTC offset any IANA
-zone has used, so a zone-carrying event near a window edge is kept even though its true
-instant is unknown here. The residue that leaves is accepted deliberately: the CalDAV server
-is the authority on time-range matching (RFC 4791 §9.9, occurrence-based), and this filter
-exists only to catch what that matching cannot express — the server matches per *occurrence*
-but returns whole *resources*, so an unexpanded series arrives showing a master `DTSTART`
-that may be years outside the window (#64). Erring the other way would discard events the
-server correctly matched, which turns a busy day into a free one; an extra row a caller can
-see and dismiss is the cheaper error.
+**Two: results are still ORDERED by a resolved instant, but now in the event's OWN zone when
+it resolves, not only the configured one.** `sortEventsByStart` reads `event.timeZone`; when
+it is a `tzid` `isUsableTimezone` can resolve, that zone is used — a correct reading, not the
+old best-effort one. The configured zone remains the fallback, for two cases only: a
+genuinely floating `start` (there is no zone to sort it in, so the caller's own clock is the
+least-wrong guess) and a `timeZone` this server was HANDED but cannot resolve (a Windows zone
+name such as `AUS Eastern Standard Time`, passed through verbatim rather than rejected — see
+below). That guard is not cosmetic: `zoneOffsetMsAt` silently falls back to the HOST zone for
+an unresolvable name, so sorting by an unresolvable `timeZone` directly would place that one
+event in the *host's* zone rather than the account's configured one — a regression on the
+zone-blind behaviour this replaces, which is exactly why `isUsableTimezone` gates it.
+
+**Non-IANA names pass through verbatim, on purpose.** A calendar written by a non-Fastmail
+client can carry a Windows zone name in its `TZID` rather than an IANA one. This server does
+not reject it or try to resolve it: `timeZone`/`endTimeZone` reports the stored name exactly
+as written, because the offset-shape alternative could not represent it at all (ICU will not
+resolve a Windows name, so there is no offset to compute), and a name-carrying shape at least
+lets a caller that understands Windows zone names use it. `resolveUsableTimezone` in
+`src/coerce.ts` is the one place that decides which zone is actually IN FORCE for reads —
+`describeTimezone` and every calendar read path call through it rather than re-deriving the
+host-zone fallback separately.
+
+**Three: the window re-filter can still only widen, and that is now a choice, not a gap.**
+`eventIntersectsWindow` (the client-side re-filter behind `list_calendar_events`) is built to
+**drop only what provably cannot intersect**, rather than to decide membership, and it is
+unchanged by #139: `MAX_UTC_OFFSET_MS` still grants ±14 hours of slack to any
+zone-designator-less value, on both edges, so a zone-carrying event near a window edge is
+kept even though its true instant is unknown here. Before #139 that width was FORCED — the
+parser had already discarded the name, so there was nothing narrower to check a value
+against. The name is no longer missing: it sits on the parsed event as
+`timeZone`/`endTimeZone`. The slack stays wide anyway, deliberately, because narrowing it to
+a per-event zone would trade one visible extra row today for an invisible missing one the
+moment a name fails to resolve, is spelled unusually, or belongs to a value
+`eventIntersectsWindow` is not even handed — its signature takes only `start`/`end`, not the
+zone fields, so tightening it is a real, separately-tested follow-up, not a one-line change
+folded in here. The residue this leaves is accepted deliberately for a second reason too: the
+CalDAV server is the authority on time-range matching (RFC 4791 §9.9, occurrence-based), and
+this filter exists only to catch what that matching cannot express — the server matches per
+*occurrence* but returns whole *resources*, so an unexpanded series arrives showing a master
+`DTSTART` that may be years outside the window (#64). Erring the other way would discard
+events the server correctly matched, which turns a busy day into a free one; an extra row a
+caller can see and dismiss is the cheaper error.
 
 **The residue that actually shows up is an ALL-DAY event, not a zoned one.** Measured live:
 `{startDate: "2026-08-01", endDate: "2026-08-31"}` on a UTC+10 account returns
@@ -1404,13 +1444,14 @@ Fastmail today (measured in `calendar-expand.probe.mjs`), and it stays as resili
 than being removed, because the claim that this filter "closes the gap if a server declines to
 expand" was false in the dangerous direction until the guard existed.
 
-The window's own bounds never lose a zone the way an iCal value does: they are normalised
-once by `coerceCalendarWindowStart` / `coerceCalendarWindowEnd` and used for both the server's
-`time-range` and this filter, so the two cannot disagree about which days were asked for.
+The window's own bounds are a separate concern from an event's stored zone entirely: they
+never carry a TZID at all, and are normalised once by `coerceCalendarWindowStart` /
+`coerceCalendarWindowEnd` and used for both the server's `time-range` and this filter, so the
+two cannot disagree about which days were asked for.
 
-**That is a statement about TZID loss, and it is not the whole story — the bounds had their
-own zone bug (#138).** Read the paragraph above as "the bounds cannot drift apart from each
-other", never as "the bounds are fine". They were resolved as UTC days, so on a UTC+10 account
+**That is a statement about the bounds agreeing with EACH OTHER, and it is not the whole
+story — the bounds had their own zone bug (#138).** Read the paragraph above as "the bounds
+cannot drift apart from each other", never as "the bounds are fine". They were resolved as UTC days, so on a UTC+10 account
 `startDate: 2026-08-12` searched 12 Aug 10:00 to 13 Aug 10:00 local and a day holding three
 appointments answered with one. Two missing events look exactly like a quiet morning, which is
 the same silent-under-report failure the rest of this section is about, arriving through the

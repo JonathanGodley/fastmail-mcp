@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -1361,6 +1361,32 @@ describe('describeTimezone', () => {
     const host = describeTimezone(undefined);
     assert.ok(host && host.length > 0);
     assert.equal(host, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  });
+});
+
+// resolveUsableTimezone (#139) is the single decision point describeTimezone and every calendar
+// read path share for "which zone is really in force" — these pin that it is not just an
+// internal helper of describeTimezone's wording, but returns the resolved NAME itself.
+describe('resolveUsableTimezone', () => {
+  it('returns the configured zone when it is set and resolvable', () => {
+    assert.equal(resolveUsableTimezone('Australia/Sydney'), 'Australia/Sydney');
+  });
+
+  it('falls back to the host zone when nothing is configured', () => {
+    assert.equal(resolveUsableTimezone(undefined), Intl.DateTimeFormat().resolvedOptions().timeZone);
+  });
+
+  it('falls back to the host zone when the configured value is not one ICU can resolve', () => {
+    // A non-IANA name (e.g. a Windows zone from an external invite) is a valid TZID to echo
+    // verbatim on an event, but it is not a usable CONFIGURED zone — there is nothing to
+    // compare an event's own zone against, so the host zone is what is actually in force.
+    assert.equal(resolveUsableTimezone('AUS Eastern Standard Time'), Intl.DateTimeFormat().resolvedOptions().timeZone);
+  });
+
+  it('agrees with isUsableTimezone on what counts as resolvable', () => {
+    assert.equal(isUsableTimezone('Australia/Sydney'), true);
+    assert.equal(isUsableTimezone('Not/AZone'), false);
+    assert.equal(resolveUsableTimezone('Not/AZone') === 'Not/AZone', isUsableTimezone('Not/AZone'));
   });
 });
 
