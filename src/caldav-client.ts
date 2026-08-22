@@ -1937,7 +1937,7 @@ export class CalDAVCalendarClient {
   private async getClient(): Promise<DAVClient> {
     if (this.client) return this.client;
 
-    this.client = new DAVClient({
+    const client = new DAVClient({
       serverUrl: this.config.serverUrl || 'https://caldav.fastmail.com',
       credentials: {
         username: this.config.username,
@@ -1954,7 +1954,32 @@ export class CalDAVCalendarClient {
       fetchOptions: { redirect: 'error' },
     });
 
-    await this.client.login();
+    // Built into a local and only assigned to `this.client` after login() resolves
+    // (#143). The previous code assigned `this.client` before the await, so a
+    // rejected login still left an unauthenticated client cached on this long-lived
+    // instance: every later call took the `if (this.client)` fast path above, handed
+    // out the dead client, and failed downstream inside tsdav with a bare "no account
+    // for fetchCalendars" instead of the real auth error. Keeping the client local
+    // until login succeeds makes the invariant structural — `this.client` only ever
+    // holds a logged-in client — so a failed login here means the next call retries
+    // login instead of reusing a dead one.
+    try {
+      await client.login();
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      // A login rejection is a credentials/config problem, not a caller argument
+      // problem, so this stays a plain Error (InternalError) rather than
+      // InvalidInputError — same classification as validateOrganizerUsername above.
+      // tsdav's own message doesn't say which credential is wrong, and the CalDAV
+      // app password is a separate credential from the Fastmail JMAP API token used
+      // elsewhere in this server, so name it explicitly.
+      throw new Error(
+        `CalDAV login failed: ${detail}. Check the configured CalDAV app password ` +
+        `(a separate credential from the Fastmail JMAP API token).`,
+      );
+    }
+
+    this.client = client;
     return this.client;
   }
 

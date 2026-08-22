@@ -3603,6 +3603,69 @@ describe('CalDAV requests refuse to follow redirects', () => {
   });
 });
 
+// A failed CalDAV login used to still cache the unauthenticated client (getClient()
+// assigned `this.client` before awaiting login()), so every later call took the
+// `if (this.client)` fast path and failed downstream inside tsdav with a bare "no
+// account for fetchCalendars" instead of the real auth error (#143). getClient() now
+// only caches the client once login() has resolved.
+describe('CalDAV login failure is not cached (#143)', () => {
+  it('does not cache the client after a failed login, so a second call retries the login and surfaces the auth error again', async () => {
+    const realLogin = DAVClient.prototype.login;
+    const loginMock = mock.fn(async () => {
+      throw new Error('Invalid credentials');
+    });
+    DAVClient.prototype.login = loginMock as unknown as typeof realLogin;
+
+    try {
+      const wrapper = new CalDAVCalendarClient({ username: 'test@example.com', password: 'wrong' });
+
+      const isAuthError = (err: unknown) =>
+        err instanceof Error && err.message.includes('CalDAV login failed') && err.message.includes('app password');
+
+      // getClient() is private; going through a public method would make this
+      // depend on that method's own behaviour as well as getClient()'s.
+      await assert.rejects((wrapper as any).getClient(), isAuthError);
+      assert.equal(loginMock.mock.calls.length, 1, 'expected the first call to attempt exactly one login');
+
+      // The bug: this second call used to return the client cached by the first
+      // (failed) call instead of retrying, so it never reached login() again and
+      // instead failed later, downstream, with a different and less useful message.
+      await assert.rejects(
+        (wrapper as any).getClient(),
+        isAuthError,
+        'expected the second call to surface the same auth error, not a different downstream failure from a stale cached client'
+      );
+      assert.equal(
+        loginMock.mock.calls.length,
+        2,
+        'expected getClient() to attempt a fresh login on the second call rather than returning a cached, unauthenticated client'
+      );
+    } finally {
+      DAVClient.prototype.login = realLogin;
+    }
+  });
+});
+
+describe('CalDAV login success is still cached', () => {
+  it('logs in once and reuses the same client across two getClient() calls', async () => {
+    const realLogin = DAVClient.prototype.login;
+    const loginMock = mock.fn(async function (this: DAVClient) {});
+    DAVClient.prototype.login = loginMock as unknown as typeof realLogin;
+
+    try {
+      const wrapper = new CalDAVCalendarClient({ username: 'test@example.com', password: 'pw' });
+
+      const first = await (wrapper as any).getClient();
+      const second = await (wrapper as any).getClient();
+
+      assert.equal(first, second, 'expected the same DAVClient instance to be reused rather than re-constructed');
+      assert.equal(loginMock.mock.calls.length, 1, 'expected only one login attempt across two getClient() calls');
+    } finally {
+      DAVClient.prototype.login = realLogin;
+    }
+  });
+});
+
 // ============================================================
 // Recurrence expansion and window scoping (#64), and the read
 // path's silent under-reporting (#100).
