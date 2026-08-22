@@ -94,6 +94,17 @@ holds the context for its area: the decisions it made, what it tried, why the co
 way it is. A fresh agent on a shared tree has none of that and re-derives it badly. Give the
 resumed agent its list, and let it verify and commit in its own worktree.
 
+**Land a branch by MERGING it, and sweep for the worktree afterwards.** Re-applying a branch's
+changes as fresh commits on `main` looks equivalent and is not: the content arrives, but the branch
+tip stays unreachable from `main` forever, so nothing will ever report the work as landed and the
+worktree can never be cleaned up on that evidence. When a branch is landed, remove its worktree and
+delete the branch in the same breath. **Nothing will remind you** — `.gitignore` excludes
+`.claude/*`, which is where the harness puts an isolated agent's worktree, so a leftover never
+appears in `git status` and the harness itself only auto-removes a worktree that has no commits in
+it. `git worktree list` is the only thing that shows them; run it before ending a session. (Three
+worktrees from 21 Aug 2026 sat undetected for a day that way, each holding an orphaned twin of work
+that had been re-committed onto `main` under a different hash.)
+
 **Split commits by concern**, so each commit maps to the issue it closes.
 
 ## Releasing
