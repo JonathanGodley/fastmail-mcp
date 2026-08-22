@@ -1,4 +1,4 @@
-# What the Fastmail web client offers, per screen
+# What the Fastmail client offers and writes
 
 Fastmail's client is the only written-down statement of Fastmail's own semantics. JMAP permits far
 more than the client does, Cyrus (the server Fastmail runs) implements almost none of the policy,
