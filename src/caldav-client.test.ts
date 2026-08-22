@@ -3358,9 +3358,14 @@ describe('ORGANIZER display name comes from the client config', () => {
 
 describe('createCalendarEvent start/end frame and ordering agreement', () => {
   // create defaults a designator-less value to the configured zone (#157) — pinned so the
-  // 'names both values and both forms' and 'accepts a both-floating event' tests below see a
-  // deterministic zone name regardless of the machine/CI environment running them.
-  before(() => setDefaultTimezone('Australia/Sydney'));
+  // 'names both values and both forms' and 'writes a designator-less pair in the configured
+  // zone' tests below see a deterministic zone name regardless of the machine/CI environment
+  // running them. Pinned to America/New_York specifically, not just "a fixed zone": this
+  // machine's own host zone (Intl.DateTimeFormat().resolvedOptions().timeZone) is
+  // Australia/Sydney, so pinning to Australia/Sydney here could not tell "read the configured
+  // zone" apart from "silently fell back to the host zone" — a real regression to the host-zone
+  // fallback would leave these assertions green.
+  before(() => setDefaultTimezone('America/New_York'));
   after(() => setDefaultTimezone(undefined));
 
   function createMockedCreateClient() {
@@ -3443,11 +3448,11 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
       (err: Error) => {
         assert.ok(err.message.includes("'2026-03-20T09:30:00'"), 'names the start value');
         assert.ok(err.message.includes("'2026-03-20T10:30:00Z'"), 'names the end value');
-        // The designator-less start was defaulted to the configured zone (#157, B3) rather than
+        // The designator-less start was defaulted to the configured zone (#157) rather than
         // left floating, so the error must say THAT, not "no time zone" — the caller named no
         // zone, but this server still wrote one, and saying otherwise would be false.
         assert.ok(
-          err.message.includes("the account's configured time zone (Australia/Sydney), applied because you named none"),
+          err.message.includes("the account's configured time zone (America/New_York), applied because you named none"),
           'names the start form as the defaulted zone, not as floating'
         );
         assert.ok(err.message.includes('UTC date-time'), 'names the end form');
@@ -3492,8 +3497,8 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await create(client, '2026-03-20T08:30:00', '2026-03-20T09:30:00');
     const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
-    assert.ok(ical.includes('DTSTART;TZID=Australia/Sydney:20260320T083000'));
-    assert.ok(ical.includes('DTEND;TZID=Australia/Sydney:20260320T093000'));
+    assert.ok(ical.includes('DTSTART;TZID=America/New_York:20260320T083000'));
+    assert.ok(ical.includes('DTEND;TZID=America/New_York:20260320T093000'));
     // Never the old bare-floating write — that behaviour change is the point of #157.
     assert.ok(!ical.includes('DTSTART:20260320T083000'));
     assert.ok(!ical.includes('DTEND:20260320T093000'));
@@ -3822,12 +3827,14 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   });
 });
 
-// The timeZone parameter on create_calendar_event/update_calendar_event (#157 review findings
-// B1/B2/B4/B5/B6). B1 (the isUsableTimezone offset-shape gap) and its Etc/GMT-10 carve-out are
-// already covered directly against validateCallerTimezone in coerce.test.ts; these are the
-// create/update INTEGRATION tests — that the tools actually call that gate, and the write-path
-// rules (B2 stand-down, B4 stranding, B5 conflicts, B6 precedence, the create/update default
-// split) that only exist at this layer.
+// The timeZone parameter on create_calendar_event/update_calendar_event (#157). The offset-shape
+// rejection gate (isUsableTimezone) and its Etc/GMT-10 carve-out are already covered directly
+// against validateCallerTimezone in coerce.test.ts; these are the create/update INTEGRATION
+// tests — that the tools actually call that gate, and the write-path rules that only exist at
+// this layer: standing down the cross-zone ordering check on a same-zone differently-spelled
+// pair, rejecting a stranded single-sided zone change, rejecting timeZone combined with a value
+// that already carries Z/an offset or is date-only, timeZone's precedence over a stored TZID,
+// and the create/update default split.
 describe('timeZone parameter (#157)', () => {
   function createClient() {
     const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
@@ -3877,7 +3884,7 @@ describe('timeZone parameter (#157)', () => {
       assert.ok(ical.includes('DTEND;TZID=America/New_York:20260320T093000'));
     });
 
-    it('B5: rejects timeZone combined with a Z-designated start', async () => {
+    it('rejects timeZone combined with a Z-designated start', async () => {
       const { client, mockDAVClient } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -3890,7 +3897,7 @@ describe('timeZone parameter (#157)', () => {
       assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
     });
 
-    it('B5: rejects timeZone combined with an offset-designated end', async () => {
+    it('rejects timeZone combined with an offset-designated end', async () => {
       const { client } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -3902,7 +3909,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B5: rejects timeZone combined with a date-only start/end', async () => {
+    it('rejects timeZone combined with a date-only start/end', async () => {
       const { client } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -3914,7 +3921,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B5: rejects a null timeZone (no way to force a floating write)', async () => {
+    it('rejects a null timeZone (no way to force a floating write)', async () => {
       const { client } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -3926,7 +3933,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B5: rejects an empty-string timeZone', async () => {
+    it('rejects an empty-string timeZone', async () => {
       const { client } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -3938,7 +3945,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B1: rejects an offset-shaped timeZone reaching create through the same gate', async () => {
+    it('rejects an offset-shaped timeZone reaching create through the same gate', async () => {
       const { client } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -3950,7 +3957,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B1: accepts Etc/GMT-10 as a timeZone reaching create through the same gate', async () => {
+    it('accepts Etc/GMT-10 as a timeZone reaching create through the same gate', async () => {
       const { client, mockDAVClient } = createClient();
       await client.createCalendarEvent({
         calendarId: 'Personal', title: 'T',
@@ -3985,7 +3992,7 @@ describe('timeZone parameter (#157)', () => {
       assert.ok(written.includes('DTSTART;TZID=Australia/Sydney:20260321T090000'));
     });
 
-    it('B5: rejects timeZone with neither start nor end, naming the way to still reach it', async () => {
+    it('rejects timeZone with neither start nor end, naming the way to still reach it', async () => {
       const { client, mockDAVClient } = updateClient(ZONED);
       await assert.rejects(
         () => client.updateCalendarEvent('tz@fm', { timeZone: 'America/New_York' }),
@@ -3994,7 +4001,7 @@ describe('timeZone parameter (#157)', () => {
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
     });
 
-    it('B5: rejects timeZone combined with a Z-designated start', async () => {
+    it('rejects timeZone combined with a Z-designated start', async () => {
       const { client } = updateClient(ZONED);
       await assert.rejects(
         () => client.updateCalendarEvent('tz@fm', { start: '2026-03-21T09:00:00Z', timeZone: 'America/New_York' }),
@@ -4002,7 +4009,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B5: rejects timeZone combined with a date-only start', async () => {
+    it('rejects timeZone combined with a date-only start', async () => {
       const { client } = updateClient(ZONED);
       await assert.rejects(
         () => client.updateCalendarEvent('tz@fm', { start: '2026-03-21', timeZone: 'America/New_York' }),
@@ -4010,7 +4017,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B5: rejects a null timeZone', async () => {
+    it('rejects a null timeZone', async () => {
       const { client } = updateClient(ZONED);
       await assert.rejects(
         () => client.updateCalendarEvent('tz@fm', { start: '2026-03-21T09:00:00', timeZone: null }),
@@ -4018,7 +4025,7 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B4: rejects timeZone on start alone when the stored end is a DIFFERENT named zone', async () => {
+    it('rejects timeZone on start alone when the stored end is a DIFFERENT named zone', async () => {
       const { client, mockDAVClient } = updateClient(ZONED);
       await assert.rejects(
         () => client.updateCalendarEvent('tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'America/New_York' }),
@@ -4027,7 +4034,7 @@ describe('timeZone parameter (#157)', () => {
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
     });
 
-    it('B4: rejects timeZone on end alone when the stored start is a DIFFERENT named zone', async () => {
+    it('rejects timeZone on end alone when the stored start is a DIFFERENT named zone', async () => {
       const { client } = updateClient(ZONED);
       await assert.rejects(
         () => client.updateCalendarEvent('tz@fm', { end: '2026-03-21T10:00:00', timeZone: 'America/New_York' }),
@@ -4035,16 +4042,20 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
-    it('B4: does not fire when the untouched side is stored in the SAME zone, differently spelled', async () => {
+    it('does not fire when the untouched side is stored in the SAME zone, differently spelled', async () => {
       // 'australia/sydney' (lowercase) names the same zone as the stored 'Australia/Sydney'
-      // (zoneNamesEqual is case-insensitive) — not the two-zone shape B4 exists to catch.
+      // (zoneNamesEqual is case-insensitive), so this is not the two-zone shape the stranding
+      // check exists to catch. What actually lands on the wire is the CANONICAL name ICU
+      // resolves 'australia/sydney' to, not the caller's lowercase spelling — canonicalization
+      // happens before the write, so asserting the raw input here would be asserting a value
+      // this code path no longer produces.
       const { client, mockDAVClient } = updateClient(ZONED);
       await client.updateCalendarEvent('tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'australia/sydney' });
       const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-      assert.ok(written.includes('DTSTART;TZID=australia/sydney:20260321T090000'));
+      assert.ok(written.includes('DTSTART;TZID=Australia/Sydney:20260321T090000'));
     });
 
-    it('B2: a differently-spelled same zone does NOT stand down the ordering check (backwards pair rejected)', async () => {
+    it('a differently-spelled same zone does NOT stand down the ordering check (backwards pair rejected)', async () => {
       // Before the fix this compared TZIDs with raw !==, so 'Australia/Sydney' vs
       // 'australia/sydney' read as two DIFFERENT zones and stood the ordering check down —
       // silently accepting a backwards pair as a "flight lands elsewhere" shape it is not.
@@ -4058,16 +4069,200 @@ describe('timeZone parameter (#157)', () => {
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
     });
 
-    it('B2: the same differently-spelled zone accepts a genuinely forward pair', async () => {
+    it('the same differently-spelled zone accepts a genuinely forward pair', async () => {
+      // See the comment above: the written TZID is the canonical 'Australia/Sydney', not the
+      // caller's lowercase 'australia/sydney' spelling.
       const { client, mockDAVClient } = updateClient(ZONED);
       await client.updateCalendarEvent('tz@fm', { end: '2026-03-20T21:00:00', timeZone: 'australia/sydney' });
       const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-      assert.ok(written.includes('DTEND;TZID=australia/sydney:20260320T210000'));
+      assert.ok(written.includes('DTEND;TZID=Australia/Sydney:20260320T210000'));
+    });
+
+    it('does not strand a single-sided update against a DURATION-based event with no stored DTEND', async () => {
+      // rejectStrandedZoneMismatch reads the untouched side's line to compare zones; a
+      // DURATION-based event has no DTEND line to read at all, and the function returns before
+      // reaching the zone comparison. The call goes on to succeed: with no stored DTEND,
+      // validateDateConsistency also has nothing to compare the new start against and skips.
+      const durationEvent = storedEvent('dur-tz@fm', 'DTSTART:20260320T083000Z', 'DURATION:PT1H');
+      const { client, mockDAVClient } = updateClient(durationEvent);
+      await client.updateCalendarEvent('dur-tz@fm', { start: '2026-03-25T08:30:00', timeZone: 'America/New_York' });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(written.includes('DTSTART;TZID=America/New_York:20260325T083000'));
+      assert.ok(written.includes('DURATION:PT1H'));
+    });
+
+    it('stands down when the untouched side is stored NON-zoned — the frame-consistency check rejects it instead, with its own message', async () => {
+      // The stranding check only ever fires for a stored 'zoned' untouched side (see its
+      // doc comment): a stored UTC or floating value already produces a frame mismatch against
+      // the newly-zoned side, and that is validateDateConsistency's job, not this function's.
+      // This asserts the DISTINCTION — the call is still rejected, but by the frame-consistency
+      // message, never by the "would rewrite ... while the stored ... stays in" wording.
+      const utcEnd = storedEvent('utc-end@fm', 'DTSTART:20260320T190000Z', 'DTEND:20260321T200000Z');
+      const { client, mockDAVClient } = updateClient(utcEnd);
+      await assert.rejects(
+        () => client.updateCalendarEvent('utc-end@fm', { start: '2026-03-21T09:00:00', timeZone: 'America/New_York' }),
+        (err: Error) => {
+          assert.match(err.message, /DTSTART and DTEND must use the same date\/time form/);
+          assert.doesNotMatch(err.message, /would rewrite/);
+          return true;
+        },
+      );
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+    });
+
+    it('recognises the stranded side as the SAME zone through a stored leading-slash TZID (RFC 5545 §3.2.19)', async () => {
+      // zoneNamesEqual strips exactly one leading slash and lowercases before comparing, so a
+      // stored '/Australia/Sydney' (the vendor/registry-qualified form the RFC allows) must
+      // still read as the same zone as a caller's un-prefixed 'Australia/Sydney' — not two
+      // different zones that would trip the stranding rejection.
+      const slashZoned = storedEvent(
+        'slash-tz@fm',
+        'DTSTART;TZID=/Australia/Sydney:20260320T190000',
+        'DTEND;TZID=/Australia/Sydney:20260321T200000',
+      );
+      const { client, mockDAVClient } = updateClient(slashZoned);
+      await client.updateCalendarEvent('slash-tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'Australia/Sydney' });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(written.includes('DTSTART;TZID=Australia/Sydney:20260321T090000'));
     });
   });
 });
 
-describe('calendar write result sentences (#154 slice of #157)', () => {
+// classifyWrittenLine — the function describeCreateCalendarEventResult/describeUpdateCalendarEventResult
+// build their sentences from — is exercised elsewhere only via hand-built CalendarZoneWriteInfo
+// literals passed straight to those two describe functions. That proves the sentence wording is
+// right given a classification, but never proves createCalendarEvent/updateCalendarEvent
+// actually PRODUCE that classification from a real call: a regression in classifyWrittenLine's
+// own line-reading, or in what formatDateTimeProperty hands it, could pass every test above
+// while still misreporting what got written. These drive the real methods end to end.
+describe('calendar write result classification, driven from real create/update calls (#157)', () => {
+  function createClient() {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function updateClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+    };
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  describe('create_calendar_event', () => {
+    // A zone other than this host's own, for the same reason as the re-pin above: a regression
+    // to reading the host zone instead of the configured one must not leave this green.
+    before(() => setDefaultTimezone('America/New_York'));
+    after(() => setDefaultTimezone(undefined));
+
+    it('classifies a designator-less pair as zoned, in the configured zone', async () => {
+      const { client } = createClient();
+      const result = await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T',
+        start: '2026-03-20T08:30:00', end: '2026-03-20T09:30:00',
+      });
+      assert.deepEqual(result.start, { kind: 'zoned', zone: 'America/New_York' });
+      assert.deepEqual(result.end, { kind: 'zoned', zone: 'America/New_York' });
+    });
+
+    it('classifies a Z-designated pair as utc', async () => {
+      const { client } = createClient();
+      const result = await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T',
+        start: '2026-03-20T08:30:00Z', end: '2026-03-20T09:30:00Z',
+      });
+      assert.deepEqual(result.start, { kind: 'utc' });
+      assert.deepEqual(result.end, { kind: 'utc' });
+    });
+
+    it('classifies a date-only pair as allday', async () => {
+      const { client } = createClient();
+      const result = await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T',
+        start: '2026-03-20', end: '2026-03-21',
+      });
+      assert.deepEqual(result.start, { kind: 'allday' });
+      assert.deepEqual(result.end, { kind: 'allday' });
+    });
+
+    // create always defaults a designator-less value to the configured zone (#157), so
+    // 'floating' is not reachable from createCalendarEvent — only from updateCalendarEvent,
+    // which never defaults an omitted timeZone. See that case below.
+  });
+
+  describe('update_calendar_event', () => {
+    function stored(uid: string, dtstart: string, dtend: string): string {
+      return [
+        'BEGIN:VCALENDAR', 'BEGIN:VEVENT',
+        `UID:${uid}`, 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Stored',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+    }
+
+    it('classifies a re-zoned pair as zoned, in the caller-named zone', async () => {
+      const icalData = stored(
+        'u1@fm',
+        'DTSTART;TZID=Australia/Sydney:20260320T190000',
+        'DTEND;TZID=Australia/Sydney:20260321T200000',
+      );
+      const { client } = updateClient(icalData);
+      const result = await client.updateCalendarEvent('u1@fm', {
+        start: '2026-03-21T09:00:00', end: '2026-03-21T10:00:00', timeZone: 'America/New_York',
+      });
+      assert.deepEqual(result.start, { kind: 'zoned', zone: 'America/New_York' });
+      assert.deepEqual(result.end, { kind: 'zoned', zone: 'America/New_York' });
+    });
+
+    it('classifies a Z-designated pair as utc', async () => {
+      const icalData = stored('u2@fm', 'DTSTART:20260320T083000Z', 'DTEND:20260320T093000Z');
+      const { client } = updateClient(icalData);
+      const result = await client.updateCalendarEvent('u2@fm', {
+        start: '2026-03-25T08:30:00Z', end: '2026-03-25T09:30:00Z',
+      });
+      assert.deepEqual(result.start, { kind: 'utc' });
+      assert.deepEqual(result.end, { kind: 'utc' });
+    });
+
+    it('classifies a date-only pair as allday', async () => {
+      const icalData = stored('u3@fm', 'DTSTART;VALUE=DATE:20260320', 'DTEND;VALUE=DATE:20260321');
+      const { client } = updateClient(icalData);
+      const result = await client.updateCalendarEvent('u3@fm', { start: '2026-03-25', end: '2026-03-26' });
+      assert.deepEqual(result.start, { kind: 'allday' });
+      assert.deepEqual(result.end, { kind: 'allday' });
+    });
+
+    it('classifies a floating pair as floating — the one kind create can never write', async () => {
+      const icalData = stored('u4@fm', 'DTSTART:20260320T083000', 'DTEND:20260320T093000');
+      const { client } = updateClient(icalData);
+      const result = await client.updateCalendarEvent('u4@fm', {
+        start: '2026-03-25T08:30:00', end: '2026-03-25T09:30:00',
+      });
+      assert.deepEqual(result.start, { kind: 'floating' });
+      assert.deepEqual(result.end, { kind: 'floating' });
+    });
+
+    it('reports neither side when a non-time edit touches neither start nor end', async () => {
+      const icalData = stored('u5@fm', 'DTSTART:20260320T083000Z', 'DTEND:20260320T093000Z');
+      const { client } = updateClient(icalData);
+      const result = await client.updateCalendarEvent('u5@fm', { title: 'Renamed' });
+      assert.equal(result.start, undefined);
+      assert.equal(result.end, undefined);
+    });
+  });
+});
+
+describe('calendar write result sentences (#157)', () => {
   it('create: reports a single zone when both sides land in it', () => {
     const msg = describeCreateCalendarEventResult({
       eventId: 'e1',
@@ -5465,40 +5660,52 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     assert.equal(t2, 0);
   });
 
-  // End-to-end wiring check for #139: the configured zone this `describe` block pins in
-  // `before` (Australia/Sydney, deliberately NOT whatever zone the test host happens to run
-  // in) must reach the parser as an injected parameter and drive the omit-when-same rule for
-  // real, not just when `configuredZone` is passed directly to `parseCalendarObject`.
+  // End-to-end wiring check for #139: the configured zone must reach the parser as an injected
+  // parameter and drive the omit-when-same rule for real, not just when `configuredZone` is
+  // passed directly to `parseCalendarObject`. This test overrides the describe block's own
+  // `Australia/Sydney` pin to `America/New_York` for its own duration: on the machine this was
+  // written on, `Intl.DateTimeFormat().resolvedOptions().timeZone` (the host's own zone) is
+  // ALSO `Australia/Sydney`, so a pin of `Australia/Sydney` here could not tell "read the
+  // configured zone" apart from "silently fell back to the host zone" — a real production
+  // regression to the host-zone fallback would leave this test green. `America/New_York` is
+  // not this host's zone, so the omit-when-same fixture only omits if the configured value was
+  // genuinely read.
   it('wires the pinned configured zone through to timeZone omit-when-same and emit-when-different', async () => {
-    const sameZone = [
-      'BEGIN:VCALENDAR',
-      'BEGIN:VEVENT',
-      'UID:same@fm',
-      'DTSTART;TZID=Australia/Sydney:20260320T083000',
-      'DTEND;TZID=Australia/Sydney:20260320T093000',
-      'SUMMARY:Standup',
-      'END:VEVENT',
-      'END:VCALENDAR',
-    ].join('\r\n');
-    const differentZone = [
-      'BEGIN:VCALENDAR',
-      'BEGIN:VEVENT',
-      'UID:different@fm',
-      'DTSTART;TZID=Pacific/Auckland:20260320T083000',
-      'DTEND;TZID=Pacific/Auckland:20260320T093000',
-      'SUMMARY:Standup NZ',
-      'END:VEVENT',
-      'END:VCALENDAR',
-    ].join('\r\n');
-    const { client } = mockedClient([
-      { data: sameZone, url: '/cal/same.ics' },
-      { data: differentZone, url: '/cal/different.ics' },
-    ]);
-    const { events } = await client.getCalendarEvents(undefined, 50);
-    const same = events.find(e => e.id === 'same@fm')!;
-    const different = events.find(e => e.id === 'different@fm')!;
-    assert.equal(same.timeZone, undefined);
-    assert.equal(different.timeZone, 'Pacific/Auckland');
+    setDefaultTimezone('America/New_York');
+    try {
+      const sameZone = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:same@fm',
+        'DTSTART;TZID=America/New_York:20260320T083000',
+        'DTEND;TZID=America/New_York:20260320T093000',
+        'SUMMARY:Standup',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n');
+      const differentZone = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:different@fm',
+        'DTSTART;TZID=Pacific/Auckland:20260320T083000',
+        'DTEND;TZID=Pacific/Auckland:20260320T093000',
+        'SUMMARY:Standup NZ',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n');
+      const { client } = mockedClient([
+        { data: sameZone, url: '/cal/same.ics' },
+        { data: differentZone, url: '/cal/different.ics' },
+      ]);
+      const { events } = await client.getCalendarEvents(undefined, 50);
+      const same = events.find(e => e.id === 'same@fm')!;
+      const different = events.find(e => e.id === 'different@fm')!;
+      assert.equal(same.timeZone, undefined);
+      assert.equal(different.timeZone, 'Pacific/Auckland');
+    } finally {
+      // Restore the describe block's own pin — later tests in this block rely on it.
+      setDefaultTimezone('Australia/Sydney');
+    }
   });
 
   it('will not write into, or delete from, a calendar the read path refuses to read', async () => {

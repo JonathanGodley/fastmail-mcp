@@ -510,7 +510,7 @@ export function resolveUsableTimezone(zone: string | undefined): string {
 
 /**
  * Validate a caller-supplied `timeZone` argument (create_calendar_event / update_calendar_event,
- * fork issue #157) and return the trimmed IANA name to write.
+ * fork issue #157) and return the canonical IANA name to write.
  *
  * `isUsableTimezone` alone is the WRONG gate for this. Probed on this host it returns `true`
  * for `"+10:00"`, `"+1000"`, `"+10"` and `"Etc/GMT-10"` — ICU resolves several offset spellings
@@ -529,6 +529,12 @@ export function resolveUsableTimezone(zone: string | undefined): string {
  * design question by accident rather than ask. Omit `timeZone` instead: on `create` an omitted
  * `timeZone` writes the account's configured zone (never floating, see docs/conventions.md); on
  * `update` it leaves whatever the event already has unchanged.
+ *
+ * Not an IANA name and not accepted: a non-IANA name such as a Windows zone id ("AUS Eastern
+ * Standard Time") still rejects here even though it is a real zone identifier somewhere — ICU
+ * cannot resolve it, so there is nothing to canonicalise it against. That is a genuine
+ * round-trip limit, not an oversight; both tools' descriptions say `timeZone` takes an IANA name
+ * for this reason.
  */
 export function validateCallerTimezone(value: unknown): string {
   if (value === null || (typeof value === 'string' && value.trim().length === 0)) {
@@ -542,8 +548,20 @@ export function validateCallerTimezone(value: unknown): string {
     throw new InvalidInputError(`timeZone must be an IANA zone name string (e.g. "Australia/Sydney"), not ${typeof value}.`);
   }
   const trimmed = value.trim();
+  // RFC 5545 §3.2.19 permits a leading '/' on a TZID (a zone registered by its own creator
+  // rather than plain IANA form); normalizeZoneForComparison in caldav-client.ts already strips
+  // it for comparison, and the read half (#139) emits it verbatim when a stored event carries
+  // it. Strip it here too so a caller echoing a `timeZone` this server just handed back
+  // (read-modify-write) is not rejected for a spelling this server itself produced. This has to
+  // run before both the offset-shape check and the canonicalisation call below: ICU throws
+  // outright on a leading slash (`new Intl.DateTimeFormat('en-US', { timeZone:
+  // '/Australia/Sydney' })` throws), so an unstripped value never reaches isUsableTimezone as
+  // true in the first place. A vendor-prefixed form ('/vendor.example/.../Zone/Name') still
+  // fails after stripping only the one leading slash — that is the safe direction, a real
+  // rejection rather than a guess at which registry the rest of the string names.
+  const zoneCandidate = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
   // Offset-shape denylist — see the function comment for why this runs before isUsableTimezone.
-  if (/^[+-]/.test(trimmed) || /^(GMT|UTC|UT)[+-]/i.test(trimmed) || /^\d/.test(trimmed)) {
+  if (/^[+-]/.test(zoneCandidate) || /^(GMT|UTC|UT)[+-]/i.test(zoneCandidate) || /^\d/.test(zoneCandidate)) {
     throw new InvalidInputError(
       `timeZone must be an IANA zone NAME such as "Australia/Sydney" or "America/New_York", not a ` +
       `fixed UTC offset ("${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}"). A calendar time is never ` +
@@ -551,13 +569,25 @@ export function validateCallerTimezone(value: unknown): string {
       'out the offset itself.'
     );
   }
-  if (!isUsableTimezone(trimmed)) {
+  if (!isUsableTimezone(zoneCandidate)) {
     throw new InvalidInputError(
       `timeZone "${echoCallerText(trimmed, ZONE_ECHO_LIMIT)}" is not a time zone this server can ` +
       'resolve. Pass a standard IANA name such as "Australia/Sydney" or "America/New_York".'
     );
   }
-  return trimmed;
+  // ICU resolves a zone name case-insensitively and through backward-compatibility links
+  // ("australia/sydney", "NZ", "Zulu" all resolve to a real zone) but the CalDAV server behind
+  // this account (Cyrus) looks a TZID up with an exact-string match against its own tzdata,
+  // which is far stricter than ICU. Writing the caller's raw spelling would let an ICU-blessed
+  // string reach the calendar as a TZID Cyrus itself cannot resolve — the same failure class the
+  // offset-shape check above exists to prevent, one dimension over: a string ICU accepts that
+  // the calendar server cannot read back as a name. `resolvedOptions().timeZone` is ICU's own
+  // canonical spelling for whatever was resolved (guaranteed not to throw here, since
+  // `isUsableTimezone` above already proved `zoneCandidate` resolves), so writing THAT is what
+  // actually lands on a name Cyrus recognises, and it is also what the create/update response
+  // reports as written. Do not "simplify" this back to returning the caller's input — the
+  // canonical name is deliberately not an echo of what was typed.
+  return new Intl.DateTimeFormat('en-US', { timeZone: zoneCandidate }).resolvedOptions().timeZone;
 }
 
 /**

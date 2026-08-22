@@ -1457,6 +1457,117 @@ appointments answered with one. Two missing events look exactly like a quiet mor
 the same silent-under-report failure the rest of this section is about, arriving through the
 argument rather than the payload.
 
+### Writing a zone: `timeZone`, and why create and update disagree on the default
+
+The read half above restored the NAME on the way out; `timeZone` on `create_calendar_event`
+and `update_calendar_event` ([#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157))
+is its write-side counterpart, and it keeps to the same rule: this server never puts an offset
+in a calendar value and never asks a caller to compute one. `timeZone` only ever qualifies a
+**designator-less** `start`/`end` — a value already carrying `Z` or a numeric offset names its
+own instant and `timeZone` would be redundant at best and contradictory at worst, so it is
+rejected rather than silently ignored (below).
+
+**Precedence, in the order `formatDateTimeProperty` actually applies it:**
+
+1. `callerZone` — the validated `timeZone` argument, when the caller passed one.
+2. the STORED `TZID`, read off the existing property line — **update only**, and only when
+   `timeZone` was not supplied. This is the pre-#157 preserve-the-timezone behaviour, kept
+   byte-for-byte: an update that touches only one side of an already-zoned event keeps the
+   other side's zone without the caller having to re-state it.
+3. `defaultZone` — the account's configured zone (`getDefaultTimezone()`, `resolveUsableTimezone`
+   gated) — **create only**.
+4. floating — no `TZID` at all. This is now unreachable on create (step 3 always supplies a
+   zone) and is exactly the pre-#157 behaviour on update.
+
+**Create defaulting to the configured zone is a deliberate behaviour change, not a bug fix.**
+Before #157, a designator-less `create_calendar_event` call wrote a bare floating value — "a
+different instant for every reader" — silently, because nothing else in the call could name a
+zone. That is a worse default than the configured zone for the overwhelming majority of events
+a caller creates for themselves, and it is now what happens unless `timeZone` says otherwise.
+**Update never defaults**, on purpose: unlike create, an update's untouched side may already
+carry a real, meaningful `TZID` — quietly overwriting it with the configured zone the moment a
+caller edits the *other* side would be a silent, unrequested rewrite of data the caller never
+asked to touch. So omitting `timeZone` on update reproduces exactly what happened before #157
+(step 2 or step 4), and reaching the configured zone requires naming it.
+
+**`timeZone` provenance (`tzidSource`) exists so a rejection never misattributes a zone the
+caller didn't choose.** `describeDateProperty` threads `'caller' | 'stored' | 'default'`
+alongside `frame: 'zoned'` (`DatePropertyFrame.tzidSource`, set only where `formatDateTimeProperty`
+itself set the `TZID`, never re-derived from the line). Without it, a `create` call that omitted
+`timeZone` and got the configured zone by default would see its own ordering error worded as if
+it had explicitly asked for that zone — a caller reading "you named X" when they named nothing
+would go looking for a `timeZone` argument that was never in their request. `validateDateConsistency`'s
+error text says "applied because you named none" for a `'default'` source instead.
+
+**Rejections (fail-closed on a narrowing argument — the [same posture](#lenient-input-coercion)
+`coerceStringArrayStrict` applies elsewhere, applied to this argument specifically):**
+
+- **`timeZone` combined with a `Z`/offset-designated `start` or `end`** (`rejectTimezoneConflict`)
+  — the value already names an instant; a second zone claim on top of it is a caller error, not
+  something to silently prefer one of.
+- **`timeZone` combined with a date-only `start` or `end`** (same function) — an all-day value
+  has no time component for a zone to qualify.
+- **`timeZone` that is `null`, empty, or whitespace-only** (`validateCallerTimezone`, `src/coerce.ts`)
+  — there is no way to ask this server to force a FLOATING write via `timeZone`; omitting the
+  argument is how a caller reaches step 2/4 above, and a caller who explicitly sends `null`
+  meaning "make it floating" gets a clear rejection instead of a silent floating write that
+  looks identical to the omitted-argument case.
+- **`timeZone` on an update that touches neither `start` nor `end`** — `timeZone` alone has
+  nothing to qualify (there is no designator-less value in the call at all), so this is rejected
+  before any patching happens, naming the fix: re-send `start` and/or `end`.
+- **`timeZone` on a SINGLE-sided update whose untouched side is stored in a DIFFERENT named
+  zone** (`rejectStrandedZoneMismatch`, both directions — updating `start` alone with the stored
+  `end` elsewhere, and updating `end` alone with the stored `start` elsewhere) — writing only
+  one side into the caller's zone while the other stays wherever it was stored would silently
+  strand the pair across two zones the caller never asked to create. The comparison uses
+  `zoneNamesEqual` (case- and separator-normalising, the same helper the read-half's
+  provenance/comparison machinery already uses — `Australia/Sydney` and `australia/sydney` are
+  the same zone here), so this rule is never tripped by a spelling difference alone. That
+  reuse fixed a real bug during this work: `validateDateConsistency`'s own zoned/zoned
+  stand-down (the flight-lands-elsewhere exemption, [#140](https://github.com/JonathanGodley/fastmail-mcp/issues/140))
+  used to compare TZIDs with a raw `!==`, so two differently-spelled names for the SAME zone
+  read as two DIFFERENT zones and stood the ordering check down — silently accepting a
+  backwards pair that a same-spelling stored/caller pair would have correctly rejected. It now
+  reads `zoneNamesEqual`, so ordering is checked whenever the two sides genuinely name the same
+  zone, however each was spelled.
+- **A GENUINE two-zone pair is still legal and still not rejected** — `timeZone` cannot itself
+  produce one (it applies identically to whichever side(s) are designator-less in a single
+  call), so the only way to reach it is the pattern `rejectStrandedZoneMismatch` exists to catch:
+  single-sided updates are exactly where it would otherwise happen by accident, and #140's flight
+  case is exactly where it should still be allowed on purpose. Passing both `start` and `end`
+  together with one `timeZone` always lands both sides in the same zone by construction, so the
+  two rules do not collide.
+
+**The response states which zone was actually written.** `createCalendarEvent`
+and `updateCalendarEvent` return a structured `CalendarZoneWriteInfo` per side — `{ kind: 'zoned',
+zone }` / `{ kind: 'utc' }` / `{ kind: 'floating' }` / `{ kind: 'allday' }`, produced by
+`classifyWrittenLine` reading back the very line just written — rather than the caller having to
+re-derive it from what they sent; `create`'s result
+always names both sides (both are always written), `update`'s names only the side(s) actually
+touched. This closes the same gap a caller hits without it: a designator-less create silently
+landing in the configured zone, or an update silently inheriting a stored zone, would otherwise
+be discoverable only by reading the event back.
+
+**The VTIMEZONE residual.** This server writes `DTSTART;TZID=<name>` / `DTEND;TZID=<name>` with
+no accompanying `VTIMEZONE` component — `createCalendarEvent`'s iCal assembly never emits one,
+and never has. Read from Cyrus's own source, not
+verified against a live probe: `caldav_store_resource` (the function behind every `caldav_put`
+path in `imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so a bare `TZID=` reference
+with nothing defining it is accepted at write time. On the server's OWN read/export paths (the
+`GET`/`multiget` handlers in `imap/http_caldav.c`, and the JMAP/JSCalendar converters in
+`imap/jmap_calendar.c` and `imap/jmap_ical.c`), Cyrus re-attaches the matching `VTIMEZONE` itself
+via `icalcomponent_add_required_timezones` (`imap/ical_support.c`) before handing the object back
+out — so a client reading the event back from Fastmail (including this server's own read path)
+always sees a complete, self-describing object regardless of what was actually stored. This is
+also the mechanism `ALLOW_CAL_NOTZ`'s `tzbyref` mode formalises server-side: `strip_vtimezones`
+(`imap/caldav_util.c`) actively REMOVES a client-supplied `VTIMEZONE` on write when the namespace
+allows it, on the same premise — the component is reconstructible from the `TZID` name alone, so
+storing it is pure overhead Cyrus elects not to keep. The residual this leaves: an IANA name ICU
+resolves but the SERVER's own tzdata does not recognise would round-trip as an unresolvable
+reference with nothing here to catch it before the write — another argument, alongside the ones
+in `validateCallerTimezone` itself, for keeping that gate narrow rather than widening it to
+accept anything ICU-shaped.
+
 ### A calendar window's DAY is a local day
 
 `coerceCalendarWindowStart` / `coerceCalendarWindowEnd` resolve a date-only bound — and a
@@ -1573,119 +1684,6 @@ DENSITY, which is the same `FREQ=MINUTELY` hazard the paragraph above just descr
 rather than active: a live 10-year window on this account measured 6.4s for 1237 events. Left
 as it is deliberately, because a cap on a span the caller named is a behaviour change to a
 user-visible contract rather than a fix.
-
-### Writing a zone: `timeZone`, and why create and update disagree on the default
-
-The read half above restored the NAME on the way out; `timeZone` on `create_calendar_event`
-and `update_calendar_event` ([#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157))
-is its write-side counterpart, and it keeps to the same rule: this server never puts an offset
-in a calendar value and never asks a caller to compute one. `timeZone` only ever qualifies a
-**designator-less** `start`/`end` — a value already carrying `Z` or a numeric offset names its
-own instant and `timeZone` would be redundant at best and contradictory at worst, so it is
-rejected rather than silently ignored (below).
-
-**Precedence, in the order `formatDateTimeProperty` actually applies it (line ~1589):**
-
-1. `callerZone` — the validated `timeZone` argument, when the caller passed one.
-2. the STORED `TZID`, read off the existing property line — **update only**, and only when
-   `timeZone` was not supplied. This is the pre-#157 preserve-the-timezone behaviour, kept
-   byte-for-byte: an update that touches only one side of an already-zoned event keeps the
-   other side's zone without the caller having to re-state it.
-3. `defaultZone` — the account's configured zone (`getDefaultTimezone()`, `resolveUsableTimezone`
-   gated) — **create only**.
-4. floating — no `TZID` at all. This is now unreachable on create (step 3 always supplies a
-   zone) and is exactly the pre-#157 behaviour on update.
-
-**Create defaulting to the configured zone is a deliberate behaviour change, not a bug fix.**
-Before #157, a designator-less `create_calendar_event` call wrote a bare floating value — "a
-different instant for every reader" — silently, because nothing else in the call could name a
-zone. That is a worse default than the configured zone for the overwhelming majority of events
-a caller creates for themselves, and it is now what happens unless `timeZone` says otherwise.
-**Update never defaults**, on purpose: unlike create, an update's untouched side may already
-carry a real, meaningful `TZID` — quietly overwriting it with the configured zone the moment a
-caller edits the *other* side would be a silent, unrequested rewrite of data the caller never
-asked to touch. So omitting `timeZone` on update reproduces exactly what happened before #157
-(step 2 or step 4), and reaching the configured zone requires naming it.
-
-**`timeZone` provenance (`tzidSource`) exists so a rejection never misattributes a zone the
-caller didn't choose.** `describeDateProperty` threads `'caller' | 'stored' | 'default'`
-alongside `frame: 'zoned'` (`DatePropertyFrame.tzidSource`, set only where `formatDateTimeProperty`
-itself set the `TZID`, never re-derived from the line). Without it, a `create` call that omitted
-`timeZone` and got the configured zone by default would see its own ordering error worded as if
-it had explicitly asked for that zone — a caller reading "you named X" when they named nothing
-would go looking for a `timeZone` argument that was never in their request. `validateDateConsistency`'s
-error text says "applied because you named none" for a `'default'` source instead.
-
-**Rejections (fail-closed on a narrowing argument — the [same posture](#lenient-input-coercion)
-`coerceStringArrayStrict` applies elsewhere, applied to this argument specifically):**
-
-- **`timeZone` combined with a `Z`/offset-designated `start` or `end`** (`rejectTimezoneConflict`)
-  — the value already names an instant; a second zone claim on top of it is a caller error, not
-  something to silently prefer one of.
-- **`timeZone` combined with a date-only `start` or `end`** (same function) — an all-day value
-  has no time component for a zone to qualify.
-- **`timeZone` that is `null`, empty, or whitespace-only** (`validateCallerTimezone`, `src/coerce.ts`)
-  — there is no way to ask this server to force a FLOATING write via `timeZone`; omitting the
-  argument is how a caller reaches step 2/4 above, and a caller who explicitly sends `null`
-  meaning "make it floating" gets a clear rejection instead of a silent floating write that
-  looks identical to the omitted-argument case.
-- **`timeZone` on an update that touches neither `start` nor `end`** — `timeZone` alone has
-  nothing to qualify (there is no designator-less value in the call at all), so this is rejected
-  before any patching happens, naming the fix: re-send `start` and/or `end`.
-- **`timeZone` on a SINGLE-sided update whose untouched side is stored in a DIFFERENT named
-  zone** (`rejectStrandedZoneMismatch`, both directions — updating `start` alone with the stored
-  `end` elsewhere, and updating `end` alone with the stored `start` elsewhere) — writing only
-  one side into the caller's zone while the other stays wherever it was stored would silently
-  strand the pair across two zones the caller never asked to create. The comparison uses
-  `zoneNamesEqual` (case- and separator-normalising, the same helper the read-half's
-  provenance/comparison machinery already uses — `Australia/Sydney` and `australia/sydney` are
-  the same zone here), so this rule is never tripped by a spelling difference alone. That
-  reuse fixed a real bug during this work: `validateDateConsistency`'s own zoned/zoned
-  stand-down (the flight-lands-elsewhere exemption, [#140](https://github.com/JonathanGodley/fastmail-mcp/issues/140))
-  used to compare TZIDs with a raw `!==`, so two differently-spelled names for the SAME zone
-  read as two DIFFERENT zones and stood the ordering check down — silently accepting a
-  backwards pair that a same-spelling stored/caller pair would have correctly rejected. It now
-  reads `zoneNamesEqual`, so ordering is checked whenever the two sides genuinely name the same
-  zone, however each was spelled.
-- **A GENUINE two-zone pair is still legal and still not rejected** — `timeZone` cannot itself
-  produce one (it applies identically to whichever side(s) are designator-less in a single
-  call), so the only way to reach it is the pattern B4 exists to catch: single-sided updates
-  are exactly where it would otherwise happen by accident, and #140's flight case is exactly
-  where it should still be allowed on purpose. Passing both `start` and `end` together with one
-  `timeZone` always lands both sides in the same zone by construction, so the two rules do not
-  collide.
-
-**The response states which zone was actually written**, folding in a slice of
-[#154](https://github.com/JonathanGodley/fastmail-mcp/issues/154) (154 stays open for the rest
-of its scope — this is create/update's corner of it, not the whole issue). `createCalendarEvent`
-and `updateCalendarEvent` return a structured `CalendarZoneWriteInfo` per side — `{ kind: 'zoned',
-zone }` / `{ kind: 'utc' }` / `{ kind: 'floating' }` / `{ kind: 'allday' }`, produced by
-`classifyWrittenLine` reading back the very line just written — rather than the caller having to
-re-derive it from what they sent; `create`'s result
-always names both sides (both are always written), `update`'s names only the side(s) actually
-touched. This closes the same gap a caller hits without it: a designator-less create silently
-landing in the configured zone, or an update silently inheriting a stored zone, would otherwise
-be discoverable only by reading the event back.
-
-**The VTIMEZONE residual.** This server writes `DTSTART;TZID=<name>` / `DTEND;TZID=<name>` with
-no accompanying `VTIMEZONE` component — `createCalendarEvent`'s iCal assembly never emits one,
-and never has. Read from Cyrus's own source (`C:\Users\JG\source-control\cyrus-imapd`), not
-verified against a live probe: `caldav_store_resource` (the function behind every `caldav_put`
-path in `imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so a bare `TZID=` reference
-with nothing defining it is accepted at write time. On the server's OWN read/export paths (the
-`GET`/`multiget` handlers in `imap/http_caldav.c`, and the JMAP/JSCalendar converters in
-`imap/jmap_calendar.c` and `imap/jmap_ical.c`), Cyrus re-attaches the matching `VTIMEZONE` itself
-via `icalcomponent_add_required_timezones` (`imap/ical_support.c`) before handing the object back
-out — so a client reading the event back from Fastmail (including this server's own read path)
-always sees a complete, self-describing object regardless of what was actually stored. This is
-also the mechanism `ALLOW_CAL_NOTZ`'s `tzbyref` mode formalises server-side: `strip_vtimezones`
-(`imap/caldav_util.c`) actively REMOVES a client-supplied `VTIMEZONE` on write when the namespace
-allows it, on the same premise — the component is reconstructible from the `TZID` name alone, so
-storing it is pure overhead Cyrus elects not to keep. The residual this leaves: an IANA name ICU
-resolves but the SERVER's own tzdata does not recognise would round-trip as an unresolvable
-reference with nothing here to catch it before the write — another argument, alongside the ones
-in `validateCallerTimezone` itself, for keeping that gate narrow rather than widening it to
-accept anything ICU-shaped.
 
 ## iCalendar structure is decided on WHOLE CONTENT LINES, never with a `/m` regex
 

@@ -1391,15 +1391,58 @@ describe('resolveUsableTimezone', () => {
 });
 
 // validateCallerTimezone is the timeZone argument's gate on create_calendar_event/
-// update_calendar_event (#157). Its B1 offset-shape denylist runs BEFORE isUsableTimezone
-// (which alone would wrongly accept an offset-shaped string like "+10:00" — ICU resolves it
-// as a fixed-offset zone), so these pin the denylist's exact boundary: what it rejects that
+// update_calendar_event (#157). Its offset-shape denylist runs BEFORE isUsableTimezone (which
+// alone would wrongly accept an offset-shaped string like "+10:00" — ICU resolves it as a
+// fixed-offset zone), so these pin the denylist's exact boundary: what it rejects that
 // isUsableTimezone alone would have let through, and what it must still let past to
 // isUsableTimezone (Etc/GMT-10 and other legitimate names that happen to contain digits).
 describe('validateCallerTimezone', () => {
   it('accepts a usable IANA zone name, trimmed', () => {
     assert.equal(validateCallerTimezone('Australia/Sydney'), 'Australia/Sydney');
     assert.equal(validateCallerTimezone('  Australia/Sydney  '), 'Australia/Sydney');
+  });
+
+  // ICU resolves a zone name case-insensitively and through backward-compatibility links, but
+  // Cyrus (the CalDAV server behind this account) looks a TZID up with an exact-string match
+  // against its own tzdata — far stricter than ICU. So the return value is ICU's own canonical
+  // spelling for whatever resolved, not an echo of what the caller typed, and these pin actual
+  // resolutions on this runtime (Node's ICU) rather than assuming case alone changes.
+  for (const [input, canonical] of [
+    ['australia/sydney', 'Australia/Sydney'],
+    ['AUSTRALIA/SYDNEY', 'Australia/Sydney'],
+    ['NZ', 'Pacific/Auckland'],
+    ['Zulu', 'UTC'],
+    ['GMT0', 'UTC'],
+  ] as const) {
+    it(`canonicalises "${input}" to "${canonical}", not the caller's own spelling`, () => {
+      assert.equal(validateCallerTimezone(input), canonical);
+    });
+  }
+
+  // RFC 5545 §3.2.19 permits a leading '/' on a TZID; the read half (#139) emits it verbatim
+  // when a stored event carries it, so a caller echoing back a timeZone this server just
+  // handed them (read-modify-write) must not be rejected for that spelling.
+  it('accepts a leading slash (RFC 5545 §3.2.19) and canonicalises past it', () => {
+    assert.equal(validateCallerTimezone('/Australia/Sydney'), 'Australia/Sydney');
+  });
+
+  // Only the simple '/Zone/Name' form is recoverable this way — a vendor-prefixed TZID has
+  // more than one slash and still fails to resolve after only the leading one is stripped,
+  // which is the safe direction (a real rejection, not a guess at which registry it names).
+  it('still rejects a vendor-prefixed TZID beyond the simple leading-slash form', () => {
+    assert.throws(
+      () => validateCallerTimezone('/vendor.example/20050126_1/Australia/Sydney'),
+      /is not a time zone this server can resolve/
+    );
+  });
+
+  // A non-IANA name is a genuine round-trip limit, not a gap in the ICU probe above: there is
+  // no canonical IANA spelling to resolve it to.
+  it('rejects a non-IANA Windows zone name', () => {
+    assert.throws(
+      () => validateCallerTimezone('AUS Eastern Standard Time'),
+      /is not a time zone this server can resolve/
+    );
   });
 
   it('rejects null as a request to write floating, not a floating value itself', () => {
@@ -1415,7 +1458,7 @@ describe('validateCallerTimezone', () => {
     assert.throws(() => validateCallerTimezone(42), /must be an IANA zone name string.*not number/);
   });
 
-  // B1: offset-shaped strings ICU resolves as a fixed-offset zone, which is exactly what a
+  // Offset-shaped strings ICU resolves as a fixed-offset zone, which is exactly what a
   // calendar time must never carry — isUsableTimezone alone would (wrongly) accept every one
   // of these, so the denylist has to run first.
   for (const offsetShaped of ['+10:00', '+1000', '+10', '-05:00', 'GMT+10', 'GMT-5', 'UTC+10', 'UT+10']) {
@@ -1433,10 +1476,17 @@ describe('validateCallerTimezone', () => {
 
   // The denylist must not overreach: these are legitimate IANA names that happen to fail the
   // GMT/UTC/UT/leading-digit shapes only superficially (Etc/GMT-10 embeds a POSIX-style sign
-  // AFTER the name, not at the start) and must still resolve via isUsableTimezone.
-  for (const legit of ['Etc/GMT-10', 'Etc/GMT+5', 'UTC', 'NZ', 'Japan', 'EST5EDT']) {
-    it(`still accepts the legitimate zone name "${legit}"`, () => {
-      assert.equal(validateCallerTimezone(legit), legit);
+  // AFTER the name, not at the start) and must still resolve via isUsableTimezone. Most of
+  // these are also unchanged by canonicalisation (an Etc/GMT offset name and UTC are already
+  // ICU-canonical); EST5EDT is not, and is pinned to what it actually resolves to.
+  for (const [legit, canonical] of [
+    ['Etc/GMT-10', 'Etc/GMT-10'],
+    ['Etc/GMT+5', 'Etc/GMT+5'],
+    ['UTC', 'UTC'],
+    ['EST5EDT', 'America/New_York'],
+  ] as const) {
+    it(`still accepts the legitimate zone name "${legit}"${legit === canonical ? '' : `, canonicalised to "${canonical}"`}`, () => {
+      assert.equal(validateCallerTimezone(legit), canonical);
     });
   }
 
