@@ -389,6 +389,14 @@ export function extractVEvent(data: string): string | null {
  * required: the RRULE and the overrides do not have to agree, and a malformed resource
  * carrying an override with no rule still refuses.
  *
+ * The marker scan is VEVENT-WIDE and NOT position-aware: it asks whether the block's content
+ * lines contain the property anywhere, so a line nested inside a subcomponent of the VEVENT
+ * (a VALARM, say) counts as present. Neither RRULE nor RDATE is a legal VALARM property, so a
+ * payload placing one there is malformed, and the resulting refusal is the fail-closed
+ * direction this whole test already prefers. The identical reach applied to RRULE long before
+ * RDATE joined it; do not narrow either of them into a position-aware read without settling
+ * what the write path should then do with a malformed resource.
+ *
  * Line-model reads (hasICalProperty / extractVEventBlocks), never a `/m`-anchored regex over
  * the raw payload. Calendar content is attacker-authored here (anyone who can send an
  * invitation writes a DESCRIPTION), and U+2028, U+2029 and a bare CR all satisfy JavaScript's
@@ -2653,9 +2661,14 @@ export class CalDAVCalendarClient {
     // production rather than doing real work — kept because `resolveUsableTimezone` is the
     // one shared seam every other zone-resolving call site here already goes through, and
     // this stays consistent with them rather than being a special case that assumes its
-    // input differently from the rest. `zone` above stays the raw configured value:
-    // `coerceCalendarWindowStart`/`End` and `sortEventsByStart` already resolve it themselves
-    // where each needs to.
+    // input differently from the rest. `zone` above stays the raw configured value only for
+    // `coerceCalendarWindowStart`/`End`, which resolve it themselves where each needs to.
+    // `sortEventsByStart` is handed `configuredZone`, the same value the window filter gets:
+    // the sort has no `resolveUsableTimezone` of its own, so passing it the raw value left it
+    // leaning on `zoneOffsetMsAt`'s SILENT host-zone fallback for the fallback leg, and the
+    // sort and the filter would then be ordering and filtering the same events against two
+    // different zones. Inert in production while #157 guarantees the configured zone is
+    // ICU-usable, but this removes the dependency rather than documenting it.
     const configuredZone = resolveUsableTimezone(zone);
     const rawStart = coerceCalendarWindowStart(startDate, 'startDate', zone);
     const rawEnd = coerceCalendarWindowEnd(endDate, 'endDate', zone);
@@ -2815,7 +2828,7 @@ export class CalDAVCalendarClient {
       // which is what makes the slice a genuine top-N.
     }
 
-    sortEventsByStart(allEvents, zone);
+    sortEventsByStart(allEvents, configuredZone);
 
     return { events: allEvents.slice(0, limit), total: allEvents.length, windowClamp };
   }

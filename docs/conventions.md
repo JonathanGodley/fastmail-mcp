@@ -1458,9 +1458,13 @@ block whatever its dates say. **Both carriers count**, and an `RRULE`-only guard
 hole: a series that lists its occurrences as `RDATE`s states no rule at all, so it read as an
 ordinary one-off and was dropped. The parsed event carries `recurrenceDates` (the raw RDATE
 values, joined) beside `recurrenceRule` so the guard and the caller can read the same fact.
-Unreachable against Fastmail today (measured in `calendar-expand.probe.mjs`), and it stays as
-resilience rather than being removed, because the claim that this filter "closes the gap if a
-server declines to expand" was false in the dangerous direction until the guard existed.
+Only the `RRULE` half is known unreachable against Fastmail today: `calendar-expand.probe.mjs`
+MEASURED that Cyrus strips `RRULE` from an expanded block. The `RDATE` half is DERIVED, not
+observed — Cyrus is understood to strip `RDATE` the same way, but nothing in
+`scripts/probes/` looks at `RDATE` under `<C:expand>`, so do not read it as measured. The
+guard stays as resilience rather than being removed, because the claim that this filter
+"closes the gap if a server declines to expand" was false in the dangerous direction until the
+guard existed.
 
 Second, **a floating timed value that has been through expansion.** The server rewrites it to
 `Z` and destroys the floating marker, so nothing on this side can tell it apart from a genuine
@@ -1840,12 +1844,14 @@ Three measured consequences, in ascending order of how bad they are:
    named, and mails its attendees a cancellation. The same trick places a fabricated
    appointment on any date of the user's calendar.
 
-The write path inherits all of it: the RRULE test and the ORGANIZER/ATTENDEE presence gates
-steered an in-place patch from `/m` tests over the stored payload. The RRULE one now decides
-whether `update_calendar_event` / `delete_calendar_event` refuse the call outright
-(`isRecurringSeriesResource`), so a forged `RRULE:` line in a `SUMMARY` would either block a
-legitimate edit or, read the other way, hide a real rule inside a folded line — which is why
-that detector reads whole content lines and takes no `/m` shortcut.
+The write path inherits all of it: the recurrence test and the ORGANIZER/ATTENDEE presence
+gates steered an in-place patch from `/m` tests over the stored payload. The recurrence one now
+decides whether `update_calendar_event` / `delete_calendar_event` refuse the call outright
+(`isRecurringSeriesResource`, which takes `RRULE` **and** `RDATE` as markers, because a series
+may list its occurrences instead of stating a rule), so a forged `RRULE:` or `RDATE:` line in a
+`SUMMARY` would either block a legitimate edit or, read the other way, hide a real recurrence
+inside a folded line — which is why that detector reads whole content lines and takes no `/m`
+shortcut.
 
 **The rule, then.** `src/caldav-client.ts` splits a payload with `icalContentLines` — CRLF and
 LF only — and matches WHOLE lines for `BEGIN:VEVENT` / `END:VEVENT` / `KEY[;:]`. U+2028,

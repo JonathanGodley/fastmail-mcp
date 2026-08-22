@@ -5699,28 +5699,36 @@ describe('non-RFC line terminators inside a value are text, not structure', () =
   }
 
   // The presence test itself, asserted directly rather than through a reader that was never
-  // `/m`-based. The RRULE / ORGANIZER / ATTENDEE gates on the write path all go through
+  // `/m`-based. The RRULE / RDATE / ORGANIZER / ATTENDEE gates on the write path all go through
   // hasICalProperty, and it is the ONLY thing they go through \u2014 an earlier version of this
   // test drove parseAllICalProperties instead, which passed identically before and after the
-  // fix and left all three gates unpinned. Two of the three are also driven end to end
-  // through updateCalendarEvent (see the patch-based suite); the RRULE one is not observable
-  // that way, because every read inside that branch is already line-model-based.
+  // fix and left every one of those gates unpinned. ORGANIZER and ATTENDEE are also driven end
+  // to end through updateCalendarEvent (see the patch-based suite); the two recurrence markers
+  // are not observable that way, because every read inside that branch is already
+  // line-model-based. RDATE is here because it fronts the same irreversible destroy as RRULE:
+  // isRecurringSeriesResource takes it as a recurrence marker too, so a forged RDATE in a TEXT
+  // value reaching that gate would refuse a legitimate edit or delete of a one-off event.
   for (const [name, sep] of TERMINATORS) {
     it(`treats a property forged after ${name} inside a value as absent, not present`, () => {
       const vevent = [
         'BEGIN:VEVENT',
         'UID:e@fm',
         `SUMMARY:Standup${sep}RRULE:FREQ=WEEKLY${sep}ORGANIZER:mailto:nobody@example.invalid`,
+        `LOCATION:Room 1${sep}RDATE:20260408T100000Z`,
         `DESCRIPTION:notes${sep}ATTENDEE;CN=Nobody:mailto:nobody@example.invalid`,
         'END:VEVENT',
       ].join('\r\n');
-      for (const key of ['RRULE', 'ORGANIZER', 'ATTENDEE']) {
+      for (const key of ['RRULE', 'RDATE', 'ORGANIZER', 'ATTENDEE']) {
         assert.equal(hasICalProperty(vevent, key), false, `${key} was read out of a value`);
       }
       // \u2026and a real one on its own line is still found, so the guard cannot be "fixed" into
       // never matching.
-      const real = vevent.replace('UID:e@fm', 'UID:e@fm\r\nRRULE:FREQ=DAILY');
+      const real = vevent.replace(
+        'UID:e@fm',
+        'UID:e@fm\r\nRRULE:FREQ=DAILY\r\nRDATE:20260415T100000Z',
+      );
       assert.equal(hasICalProperty(real, 'RRULE'), true);
+      assert.equal(hasICalProperty(real, 'RDATE'), true);
     });
   }
 
