@@ -2363,9 +2363,62 @@ const CALENDAR_NAME_LIST_CAP = 20;
  */
 const HIDDEN_TASK_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
 
+/**
+ * The one place a DAV `displayName` is turned into a name, because tsdav types it as `string`
+ * and it is not one.
+ *
+ * tsdav 2.3.1 reads the property as `rs.props?.displayname?._cdata ?? rs.props?.displayname`
+ * (`fetchCalendars`, dist/tsdav.cjs:1004) and hands the result straight through — unlike its
+ * address-book path (:744), which guards with `typeof === 'string'`. What reaches us is
+ * therefore whatever xml-js produced under tsdav's own parser options (:274-300), which is one
+ * of these, all measured against xml-js with those options rather than assumed:
+ *
+ *   <displayname>Work</displayname>                 "Work"          a plain string
+ *   <displayname><![CDATA[Work]]></displayname>     "Work"          tsdav's `._cdata` read
+ *   <displayname>2026</displayname>                 2026            a NUMBER
+ *   <displayname>true</displayname>                 true            a BOOLEAN
+ *   <displayname/>  or  <displayname></displayname> {}              an EMPTY OBJECT
+ *   <D:displayname xml:lang="en"/>                  {_attributes:…} an OBJECT
+ *   (property absent)                               undefined
+ *
+ * The number and boolean come from tsdav's `nativeType` (:104-114), which coerces any element
+ * text that looks numeric or reads "true"/"false". The empty object is xml-js compact mode:
+ * tsdav's `textFn` only fires when there IS text, so an empty element keeps its bare compact
+ * form. Whitespace-only text is the same case, because `trim: true` leaves nothing behind.
+ *
+ * The object cases are why this exists. `String({})` is `"[object Object]"` — a TRUTHY string,
+ * so every `|| 'Unnamed'` fallback downstream is dead on exactly the input it was written for,
+ * and the marker reached the caller as a calendar name. Equality reads fail the same way and
+ * more quietly: an object-shaped name never equals anything, so the hidden task collection
+ * leaked into listings and a by-name `calendarId` could not match.
+ *
+ * No URL fallback lives here. What an absent name should degrade to differs per call site (a
+ * literal "Unnamed" in a listing, the collection URL in a density note, omission from an error
+ * message's name list), so the helper answers only "is there a name, and what is it".
+ */
+export function unwrapDisplayName(raw: unknown): string | undefined {
+  const scalar =
+    typeof raw === 'object' && raw !== null
+      ? (raw as { _cdata?: unknown; _text?: unknown })._cdata ??
+        (raw as { _text?: unknown })._text
+      : raw;
+  if (typeof scalar === 'string') {
+    const trimmed = scalar.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  // A name the parser typed for us is still the name the user gave the calendar, so it is
+  // rendered rather than discarded — a calendar called "2026" keeps its name instead of
+  // becoming "Unnamed". NaN/Infinity cannot come from `nativeType`, which rejects both.
+  if (typeof scalar === 'number' && Number.isFinite(scalar)) return String(scalar);
+  if (typeof scalar === 'boolean') return String(scalar);
+  return undefined;
+}
+
 /** The calendars a caller is able to name, which is the only set worth listing back at them. */
 function selectableCalendars(calendars: DAVCalendar[]): DAVCalendar[] {
-  return calendars.filter(c => c.displayName !== HIDDEN_TASK_CALENDAR_NAME);
+  // Unwrapped before comparing: an object-shaped name never equals the hidden name, which let
+  // the task collection through into every listing built from this filter.
+  return calendars.filter(c => unwrapDisplayName(c.displayName) !== HIDDEN_TASK_CALENDAR_NAME);
 }
 
 /**
@@ -2383,7 +2436,9 @@ function selectableCalendars(calendars: DAVCalendar[]): DAVCalendar[] {
  * it is given one input.
  */
 function calendarNotFoundError(calendarId: unknown, available: DAVCalendar[]): InvalidInputError {
-  const names = selectableCalendars(available).map(c => String(c.displayName ?? '')).filter(Boolean);
+  const names = selectableCalendars(available)
+    .map(c => unwrapDisplayName(c.displayName))
+    .filter((n): n is string => n !== undefined);
   const shown = names.slice(0, CALENDAR_NAME_LIST_CAP).map(n => `"${echoCallerText(n)}"`).join(', ');
   const more = names.length > CALENDAR_NAME_LIST_CAP ? `, …and ${names.length - CALENDAR_NAME_LIST_CAP} more` : '';
   const listing = names.length > 0 ? ` Available calendars: ${shown}${more}.` : '';
@@ -2708,7 +2763,7 @@ export class CalDAVCalendarClient {
     return selectableCalendars(calendars)
       .map(c => ({
         id: c.url || '',
-        displayName: String(c.displayName || 'Unnamed'),
+        displayName: unwrapDisplayName(c.displayName) ?? 'Unnamed',
         url: c.url || '',
         description: c.description || undefined,
         color: (c as any).calendarColor || undefined,
@@ -2729,7 +2784,7 @@ export class CalDAVCalendarClient {
     const requested = typeof calendarId === 'string' ? calendarId.trim() : calendarId;
     if (requested !== undefined && requested !== null) {
       const matched = targetCalendars.filter(
-        c => c.url === requested || c.displayName === requested
+        c => c.url === requested || unwrapDisplayName(c.displayName) === requested
       );
       // A calendarId that matches nothing used to leave the list empty, so the loop below
       // never ran and the tool answered "Showing 0 of 0 results." — an availability question
@@ -2930,14 +2985,13 @@ export class CalDAVCalendarClient {
             title: parseICalValue(blocks[0], 'SUMMARY') || 'Untitled',
             id: parseICalValue(blocks[0], 'UID') || obj.url || '',
             url: obj.url || '',
-            // STRINGIFIED the way `list_calendars` and the not-found error already stringify
-            // it, deliberately rather than unwrapped. A DAV displayName is typed loosely
-            // enough to arrive as a property object; `String()` on one yields a visible
-            // "[object Object]" marker instead of throwing, which keeps the disclosure
-            // working on a shape this server does not model. Not corrected here, because
-            // unwrapping belongs in one shared helper across all three sites rather than in
-            // whichever site noticed it. The url is the handle that always exists.
-            calendar: String(cal.displayName || '') || cal.url || '',
+            // UNWRAPPED through the shared helper, the same one `list_calendars` and the
+            // not-found error use. A DAV displayName arrives as a property object whenever the
+            // element is empty or attribute-only, and stringifying one produced a visible
+            // "[object Object]" in the disclosure — truthy, so the url fallback beside it never
+            // ran. The helper answers "is there a name"; the url is the handle that always
+            // exists when there is not.
+            calendar: unwrapDisplayName(cal.displayName) ?? cal.url ?? '',
             occurrences: blocks.length,
           });
           continue;
@@ -3075,7 +3129,7 @@ export class CalDAVCalendarClient {
     const requested = typeof event.calendarId === 'string' ? event.calendarId.trim() : event.calendarId;
     const selectable = selectableCalendars(calendars);
     const targetCal = selectable.find(
-      c => c.url === requested || c.displayName === requested
+      c => c.url === requested || unwrapDisplayName(c.displayName) === requested
     );
     if (!targetCal) {
       // A calendarId that matches no calendar is caller-fixable: they re-issue the call

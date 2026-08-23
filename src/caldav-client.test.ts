@@ -32,6 +32,7 @@ import {
   CalDAVCalendarClient,
   describeCreateCalendarEventResult,
   describeUpdateCalendarEventResult,
+  unwrapDisplayName,
   CALENDAR_MAX_OCCURRENCES_PER_SERIES,
 } from './caldav-client.js';
 // A value import, not `import type`: the redirect test below stubs a method on the
@@ -6469,5 +6470,120 @@ describe('calendarNotFoundError lists only calendars a caller can name', () => {
         return true;
       },
     );
+  });
+});
+
+describe('unwrapDisplayName', () => {
+  // The shapes below are the ones tsdav 2.3.1 can hand back for a calendar's `displayname`,
+  // measured against xml-js under tsdav's own parser options rather than assumed. tsdav reads
+  // the property as `props?.displayname?._cdata ?? props?.displayname` and passes it through
+  // with no string guard, so its `displayName: string` typing is a claim, not a fact.
+
+  it('returns a plain string name, trimmed', () => {
+    assert.equal(unwrapDisplayName('Work'), 'Work');
+    assert.equal(unwrapDisplayName('  Work  '), 'Work');
+  });
+
+  it('returns undefined for the empty-element shape', () => {
+    // `<displayname/>` and `<displayname></displayname>` both parse to a bare `{}`: xml-js
+    // compact mode, and tsdav's `textFn` only fires when the element HAS text. A
+    // whitespace-only body is the same case, because tsdav parses with `trim: true`.
+    assert.equal(unwrapDisplayName({}), undefined);
+  });
+
+  it('returns undefined for the attribute-typed shape', () => {
+    // `<D:displayname xml:lang="en"/>` — no text, so the compact form keeps only its
+    // attributes. tsdav's `attributesFn` strips a bare `xmlns` but not a prefixed one.
+    assert.equal(unwrapDisplayName({ _attributes: { 'xml:lang': 'en' } }), undefined);
+    assert.equal(unwrapDisplayName({ _attributes: { 'xmlns:d': 'DAV:' } }), undefined);
+  });
+
+  it('returns undefined for an absent property', () => {
+    assert.equal(unwrapDisplayName(undefined), undefined);
+    assert.equal(unwrapDisplayName(null), undefined);
+  });
+
+  it('reads the text out of the CDATA and text-node shapes', () => {
+    assert.equal(unwrapDisplayName({ _attributes: { 'xmlns:d': 'DAV:' }, _cdata: 'Shared' }), 'Shared');
+    assert.equal(unwrapDisplayName({ _text: 'Shared' }), 'Shared');
+    // Empty text is a name that is not there, not a name of "".
+    assert.equal(unwrapDisplayName({ _cdata: '   ' }), undefined);
+  });
+
+  it('keeps a name tsdav typed away from string', () => {
+    // tsdav's `nativeType` coerces element text that looks numeric or reads true/false, so a
+    // calendar called "2026" arrives as the NUMBER 2026. It is still its name.
+    assert.equal(unwrapDisplayName(2026), '2026');
+    assert.equal(unwrapDisplayName(true), 'true');
+  });
+});
+
+describe('calendar display names that are not strings', () => {
+  it('never renders [object Object] as a calendar name, and lets the fallback fire', async () => {
+    // The defect: `String({})` is "[object Object]" — a TRUTHY string, so the `|| 'Unnamed'`
+    // fallback was dead on the exact input it existed for, and the marker reached the caller.
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    const mockDAVClient = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: 'Personal', url: '/cal/personal/' },
+        // An empty <displayname/>, as parsed.
+        { displayName: {}, url: '/cal/nameless/' },
+        // An attribute-typed one.
+        { displayName: { _attributes: { 'xml:lang': 'en' } }, url: '/cal/typed/' },
+      ]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+    (client as any).client = mockDAVClient;
+
+    const calendars = await client.getCalendars();
+
+    assert.equal(calendars.length, 3);
+    for (const cal of calendars) {
+      assert.ok(!cal.displayName.includes('[object Object]'), `leaked marker: ${cal.displayName}`);
+    }
+    assert.equal(calendars.find(c => c.id === '/cal/personal/')!.displayName, 'Personal');
+    assert.equal(calendars.find(c => c.id === '/cal/nameless/')!.displayName, 'Unnamed');
+    assert.equal(calendars.find(c => c.id === '/cal/typed/')!.displayName, 'Unnamed');
+  });
+
+  it('still hides the task collection when its name arrives CDATA-wrapped', async () => {
+    // The hidden-calendar filter compares the raw value, so any non-string shape carrying the
+    // hidden name slipped past it and the collection leaked into the listing.
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: 'Personal', url: '/cal/personal/' },
+        { displayName: { _cdata: 'DEFAULT_TASK_CALENDAR_NAME' }, url: '/cal/tasks/' },
+      ]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+
+    const calendars = await client.getCalendars();
+
+    assert.deepEqual(calendars.map(c => c.displayName), ['Personal']);
+  });
+
+  it('matches a calendarId against a name the parser wrapped', async () => {
+    // An object-shaped name never equalled the requested string, so naming that calendar was
+    // answered "Calendar not found" — an availability question answered from nothing.
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    const fetchCalendarObjects = mock.fn(async (_p: FetchObjectsParams) => []);
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: { _cdata: 'Team Roster' }, url: '/cal/team/' },
+        { displayName: 'Personal', url: '/cal/personal/' },
+      ]),
+      fetchCalendarObjects,
+    };
+
+    const result = await client.getCalendarEvents('Team Roster', 50, '2026-04-01', '2026-04-30');
+
+    assert.equal(result.events.length, 0);
+    assert.equal(fetchCalendarObjects.mock.calls.length, 1);
+    const [params] = callArguments(fetchCalendarObjects, 0);
+    assert.equal(params.calendar.url, '/cal/team/');
   });
 });
