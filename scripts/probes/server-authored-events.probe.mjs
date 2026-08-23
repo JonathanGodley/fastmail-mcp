@@ -203,32 +203,34 @@ async function fetchResources(calendarUrl) {
 
 const summaryOf = data => (data.match(/^SUMMARY:(.*)$/m)?.[1] ?? '(no SUMMARY)').trim();
 
-/** Is CAL_NAME present in a list_calendars response as a WHOLE calendar name?
+/** Is THIS run's collection — the one at `url` — present in a list_calendars response?
  *
- *  A substring test over the raw response body is wrong twice: it matches a calendar merely
- *  CONTAINING the name ("MCP probe calendar (old)" would satisfy a wait for "MCP probe
- *  calendar"), and it matches the name appearing in the tool's own prose. So: parse the
- *  payload and compare values exactly where the body is JSON, and fall back to a regex
- *  anchored on the quoted name where it is not. */
-function calendarIsListed(body, name) {
+ *  The URL, never the display name. A name test cannot tell this run's collection from an
+ *  earlier run's sitting under the same name: the earlier one is already listed, so the wait
+ *  would succeed on attempt 1 and report the fresh collection as visible before the server
+ *  had ever seen it. The URL is the only value in the payload that names exactly one
+ *  collection. Compared with any trailing slash removed, since the two sides mint it from
+ *  different places and need not agree on that. */
+const sameCalendarUrl = (a, b) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+
+function calendarIsListed(body, url) {
   try {
     const payload = jsonOf(body);
-    const names = [];
+    const urls = [];
     const walk = v => {
       if (Array.isArray(v)) v.forEach(walk);
       else if (v && typeof v === 'object') for (const [k, val] of Object.entries(v)) {
-        if (typeof val === 'string' && /^(name|displayName|title)$/i.test(k)) names.push(val);
+        if (typeof val === 'string' && /^(url|href)$/i.test(k)) urls.push(val);
         else walk(val);
       }
     };
     walk(payload);
-    return names.includes(name);
+    return urls.some(u => sameCalendarUrl(u, url));
   } catch {
-    // Not JSON (or no payload): the quoted whole value, which still excludes a prose mention
-    // and a longer name that merely starts with this one. JSON.stringify supplies the quotes
-    // AND escapes any the name itself contains, so a display name holding a `"` still matches
-    // the way it was serialised rather than producing a broken needle.
-    return body.includes(JSON.stringify(name));
+    // Not JSON (or no payload): the URL as a plain substring, with and without the trailing
+    // slash. Still unambiguous — the stamped path segment appears nowhere else.
+    const bare = url.replace(/\/+$/, '');
+    return body.includes(bare);
   }
 }
 
@@ -337,7 +339,6 @@ async function runCreate() {
   const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
   const earlier = sameName.filter(c => isMinted(c.url));
   const foreign = sameName.find(c => !isMinted(c.url));
-  let calendarUrl;
   if (foreign) {
     check('no collection outside this probe carries the display name', false,
       `a calendar named ${JSON.stringify(CAL_NAME)} exists and is not this probe's`);
@@ -352,27 +353,24 @@ async function runCreate() {
     for (const c of earlier) console.log(`  ${redact(c.url)}`);
     console.log('This run mints its own and leaves those untouched.');
   }
-  {
-    const candidateUrl = new URL(`${mintedSegment()}/`, homeUrl).href;
-    const mk = await dav('MKCALENDAR', candidateUrl, {
-      body: `<?xml version="1.0" encoding="utf-8"?>\n` +
-        `<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop>` +
-        `<d:displayname>${escapeXml(CAL_NAME)}</d:displayname>` +
-        `<c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set>` +
-        `</d:prop></d:set></c:mkcalendar>`,
-    });
-    if (!(mk.status >= 200 && mk.status < 300)) {
-      // Deliberately terminal. Falling back to any existing calendar would put the cleanup
-      // phase's whole-collection DELETE over events this run did not write.
-      check(`MKCALENDAR ${redact(candidateUrl)}`, false, `HTTP ${mk.status} ${mk.statusText}`);
-      console.error('\nStopping: this probe never writes into a calendar it did not mint.');
-      console.error('Nothing was written.');
-      return { wroteAnything: false };
-    }
-    calendarUrl = candidateUrl;
-    check(`MKCALENDAR created the temporary collection`, true, `HTTP ${mk.status}`);
-    console.log(`  ${redact(calendarUrl)}`);
+  const calendarUrl = new URL(`${mintedSegment()}/`, homeUrl).href;
+  const mk = await dav('MKCALENDAR', calendarUrl, {
+    body: `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop>` +
+      `<d:displayname>${escapeXml(CAL_NAME)}</d:displayname>` +
+      `<c:supported-calendar-component-set><c:comp name="VEVENT"/></c:supported-calendar-component-set>` +
+      `</d:prop></d:set></c:mkcalendar>`,
+  });
+  if (!(mk.status >= 200 && mk.status < 300)) {
+    // Deliberately terminal. Falling back to any existing calendar would put the cleanup
+    // phase's whole-collection DELETE over events this run did not write.
+    check(`MKCALENDAR ${redact(calendarUrl)}`, false, `HTTP ${mk.status} ${mk.statusText}`);
+    console.error('\nStopping: this probe never writes into a calendar it did not mint.');
+    console.error('Nothing was written.');
+    return { wroteAnything: false };
   }
+  check(`MKCALENDAR created the temporary collection`, true, `HTTP ${mk.status}`);
+  console.log(`  ${redact(calendarUrl)}`);
 
   // --- write the four events through the built server ----------------------------------
   // Tracked so the failure banner can tell "nothing was written" from "some of it was":
@@ -382,22 +380,19 @@ async function runCreate() {
   try {
     await client.init();
 
-    // The collection has to be visible to the CalDAV surface the server discovers before it
-    // can be addressed at all. Bounded retry, not a poll loop.
-    //
-    // This tests the DISPLAY NAME on purpose, and it is a measurement rather than the write
-    // target: whether a freshly minted collection becomes addressable by name, and how fast,
-    // is one of the things the run reports. The writes below use the URL regardless.
+    // The collection this run just minted has to reach the surface the server discovers
+    // before anything can be written to it. Bounded retry, not a poll loop. How long that
+    // takes is itself one of the things the run reports.
     const ATTEMPTS = 5;
     let visible = false;
     for (let attempt = 1; attempt <= ATTEMPTS && !visible; attempt++) {
-      visible = calendarIsListed(text(await client.call('list_calendars', {})), CAL_NAME);
+      visible = calendarIsListed(text(await client.call('list_calendars', {})), calendarUrl);
       // Log the outcome BEFORE waiting, so a slow appearance shows its progress as it goes
       // rather than arriving as one silent pause; and never wait after the last attempt.
-      console.log(`list_calendars attempt ${attempt}/${ATTEMPTS}: ${visible ? 'calendar visible' : 'not yet visible'}`);
+      console.log(`list_calendars attempt ${attempt}/${ATTEMPTS}: ${visible ? 'minted collection listed' : 'not yet listed'}`);
       if (!visible && attempt < ATTEMPTS) await new Promise(r => setTimeout(r, 1000 * attempt));
     }
-    check('the temporary calendar is addressable by display name in list_calendars', visible);
+    check('the freshly minted collection is listed by list_calendars', visible);
     if (!visible) return { wroteAnything: false };
 
     console.log('');

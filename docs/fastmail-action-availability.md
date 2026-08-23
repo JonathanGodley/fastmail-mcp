@@ -296,11 +296,12 @@ by path" above.
 **A bare `TZID` with no embedded `VTIMEZONE` renders exactly as the client's own events do.** Every
 timed event the client authors carries an embedded `VTIMEZONE` for its zone (the two timed rows in
 the section above both do); this server writes none, and the popup for the explicitly-zoned event is
-identical in format to the client's own zone-picker reference event from 22 August, which read
-`11:00 AM – 12:00 PM AEST` over `9:00 AM – 10:00 AM HKST`. So the absence has no visible effect in
-the Fastmail client, which resolves the zone name itself. **What this does not measure is
+identical in format to the client's own zone-picker reference event authored on 22 August, whose
+popup — read on 23 August in the same web client, since the 22 August section records bytes only —
+gave `11:00 AM – 12:00 PM AEST` over `9:00 AM – 10:00 AM HKST`. So the absence has no visible effect
+in the Fastmail client, which resolves the zone name itself. **What this does not measure is
 interoperability**: whether a `VTIMEZONE`-less resource resolves the same way in some *other* CalDAV
-client was not tested here, and is tracked in a fork issue.
+client was not tested here, and is tracked as #166.
 
 Also worth recording for the read side: #162 changed only the window filter and the refusals, not the
 create serialiser, which is unchanged since #157 — so that work produced no newly authored bytes to
