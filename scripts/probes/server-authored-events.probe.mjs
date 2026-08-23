@@ -40,9 +40,14 @@
 // not a reprieve, because a display name is not a unique key and the write would go to
 // whichever the server discovers first. And the writes are addressed by the minted
 // collection's URL rather than by the name, so the fixtures cannot land anywhere else even
-// if the account gains a same-named calendar mid-run. A same-named collection that IS on a
-// minted path is this probe's own, so `create` reuses it rather than minting a second and a
-// re-run after a partial failure does not litter; `cleanup` deletes every one it finds.
+// if the account gains a same-named calendar mid-run.
+//
+// EVERY RUN MINTS ITS OWN COLLECTION, and never reuses one an earlier run left behind. That
+// keeps the run's own resource count meaningful — the four events it wrote are the only
+// things in the collection it minted — and stops one run's `cleanup` from taking another
+// run's fixtures with it. An earlier minted collection is reported and left alone. Nothing is
+// stranded by that: `cleanup` deletes EVERY minted collection under the name, so one cleanup
+// sweeps every run's leftovers at once.
 //
 // NO PARTICIPANTS. None of the four events carries one. An attendee makes the server's
 // scheduling layer send a real iTIP invitation from the account under test, and the later
@@ -313,16 +318,24 @@ async function runCreate() {
   console.log(`Calendar home: ${redact(homeUrl)}`);
   console.log(`Temporary calendar display name: ${JSON.stringify(CAL_NAME)}`);
 
-  // --- the collection: reuse one THIS PROBE minted, else MKCALENDAR --------------------
-  // THE RULE: a same-named collection this probe did not mint means STOP, always — whether or
-  // not a minted one also exists. Having our own is no protection, because a display name is
-  // not a unique key: src/caldav-client.ts resolves `calendarId` as
-  // `c.url === requested || c.displayName === requested` over the discovery order, so with
-  // two collections carrying the name the write goes to whichever the server lists first,
-  // which can be the operator's real calendar. Refusing on `foreign` alone removes the
-  // ambiguity rather than betting on the order.
+  // --- the collection: ALWAYS mint a fresh one -----------------------------------------
+  // TWO RULES, and neither ever writes into a collection that already exists.
+  //
+  // 1. A same-named collection this probe did not mint means STOP, always — whether or not a
+  //    minted one also exists. Having our own is no protection, because a display name is not
+  //    a unique key: src/caldav-client.ts resolves `calendarId` as
+  //    `c.url === requested || c.displayName === requested` over the discovery order, so with
+  //    two collections carrying the name the write goes to whichever the server lists first,
+  //    which can be the operator's real calendar. Refusing on `foreign` alone removes the
+  //    ambiguity rather than betting on the order.
+  //
+  // 2. Every run MINTS ITS OWN stamped collection and NEVER reuses an earlier one. Reuse made
+  //    this run's own resource-count check meaningless (it counted a previous run's fixtures
+  //    too) and let one run's `cleanup` delete another run's events. An earlier minted
+  //    collection is reported and left exactly as it is; `cleanup` sweeps every minted
+  //    collection under the name, so nothing is stranded by leaving it alone.
   const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
-  const existing = sameName.find(c => isMinted(c.url));
+  const earlier = sameName.filter(c => isMinted(c.url));
   const foreign = sameName.find(c => !isMinted(c.url));
   let calendarUrl;
   if (foreign) {
@@ -330,21 +343,16 @@ async function runCreate() {
       `a calendar named ${JSON.stringify(CAL_NAME)} exists and is not this probe's`);
     console.error(`\nStopping: ${redact(foreign.url)} carries that display name but was not minted by`);
     console.error(`this probe (its path does not start with "${MINTED_PREFIX}"), so it is a real calendar.`);
-    if (existing) {
-      console.error(`This probe's own ${redact(existing.url)} carries the name too; that is exactly the`);
-      console.error('ambiguous case, because the name alone cannot say which of the two a write reaches.');
-    }
     console.error('Nothing was written. Choose another name and re-run:');
     console.error(`  python scripts/probes/run-probe.py server-authored-events.probe.mjs create "MCP probe calendar 2"`);
     return { wroteAnything: false };
   }
-  if (existing) {
-    calendarUrl = existing.url;
-    console.log(`\nThis probe's own collection with that display name already exists - reusing it`);
-    console.log(`rather than minting a second.`);
-    console.log(`  ${redact(calendarUrl)}`);
-    check('collection available (reused a previously minted one)', true);
-  } else {
+  if (earlier.length) {
+    console.log(`\n${earlier.length} earlier minted collection(s) under this name exist; \`cleanup\` will delete them all.`);
+    for (const c of earlier) console.log(`  ${redact(c.url)}`);
+    console.log('This run mints its own and leaves those untouched.');
+  }
+  {
     const candidateUrl = new URL(`${mintedSegment()}/`, homeUrl).href;
     const mk = await dav('MKCALENDAR', candidateUrl, {
       body: `<?xml version="1.0" encoding="utf-8"?>\n` +
@@ -354,8 +362,8 @@ async function runCreate() {
         `</d:prop></d:set></c:mkcalendar>`,
     });
     if (!(mk.status >= 200 && mk.status < 300)) {
-      // Deliberately terminal. Falling back to an existing calendar would put the cleanup
-      // phase's whole-collection DELETE over the operator's own events.
+      // Deliberately terminal. Falling back to any existing calendar would put the cleanup
+      // phase's whole-collection DELETE over events this run did not write.
       check(`MKCALENDAR ${redact(candidateUrl)}`, false, `HTTP ${mk.status} ${mk.statusText}`);
       console.error('\nStopping: this probe never writes into a calendar it did not mint.');
       console.error('Nothing was written.');
@@ -419,7 +427,10 @@ async function runCreate() {
   console.log(`\n${'='.repeat(70)}`);
   console.log(`Stored resources, fetched back raw over CalDAV (REPORT ${status} ${statusText})`);
   console.log(`This is what the client is rendering.`);
-  check(`all ${EVENTS.length} events are stored in the collection`, resources.length === EVENTS.length,
+  // Exactly the four this run wrote: the collection was minted by this run and nothing else
+  // has ever written to it, so any other count is a real discrepancy rather than history.
+  check(`exactly the ${EVENTS.length} events this run wrote are stored in the collection it minted`,
+    resources.length === EVENTS.length,
     `found ${resources.length}`);
   for (const r of resources) {
     console.log('='.repeat(70));
@@ -434,7 +445,9 @@ async function runCreate() {
   console.log('Look for in the client:');
   for (const ev of EVENTS) console.log(`  ${ev.title}\n      ${ev.lookFor}`);
   console.log('');
-  console.log(`The events are LEFT IN PLACE for viewing. When you are done, remove them with:`);
+  console.log(`The events are LEFT IN PLACE for viewing. When you are done, remove them with the`);
+  console.log(`command below, which deletes EVERY collection this probe has minted under this name,`);
+  console.log(`this run's and any earlier run's:`);
   console.log(`  python scripts/probes/run-probe.py server-authored-events.probe.mjs cleanup ${JSON.stringify(CAL_NAME)}`);
   return { wroteAnything };
 }
