@@ -216,8 +216,10 @@ same way, covering the recurrence and DST shapes the first pass left open. The m
 clients share their authoring logic, so these are recorded as the client's shapes rather than either
 app's; that sharing is the operator's statement, and the second pass is the first *measured* support
 for it — on the four shapes it covers the web client wrote the same model as the mobile one (a zone
-name plus a wall clock, `VALUE=DATE` for all-day, `DURATION` for the end). That is agreement on four
-shapes, not a measurement of every shape. This is a third method alongside the two at the top of
+name plus a wall clock, `VALUE=DATE` for all-day). That is agreement on four shapes, not a
+measurement of every shape, and it is agreement on the *model*, not on every spelling: the two
+clients wrote the same three-day all-day event with different end properties (see the storage
+paragraph below). This is a third method alongside the two at the top of
 the file — not a reading of pixels and not a `mailboxIds` diff, but the resource's bytes as the
 server stored them. Bytes need no second
 method to corroborate them, which is why one pass settles these rows.
@@ -237,8 +239,11 @@ method to corroborate them, which is why one pass settles these rows.
 
 **`UNTIL` is UTC, and it is the last second of the chosen local day.** The picker was given a date,
 "Last occurs on Wed, 23 Sep 2026", and the client wrote `UNTIL=20260923T135959Z` — 23:59:59 on the
-23rd in `Australia/Sydney`, converted to UTC. So `UNTIL` is the one place the client does write a
-`Z` value, and the bound it means is a whole local day rather than the series' own clock time. Note
+23rd in `Australia/Sydney`, converted to UTC. So among the values that *schedule* the series,
+`UNTIL` is the one the client writes as a `Z`, and the bound it means is a whole local day rather
+than the series' own clock time. (The resource's housekeeping timestamps — `CREATED`, `DTSTAMP`,
+`LAST-MODIFIED`, and `TZUNTIL` and `LAST-MODIFIED` inside the `VTIMEZONE` — are UTC as well, but
+none of them schedules anything, so they are not what this claim is about.) Note
 also what is **absent**: the weekly rule carries no `BYDAY`, so the weekday is taken from `DTSTART`
 and a reader must not expect the rule to restate it. The monthly "3rd Tuesday" rule does carry
 `BYDAY=3TU`, because there the weekday is not derivable from `DTSTART` alone. Reading the series
@@ -259,8 +264,10 @@ client-authored event.)
 **The client never writes a floating or absolute time.** Every timed value in all six is an IANA
 zone *name* plus a local wall clock. Not one `Z` form, not one numeric offset, not one bare
 `DTSTART:20260822T090000`. The claim is about the values that *schedule* an event — `DTSTART`,
-`DTEND`, `RECURRENCE-ID`, `EXDATE` — and it survives the second pass, where the only `Z` written
-anywhere is the `UNTIL` inside an `RRULE`. That is the measured ratification of the write model this server ships
+`DTEND`, `DURATION`, `RECURRENCE-ID`, `EXDATE`, and a recurrence rule's own bound — and it survives
+the second pass, where the only `Z` among them is the `UNTIL`. Read it as scoped to those values,
+not to the resource: the housekeeping timestamps (`CREATED`, `DTSTAMP`, `LAST-MODIFIED`, `TZUNTIL`)
+are UTC throughout, and always were. That is the measured ratification of the write model this server ships
 (#139, #157): a zone name plus wall clock in both directions, and an omitted zone writing the
 configured zone rather than leaving the value floating. The client would author the same bytes.
 
@@ -302,13 +309,24 @@ The weekly `UNTIL` series was edited from its **first** occurrence, choosing **A
 with the title changed and the start moved from 9:00 to 9:30. The client rewrote the **master VEVENT
 in place**, and wrote nothing else:
 
+Only the **post-edit** bytes were fetched, so the two-sided claims below are marked with what they
+rest on. Read an unmarked one as measured.
+
 - `DTSTART` `20260826T090000` → `20260826T093000` and `SUMMARY` changed, in the one existing block.
-- `SEQUENCE` 0 → 1, `DTSTAMP` and `LAST-MODIFIED` bumped, `UID` unchanged.
-- `RRULE` **unchanged** — `UNTIL=20260923T135959Z` was kept exactly as authored, so moving the
-  series did not move its end bound with it.
+- `SEQUENCE` is **1**, and `DTSTAMP` and `LAST-MODIFIED` are later than the resource's `CREATED`.
+  That it was 0 before is *inferred* from the three sibling resources authored in the same pass and
+  not edited, which all carry `SEQUENCE:0`.
+- **One resource, one UID, after the edit** — the edit did not fork the series into a second
+  resource. This is not a before-and-after comparison of the UID: only the post-edit resource was
+  read, so what is measured is that a single resource under a single UID is what the series is.
+- `RRULE` carries `UNTIL=20260923T135959Z`, exactly as authored, so moving the series did not move
+  its end bound with it. That the rule is otherwise unchanged is *inferred* from the client's own
+  popup, which read the same before and after the edit — "5 times … last occurring on Wed, Sep 23".
 - **No override VEVENT, no `RECURRENCE-ID`, no `EXDATE`.** The resource still holds exactly one
-  VEVENT. (The pre-edit resource carried an empty `DESCRIPTION:` like the others and the rewrite
-  dropped it — noise either way, but it shows the block is rewritten rather than patched.)
+  VEVENT. It also carries **no `DESCRIPTION`** at all; the three un-edited siblings each carry an
+  empty `DESCRIPTION:`, so the rewrite most likely dropped one — *inferred* from the siblings, not
+  from a pre-edit fetch. Noise either way, but it suggests the block is rewritten rather than
+  patched.
 
 So the two edit modes have nothing in common on the wire: editing one occurrence adds a sibling
 override block beside the master, editing the whole series mutates the master and leaves the
@@ -320,10 +338,15 @@ event only" and "All occurrences", and nothing else. There is no "this and futur
 the client never authors the split that option implies elsewhere (capping the old master with an
 `UNTIL` and starting a fresh series), and a resource in that shape did not come from this client.
 
-**Client noise a parser must tolerate.** The six carry `VALARM` blocks,
-`X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, and empty `DESCRIPTION:` lines. None of it is
-optional to survive: it is what the client writes by default, so it is present on ordinary events
-nobody configured specially.
+**Client noise a parser must tolerate — in both directions.** All ten resources carry
+`X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, so that one is simply what the client writes. The
+other two are not. The 22 August six carry `VALARM` blocks; **not one of the 23 August four does**.
+The empty `DESCRIPTION:` line is on the 22 August six and on three of the 23 August four — every
+one except the whole-series edit, which carries no `DESCRIPTION` at all. Every one of the ten is an
+ordinary event nobody configured specially, so a parser must survive each of those two properties
+being present *and* being absent, and must not read an absence as meaning the event came from
+somewhere other than this client. What made the two passes differ on the `VALARM` was not
+identified — an account-level default alarm setting is the obvious candidate and was not checked.
 
 **Unmeasured.** The 23 August pass closed four of the gaps the first one left: `UNTIL`, a `BYDAY`
 expansion, all-day events spanning a DST boundary, and a whole-series edit are all measured above.
