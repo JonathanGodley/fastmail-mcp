@@ -356,6 +356,51 @@ All four of the second pass additionally carry `STATUS:CONFIRMED` and the Cyrus 
 as a fact about those four rather than a rule about the client: the first pass's six are mixed
 between the Cyrus and the Fastmail `PRODID`, per the storage-serialisation paragraph above.
 
+### How this server's writes render in the client
+
+The section above reads the client's bytes. This reads the client's *pixels*, for bytes this server
+wrote — the same comparison run backwards, and the only way to find out whether the client agrees
+with what the create path says it produced.
+
+**Method, and the instrument.** On 23 August 2026 the four events below were authored through this
+server's own create path (`create_calendar_event`, driven against the built `dist/` over the MCP
+harness, no participants) into a collection minted by
+`scripts/probes/server-authored-events.probe.mjs` with `MKCALENDAR`, and each was opened in the
+Fastmail **web** client the same day. The account's configured zone was `Australia/Sydney`, on AEST
+at the time. This is a fourth method in this file: the pixels of the client's event popup, read
+against bytes this server wrote rather than bytes the client wrote. Also measured in passing: the
+`MKCALENDAR`'d collection appeared in the client's calendar list under its display name with no
+further step.
+
+| What this server wrote | What the client showed |
+| --- | --- |
+| `DTSTART;TZID=Australia/Sydney:20260826T100000` + `DTEND;TZID=Australia/Sydney:20260826T110000` (`timeZone` omitted, so the configured zone was written), `PRODID:-//fastmail-mcp//CalDAV//EN`, no `VTIMEZONE` | `10:00 AM – 11:00 AM AEST (1 hour)`, with no zone annotation |
+| `DTSTART;TZID=Asia/Hong_Kong:20260826T100000` + `DTEND;TZID=Asia/Hong_Kong:20260826T110000` (`timeZone: "Asia/Hong_Kong"`), no `VTIMEZONE` | `12:00 PM – 1:00 PM AEST (1 hour)` with a second line `10:00 AM – 11:00 AM HKST` |
+| `DTSTART;VALUE=DATE:20260827` + `DTEND;VALUE=DATE:20260828` | `Thursday, August 27, 2026` |
+| `DTSTART;VALUE=DATE:20260828` + `DTEND;VALUE=DATE:20260831` (an **exclusive** end) | `Friday, August 28, 2026 – Sunday, August 30, 2026 (3 days)` |
+
+Note that all four end with `DTEND`. This server never writes the `DURATION` form, though the client
+writes it on some resources and this server's parser reads both — see "Storage serialisation varies
+by path" above.
+
+**A bare `TZID` with no embedded `VTIMEZONE` renders exactly as the client's own events do.** Every
+timed event the client authors carries an embedded `VTIMEZONE` for its zone (the two timed rows in
+the section above both do); this server writes none, and the popup for the explicitly-zoned event is
+identical in format to the client's own zone-picker reference event authored on 22 August, whose
+popup — read on 23 August in the same web client, since the 22 August section records bytes only —
+gave `11:00 AM – 12:00 PM AEST` over `9:00 AM – 10:00 AM HKST`. So the absence has no visible effect
+in the Fastmail client, which resolves the zone name itself. **What this does not measure is
+interoperability**: whether a `VTIMEZONE`-less resource resolves the same way in some *other* CalDAV
+client was not tested here, and is tracked as #166.
+
+Also worth recording for the read side: #162 changed only the window filter and the refusals, not the
+create serialiser, which is unchanged since #157 — so that work produced no newly authored bytes to
+view here.
+
+One bound on this whole subsection: a client popup is not a byte-level check. The bytes in the left
+column were verified by the probe's CalDAV `REPORT` fetch-back of the stored resource, and only the
+right column is pixels.
+
 **Unmeasured.** The 23 August pass closed four of the gaps the first one left: `UNTIL`, a `BYDAY`
 expansion, all-day events spanning a DST boundary, and a whole-series edit are all measured above.
 What is still not authored, and so still not known:
