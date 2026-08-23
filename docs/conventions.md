@@ -1871,15 +1871,21 @@ event chooses the DENSITY. Those are different questions and they get different 
   exist.
 
   **The count is over the range REQUESTED, not the caller's window**, which is the widened one
-  described above - 14 hours past each edge. So "5001 occurrences" is a count of the blocks the
-  server returned, and for a caller window of a single day it can report 5001 where 1440 fall
-  strictly inside the day. The note says so in those terms rather than claiming the caller's
+  described above - up to 14 hours past each edge ("up to", because `shiftIsoMs` saturates the
+  widened bound at the representable-date edge). So the number the note prints is a count of
+  the blocks the server returned, and the shorter the caller's window the further above the
+  in-window count it can sit: a single-day window is requested as 52 hours rather than 24, so
+  for an evenly spaced series the count can be more than double the number of occurrences
+  falling inside the day. The note says so in those terms rather than claiming the caller's
   window, because counting only the in-window blocks would require the per-block parse the cap
-  exists to avoid. The consequence is that the threshold is applied to a set up to 28 hours
-  wider than the window asked about, so a series with slightly fewer than 5000 genuine
-  in-window occurrences can still be omitted (for a month-long window the band is roughly
-  4830-5000). That is a deliberate trade of a little precision at the boundary for not parsing
-  the payload the cap is there to refuse.
+  exists to avoid.
+
+  The consequence is that the threshold is applied to a set up to 28 hours wider than the
+  window asked about, so a series with slightly fewer than 5000 genuine in-window occurrences
+  can still be omitted. For a 31-day window the requested range is 772 hours against the
+  caller's 744, so an evenly spaced series trips from about 4820 in-window occurrences up
+  (5000 x 744/772). That is a deliberate trade of a little precision at the boundary for not
+  parsing the payload the cap is there to refuse.
 
 **Why 5000.** It is the number that separates a real calendar from a pathological one. A daily
 event over a 10-year window is 3,653 occurrences and every 10 minutes for a month is 4,464;

@@ -164,7 +164,9 @@ export interface CalendarEventQueryResult {
   // gave the separator convention a second home.
   windowClamp?: CalendarWindowClamp;
   // Series left OUT of `events` and `total` because one resource expanded to more than
-  // CALENDAR_MAX_OCCURRENCES_PER_SERIES occurrences in this window. ABSENT when nothing was
+  // CALENDAR_MAX_OCCURRENCES_PER_SERIES blocks in the RANGE REQUESTED for this window, which
+  // is the widened one rather than the caller's own (see CALENDAR_MAX_OCCURRENCES_PER_SERIES
+  // for what that does to the threshold). ABSENT when nothing was
   // omitted, so silence means every series was materialised — the same never-silently-degrade
   // rule `windowClamp` follows, and the same STRUCTURE-not-prose shape: the wording lives in
   // `buildCalendarDensityNote` where a formatter test can reach it.
@@ -2223,7 +2225,9 @@ export const CALENDAR_OPEN_WINDOW_DAYS = 31;
  * ones the server returned for the widened request (MAX_UTC_OFFSET_MS at each edge, #162), so
  * the threshold is applied to a set up to 28 hours wider than the window the caller asked
  * about — a series with slightly under 5000 genuine in-window occurrences can therefore be
- * omitted (for a month-long window the band is roughly 4830-5000 in-window). Narrowing to the
+ * omitted. For a 31-day window the widened range is 772 hours against the caller's 744, so an
+ * evenly spaced series trips the threshold from about 4820 in-window occurrences up
+ * (5000 x 744/772); the shorter the window, the wider that gap gets. Narrowing to the
  * caller's window first would need the per-block parse this cap exists to avoid, so the number
  * is described accurately in the note rather than made exact.
  *

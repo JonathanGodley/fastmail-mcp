@@ -1589,7 +1589,11 @@ describe('buildCalendarDensityNote', () => {
     // window" would overstate it: a caller asking about one day can be told 5001 where 1440
     // fall inside the day. Counting only the in-window blocks would need the per-block parse
     // this cap exists to avoid, so the number is described accurately instead of narrowed.
-    assert.match(note, /14 hours past each edge of the window named/);
+    // "up to", not a flat 14: `shiftIsoMs` saturates the widened bound at the representable
+    // date edge, so a window ending near 9999-12-31 is widened by less. The overstatement
+    // would always have been in the conservative direction, but the phrase is what a caller
+    // reads to work out how far off the number can be.
+    assert.match(note, /up to 14 hours past each edge of the window named/);
     assert.match(note, /higher than the number of occurrences falling strictly inside it/);
     // The cap is a judgement call, so the note says whose it is and how to contest it rather
     // than reading as a platform limit the caller can do nothing about.

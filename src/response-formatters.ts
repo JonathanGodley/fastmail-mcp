@@ -245,7 +245,9 @@ const DENSE_SERIES_LIST_CAP = 5;
 
 /**
  * Build the trailing note naming the repeating events left out of a listing because one
- * resource expanded to more than CALENDAR_MAX_OCCURRENCES_PER_SERIES occurrences in the window.
+ * resource expanded to more than CALENDAR_MAX_OCCURRENCES_PER_SERIES blocks in the RANGE
+ * REQUESTED for the window, which is widened past the caller's own bounds — the note text
+ * below says so, because the difference is visible in the number it prints.
  *
  * Beside `buildCalendarWindowNote` and shaped the same way: the CLIENT returns structure
  * (`CalendarEventQueryResult.denseSeries`), this owns the wording and the blank-line separator,
@@ -278,7 +280,7 @@ export function buildCalendarDensityNote(denseSeries?: DenseCalendarSeries[]): s
   return `\n\nNote: ${n} repeating event${n === 1 ? ' was' : 's were'} left out because ` +
     `${n === 1 ? 'it expands' : 'they each expand'} to more than ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} ` +
     `occurrences in the range searched for this window: ${listed}${more}. Each count is of the blocks ` +
-    'the server returned, and that range runs 14 hours past each edge of the window named, so a count ' +
+    'the server returned, and that range runs up to 14 hours past each edge of the window named, so a count ' +
     'can be higher than the number of occurrences falling strictly inside it. This is a deliberate limit ' +
     'on how dense a series this server will materialise; narrow the window to see it. If you have a ' +
     'genuine use for a series this dense, open an issue at https://github.com/JonathanGodley/fastmail-mcp/issues.';
