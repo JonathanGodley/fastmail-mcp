@@ -211,10 +211,15 @@ permits — RFC 5545 allows floating time, UTC and offsets, and the client uses 
 
 **Method, and the instrument.** Six reference events were authored in the Fastmail **mobile** app on
 22 August 2026, one per shape below, and the stored iCalendar was fetched back over CalDAV the same
-day. The mobile and web clients share their authoring logic, so these are recorded as the client's
-shapes rather than the mobile app's; that sharing is the operator's statement and is not measured
-here. This is a third method alongside the two at the top of the file — not a reading of pixels and
-not a `mailboxIds` diff, but the resource's bytes as the server stored them. Bytes need no second
+day. Four further events were authored in the **web** client on 23 August 2026 and fetched back the
+same way, covering the recurrence and DST shapes the first pass left open. The mobile and web
+clients share their authoring logic, so these are recorded as the client's shapes rather than either
+app's; that sharing is the operator's statement, and the second pass is the first *measured* support
+for it — on the four shapes it covers the web client wrote the same model as the mobile one (a zone
+name plus a wall clock, `VALUE=DATE` for all-day, `DURATION` for the end). That is agreement on four
+shapes, not a measurement of every shape. This is a third method alongside the two at the top of
+the file — not a reading of pixels and not a `mailboxIds` diff, but the resource's bytes as the
+server stored them. Bytes need no second
 method to corroborate them, which is why one pass settles these rows.
 
 | Event kind | What the client wrote |
@@ -225,10 +230,37 @@ method to corroborate them, which is why one pass settles these rows.
 | All-day, three days | `DTSTART;VALUE=DATE:20260822` + `DTEND;VALUE=DATE:20260825` — an **exclusive** end |
 | Weekly timed series | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `RRULE:FREQ=WEEKLY;COUNT=4` |
 | Yearly all-day series | `DTSTART;VALUE=DATE:20260822` + `RRULE:FREQ=YEARLY;COUNT=3` + `DURATION:P1D` |
+| Weekly timed series ended by a **date** ("Last occurs on") | `DTSTART;TZID=Australia/Sydney:20260826T093000` + `DURATION:PT1H` + `RRULE:FREQ=WEEKLY;UNTIL=20260923T135959Z`, with an embedded `VTIMEZONE` carrying `TZUNTIL:20260923T145959Z`. The `DTSTART` is the **post-edit** value; it was authored at `090000` and moved by the whole-series edit below |
+| Monthly timed series, "every month on the 3rd Tuesday" | `DTSTART;TZID=Australia/Sydney:20260915T090000` + `DURATION:PT1H` + `RRULE:FREQ=MONTHLY;BYDAY=3TU;COUNT=3`, with an embedded `VTIMEZONE` carrying `TZUNTIL:20261116T230000Z` |
+| All-day, three days, spanning the Sydney DST change | `DTSTART;VALUE=DATE:20261003` + `DURATION:P3D` + `TRANSP:TRANSPARENT` — no zone, no `VTIMEZONE` |
+| All-day **daily series** across the same DST change | `DTSTART;VALUE=DATE:20261003` + `DURATION:P1D` + `RRULE:FREQ=DAILY;COUNT=3` + `TRANSP:TRANSPARENT` |
+
+**`UNTIL` is UTC, and it is the last second of the chosen local day.** The picker was given a date,
+"Last occurs on Wed, 23 Sep 2026", and the client wrote `UNTIL=20260923T135959Z` — 23:59:59 on the
+23rd in `Australia/Sydney`, converted to UTC. So `UNTIL` is the one place the client does write a
+`Z` value, and the bound it means is a whole local day rather than the series' own clock time. Note
+also what is **absent**: the weekly rule carries no `BYDAY`, so the weekday is taken from `DTSTART`
+and a reader must not expect the rule to restate it. The monthly "3rd Tuesday" rule does carry
+`BYDAY=3TU`, because there the weekday is not derivable from `DTSTART` alone. Reading the series
+back, the client's own popup rendered the `UNTIL` as a count plus a last date — "It occurs 5 times,
+starting on Wed, Aug 26, 2026 and last occurring on Wed, Sep 23, 2026" — so a count in the UI is not
+evidence of a `COUNT` on the wire.
+
+**A DST boundary leaves no trace in an all-day value.** Both October fixtures run across the Sydney
+transition (DST starts 02:00 on Sun 4 Oct 2026) and neither records it: the single event is
+`DTSTART;VALUE=DATE:20261003` + `DURATION:P3D`, the series is the same start + `DURATION:P1D` +
+`RRULE:FREQ=DAILY;COUNT=3`, and neither carries a zone or an embedded `VTIMEZONE` at all. A
+multi-day all-day event spanning a transition is a plain run of dates, which is what makes the
+date-only reading in the window filter safe across one. (Noise differs in this pass, too: none of
+the four carries a `VALARM`, though all four carry `X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`,
+`STATUS:CONFIRMED`, and the Cyrus `PRODID`. So a `VALARM` is not guaranteed even on an ordinary
+client-authored event.)
 
 **The client never writes a floating or absolute time.** Every timed value in all six is an IANA
 zone *name* plus a local wall clock. Not one `Z` form, not one numeric offset, not one bare
-`DTSTART:20260822T090000`. That is the measured ratification of the write model this server ships
+`DTSTART:20260822T090000`. The claim is about the values that *schedule* an event — `DTSTART`,
+`DTEND`, `RECURRENCE-ID`, `EXDATE` — and it survives the second pass, where the only `Z` written
+anywhere is the `UNTIL` inside an `RRULE`. That is the measured ratification of the write model this server ships
 (#139, #157): a zone name plus wall clock in both directions, and an omitted zone writing the
 configured zone rather than leaving the value floating. The client would author the same bytes.
 
@@ -244,7 +276,10 @@ an instant. This server's create path already serialises date-only input the sam
 `PRODID:-//Fastmail/2020.5/EN` and others `PRODID:-//CyrusIMAP.org/Cyrus …//EN`, and the end of an
 event is spelled sometimes as `DURATION` and sometimes as `DTEND`. Both end-shapes are real on the
 wire from the same account and from the same client, so neither can be treated as the canonical
-one; a reader must handle both, and this server's parser does.
+one; a reader must handle both, and this server's parser does. The second pass sharpens it: the
+three-day all-day event authored on 23 August came back as `DURATION:P3D` where the identically
+shaped one from 22 August had a date-only `DTEND`, so the two spellings are not even split by event
+kind — the same kind of event, in one account, produced both.
 
 ### Editing one occurrence of a series
 
@@ -261,15 +296,51 @@ half an hour later. Both edits landed in **one resource under one UID**, as two 
 Note that the `RECURRENCE-ID` carries the same zone-name-plus-wall-clock form as everything else,
 so identifying an occurrence uses the same model as scheduling one.
 
+### Editing a whole series
+
+The weekly `UNTIL` series was edited from its **first** occurrence, choosing **All occurrences**,
+with the title changed and the start moved from 9:00 to 9:30. The client rewrote the **master VEVENT
+in place**, and wrote nothing else:
+
+- `DTSTART` `20260826T090000` → `20260826T093000` and `SUMMARY` changed, in the one existing block.
+- `SEQUENCE` 0 → 1, `DTSTAMP` and `LAST-MODIFIED` bumped, `UID` unchanged.
+- `RRULE` **unchanged** — `UNTIL=20260923T135959Z` was kept exactly as authored, so moving the
+  series did not move its end bound with it.
+- **No override VEVENT, no `RECURRENCE-ID`, no `EXDATE`.** The resource still holds exactly one
+  VEVENT. (The pre-edit resource carried an empty `DESCRIPTION:` like the others and the rewrite
+  dropped it — noise either way, but it shows the block is rewritten rather than patched.)
+
+So the two edit modes have nothing in common on the wire: editing one occurrence adds a sibling
+override block beside the master, editing the whole series mutates the master and leaves the
+resource single-block. Nothing structural distinguishes a whole-series edit from an event that was
+never edited — only `SEQUENCE` and the timestamps record that anything happened.
+
+**The occurrence picker offers exactly two choices.** Editing an occurrence of a series pops "This
+event only" and "All occurrences", and nothing else. There is no "this and future occurrences", so
+the client never authors the split that option implies elsewhere (capping the old master with an
+`UNTIL` and starting a fresh series), and a resource in that shape did not come from this client.
+
 **Client noise a parser must tolerate.** The six carry `VALARM` blocks,
 `X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, and empty `DESCRIPTION:` lines. None of it is
 optional to survive: it is what the client writes by default, so it is present on ordinary events
 nobody configured specially.
 
-**Unmeasured.** These six cover single events and two simple `COUNT`-bounded rules. `UNTIL`,
-`BYDAY`/`BYMONTHDAY` expansions, all-day events spanning a DST boundary, and what the client writes
-when a *whole series* is edited rather than one occurrence were not authored and are left explicit
-rather than blank.
+**Unmeasured.** The 23 August pass closed four of the gaps the first one left: `UNTIL`, a `BYDAY`
+expansion, all-day events spanning a DST boundary, and a whole-series edit are all measured above.
+What is still not authored, and so still not known:
+
+- **`BYMONTHDAY`** — the monthly picker's other option, "on the 15th". Only the "3rd Tuesday" branch
+  was authored, so nothing here says how a day-of-month rule is written.
+- **The weekly picker's multi-day form** ("on Saturday & Sunday"). A `BYDAY` list is the obvious
+  guess and a guess is not a measurement; the single-weekday case wrote no `BYDAY` at all, which is
+  reason enough not to assume the multi-day case by extension.
+- **A "this and future occurrences" split** — not merely unmeasured but unavailable: the client's
+  occurrence picker has no such option (above), so it cannot be authored from this client at all.
+- **A timed series crossing a DST boundary.** Both DST fixtures here are date-only. Whether a
+  weekly 9:00 series holds its wall clock or its offset across a transition is the case that
+  matters most for a zone-name-plus-wall-clock reader, and it has not been measured.
+
+These are left explicit rather than blank.
 
 ## Extending this file
 
