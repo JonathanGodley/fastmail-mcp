@@ -163,6 +163,21 @@ export interface CalendarEventQueryResult {
   // sentence down here instead put the wording somewhere no formatter test can reach it and
   // gave the separator convention a second home.
   windowClamp?: CalendarWindowClamp;
+  // Series left OUT of `events` and `total` because one resource expanded to more than
+  // CALENDAR_MAX_OCCURRENCES_PER_SERIES occurrences in this window. ABSENT when nothing was
+  // omitted, so silence means every series was materialised — the same never-silently-degrade
+  // rule `windowClamp` follows, and the same STRUCTURE-not-prose shape: the wording lives in
+  // `buildCalendarDensityNote` where a formatter test can reach it.
+  denseSeries?: DenseCalendarSeries[];
+}
+
+/** One repeating event too dense to materialise, described well enough to find and narrow to. */
+export interface DenseCalendarSeries {
+  title: string;
+  id: string;
+  url: string;
+  calendar: string;
+  occurrences: number;
 }
 
 /** Why, and to what, a calendar window ended up narrower than the one the caller described. */
@@ -1135,9 +1150,15 @@ function extractAllVEvents(data: string): string[] {
  */
 export function parseCalendarObjects(
   obj: DAVCalendarObject,
-  options?: { includeParticipants?: boolean; expanded?: boolean; configuredZone?: string },
+  options?: { includeParticipants?: boolean; expanded?: boolean; configuredZone?: string; blocks?: string[] },
 ): CalendarEvent[] {
-  const blocks = extractAllVEvents(obj.data || '');
+  // `blocks` is an optimisation with a correctness point behind it. The listing path has to
+  // COUNT this resource's blocks before deciding whether to parse it at all (see
+  // CALENDAR_MAX_OCCURRENCES_PER_SERIES), and extracting them twice would mean two walks of a
+  // payload that is large in exactly the case the count is guarding against — and, worse, two
+  // places that could disagree about what a VEVENT block is. Passing the list through keeps
+  // one structural extraction per resource.
+  const blocks = options?.blocks ?? extractAllVEvents(obj.data || '');
   if (blocks.length === 0) {
     // No VEVENT found — return minimal event
     return [{
@@ -2173,6 +2194,43 @@ export function sortEventsByStart(events: CalendarEvent[], zone: string | undefi
  */
 export const CALENDAR_OPEN_WINDOW_DAYS = 31;
 
+/**
+ * How many in-window occurrences ONE CalDAV resource may expand to before this server declines
+ * to materialise it.
+ *
+ * The window bound above covers one of the two ways to ask for an unbounded expansion; this
+ * covers the other. A caller naming both bounds gets exactly the span it named, because the
+ * span is its own decision — but the caller chooses the span and an ATTACKER chooses the
+ * DENSITY. Calendar content here is authored by anyone who can send an invitation, and one
+ * `FREQ=MINUTELY` series fills any window at all.
+ *
+ * 5000 is set where it passes the dense-but-real cases and trips the ones nothing legitimate
+ * produces:
+ *
+ *   10 years of a DAILY series            3,653   passes
+ *   a month at every 10 minutes           4,464   passes
+ *   a month at every 5 minutes            8,928   trips
+ *   a month of FREQ=MINUTELY             44,640   trips
+ *
+ * IT IS A PARSE-AND-SHOW THRESHOLD, NOT A RESPONSE SIZE. The response stays bounded by `limit`
+ * (default 50, hard cap 500) exactly as before; this decides whether one resource's blocks are
+ * parsed and offered at all.
+ *
+ * A tripped resource is left OUT of the rows entirely rather than truncated to its first N.
+ * Truncating would fill the whole `limit` page with one series and push every real event off
+ * it, which is the outcome the cap exists to prevent — one hostile invitation cannot blank a
+ * listing. The omission is disclosed by name, count and calendar in a trailing note, so it is
+ * never silent, and the call still answers.
+ *
+ * THE RESIDUAL, stated because it is not fixed: this bounds what this server PARSES and SHOWS,
+ * never what Cyrus generates or transfers. Cyrus's `expand_cb` returns 1 unconditionally and
+ * its `CALDAV:max-instances` property has no handler, so there is no server-side result limit
+ * to ask for; tsdav's `fetchCalendarObjects` has no limit or paging option and buffers the
+ * whole multistatus before this code sees any of it. The fetch is the platform's; the parse
+ * and the page are the work on this side, and that is what this bounds.
+ */
+export const CALENDAR_MAX_OCCURRENCES_PER_SERIES = 5000;
+
 // The ends of the four-digit-year range every consumer of these bounds can express. Past
 // them `toISOString` emits the expanded form (`+010000-12-30T…`), which tsdav rejects with a
 // plain Error — surfacing a caller-fixable argument as InternalError ("server-side, a bare
@@ -2835,13 +2893,36 @@ export class CalDAVCalendarClient {
     const windowEndMs = trueWindowEnd === undefined ? NaN : Date.parse(trueWindowEnd);
 
     const allEvents: CalendarEvent[] = [];
+    const denseSeries: DenseCalendarSeries[] = [];
     for (const cal of targetCalendars) {
       const objects = await client.fetchCalendarObjects({ calendar: cal, ...fetchOptions });
       for (const obj of objects) {
+        // ONE structural extraction per resource, on whole content lines — never a `/m` regex
+        // or a substring count, which a DESCRIPTION containing the text "BEGIN:VEVENT" defeats
+        // (see docs/conventions.md). The list is counted here and then handed to the parser
+        // rather than re-derived by it.
+        const blocks = extractVEventBlocks(obj.data || '');
+        if (blocks.length > CALENDAR_MAX_OCCURRENCES_PER_SERIES) {
+          // NOT PARSED, and not truncated to its first N either: the first N of a hostile
+          // series would fill the whole `limit` page and push every real event off it. The
+          // title and id come from the first block, which is the same pair a row would have
+          // carried and is two property reads rather than a parse of the whole payload.
+          denseSeries.push({
+            title: parseICalValue(blocks[0], 'SUMMARY') || 'Untitled',
+            id: parseICalValue(blocks[0], 'UID') || obj.url || '',
+            url: obj.url || '',
+            // Coerced the way `list_calendars` and the not-found error already coerce it: a
+            // DAV displayName is typed loosely enough to arrive as a property object, and the
+            // url is the handle that always exists.
+            calendar: String(cal.displayName || '') || cal.url || '',
+            occurrences: blocks.length,
+          });
+          continue;
+        }
         // Every VEVENT in the blob, not the first: with `expand` a single resource carries
         // one block per in-window occurrence, so a first-match read drops all but one.
         // `expanded` is passed rather than sniffed — see parseCalendarObjects.
-        for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone })) {
+        for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone, blocks })) {
           // A block that STILL CARRIES A RECURRENCE CARRIER is never dropped here, whatever
           // its dates say. This branch runs on an expanded query, so a surviving master means
           // the server declined to expand that resource — and the master then shows the
@@ -2879,7 +2960,16 @@ export class CalDAVCalendarClient {
 
     sortEventsByStart(allEvents, configuredZone);
 
-    return { events: allEvents.slice(0, limit), total: allEvents.length, windowClamp };
+    // `total` counts what was materialised, so an omitted series is NOT in it: the total is
+    // "how many events matched, of which `limit` trimmed the rest", and folding in occurrences
+    // no row represents would make a caller raise `limit` chasing rows that do not exist. The
+    // note is what discloses the omission, and it is absent when there was nothing to omit.
+    return {
+      events: allEvents.slice(0, limit),
+      total: allEvents.length,
+      windowClamp,
+      denseSeries: denseSeries.length > 0 ? denseSeries : undefined,
+    };
   }
 
   /**

@@ -32,6 +32,7 @@ import {
   CalDAVCalendarClient,
   describeCreateCalendarEventResult,
   describeUpdateCalendarEventResult,
+  CALENDAR_MAX_OCCURRENCES_PER_SERIES,
 } from './caldav-client.js';
 // A value import, not `import type`: the redirect test below stubs a method on the
 // prototype, which needs the class itself. It still serves the type positions.
@@ -5158,6 +5159,100 @@ describe('eventIntersectsWindow', () => {
       ),
       true,
     );
+  });
+});
+
+describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may be (#142)', () => {
+  // Every assertion here is about which UTC instants came back, so the zone is pinned rather
+  // than left to the machine.
+  before(() => setDefaultTimezone('UTC'));
+  after(() => setDefaultTimezone(undefined));
+
+  const WINDOW_START = '2027-03-01T00:00:00Z';
+  const WINDOW_END = '2027-03-10T00:00:00Z';
+
+  /** An expanded blob: one VEVENT block per occurrence, a minute apart, RRULE stripped. */
+  function expandedBlob(uid: string, summary: string, count: number): string {
+    const base = Date.parse('2027-03-01T00:10:00Z');
+    const blocks: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const at = new Date(base + i * 60000).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      blocks.push(['BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${at}`, `SUMMARY:${summary}`, 'END:VEVENT'].join('\r\n'));
+    }
+    return ['BEGIN:VCALENDAR', ...blocks, 'END:VCALENDAR'].join('\r\n');
+  }
+
+  function oneEvent(uid: string, summary: string, dtstart: string): string {
+    return [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${dtstart}`,
+      `SUMMARY:${summary}`, 'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  function clientOver(byCalendar: Record<string, Array<{ data: string; url: string }>>) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => Object.keys(byCalendar).map(url => ({
+        displayName: url === '/cal/work/' ? 'Work' : 'Personal', url,
+      }))),
+      fetchCalendarObjects: mock.fn(async (p: FetchObjectsParams) =>
+        byCalendar[(p as any).calendar.url] ?? []),
+    };
+    return client;
+  }
+
+  it('omits a series past the cap ENTIRELY, and answers everything else normally', async () => {
+    // Not "its first N": the first N of a hostile series would fill the whole `limit` page and
+    // push every real event off it, which is the outcome the cap exists to prevent. The caller
+    // chooses the SPAN of a window; an attacker chooses the DENSITY inside it, and anyone who
+    // can send an invitation can put a FREQ=MINUTELY series in the account.
+    const client = clientOver({
+      '/cal/work/': [
+        { data: expandedBlob('dense@fm', 'Every minute', CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '/w-dense.ics' },
+        { data: oneEvent('real@fm', 'Real meeting', '20270302T090000Z'), url: '/w-real.ics' },
+      ],
+      '/cal/personal/': [
+        { data: oneEvent('other@fm', 'Dentist', '20270303T090000Z'), url: '/p-other.ics' },
+      ],
+    });
+
+    const { events, total, denseSeries } = await client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END);
+
+    // The rest of the window answers: the other resource in the SAME calendar, and one in a
+    // second calendar, so a dense series cannot take its neighbours or its siblings with it.
+    assert.deepEqual(events.map(e => e.title), ['Real meeting', 'Dentist']);
+    // `total` counts what was materialised. Folding in occurrences no row represents would
+    // make a caller raise `limit` chasing rows that do not exist.
+    assert.equal(total, 2);
+
+    assert.ok(denseSeries, 'an omitted series must be disclosed');
+    assert.equal(denseSeries!.length, 1);
+    assert.deepEqual(denseSeries![0], {
+      title: 'Every minute',
+      id: 'dense@fm',
+      url: '/w-dense.ics',
+      calendar: 'Work',
+      occurrences: CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1,
+    });
+  });
+
+  it('materialises a series sitting exactly ON the cap', async () => {
+    // The boundary, stated in the direction that matters: the cap is "more than N", so N
+    // itself is answered. An off-by-one here silently drops a legitimate dense series.
+    const client = clientOver({
+      '/cal/work/': [
+        { data: expandedBlob('atcap@fm', 'At the cap', CALENDAR_MAX_OCCURRENCES_PER_SERIES), url: '/w-atcap.ics' },
+      ],
+    });
+
+    const { total, denseSeries } = await client.getCalendarEvents(
+      undefined, 50, WINDOW_START, WINDOW_END,
+    );
+
+    assert.equal(total, CALENDAR_MAX_OCCURRENCES_PER_SERIES);
+    // Absent, not empty: silence is what says every series in the window was materialised.
+    assert.equal(denseSeries, undefined);
   });
 });
 
