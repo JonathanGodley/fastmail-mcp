@@ -2753,7 +2753,16 @@ export class JmapClient {
         const keepHtmlMarked = guardVariant === 'reply' ? hasQuoteMarker : hasForwardMarker;
         const keepTextMarked = guardVariant === 'reply' ? hasTextQuoteMarker : hasTextForwardMarker;
         if ((wroteHtml && keepHtmlMarked(callerWrittenHtml)) || (wroteText && keepTextMarked(callerWrittenText))) {
-          throw new InvalidInputError(`The body you supplied already contains ${keepNoun}, and originalEmailId would rebuild it underneath, so the draft would carry it twice. If this body is the draft's own text read back, pass noQuote:true instead of originalEmailId and it is stored as written. If you meant to write a fresh body, send it without ${keepNoun} and keep originalEmailId.`);
+          // What noQuote costs, said where the caller decides rather than only in the README.
+          // "with nothing rebuilt" is load-bearing on a FALSE POSITIVE (prose ending in
+          // "wrote:" above a "> " line, or a pasted cite-blockquote): taking this way out
+          // stores that body and does NOT restore the draft's real quote. Rejecting rather
+          // than skipping exists to let the caller choose, so the choice has to be informed.
+          // The forward clause is the noQuote de-forwarding below (dropForwardHeader), which
+          // strips X-Forwarded-Message-Id and the source id — invisible until send_draft
+          // fails to mark the original.
+          const noQuoteCost = guardVariant === 'forward' ? ", and the draft's forward marking cleared" : '';
+          throw new InvalidInputError(`The body you supplied already contains ${keepNoun}, and originalEmailId would rebuild it underneath, so the draft would carry it twice. If this body is the draft's own text read back, pass noQuote:true instead of originalEmailId: the body is stored exactly as written, with nothing rebuilt${noQuoteCost}. If you meant to write a fresh body, send it without ${keepNoun} and keep originalEmailId.`);
         }
         // Regenerate from the caller-named original — never re-resolved from the draft's
         // In-Reply-To / X-Forwarded-Message-Id (attacker-controllable), so there's no spoof
