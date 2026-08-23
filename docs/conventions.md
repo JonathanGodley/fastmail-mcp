@@ -1737,7 +1737,7 @@ Mechanics worth knowing before touching it:
   at 02:00, so the deployment's own zone hid it; `FASTMAIL_TIMEZONE` is a config value.
 - **A date-only end advances by a whole LOCAL day, not by 24 hours.** A day a DST change makes
   23 or 25 hours long would otherwise end an hour inside itself or an hour into the next day.
-  The 366-day clamp on a one-sided window is the deliberate exception: it advances in fixed
+  The 31-day clamp on a one-sided window is the deliberate exception: it advances in fixed
   24-hour days because it invents a span nobody named, where a DST hour either side of an
   arbitrary bound is not a wrong answer to anything, and the clamp note states the instant it
   landed on.
@@ -1777,8 +1777,8 @@ buffered, regex-split, parsed, filtered and sorted before `limit` ever applies, 
 not a bound on the work. Calendar content is also attacker-authored in this deployment:
 anyone who can send an invitation can put a `FREQ=MINUTELY` series in the account.
 
-So the INVENTED half is clamped to `CALENDAR_OPEN_WINDOW_DAYS` (366) from the bound that was
-given, and the clamp is surfaced in `CalendarEventQueryResult.windowClamp` — STRUCTURE, not
+So the INVENTED half is clamped to `CALENDAR_OPEN_WINDOW_DAYS` (31 days, a month) from the
+bound that was given, and the clamp is surfaced in `CalendarEventQueryResult.windowClamp` — STRUCTURE, not
 finished prose. That is the shape the email listings already established for a disclosure of
 this kind (`QueryResult.exclusion` -> `buildExclusionNote` -> handler), and the calendar path
 briefly diverged from it: it built the sentence inside the client, which put the wording where
@@ -1788,6 +1788,14 @@ A caller silently handed a narrower window than it asked for would read "nothing
 date" as an empty calendar — the same never-silently-degrade rule the exclusion note and
 `unresolvedMailboxIds` exist for. A window whose bounds the caller named is never clamped:
 that span is the caller's own decision.
+
+**A month, because that is the question the missing bound is asking.** "What is coming up",
+"what led up to this date" - a month is what a calendar client puts on screen at a time, so
+the invented span is the one the caller reading the answer already has in mind. The expanding
+APIs nearest to this one invent no span at all: Cyrus's own JMAP `CalendarEvent/query` rejects
+an `expandRecurrences` query with no upper bound, and Microsoft Graph's `calendarView`
+requires both bounds, so inventing a month is already the generous reading. 31 rather than 30
+so the same date next month is always inside the span, from any starting day in any month.
 
 **Saturation is the other narrowing, and it names an EDGE.** A bound that resolves outside the
 four-digit-year range every consumer of these values can express is pulled back to that range's

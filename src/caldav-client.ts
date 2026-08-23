@@ -2143,17 +2143,27 @@ export function sortEventsByStart(events: CalendarEvent[], zone: string | undefi
  * every block copied by a global regex, parsed, filtered and sorted, and only THEN sliced to
  * `limit` — so `limit` is not a bound on any of the work.
  *
- * A year is the span chosen: it answers the question a one-sided window is actually asking
- * ("what is coming up", "what led up to this date") without inventing a range nobody named,
- * and it holds an ordinary daily series to a few hundred rows. 366 rather than 365 so a leap
- * year still covers a full year from any starting day. It is a bound on the INVENTED half
- * only — a caller that names both bounds gets exactly the window it named, because that
- * scope is its own decision.
+ * A MONTH is the span chosen. It answers the question a one-sided or bounds-free window is
+ * actually asking — "what is coming up", "what led up to this date" — and it matches what a
+ * calendar client puts on screen at a time, so the invented span is the one a caller reading
+ * the answer already has in mind. The expanding APIs nearest to this one do not invent a span
+ * at all: Cyrus's own JMAP `CalendarEvent/query` REJECTS an `expandRecurrences` query with no
+ * upper bound, and Microsoft Graph's `calendarView` requires both bounds. Inventing a month is
+ * already the generous reading; inventing a year was generous twice over, and it held an
+ * ordinary daily series to a few hundred rows rather than a few dozen.
+ *
+ * 31 rather than 30 so the same date next month is always inside the span, from any starting
+ * day in any month. The days are fixed 24-hour days, not local days, for the reason
+ * `shiftIsoDays` gives: the span is invented rather than asked for, so a DST hour either side
+ * of it is not a wrong answer to anything, and the note states the resulting instant.
+ *
+ * It bounds an INVENTED bound only — a caller that names both bounds gets exactly the window
+ * it named, because that span is its own decision.
  *
  * The clamp is never silent: `windowClamp` names the window actually queried and how to ask
  * for more, so "nothing after that date" can't be read as an empty calendar.
  */
-export const CALENDAR_OPEN_WINDOW_DAYS = 366;
+export const CALENDAR_OPEN_WINDOW_DAYS = 31;
 
 // The ends of the four-digit-year range every consumer of these bounds can express. Past
 // them `toISOString` emits the expanded form (`+010000-12-30T…`), which tsdav rejects with a
@@ -2204,8 +2214,8 @@ function saturationEdge(saturatedValue: string): 'earliest' | 'latest' {
  * The 24-hour day here is deliberate, and deliberately NOT the local-day arithmetic
  * `coerceCalendarWindowEnd` uses. That one advances a bound the CALLER named, where landing an
  * hour inside or past their day is a wrong answer to a question they asked. This one invents a
- * span nobody named, chosen for being roughly a year; a DST hour either side of an arbitrary
- * 366-day bound is not a wrong answer to anything, and the note names the resulting instant.
+ * span nobody named, chosen for being roughly a month; a DST hour either side of an arbitrary
+ * 31-day bound is not a wrong answer to anything, and the note names the resulting instant.
  *
  * The example that reaches the saturation is `startDate: "9999-12-30"` ON ITS OWN, where the
  * invented END has nowhere to go. `endDate` alone runs the other way and cannot saturate at
@@ -2715,9 +2725,9 @@ export class CalDAVCalendarClient {
       // AFTER the invented half is filled in, not as its alternative. The old `else if` made
       // this check the both-bounds case only, and the comment below said so — but saturation
       // means a ONE-SIDED window can come out zero-length too: `startDate:
-      // "9999-12-31T23:59:59Z"` leaves the invented +366 days nowhere to go, so both ends land
+      // "9999-12-31T23:59:59Z"` leaves the invented month nowhere to go, so both ends land
       // on the same instant. Left to tsdav that was a plain Error (InternalError) or, worse, a
-      // silently empty answer under a note claiming a 366-day span had been searched.
+      // silently empty answer under a note claiming a month-long span had been searched.
       if (Date.parse(windowStart!) >= Date.parse(windowEnd!)) {
         // Checked here rather than left to tsdav, which throws a plain Error for a backwards
         // range. That reaches the tool boundary as InternalError ("server-side, a bare retry

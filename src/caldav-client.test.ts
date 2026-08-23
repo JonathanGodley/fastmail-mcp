@@ -5240,7 +5240,9 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
   it('bounds a window given only a startDate, and says so', async () => {
     // With `expand` on, the missing half is the range the SERVER materialises occurrences
     // over — a 2099 default asked Fastmail to generate every occurrence of every repeating
-    // event for 73 years, and `limit` bounds none of that work.
+    // event for 73 years, and `limit` bounds none of that work. The invented half is one
+    // month: 2027-03-01 plus 31 fixed days is 2027-04-01, and the request range is that
+    // window widened by fourteen hours at each edge.
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     const mockDAVClient = {
       login: mock.fn(async () => {}),
@@ -5254,7 +5256,7 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.deepEqual(callArgs.timeRange, {
       start: '2027-02-28T10:00:00Z',
-      end: '2028-03-01T14:00:00Z',
+      end: '2027-04-01T14:00:00Z',
     });
     // Never silently narrowed: a caller handed a shorter window than it asked for has to be
     // told, or "nothing after that date" reads as an empty calendar.
@@ -5265,7 +5267,7 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     assert.ok(windowClamp, 'a clamped window must be disclosed');
     assert.equal(windowClamp!.invented, 'endDate');
     assert.equal(windowClamp!.start, '2027-03-01T00:00:00Z');
-    assert.equal(windowClamp!.end, '2028-03-01T00:00:00Z');
+    assert.equal(windowClamp!.end, '2027-04-01T00:00:00Z');
     assert.equal(windowClamp!.saturated, undefined);
   });
 
@@ -5282,14 +5284,15 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     // A date-only endDate still covers the whole of the 10th, so the exclusive end is the
-    // following midnight and the clamp counts back from there.
+    // following midnight and the clamp counts back a month from there: 2027-03-11 less 31
+    // fixed days is 2027-02-08.
     assert.deepEqual(callArgs.timeRange, {
-      start: '2026-03-09T10:00:00Z',
+      start: '2027-02-07T10:00:00Z',
       end: '2027-03-11T14:00:00Z',
     });
     assert.ok(windowClamp, 'a clamped window must be disclosed');
     assert.equal(windowClamp!.invented, 'startDate');
-    assert.equal(windowClamp!.start, '2026-03-10T00:00:00Z');
+    assert.equal(windowClamp!.start, '2027-02-08T00:00:00Z');
     assert.equal(windowClamp!.end, '2027-03-11T00:00:00Z');
   });
 
@@ -5986,7 +5989,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     // The inversion check used to be the `else if` alternative to the clamp, so a one-sided
     // window never reached it — and the comment beside it claimed a single bound "is clamped
     // above, never inverted". Saturation makes that false: a startDate on the last
-    // representable instant leaves the invented +366 days nowhere to go, and tsdav answered
+    // representable instant leaves the invented month nowhere to go, and tsdav answered
     // with a plain Error (InternalError) over what is a caller-fixable bound.
     const { client, mockDAVClient } = mockedClient();
     await assert.rejects(
