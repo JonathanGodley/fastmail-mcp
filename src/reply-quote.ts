@@ -204,7 +204,9 @@ const QUOTE_OPEN = '<blockquote type="cite" style="margin:0 0 0 .8ex;border-left
 // a marker. Tolerant of attribute order and quote style ("..." / '...' / bare). This is a
 // PRESENCE check, not a content check: any such blockquote counts and an empty shell passes —
 // edit_draft's guard treats originalEmailId as the authoritative way to keep/regenerate the
-// quote, so a loose marker here only governs whether the guard fires. Other clients (e.g.
+// quote, so a loose marker here only governs whether the guard fires — and, on the keep path,
+// whether a caller-supplied body is refused for already carrying the quote (#145); it can only
+// ever refuse on caller input, never exempt. Other clients (e.g.
 // Outlook's div-based quoting) aren't recognized; see the recognition residual in
 // docs/email-bodies.md.
 export function hasQuoteMarker(html: string | null | undefined): boolean {
@@ -216,9 +218,12 @@ export function hasQuoteMarker(html: string | null | undefined): boolean {
 // followed (allowing blank lines between) by a "> "-prefixed quote line. buildReplyBodies
 // emits exactly `${attribution}\n${quoteText(...)}`, so the runtime form is `wrote:\n> `;
 // the blank-line / CRLF tolerance is belt-and-suspenders for how a store/fetch round-trip or
-// a future format tweak might re-serialize it. Used ONLY on the OLD (stored) text, never on
-// caller input — see edit_draft's guard. Like hasQuoteMarker this is a PRESENCE check that
-// only governs whether the guard fires; originalEmailId is the authoritative keep path.
+// a future format tweak might re-serialize it. Mostly used on the OLD (stored) text, which is
+// what decides whether edit_draft's guard fires. The one caller-input use is that guard's keep
+// path (#145), where a supplied body already carrying the quote originalEmailId would rebuild
+// is REFUSED — read-only in the refuse direction, so caller input can never use this to make an
+// edit pass. Like hasQuoteMarker this is a PRESENCE check that only governs whether the guard
+// fires; originalEmailId is the authoritative keep path.
 // NOTE: each `([ \t]*\r?\n)*` iteration consumes a mandatory `\r?\n` over a class disjoint
 // from `\n` (no zero-width match), so this can't catastrophically backtrack — do NOT relax it
 // into a `\s*` / nested-quantifier form that could.
@@ -1101,8 +1106,9 @@ export function buildForwardBodies(input: {
 // hasQuoteMarker by tag name (div vs blockquote) — the official Fastmail client
 // uses <blockquote type="cite"> for replies and <div type="cite"> only for
 // forwards (probed live 2026-07-05). Like hasQuoteMarker, a PRESENCE check that
-// only governs whether edit_draft's guard fires; originalEmailId is the
-// authoritative keep path.
+// governs whether edit_draft's guard fires and — on the keep path — whether a
+// caller-supplied body is refused for already carrying the block (#145, refuse
+// only, never exempt); originalEmailId is the authoritative keep path.
 export function hasForwardMarker(html: string | null | undefined): boolean {
   if (!html) return false;
   return /<div\b[^>]*\btype\s*=\s*["']?cite\b/i.test(html);
@@ -1118,7 +1124,8 @@ export function hasForwardMarker(html: string | null | undefined): boolean {
 // htmlToText(<the html block>) — an html-only forward stores a derived
 // text/plain alternative (pinned by test). Matching pasted forwarded content of
 // the same conventional shape is an accepted, documented cost: the guard
-// over-asks loudly and noQuote resolves it in one step. Linear-time: every
+// over-asks loudly and noQuote resolves it in one step — which is also the
+// answer when this fires on a caller-supplied keep body (#145). Linear-time: every
 // quantifier consumes from classes disjoint from its neighbors.
 export function hasTextForwardMarker(text: string | null | undefined): boolean {
   if (!text) return false;

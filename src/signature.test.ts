@@ -1246,12 +1246,14 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     const edited = `Thanks, and one more thing.\n\nRegards,\nTest User\n\n${QUOTE}`;
     const result = await client.updateDraft('draft-1', {
       textBody: edited,
-      originalEmailId: 'orig-1',
+      noQuote: true,
       appendSignature: true,
     });
     const stored = seen.created.bodyValues.text.value;
     assert.equal(stored.match(/Regards,/g)!.length, 1, stored);
     assert.match(stored, /^Thanks, and one more thing\.\n\nRegards,\nTest User\n/, stored);
+    // The quote came back in the body, so it must be stored exactly as handed over — once.
+    assert.equal(stored, edited, stored);
     // The flag was passed and nothing was appended, so it is reported rather than silent.
     assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
   });
@@ -1271,7 +1273,14 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     keywords: { $draft: true },
   });
 
-  /** The recovery loop: hand the draft's own text back with the flag still set. */
+  /**
+   * The recovery loop: hand the draft's own text back with the flag still set.
+   *
+   * noQuote, not originalEmailId: the text handed back already carries the quoted original, and
+   * originalEmailId REBUILDS the quote underneath the body supplied, so it would store the quote
+   * twice (and is refused for that reason, #145). noQuote is what the loop is documented to
+   * pass, and it stores the body as written — which is the premise every assertion here makes.
+   */
   async function reSign(
     body: string,
     edit: (s: string) => string = (s) => s,
@@ -1280,7 +1289,7 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     const client = makeClient(identities);
     const seen = mockUpdate(client, textReplyDraft(body));
     const result = await client.updateDraft('draft-1', {
-      textBody: edit(body), originalEmailId: 'orig-1', appendSignature: true,
+      textBody: edit(body), noQuote: true, appendSignature: true,
     });
     return { stored: seen.created.bodyValues.text.value as string, result };
   }
@@ -1288,6 +1297,13 @@ describe('edit_draft preserves a signature the draft already carries', () => {
   // Sign-offs the DRAFT carries, counted at line start and unquoted, so a "Regards," inside a
   // quote is not mistaken for one of the draft's own.
   const ownSignOffs = (s: string) => (s.match(/^Regards,$/gm) ?? []).length;
+  // The draft's OWN attribution line — "… wrote:" at line start and NOT inside a quote, so a
+  // nested attribution stays the quoted message's rather than counting as the draft's.
+  const ownAttributions = (s: string) => (s.match(/^(?!>).*\bwrote:[ \t]*$/gm) ?? []).length;
+  // The quoted original's own content, at whatever nesting depth it sits. Counting the QUOTE, not
+  // just the sign-off, is what catches a rebuild landing a second copy of it underneath the body:
+  // these tests all passed while storing it twice, because a sign-off count cannot see that.
+  const quotedOriginals = (s: string) => (s.match(/^>+ Original text\.$/gm) ?? []).length;
 
   // The identity whose own sign-off contains a quotation, driven through the real edit on the
   // loop the docs prescribe. This is the shape that duplicated silently while every pure-helper
@@ -1302,6 +1318,8 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     );
     assert.equal(ownSignOffs(stored), 1, stored);
     assert.equal(stored.match(/Per aspera ad astra/g)!.length, 1, stored);
+    assert.equal(ownAttributions(stored), 1, stored);
+    assert.equal(quotedOriginals(stored), 1, stored);
     assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
   });
 
@@ -1347,6 +1365,8 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     ].join('\n');
     const { stored, result } = await reSign(body, (s) => s.replace('Thanks.', 'Thanks again.'));
     assert.equal(ownSignOffs(stored), 1, stored);
+    assert.equal(ownAttributions(stored), 1, stored);
+    assert.equal(quotedOriginals(stored), 1, stored);
     assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
   });
 
@@ -1368,6 +1388,8 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     ].join('\n');
     const { stored, result } = await reSign(body, (s) => s.replace('Thanks.', 'Thanks again.'));
     assert.equal(ownSignOffs(stored), 1, stored);
+    assert.equal(ownAttributions(stored), 1, stored);
+    assert.equal(quotedOriginals(stored), 1, stored);
     assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
   });
 
@@ -1388,6 +1410,8 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     ].join('\n');
     const { stored, result } = await reSign(body, (s) => s.replace('Thanks.', 'Thanks again.'));
     assert.equal(ownSignOffs(stored), 1, stored);
+    assert.equal(ownAttributions(stored), 1, stored);
+    assert.equal(quotedOriginals(stored), 1, stored);
     assert.deepEqual(result.notes, [noteSignatureNotAppended('already-signed', 'me@example.com')]);
   });
 
@@ -1408,6 +1432,8 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     ].join('\n');
     const { stored, result } = await reSign(body);
     assert.equal(ownSignOffs(stored), 1, stored);
+    assert.equal(ownAttributions(stored), 1, stored);
+    assert.equal(quotedOriginals(stored), 1, stored);
     assert.equal(result.notes, undefined);
   });
 

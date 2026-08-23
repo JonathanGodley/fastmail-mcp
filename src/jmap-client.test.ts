@@ -1329,6 +1329,94 @@ describe('updateDraft', () => {
     );
   });
 
+  it('rejects a keep whose own text body already carries the quote it would rebuild (#145)', async () => {
+    // The probe's shape: the read-edit-write loop the signature docs prescribe for a plain-text
+    // draft hands the stored text straight back, quote and all. Rebuilding underneath it would
+    // store the attribution and the quoted original twice, so the call is refused and pointed at
+    // noQuote. The refusal must not depend on the original resolving — nothing is fetched.
+    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: RAW_TEXT_QUOTE, originalEmailId: 'orig-1' }),
+      /noQuote/,
+    );
+    const fetchedOriginal = makeReq.mock.calls.some((c: any) => {
+      const [method, params] = c.arguments[0].methodCalls[0];
+      return method === 'Email/get' && params.ids?.[0] === 'orig-1';
+    });
+    assert.equal(fetchedOriginal, false, 'the refusal must precede the originalEmailId fetch');
+  });
+
+  it('rejects a keep whose own html body already carries the quoted original (#145)', async () => {
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: RAW_HTML_QUOTE, originalEmailId: 'orig-1' }),
+      (err: Error) => {
+        assert.match(err.message, /already contains the quote.*carry it twice.*noQuote:true/s);
+        // A reply draft has no forward marking, so the forward-only clause must not appear.
+        assert.doesNotMatch(err.message, /forward marking/);
+        return true;
+      },
+    );
+  });
+
+  it('rejects a keep when only the TEXT side of a both-bodies edit carries the quote (#145)', async () => {
+    // Pins the `||`: either written body carrying the block is enough, so the html side being
+    // clean does not license rebuilding underneath a text side that already has it.
+    mockReplyUpdate(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft(
+        'draft-1',
+        { htmlBody: PLAIN_HTML, textBody: RAW_TEXT_QUOTE, originalEmailId: 'orig-1' },
+      ),
+      (err: Error) => {
+        assert.match(err.message, /already contains the quote.*noQuote:true/s);
+        assert.doesNotMatch(err.message, /forward marking/);
+        return true;
+      },
+    );
+  });
+
+  it('still reports the not-both contradiction when the body also carries the quote (#145)', async () => {
+    // Precedence: originalEmailId + noQuote is the more fundamental contradiction and is
+    // answered first, so the duplicate check never gets to reframe it as a body problem.
+    mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await assert.rejects(
+      () => client.updateDraft(
+        'draft-1',
+        { textBody: RAW_TEXT_QUOTE, originalEmailId: 'orig-1', noQuote: true },
+      ),
+      /not both/,
+    );
+  });
+
+  it('stores a quote-bearing body verbatim under noQuote — the refusal\'s advertised recovery (#145)', async () => {
+    // The other half of #145: the way out the refusal names has to actually work, and has to
+    // leave the quote in the draft exactly once, as written.
+    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
+    await client.updateDraft('draft-1', { textBody: RAW_TEXT_QUOTE, noQuote: true });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.text.value, RAW_TEXT_QUOTE);
+    // Exactly one attribution line — the defect this guards against is two.
+    assert.equal(draft.bodyValues.text.value.match(/wrote:/g).length, 1);
+  });
+
+  it('reads the caller\'s own html, not the signature this server appended (#145)', async () => {
+    // The check is snapshotted before the signature step for this case: an identity whose html
+    // signature contains a cite-blockquote must not make an honest keep look like a duplicate.
+    mock.method(client, 'getIdentities', async () => [{
+      ...IDENTITY,
+      htmlSignature: '<div>Regards,<blockquote type="cite">Sample Co</blockquote></div>',
+    }]);
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    await client.updateDraft(
+      'draft-1',
+      { htmlBody: PLAIN_HTML, originalEmailId: 'orig-1', appendSignature: true },
+    );
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.html.value, /Sample Co/);          // signature landed
+    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/); // quote still rebuilt
+  });
+
   it('regenerates and keeps the html quote from originalEmailId (dual)', async () => {
     const makeReq = mockReplyUpdate(client, DUAL_REPLY);
     await client.updateDraft('draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-1' });
@@ -1434,9 +1522,14 @@ describe('updateDraft', () => {
     // Each edit rebuilds the quote from the original, so each edit loses them again. Repeating
     // the disclosure is correct: the alternative is an edit that drops images and says nothing.
     mockReplyUpdate(client, DUAL_REPLY);
-    const args = { htmlBody: '<p>edited twice</p>', originalEmailId: 'orig-relative' };
-    const first = await client.updateDraft('draft-1', args);
-    const second = await client.updateDraft('draft-1', args);
+    // A FRESH args object per call, because the keep path rewrites updates.htmlBody in place
+    // with the rebuilt (quote-bearing) body. Reusing one object would hand the second call the
+    // first call's output rather than the caller's html — which the #145 duplicate check now
+    // correctly refuses. Two separate edits is what this test means; a real caller's arguments
+    // are parsed fresh per request, so they never alias this way.
+    const args = () => ({ htmlBody: '<p>edited twice</p>', originalEmailId: 'orig-relative' });
+    const first = await client.updateDraft('draft-1', args());
+    const second = await client.updateDraft('draft-1', args());
     assert.deepEqual(second.notes, first.notes);
   });
 
@@ -4057,6 +4150,54 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     assert.match(html, /^<p>new note<\/p><div><br>----- Original message -----/);
     assert.match(html, /ORIGINAL HTML BODY/);
     assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
+  });
+
+  it('rejects a keep whose own html body already carries the forwarded block (#145)', async () => {
+    // Same defect as the reply side, forward markers: buildForwardBodies appends the block
+    // under the note, so a note that already ends in one would store it twice.
+    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: FWD_HTML, originalEmailId: 'orig-1' }),
+      (err: Error) => {
+        assert.match(err.message, /already contains the forwarded block.*carry it twice.*noQuote:true/s);
+        // This draft HAS a recorded source, so noQuote would clear it — and the refusal that
+        // recommends noQuote has to say so.
+        assert.match(err.message, /forward marking/);
+        return true;
+      },
+    );
+    const fetchedOriginal = makeReq.mock.calls.some((c: any) => {
+      const [method, params] = c.arguments[0].methodCalls[0];
+      return method === 'Email/get' && params.ids?.[0] === 'orig-1';
+    });
+    assert.equal(fetchedOriginal, false, 'the refusal must precede the originalEmailId fetch');
+  });
+
+  it('does not claim a forward-marking cost on a draft that has no marking to clear (#145)', async () => {
+    // Marker-only forward draft: a recognizable block but no recorded source, so noQuote has
+    // no header to drop. The refusal still stands (the block would be rebuilt underneath), but
+    // the clause naming what noQuote costs must not appear — it would be untrue here.
+    mockForwardUpdate(client, HEADERLESS_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: FWD_HTML, originalEmailId: 'orig-1' }),
+      (err: Error) => {
+        assert.match(err.message, /already contains the forwarded block.*noQuote:true/s);
+        assert.doesNotMatch(err.message, /forward marking/);
+        return true;
+      },
+    );
+  });
+
+  it('rejects a keep whose own text body already carries the dashed forwarded line (#145)', async () => {
+    mockForwardUpdate(client, TEXT_ONLY_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { textBody: FWD_TEXT, originalEmailId: 'orig-1' }),
+      (err: Error) => {
+        assert.match(err.message, /already contains the forwarded block.*noQuote:true/s);
+        assert.match(err.message, /forward marking/);
+        return true;
+      },
+    );
   });
 
   it('originalEmailId keep regenerates BOTH bodies when both are written (custom text side kept)', async () => {
