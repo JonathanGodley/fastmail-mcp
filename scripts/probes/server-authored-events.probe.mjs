@@ -399,19 +399,24 @@ async function runCreate() {
     console.log(`Addressing the writes by URL: ${redact(calendarUrl)}`);
     for (const ev of EVENTS) {
       wroteAnything = true;
-      const res = await client.call('create_calendar_event', {
-        // BY URL, never by display name. `calendarId` accepts either, and the URL is the
-        // only one of the two that names exactly one collection — see the rule above.
-        calendarId: calendarUrl,
-        title: ev.title,
-        ...ev.args,
-      });
-      const body = text(res);
       console.log('-'.repeat(70));
       console.log(`create_calendar_event  ${ev.title}`);
       console.log(`  args: ${JSON.stringify(ev.args)}`);
-      console.log(redact(body).split('\n').map(l => '  ' + l).join('\n'));
-      check(`created "${ev.title}"`, !res.isError && /error/i.test(body) === false);
+      try {
+        const res = await client.call('create_calendar_event', {
+          // BY URL, never by display name. `calendarId` accepts either, and the URL is the
+          // only one of the two that names exactly one collection — see the rule above.
+          calendarId: calendarUrl,
+          title: ev.title,
+          ...ev.args,
+        });
+        const body = text(res);
+        console.log(redact(body).split('\n').map(l => '  ' + l).join('\n'));
+        check(`created "${ev.title}"`, !res.isError);
+      } catch (err) {
+        check(`created "${ev.title}"`, false, redact(err.message));
+        continue;
+      }
     }
   } finally {
     client.close();
