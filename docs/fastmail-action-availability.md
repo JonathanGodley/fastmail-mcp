@@ -344,8 +344,7 @@ the client never authors the split that option implies elsewhere (capping the ol
 `UNTIL` and starting a fresh series), and a resource in that shape did not come from this client.
 
 **Client noise a parser must tolerate — in both directions.** All ten resources carry
-`X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, and all four of the second pass also carry
-`STATUS:CONFIRMED` and the Cyrus `PRODID`, so those are simply what the client writes. The
+`X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, so that one is simply what the client writes. The
 other two are not. The 22 August six carry `VALARM` blocks; **not one of the 23 August four does**.
 The empty `DESCRIPTION:` line is on the 22 August six and on three of the 23 August four — every
 one except the whole-series edit, which carries no `DESCRIPTION` at all. Every one of the ten is an
@@ -353,6 +352,9 @@ ordinary event nobody configured specially, so a parser must survive each of tho
 being present *and* being absent, and must not read an absence as meaning the event came from
 somewhere other than this client. What made the two passes differ on the `VALARM` was not
 identified — an account-level default alarm setting is the obvious candidate and was not checked.
+All four of the second pass additionally carry `STATUS:CONFIRMED` and the Cyrus `PRODID`. Read that
+as a fact about those four rather than a rule about the client: the first pass's six are mixed
+between the Cyrus and the Fastmail `PRODID`, per the storage-serialisation paragraph above.
 
 **Unmeasured.** The 23 August pass closed four of the gaps the first one left: `UNTIL`, a `BYDAY`
 expansion, all-day events spanning a DST boundary, and a whole-series edit are all measured above.
