@@ -25,13 +25,18 @@
 // place and exits; `cleanup` removes the whole collection later. Nothing else sweeps
 // them, so an un-run `cleanup` leaves a stray calendar in the account.
 //
-// MKCALENDAR OR STOP. The fixtures go into a temporary collection minted by MKCALENDAR.
-// If MKCALENDAR fails the probe prints the status and exits non-zero — it NEVER falls back
-// to writing into an existing calendar. This runs against a live personal account and the
-// cleanup phase deletes a whole collection; writing into a real calendar would put that
-// delete over the operator's own events. If a collection with the requested display name
-// already exists it is reused rather than a second one minted, so a re-run after a partial
-// failure does not litter.
+// MKCALENDAR OR STOP, AND NEVER TOUCH A COLLECTION IT DID NOT MINT. The fixtures go into a
+// temporary collection minted by MKCALENDAR. If MKCALENDAR fails the probe prints the status
+// and exits non-zero — it NEVER writes into a calendar it did not mint. This runs against a
+// live personal account and the cleanup phase deletes a WHOLE COLLECTION, so a display name
+// alone is not enough to identify a target: `cleanup Personal` must not wipe a real calendar.
+//
+// The provenance test is the PATH, not the name. `create` mints its collection at a path
+// whose last segment starts with `mcp-164-`, and both phases match on the display name AND
+// that segment. A same-named collection on any other path is refused, loudly and non-zero,
+// by both phases: `create` will not write into it and `cleanup` will not delete it. A
+// same-named collection that IS on a minted path is this probe's own, so `create` reuses it
+// rather than minting a second and a re-run after a partial failure does not litter.
 //
 // NO PARTICIPANTS. None of the four events carries one. An attendee makes the server's
 // scheduling layer send a real iTIP invitation from the account under test, and the later
@@ -50,7 +55,7 @@
 // test is the shipped one); the collection plumbing and the read-back are raw CalDAV over
 // bare fetch, so none of our parsing sits between the store and the dump.
 
-import { makeChecker, text } from './probelib.mjs';
+import { makeChecker, text, jsonOf } from './probelib.mjs';
 import { createClient } from '../mcp-harness.mjs';
 
 const USERNAME = process.env.FASTMAIL_CALDAV_USERNAME;
@@ -106,12 +111,17 @@ const elAll = (xml, name) =>
 const responses = xml => elAll(xml, 'response');
 const abs = href => new URL(href, ROOT).href;
 
-// Cyrus returns calendar-data as a CDATA section, so the raw iCalendar arrives wrapped and
-// NOT entity-escaped. Unwrap first and skip the entity pass on that content: a dump that
-// still says `<![CDATA[BEGIN:VCALENDAR` is not the stored bytes.
+// Cyrus returned calendar-data as a CDATA section on one live run (23 Aug 2026), so the raw
+// iCalendar arrives wrapped and NOT entity-escaped; a dump that still says
+// `<![CDATA[BEGIN:VCALENDAR` is not the stored bytes. Harmless when absent - a payload with
+// no CDATA falls through to the entity pass unchanged, which is what the sibling
+// client-authored probe does on every response.
+//
+// EVERY section, joined: a payload containing a literal `]]>` is emitted as two adjacent
+// CDATA sections split around it, so taking only the first would silently truncate the dump.
 const unescapeXml = s => {
-  const cdata = s.match(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/);
-  if (cdata) return cdata[1];
+  const sections = [...s.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)];
+  if (sections.length) return sections.map(m => m[1]).join('');
   return s
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&');
@@ -173,33 +183,108 @@ async function fetchResources(calendarUrl) {
 
 const summaryOf = data => (data.match(/^SUMMARY:(.*)$/m)?.[1] ?? '(no SUMMARY)').trim();
 
+/** Is CAL_NAME present in a list_calendars response as a WHOLE calendar name?
+ *
+ *  A substring test over the raw response body is wrong twice: it matches a calendar merely
+ *  CONTAINING the name ("MCP probe calendar (old)" would satisfy a wait for "MCP probe
+ *  calendar"), and it matches the name appearing in the tool's own prose. So: parse the
+ *  payload and compare values exactly where the body is JSON, and fall back to a regex
+ *  anchored on the quoted name where it is not. */
+function calendarIsListed(body, name) {
+  try {
+    const payload = jsonOf(body);
+    const names = [];
+    const walk = v => {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') for (const [k, val] of Object.entries(v)) {
+        if (typeof val === 'string' && /^(name|displayName|title)$/i.test(k)) names.push(val);
+        else walk(val);
+      }
+    };
+    walk(payload);
+    return names.includes(name);
+  } catch {
+    // Not JSON (or no payload): the quoted whole value, which still excludes a prose mention
+    // and a longer name that merely starts with this one.
+    return new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`).test(body);
+  }
+}
+
+// PROVENANCE. The one marker that says this probe made a collection: `create` mints the path
+// segment, so only a collection sitting on such a path is eligible to be written into or
+// deleted. A display name is caller-supplied and can name anything in the account, which is
+// why it is never the sole test.
+const MINTED_PREFIX = 'mcp-164-';
+const mintedSegment = () => `${MINTED_PREFIX}${Date.now()}`;
+const isMinted = url => {
+  const segments = new URL(url).pathname.split('/').filter(Boolean);
+  return (segments.at(-1) ?? '').startsWith(MINTED_PREFIX);
+};
+
 // ---------------------------------------------------------------------------
-// The four reference shapes. Deliberately in one contiguous stretch of days so a single
-// week view of the client shows all four at once. `timeZone` is omitted on the first
-// (create writes the configured zone) and named on the second, which is the pair that
-// tells you whether the client annotates a non-default zone the way it does its own.
-// DTEND is exclusive, so the three-day band ends on the 31st to cover 28/29/30.
+// The four reference shapes, on dates computed from TODAY so a run in any month still lands
+// its fixtures in the coming week rather than on a date that has gone past. The anchor is
+// the next Wednesday at least two days out: far enough ahead that nothing here competes with
+// today's real entries, and a fixed weekday so the four sit in one contiguous stretch that a
+// single week view of the client shows at once.
+//
+// `timeZone` is omitted on the first (create writes the configured zone) and named on the
+// second — that pair is what tells you whether the client annotates a non-default zone the
+// way it does its own. DTEND is exclusive, so the three-day band ends on the fourth day to
+// cover three.
 // ---------------------------------------------------------------------------
+const WEDNESDAY = 3;
+const MIN_DAYS_AHEAD = 2;
+
+/** Local calendar date, YYYY-MM-DD, offset by whole days. Local, not UTC: the fixture dates
+ *  are the days the operator will open in the client, which are their own local days. */
+function localDate(base, addDays = 0) {
+  const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + addDays);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+/** "Wed 26 Aug 2026", for the look-for lines: the operator needs the day, not an ISO string. */
+const humanDate = iso => {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-AU',
+    { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+};
+
+const TODAY = new Date();
+// Days from today to the next Wednesday that is at least MIN_DAYS_AHEAD away.
+const ANCHOR_OFFSET = (() => {
+  let offset = (WEDNESDAY - TODAY.getDay() + 7) % 7;
+  while (offset < MIN_DAYS_AHEAD) offset += 7;
+  return offset;
+})();
+const DAY_TIMED = localDate(TODAY, ANCHOR_OFFSET);          // both timed events
+const DAY_ALLDAY_1 = localDate(TODAY, ANCHOR_OFFSET + 1);   // the single all-day
+const DAY_ALLDAY_1_END = localDate(TODAY, ANCHOR_OFFSET + 2);
+const DAY_ALLDAY_3 = localDate(TODAY, ANCHOR_OFFSET + 2);   // the three-day band starts here
+const DAY_ALLDAY_3_LAST = localDate(TODAY, ANCHOR_OFFSET + 4);
+const DAY_ALLDAY_3_END = localDate(TODAY, ANCHOR_OFFSET + 5); // exclusive
+
 const EVENTS = [
   {
     title: 'MCP-164 timed default zone',
-    args: { start: '2026-08-26T10:00:00', end: '2026-08-26T11:00:00' },
-    lookFor: 'renders at 10:00-11:00 local with no unexpected zone annotation',
+    args: { start: `${DAY_TIMED}T10:00:00`, end: `${DAY_TIMED}T11:00:00` },
+    lookFor: `on ${humanDate(DAY_TIMED)}: renders at 10:00-11:00 local with no unexpected zone annotation`,
   },
   {
     title: 'MCP-164 timed Hong Kong',
-    args: { start: '2026-08-26T10:00:00', end: '2026-08-26T11:00:00', timeZone: 'Asia/Hong_Kong' },
-    lookFor: 'the client shows Asia/Hong_Kong the way it does for its own zone-picker events',
+    args: { start: `${DAY_TIMED}T10:00:00`, end: `${DAY_TIMED}T11:00:00`, timeZone: 'Asia/Hong_Kong' },
+    lookFor: `on ${humanDate(DAY_TIMED)}: the client shows Asia/Hong_Kong the way it does for its own zone-picker events`,
   },
   {
     title: 'MCP-164 all-day one day',
-    args: { start: '2026-08-27', end: '2026-08-28' },
-    lookFor: '"All day" on exactly 27 Aug',
+    args: { start: DAY_ALLDAY_1, end: DAY_ALLDAY_1_END },
+    lookFor: `"All day" on exactly ${humanDate(DAY_ALLDAY_1)}`,
   },
   {
     title: 'MCP-164 all-day three days',
-    args: { start: '2026-08-28', end: '2026-08-31' },
-    lookFor: 'spans 28-30 Aug with no off-by-one at the exclusive end',
+    args: { start: DAY_ALLDAY_3, end: DAY_ALLDAY_3_END },
+    lookFor: `spans ${humanDate(DAY_ALLDAY_3)} to ${humanDate(DAY_ALLDAY_3_LAST)} inclusive, ` +
+      `with no off-by-one at the exclusive end (${humanDate(DAY_ALLDAY_3_END)} must be clear)`,
   },
 ];
 
@@ -211,16 +296,30 @@ async function runCreate() {
   console.log(`Calendar home: ${redact(homeUrl)}`);
   console.log(`Temporary calendar display name: ${JSON.stringify(CAL_NAME)}`);
 
-  // --- the collection: reuse an existing one by display name, else MKCALENDAR ----------
-  const existing = (await listCollections(homeUrl)).find(c => c.name === CAL_NAME);
+  // --- the collection: reuse one THIS PROBE minted, else MKCALENDAR --------------------
+  // Name AND minted path. A same-named collection anywhere else is someone's real calendar:
+  // writing into it would hand the cleanup phase's whole-collection DELETE to their events.
+  const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
+  const existing = sameName.find(c => isMinted(c.url));
+  const foreign = sameName.find(c => !isMinted(c.url));
   let calendarUrl;
+  if (!existing && foreign) {
+    check('the display name is free, or already belongs to this probe', false,
+      `a calendar named ${JSON.stringify(CAL_NAME)} exists and is not this probe's`);
+    console.error(`\nStopping: ${redact(foreign.url)} carries that display name but was not minted by`);
+    console.error(`this probe (its path does not start with "${MINTED_PREFIX}"), so it is a real calendar.`);
+    console.error('Nothing was written. Choose another name and re-run:');
+    console.error(`  python scripts/probes/run-probe.py server-authored-events.probe.mjs create "MCP probe calendar 2"`);
+    return { wroteAnything: false };
+  }
   if (existing) {
     calendarUrl = existing.url;
-    console.log(`\nA collection with that display name already exists - reusing it rather than minting a second.`);
+    console.log(`\nThis probe's own collection with that display name already exists - reusing it`);
+    console.log(`rather than minting a second.`);
     console.log(`  ${redact(calendarUrl)}`);
-    check('collection available (reused existing)', true);
+    check('collection available (reused a previously minted one)', true);
   } else {
-    const candidateUrl = new URL(`mcp-164-${Date.now()}/`, homeUrl).href;
+    const candidateUrl = new URL(`${mintedSegment()}/`, homeUrl).href;
     const mk = await dav('MKCALENDAR', candidateUrl, {
       body: `<?xml version="1.0" encoding="utf-8"?>\n` +
         `<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop>` +
@@ -232,8 +331,9 @@ async function runCreate() {
       // Deliberately terminal. Falling back to an existing calendar would put the cleanup
       // phase's whole-collection DELETE over the operator's own events.
       check(`MKCALENDAR ${redact(candidateUrl)}`, false, `HTTP ${mk.status} ${mk.statusText}`);
-      console.error('\nStopping: this probe never writes into an existing calendar.');
-      return;
+      console.error('\nStopping: this probe never writes into a calendar it did not mint.');
+      console.error('Nothing was written.');
+      return { wroteAnything: false };
     }
     calendarUrl = candidateUrl;
     check(`MKCALENDAR created the temporary collection`, true, `HTTP ${mk.status}`);
@@ -241,24 +341,30 @@ async function runCreate() {
   }
 
   // --- write the four events through the built server ----------------------------------
+  // Tracked so the failure banner can tell "nothing was written" from "some of it was":
+  // set the moment a create is ATTEMPTED, since a call that errors may still have landed.
+  let wroteAnything = false;
   const client = createClient({ env: process.env });
   try {
     await client.init();
 
     // The collection has to be visible to the JMAP/CalDAV surface the server reads before
     // create_calendar_event can address it by display name. Bounded retry, not a poll loop.
+    const ATTEMPTS = 5;
     let visible = false;
-    for (let attempt = 1; attempt <= 5 && !visible; attempt++) {
-      const body = text(await client.call('list_calendars', {}));
-      visible = body.includes(CAL_NAME);
-      if (!visible) await new Promise(r => setTimeout(r, 1000 * attempt));
-      console.log(`list_calendars attempt ${attempt}: ${visible ? 'calendar visible' : 'not yet visible'}`);
+    for (let attempt = 1; attempt <= ATTEMPTS && !visible; attempt++) {
+      visible = calendarIsListed(text(await client.call('list_calendars', {})), CAL_NAME);
+      // Log the outcome BEFORE waiting, so a slow appearance shows its progress as it goes
+      // rather than arriving as one silent pause; and never wait after the last attempt.
+      console.log(`list_calendars attempt ${attempt}/${ATTEMPTS}: ${visible ? 'calendar visible' : 'not yet visible'}`);
+      if (!visible && attempt < ATTEMPTS) await new Promise(r => setTimeout(r, 1000 * attempt));
     }
     check('the temporary calendar is addressable by display name in list_calendars', visible);
-    if (!visible) return;
+    if (!visible) return { wroteAnything: false };
 
     console.log('');
     for (const ev of EVENTS) {
+      wroteAnything = true;
       const res = await client.call('create_calendar_event', {
         calendarId: CAL_NAME,
         title: ev.title,
@@ -297,6 +403,7 @@ async function runCreate() {
   console.log('');
   console.log(`The events are LEFT IN PLACE for viewing. When you are done, remove them with:`);
   console.log(`  python scripts/probes/run-probe.py server-authored-events.probe.mjs cleanup ${JSON.stringify(CAL_NAME)}`);
+  return { wroteAnything };
 }
 
 async function runCleanup() {
@@ -304,9 +411,21 @@ async function runCleanup() {
   console.log(`Calendar home: ${redact(homeUrl)}`);
   console.log(`Looking for the collection named ${JSON.stringify(CAL_NAME)}.`);
 
-  const target = (await listCollections(homeUrl)).find(c => c.name === CAL_NAME);
+  // Name AND minted path, both. This DELETEs a whole collection, so a display-name match on
+  // its own is not proof of anything: the name is a CLI argument and could name a real
+  // calendar. Only a collection sitting on a path this probe minted is eligible.
+  const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
+  const target = sameName.find(c => isMinted(c.url));
   if (!target) {
-    console.log('\nNo collection with that display name - nothing to clean up.');
+    const foreign = sameName.find(c => !isMinted(c.url));
+    if (foreign) {
+      check('the collection to delete was made by this probe', false,
+        `a collection named ${JSON.stringify(CAL_NAME)} exists but was not made by this probe - refusing to delete it`);
+      console.error(`\n${redact(foreign.url)} carries that display name, but its path does not start`);
+      console.error(`with "${MINTED_PREFIX}", so this probe did not create it. Nothing was deleted.`);
+      return;
+    }
+    console.log('\nNo collection of this probe\'s with that display name - nothing to clean up.');
     return;
   }
   console.log(`  ${redact(target.url)}`);
@@ -326,16 +445,21 @@ async function runCleanup() {
   check('the collection is gone from the calendar home', !stillThere);
 }
 
+// A throw leaves it unknown whether a create landed, so the banner below assumes it might
+// have: the honest default for a phase that deliberately leaves fixtures behind.
+let outcome = { wroteAnything: MODE === 'create' };
 try {
-  if (MODE === 'create') await runCreate();
-  else await runCleanup();
+  outcome = (MODE === 'create' ? await runCreate() : await runCleanup()) ?? outcome;
 } catch (err) {
   check(`${MODE} completed without throwing`, false, redact(err?.message ?? String(err)));
 }
 
 if (failures() > 0) {
   console.error(`\n${failures()} check(s) FAILED.`);
-  if (MODE === 'create') {
+  // Only offer the cleanup line when a write was actually attempted. A run that stopped at
+  // MKCALENDAR or at the provenance guard wrote nothing, and telling the operator to go
+  // clean up after it would send them looking for fixtures that do not exist.
+  if (MODE === 'create' && outcome.wroteAnything) {
     console.error('Nothing was auto-deleted: what got written is listed above, and removing it is your call.');
     console.error(`Run: python scripts/probes/run-probe.py server-authored-events.probe.mjs cleanup ${JSON.stringify(CAL_NAME)}`);
   }
