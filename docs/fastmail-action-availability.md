@@ -256,15 +256,13 @@ transition (DST starts 02:00 on Sun 4 Oct 2026) and neither records it: the sing
 `DTSTART;VALUE=DATE:20261003` + `DURATION:P3D`, the series is the same start + `DURATION:P1D` +
 `RRULE:FREQ=DAILY;COUNT=3`, and neither carries a zone or an embedded `VTIMEZONE` at all. A
 multi-day all-day event spanning a transition is a plain run of dates, which is what makes the
-date-only reading in the window filter safe across one. (Noise differs in this pass, too: none of
-the four carries a `VALARM`, though all four carry `X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`,
-`STATUS:CONFIRMED`, and the Cyrus `PRODID`. So a `VALARM` is not guaranteed even on an ordinary
-client-authored event.)
+date-only reading in the window filter safe across one. (The noise these four carry differs from
+the first pass's — see the client-noise paragraph below.)
 
 **The client never writes a floating or absolute time.** Every timed value in all six is an IANA
 zone *name* plus a local wall clock. Not one `Z` form, not one numeric offset, not one bare
 `DTSTART:20260822T090000`. The claim is about the values that *schedule* an event — `DTSTART`,
-`DTEND`, `DURATION`, `RECURRENCE-ID`, `EXDATE`, and a recurrence rule's own bound — and it survives
+`DTEND`, `RECURRENCE-ID`, `EXDATE`, and a recurrence rule's own bound — and it survives
 the second pass, where the only `Z` among them is the `UNTIL`. Read it as scoped to those values,
 not to the resource: the housekeeping timestamps (`CREATED`, `DTSTAMP`, `LAST-MODIFIED`, `TZUNTIL`)
 are UTC throughout, and always were. That is the measured ratification of the write model this server ships
@@ -312,13 +310,20 @@ in place**, and wrote nothing else:
 Only the **post-edit** bytes were fetched, so the two-sided claims below are marked with what they
 rest on. Read an unmarked one as measured.
 
-- `DTSTART` `20260826T090000` → `20260826T093000` and `SUMMARY` changed, in the one existing block.
+- `DTSTART` is `20260826T093000` and the `SUMMARY` is the new title, in the one existing block.
+  The `090000` and the old title it moved *from* are the operator's own authoring and edit actions
+  — 9:00 was entered in the picker and 9:30 typed over it, and the title was retyped — not a
+  pre-edit fetch. The table row above records the same post-edit value.
 - `SEQUENCE` is **1**, and `DTSTAMP` and `LAST-MODIFIED` are later than the resource's `CREATED`.
   That it was 0 before is *inferred* from the three sibling resources authored in the same pass and
   not edited, which all carry `SEQUENCE:0`.
 - **One resource, one UID, after the edit** — the edit did not fork the series into a second
   resource. This is not a before-and-after comparison of the UID: only the post-edit resource was
   read, so what is measured is that a single resource under a single UID is what the series is.
+  It is bounded, though, by how that resource was found: a title-substring sweep across **all five
+  calendar collections in the account** over 2026-07-24 to 2026-12-21 returned exactly four
+  resources for the pass's four events. A fork would have had to land outside that window or under
+  a title not containing the substring to escape it.
 - `RRULE` carries `UNTIL=20260923T135959Z`, exactly as authored, so moving the series did not move
   its end bound with it. That the rule is otherwise unchanged is *inferred* from the client's own
   popup, which read the same before and after the edit — "5 times … last occurring on Wed, Sep 23".
@@ -339,7 +344,8 @@ the client never authors the split that option implies elsewhere (capping the ol
 `UNTIL` and starting a fresh series), and a resource in that shape did not come from this client.
 
 **Client noise a parser must tolerate — in both directions.** All ten resources carry
-`X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, so that one is simply what the client writes. The
+`X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, and all four of the second pass also carry
+`STATUS:CONFIRMED` and the Cyrus `PRODID`, so those are simply what the client writes. The
 other two are not. The 22 August six carry `VALARM` blocks; **not one of the 23 August four does**.
 The empty `DESCRIPTION:` line is on the 22 August six and on three of the 23 August four — every
 one except the whole-series edit, which carries no `DESCRIPTION` at all. Every one of the ten is an
