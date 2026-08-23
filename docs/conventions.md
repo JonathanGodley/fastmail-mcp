@@ -1883,7 +1883,7 @@ event chooses the DENSITY. Those are different questions and they get different 
   The consequence is that the threshold is applied to a set up to 28 hours wider than the
   window asked about, so a series with slightly fewer than 5000 genuine in-window occurrences
   can still be omitted. For a 31-day window the requested range is 772 hours against the
-  caller's 744, so an evenly spaced series trips from about 4820 in-window occurrences up
+  caller's 744, so an evenly spaced series trips from about 4819 in-window occurrences up
   (5000 x 744/772). That is a deliberate trade of a little precision at the boundary for not
   parsing the payload the cap is there to refuse.
 

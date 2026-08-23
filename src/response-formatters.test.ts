@@ -1584,11 +1584,12 @@ describe('buildCalendarDensityNote', () => {
     assert.match(note, /1 repeating event was left out because it expands to more than 5000 occurrences in the range searched for this window/);
     assert.match(note, /"Standup" \(id dense@example\.invalid, 44640 occurrences, calendar Work\)/);
     assert.match(note, /narrow the window to see it/);
-    // The count is of the blocks the SERVER returned, over a range widened by 14 hours at each
-    // edge so Fastmail cannot withhold an all-day or floating event (#162). Saying "in this
-    // window" would overstate it: a caller asking about one day can be told 5001 where 1440
-    // fall inside the day. Counting only the in-window blocks would need the per-block parse
-    // this cap exists to avoid, so the number is described accurately instead of narrowed.
+    // The count is of the blocks the SERVER returned, over a range widened by up to 14 hours at
+    // each edge so Fastmail cannot withhold an all-day or floating event (#162). Saying "in this
+    // window" would overstate it: a single-day window is requested as up to 52 hours rather than
+    // 24, so the count can be more than double the number falling inside the day. Counting only
+    // the in-window blocks would need the per-block parse this cap exists to avoid, so the
+    // number is described accurately instead of narrowed.
     // "up to", not a flat 14: `shiftIsoMs` saturates the widened bound at the representable
     // date edge, so a window ending near 9999-12-31 is widened by less. The overstatement
     // would always have been in the conservative direction, but the phrase is what a caller

@@ -2226,7 +2226,7 @@ export const CALENDAR_OPEN_WINDOW_DAYS = 31;
  * the threshold is applied to a set up to 28 hours wider than the window the caller asked
  * about — a series with slightly under 5000 genuine in-window occurrences can therefore be
  * omitted. For a 31-day window the widened range is 772 hours against the caller's 744, so an
- * evenly spaced series trips the threshold from about 4820 in-window occurrences up
+ * evenly spaced series trips the threshold from about 4819 in-window occurrences up
  * (5000 x 744/772); the shorter the window, the wider that gap gets. Narrowing to the
  * caller's window first would need the per-block parse this cap exists to avoid, so the number
  * is described accurately in the note rather than made exact.
