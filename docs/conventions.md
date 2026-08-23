@@ -1737,7 +1737,7 @@ Mechanics worth knowing before touching it:
   at 02:00, so the deployment's own zone hid it; `FASTMAIL_TIMEZONE` is a config value.
 - **A date-only end advances by a whole LOCAL day, not by 24 hours.** A day a DST change makes
   23 or 25 hours long would otherwise end an hour inside itself or an hour into the next day.
-  The 366-day clamp on a one-sided window is the deliberate exception: it advances in fixed
+  The 31-day clamp on a one-sided window is the deliberate exception: it advances in fixed
   24-hour days because it invents a span nobody named, where a DST hour either side of an
   arbitrary bound is not a wrong answer to anything, and the clamp note states the instant it
   landed on.
@@ -1765,9 +1765,9 @@ Mechanics worth knowing before touching it:
   reading whenever the host sits in the zone asserted — which is how the wrong-day window sat
   under a green suite. The suite pins Sydney and New York so a sign error cannot pass both.
 
-### A one-sided window is bounded, and the bound is disclosed
+### An invented calendar window is bounded, and the bound is disclosed
 
-`startDate` and `endDate` are both optional, so one of them may have to be invented. It used
+`startDate` and `endDate` are both optional, so one or both of them may have to be invented. It used
 to be invented as 1970-01-01 / 2099-12-31, which was harmless while the window was only a
 filter and stopped being harmless the moment `expand` was added: the window is now the range
 the SERVER materialises occurrences over, so `startDate: <today>` alone asked Fastmail to
@@ -1777,8 +1777,8 @@ buffered, regex-split, parsed, filtered and sorted before `limit` ever applies, 
 not a bound on the work. Calendar content is also attacker-authored in this deployment:
 anyone who can send an invitation can put a `FREQ=MINUTELY` series in the account.
 
-So the INVENTED half is clamped to `CALENDAR_OPEN_WINDOW_DAYS` (366) from the bound that was
-given, and the clamp is surfaced in `CalendarEventQueryResult.windowClamp` — STRUCTURE, not
+So the INVENTED half is clamped to `CALENDAR_OPEN_WINDOW_DAYS` (31 days, a month) from the
+bound that was given, and the clamp is surfaced in `CalendarEventQueryResult.windowClamp` — STRUCTURE, not
 finished prose. That is the shape the email listings already established for a disclosure of
 this kind (`QueryResult.exclusion` -> `buildExclusionNote` -> handler), and the calendar path
 briefly diverged from it: it built the sentence inside the client, which put the wording where
@@ -1788,6 +1788,34 @@ A caller silently handed a narrower window than it asked for would read "nothing
 date" as an empty calendar — the same never-silently-degrade rule the exclusion note and
 `unresolvedMailboxIds` exist for. A window whose bounds the caller named is never clamped:
 that span is the caller's own decision.
+
+**A month, because that is the question the missing bound is asking.** "What is coming up",
+"what led up to this date" - a month is what a calendar client puts on screen at a time, so
+the invented span is the one the caller reading the answer already has in mind. The expanding
+APIs nearest to this one invent no span at all: Cyrus's own JMAP `CalendarEvent/query` rejects
+an `expandRecurrences` query with no upper bound, and Microsoft Graph's `calendarView`
+requires both bounds, so inventing a month is already the generous reading. 31 rather than 30
+so the same date next month is always inside the span, from any starting day in any month.
+
+**A caller who names NEITHER bound gets the same month, anchored on today**
+([#142](https://github.com/JonathanGodley/fastmail-mcp/issues/142)). That call used to go out
+with no time range at all, which meant no `expand` either - tsdav drops `<C:expand>` without
+one - so the call most likely to be asked "what is on?" was the one call that answered with
+series masters at their original `DTSTART` instead of the occurrences that fall on those days.
+There is no unwindowed listing any more: an absent window is the OPEN-ENDED case, which is the
+one thing this section exists to refuse, not a third thing that escapes it. `windowClamp.invented`
+carries `'both'` for it and the note gets its own sentence, because the one-sided wording blames
+a bound the caller gave ("only endDate was given") and names the missing one to pass, and
+neither half of that has a referent when the caller gave nothing.
+
+The window starts at LOCAL MIDNIGHT TODAY, resolved through the same wall-clock path a
+date-only `startDate` takes (`startOfLocalDayUtcIso` in `coerce.ts`, which calls
+`zoneOffsetMsAt` and `wallClockToUtcMs` rather than re-deriving either). "No bounds" and
+"today's date as `startDate`" must not answer two different questions. The clock is INJECTED -
+`CalDAVConfig.now`, defaulting to `Date.now` - and read once per call, so the two ends of one
+window cannot straddle a midnight and the behaviour is unit-testable at all: a default window
+computed from the real clock can only be asserted against a value the test recomputes the same
+way, which tests nothing.
 
 **Saturation is the other narrowing, and it names an EDGE.** A bound that resolves outside the
 four-digit-year range every consumer of these values can express is pulled back to that range's
@@ -1824,14 +1852,67 @@ Three consequences worth stating, because each is a place this could go quietly 
   server will withhold, not about how the caller's bounds are read, so "the caller named an
   instant" does not exempt it.
 
-**The bound therefore covers ONE of the two ways to ask for an unbounded expansion**, and the
-justification above does not stretch to cover the other. A caller naming BOTH bounds
-(`2000-01-01 .. 2100-01-01`) still asks the server to materialise every occurrence over a
-century, bounded by nothing — and while the caller chooses the SPAN, an attacker chooses the
-DENSITY, which is the same `FREQ=MINUTELY` hazard the paragraph above just described. Latent
-rather than active: a live 10-year window on this account measured 6.4s for 1237 events. Left
-as it is deliberately, because a cap on a span the caller named is a behaviour change to a
-user-visible contract rather than a fix.
+### The span is the caller's; the density is not
+
+The window bound above covers only ONE of the two ways to ask for an unbounded expansion. A
+caller naming BOTH bounds (`2000-01-01 .. 2100-01-01`) still asks the server to materialise
+every occurrence over a century - and while the caller chooses the SPAN, whoever authored the
+event chooses the DENSITY. Those are different questions and they get different answers
+([#142](https://github.com/JonathanGodley/fastmail-mcp/issues/142)):
+
+- **A span the caller named is never clamped, however long.** Asking for a century is a
+  legitimate question, and shortening it silently would answer a different one.
+- **A single repeating resource that expands to more than `CALENDAR_MAX_OCCURRENCES_PER_SERIES`
+  (5000) blocks is left out of the results entirely**, and named in the same trailing `Note:`
+  the window disclosure uses - title, id, occurrence count and calendar - so the caller can
+  narrow to it directly. The call still answers everything else. It is out of `total` as well
+  as out of the rows: `total` answers "how many rows did `limit` cut off", so folding in
+  occurrences no row represents would send a caller raising `limit` after rows that do not
+  exist.
+
+  **The count is over the range REQUESTED, not the caller's window**, which is the widened one
+  described above - up to 14 hours past each edge ("up to", because `shiftIsoMs` saturates the
+  widened bound at the representable-date edge). So the number the note prints is a count of
+  the blocks the server returned, and the shorter the caller's window the further above the
+  in-window count it can sit: a single-day window is requested as 52 hours rather than 24, so
+  for an evenly spaced series the count can be more than double the number of occurrences
+  falling inside the day. The note says so in those terms rather than claiming the caller's
+  window, because counting only the in-window blocks would require the per-block parse the cap
+  exists to avoid.
+
+  The consequence is that the threshold is applied to a set up to 28 hours wider than the
+  window asked about, so a series with slightly fewer than 5000 genuine in-window occurrences
+  can still be omitted. For a 31-day window the requested range is 772 hours against the
+  caller's 744, so an evenly spaced series trips from about 4820 in-window occurrences up
+  (5000 x 744/772). That is a deliberate trade of a little precision at the boundary for not
+  parsing the payload the cap is there to refuse.
+
+**Why 5000.** It is the number that separates a real calendar from a pathological one. A daily
+event over a 10-year window is 3,653 occurrences and every 10 minutes for a month is 4,464;
+both pass. Every 5 minutes for a month is 8,928 and `FREQ=MINUTELY` for a month is 44,640; both
+trip. The threshold is deliberately far above anything a person schedules, because the cost of
+a false positive - a legitimate series vanishing from a listing - is much higher than the cost
+of parsing a few thousand extra blocks.
+
+**Why omit rather than truncate.** Truncating a dense series to its first N occurrences reads
+as the safer choice and is not: the results are sorted by start time and trimmed to `limit`, so
+a `FREQ=MINUTELY` series' first few hundred occurrences would fill the entire page and push
+every genuine event off it. The caller would get a plausible-looking answer that is wrong.
+Omitting the series costs the caller one event and keeps the rest of the listing intact, and
+the `Note:` makes the omission impossible to miss.
+
+**Attacker-authored, not merely accidental.** Calendar content in this deployment comes from
+anyone who can send an invitation, so density is not just a user's mistake to be tolerated - a
+one-line `RRULE` is enough to make any listing on the account useless. That is the same
+threat model the whole-content-line rule below rests on.
+
+**The residual: this bounds what is PARSED, never what is generated or transferred.** Cyrus's
+CalDAV expansion has no cap of its own (`expand_cb` returns 1 unconditionally, and
+`CALDAV:max-instances` has no handler), and tsdav's `fetchCalendarObjects` has no limit or
+paging option and buffers the whole multistatus response before returning it. So the server
+still generates every occurrence and still sends every byte; the cap decides what this server
+parses into events and shows. That is a real limit, and it is the reason the window bound above
+matters more than this one - the window is the only thing that shrinks the request.
 
 ## iCalendar structure is decided on WHOLE CONTENT LINES, never with a `/m` regex
 

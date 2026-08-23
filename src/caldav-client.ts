@@ -4,7 +4,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -20,6 +20,12 @@ export interface CalDAVConfig {
   // environment (the server does that through its shared multi-name lookup, so a DXT
   // user_config spelling reaches it); left unset it falls back to the username.
   displayName?: string;
+  // The clock "today" is read from, for the window a caller that named no bounds gets.
+  // Injectable so that behaviour is unit-testable at all: a default window computed from the
+  // real clock can only be asserted against a value the test recomputes the same way, which
+  // tests nothing. Defaults to `Date.now`, and is read ONCE per call so the two ends of one
+  // window cannot straddle a midnight.
+  now?: () => number;
 }
 
 export interface CalendarInfo {
@@ -157,13 +163,39 @@ export interface CalendarEventQueryResult {
   // sentence down here instead put the wording somewhere no formatter test can reach it and
   // gave the separator convention a second home.
   windowClamp?: CalendarWindowClamp;
+  // Series left OUT of `events` and `total` because one resource expanded to more than
+  // CALENDAR_MAX_OCCURRENCES_PER_SERIES blocks in the RANGE REQUESTED for this window, which
+  // is the widened one rather than the caller's own (see CALENDAR_MAX_OCCURRENCES_PER_SERIES
+  // for what that does to the threshold). ABSENT when nothing was
+  // omitted, so silence means every series was materialised — the same never-silently-degrade
+  // rule `windowClamp` follows, and the same STRUCTURE-not-prose shape: the wording lives in
+  // `buildCalendarDensityNote` where a formatter test can reach it.
+  denseSeries?: DenseCalendarSeries[];
+}
+
+/** One repeating event too dense to materialise, described well enough to find and narrow to. */
+export interface DenseCalendarSeries {
+  title: string;
+  id: string;
+  // Carried but deliberately NOT rendered in the note. It is here for the same reason
+  // `CalendarEvent.url` is kept on an ordinary row (see the comment there): a UID is unique
+  // per collection, not per account, so where two calendars hold the same UID the url is the
+  // only thing that tells the two records apart — and a series omitted from the rows is
+  // exactly the case where no row carries it. It stays out of the note text because title, id
+  // and calendar name already identify the series for someone narrowing the window, and the
+  // note is long enough without a path in it.
+  url: string;
+  calendar: string;
+  occurrences: number;
 }
 
 /** Why, and to what, a calendar window ended up narrower than the one the caller described. */
 export interface CalendarWindowClamp {
   // The bound the caller OMITTED, which had to be invented CALENDAR_OPEN_WINDOW_DAYS away
-  // from the one they gave. Absent when both bounds were named.
-  invented?: 'startDate' | 'endDate';
+  // from the one they gave. `'both'` is the caller who named neither: the window then starts
+  // at local midnight today and runs the same invented span forward. Absent when both bounds
+  // were named.
+  invented?: 'startDate' | 'endDate' | 'both';
   // Caller-named bounds whose resolved instant ran outside the four-digit-year range every
   // consumer of these values can express, and so were pulled back to its edge. `edge` names
   // WHICH edge, because the disclosure is an opposite statement at each end and a window can
@@ -1127,9 +1159,15 @@ function extractAllVEvents(data: string): string[] {
  */
 export function parseCalendarObjects(
   obj: DAVCalendarObject,
-  options?: { includeParticipants?: boolean; expanded?: boolean; configuredZone?: string },
+  options?: { includeParticipants?: boolean; expanded?: boolean; configuredZone?: string; blocks?: string[] },
 ): CalendarEvent[] {
-  const blocks = extractAllVEvents(obj.data || '');
+  // `blocks` is an optimisation with a correctness point behind it. The listing path has to
+  // COUNT this resource's blocks before deciding whether to parse it at all (see
+  // CALENDAR_MAX_OCCURRENCES_PER_SERIES), and extracting them twice would mean two walks of a
+  // payload that is large in exactly the case the count is guarding against — and, worse, two
+  // places that could disagree about what a VEVENT block is. Passing the list through keeps
+  // one structural extraction per resource.
+  const blocks = options?.blocks ?? extractAllVEvents(obj.data || '');
   if (blocks.length === 0) {
     // No VEVENT found — return minimal event
     return [{
@@ -2143,17 +2181,74 @@ export function sortEventsByStart(events: CalendarEvent[], zone: string | undefi
  * every block copied by a global regex, parsed, filtered and sorted, and only THEN sliced to
  * `limit` — so `limit` is not a bound on any of the work.
  *
- * A year is the span chosen: it answers the question a one-sided window is actually asking
- * ("what is coming up", "what led up to this date") without inventing a range nobody named,
- * and it holds an ordinary daily series to a few hundred rows. 366 rather than 365 so a leap
- * year still covers a full year from any starting day. It is a bound on the INVENTED half
- * only — a caller that names both bounds gets exactly the window it named, because that
- * scope is its own decision.
+ * A MONTH is the span chosen. It answers the question a one-sided or bounds-free window is
+ * actually asking — "what is coming up", "what led up to this date" — and it matches what a
+ * calendar client puts on screen at a time, so the invented span is the one a caller reading
+ * the answer already has in mind. The expanding APIs nearest to this one do not invent a span
+ * at all: Cyrus's own JMAP `CalendarEvent/query` REJECTS an `expandRecurrences` query with no
+ * upper bound, and Microsoft Graph's `calendarView` requires both bounds. Inventing a month is
+ * already the generous reading; inventing a year was generous twice over, and it held an
+ * ordinary daily series to a few hundred rows rather than a few dozen.
+ *
+ * 31 rather than 30 so the same date next month is always inside the span, from any starting
+ * day in any month. The days are fixed 24-hour days, not local days, for the reason
+ * `shiftIsoDays` gives: the span is invented rather than asked for, so a DST hour either side
+ * of it is not a wrong answer to anything, and the note states the resulting instant.
+ *
+ * It bounds an INVENTED bound only — a caller that names both bounds gets exactly the window
+ * it named, because that span is its own decision.
  *
  * The clamp is never silent: `windowClamp` names the window actually queried and how to ask
  * for more, so "nothing after that date" can't be read as an empty calendar.
  */
-export const CALENDAR_OPEN_WINDOW_DAYS = 366;
+export const CALENDAR_OPEN_WINDOW_DAYS = 31;
+
+/**
+ * How many in-window occurrences ONE CalDAV resource may expand to before this server declines
+ * to materialise it.
+ *
+ * The window bound above covers one of the two ways to ask for an unbounded expansion; this
+ * covers the other. A caller naming both bounds gets exactly the span it named, because the
+ * span is its own decision — but the caller chooses the span and an ATTACKER chooses the
+ * DENSITY. Calendar content here is authored by anyone who can send an invitation, and one
+ * `FREQ=MINUTELY` series fills any window at all.
+ *
+ * 5000 is set where it passes the dense-but-real cases and trips the ones nothing legitimate
+ * produces:
+ *
+ *   10 years of a DAILY series            3,653   passes
+ *   a month at every 10 minutes           4,464   passes
+ *   a month at every 5 minutes            8,928   trips
+ *   a month of FREQ=MINUTELY             44,640   trips
+ *
+ * THE COUNT IS OVER THE RANGE REQUESTED, NOT THE CALLER'S WINDOW. The blocks counted are the
+ * ones the server returned for the widened request (MAX_UTC_OFFSET_MS at each edge, #162), so
+ * the threshold is applied to a set up to 28 hours wider than the window the caller asked
+ * about — a series with slightly under 5000 genuine in-window occurrences can therefore be
+ * omitted. For a 31-day window the widened range is 772 hours against the caller's 744, so an
+ * evenly spaced series trips the threshold from about 4820 in-window occurrences up
+ * (5000 x 744/772); the shorter the window, the wider that gap gets. Narrowing to the
+ * caller's window first would need the per-block parse this cap exists to avoid, so the number
+ * is described accurately in the note rather than made exact.
+ *
+ * IT IS A PARSE-AND-SHOW THRESHOLD, NOT A RESPONSE SIZE. The response stays bounded by `limit`
+ * (default 50, hard cap 500) exactly as before; this decides whether one resource's blocks are
+ * parsed and offered at all.
+ *
+ * A tripped resource is left OUT of the rows entirely rather than truncated to its first N.
+ * Truncating would fill the whole `limit` page with one series and push every real event off
+ * it, which is the outcome the cap exists to prevent — one hostile invitation cannot blank a
+ * listing. The omission is disclosed by name, count and calendar in a trailing note, so it is
+ * never silent, and the call still answers.
+ *
+ * THE RESIDUAL, stated because it is not fixed: this bounds what this server PARSES and SHOWS,
+ * never what Cyrus generates or transfers. Cyrus's `expand_cb` returns 1 unconditionally and
+ * its `CALDAV:max-instances` property has no handler, so there is no server-side result limit
+ * to ask for; tsdav's `fetchCalendarObjects` has no limit or paging option and buffers the
+ * whole multistatus before this code sees any of it. The fetch is the platform's; the parse
+ * and the page are the work on this side, and that is what this bounds.
+ */
+export const CALENDAR_MAX_OCCURRENCES_PER_SERIES = 5000;
 
 // The ends of the four-digit-year range every consumer of these bounds can express. Past
 // them `toISOString` emits the expanded form (`+010000-12-30T…`), which tsdav rejects with a
@@ -2204,8 +2299,8 @@ function saturationEdge(saturatedValue: string): 'earliest' | 'latest' {
  * The 24-hour day here is deliberate, and deliberately NOT the local-day arithmetic
  * `coerceCalendarWindowEnd` uses. That one advances a bound the CALLER named, where landing an
  * hour inside or past their day is a wrong answer to a question they asked. This one invents a
- * span nobody named, chosen for being roughly a year; a DST hour either side of an arbitrary
- * 366-day bound is not a wrong answer to anything, and the note names the resulting instant.
+ * span nobody named, chosen for being roughly a month; a DST hour either side of an arbitrary
+ * 31-day bound is not a wrong answer to anything, and the note names the resulting instant.
  *
  * The example that reaches the saturation is `startDate: "9999-12-30"` ON ITS OWN, where the
  * invented END has nowhere to go. `endDate` alone runs the other way and cannot saturate at
@@ -2700,11 +2795,25 @@ export class CalDAVCalendarClient {
     // exact filter exists to remove.
     let trueWindowStart: string | undefined;
     let trueWindowEnd: string | undefined;
-    if (start || end) {
+    // UNCONDITIONAL: there is no such thing as an unwindowed listing any more. A call naming
+    // neither bound used to be sent with no time range at all, which meant no `expand` either
+    // (tsdav drops it without one) — so the one call most likely to be asked "what is on?" was
+    // the one call that answered with series masters at their original DTSTART instead of the
+    // occurrences that actually fall on those days. Bounding it is also what makes the
+    // expansion safe to turn on there: the window IS the range the server materialises over,
+    // and an absent one is the unbounded case, not the empty case (#142).
+    {
       let windowStart = start;
       let windowEnd = end;
-      let invented: 'startDate' | 'endDate' | undefined;
-      if (!windowStart) {
+      let invented: 'startDate' | 'endDate' | 'both' | undefined;
+      if (!windowStart && !windowEnd) {
+        // The same local-day rule a date-only `startDate` gets, so "no bounds" and "today's
+        // date as startDate" cannot disagree about which day today is. The clock is read once
+        // here, not per bound, so the two ends cannot straddle a midnight.
+        windowStart = startOfLocalDayUtcIso((this.config.now ?? Date.now)(), zone);
+        windowEnd = shiftIsoDays(windowStart, CALENDAR_OPEN_WINDOW_DAYS);
+        invented = 'both';
+      } else if (!windowStart) {
         windowStart = shiftIsoDays(windowEnd!, -CALENDAR_OPEN_WINDOW_DAYS);
         invented = 'startDate';
       } else if (!windowEnd) {
@@ -2715,9 +2824,9 @@ export class CalDAVCalendarClient {
       // AFTER the invented half is filled in, not as its alternative. The old `else if` made
       // this check the both-bounds case only, and the comment below said so — but saturation
       // means a ONE-SIDED window can come out zero-length too: `startDate:
-      // "9999-12-31T23:59:59Z"` leaves the invented +366 days nowhere to go, so both ends land
+      // "9999-12-31T23:59:59Z"` leaves the invented month nowhere to go, so both ends land
       // on the same instant. Left to tsdav that was a plain Error (InternalError) or, worse, a
-      // silently empty answer under a note claiming a 366-day span had been searched.
+      // silently empty answer under a note claiming a month-long span had been searched.
       if (Date.parse(windowStart!) >= Date.parse(windowEnd!)) {
         // Checked here rather than left to tsdav, which throws a plain Error for a backwards
         // range. That reaches the tool boundary as InternalError ("server-side, a bare retry
@@ -2743,9 +2852,16 @@ export class CalDAVCalendarClient {
           ? `both resolve to the same instant, ${windowStart}, which is a zero-length window`
           : `which resolve to the range ${windowStart} .. ${windowEnd}`;
         const quote = (v: unknown) => (v === undefined || v === null ? '(omitted)' : `"${echoCallerText(v)}"`);
-        // The one-sided arm needs its own sentence: the caller cannot "put startDate before
-        // endDate" when they only passed one, so the ordinary advice would be unfollowable.
-        const advice = invented
+        // An INVENTED bound needs its own sentence: the caller cannot "put startDate before
+        // endDate" when they passed one or neither, so the ordinary advice would be
+        // unfollowable. The no-bounds arm is separate again, because there is no bound of
+        // theirs to blame — the default window starts at today and there is nowhere for a
+        // month to go only when today itself sits at the end of the representable range.
+        const advice = invented === 'both'
+          ? 'Neither startDate nor endDate was given, so the window was taken as a month from today — but today ' +
+            'sits at the edge of the range this server can express, so that month had nowhere to go. Pass ' +
+            'startDate and endDate.'
+          : invented
           ? `${invented} was not given, so it was filled in ${CALENDAR_OPEN_WINDOW_DAYS} days away — but the bound ` +
             'you did give sits at the edge of the range this server can express, so the invented one had nowhere ' +
             'to go. Pass both startDate and endDate.'
@@ -2789,18 +2905,53 @@ export class CalDAVCalendarClient {
       fetchOptions.expand = true;
     }
 
-    // Derived from the TRUE window, never from `fetchOptions.timeRange`.
+    // Derived from the TRUE window, never from `fetchOptions.timeRange`. Both are always set
+    // now that the window branch is unconditional; the undefined arms stay because the
+    // declarations above are the only thing that says so and a type is not a guarantee.
     const windowStartMs = trueWindowStart === undefined ? NaN : Date.parse(trueWindowStart);
     const windowEndMs = trueWindowEnd === undefined ? NaN : Date.parse(trueWindowEnd);
 
     const allEvents: CalendarEvent[] = [];
+    const denseSeries: DenseCalendarSeries[] = [];
     for (const cal of targetCalendars) {
       const objects = await client.fetchCalendarObjects({ calendar: cal, ...fetchOptions });
       for (const obj of objects) {
+        // ONE structural extraction per resource, on whole content lines — never a `/m` regex
+        // or a substring count, which a DESCRIPTION containing the text "BEGIN:VEVENT" defeats
+        // (see docs/conventions.md). The list is counted here and then handed to the parser
+        // rather than re-derived by it.
+        const blocks = extractVEventBlocks(obj.data || '');
+        if (blocks.length > CALENDAR_MAX_OCCURRENCES_PER_SERIES) {
+          // NOT PARSED, and not truncated to its first N either: the first N of a hostile
+          // series would fill the whole `limit` page and push every real event off it. The
+          // title and id come from the first block, which is the same pair a row would have
+          // carried and is two property reads rather than a parse of the whole payload.
+          denseSeries.push({
+            title: parseICalValue(blocks[0], 'SUMMARY') || 'Untitled',
+            id: parseICalValue(blocks[0], 'UID') || obj.url || '',
+            url: obj.url || '',
+            // STRINGIFIED the way `list_calendars` and the not-found error already stringify
+            // it, deliberately rather than unwrapped. A DAV displayName is typed loosely
+            // enough to arrive as a property object; `String()` on one yields a visible
+            // "[object Object]" marker instead of throwing, which keeps the disclosure
+            // working on a shape this server does not model. Not corrected here, because
+            // unwrapping belongs in one shared helper across all three sites rather than in
+            // whichever site noticed it. The url is the handle that always exists.
+            calendar: String(cal.displayName || '') || cal.url || '',
+            occurrences: blocks.length,
+          });
+          continue;
+        }
         // Every VEVENT in the blob, not the first: with `expand` a single resource carries
         // one block per in-window occurrence, so a first-match read drops all but one.
         // `expanded` is passed rather than sniffed — see parseCalendarObjects.
-        for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone })) {
+        //
+        // `!!fetchOptions.expand` is always true now that the window branch above is
+        // unconditional, and the defensive read stays for the same reason the
+        // `trueWindowStart === undefined` arms above do: the only thing making it true is that
+        // branch, and a reader who changes the branch should get the old behaviour here rather
+        // than a hardcoded `true` that has quietly become a lie.
+        for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone, blocks })) {
           // A block that STILL CARRIES A RECURRENCE CARRIER is never dropped here, whatever
           // its dates say. This branch runs on an expanded query, so a surviving master means
           // the server declined to expand that resource — and the master then shows the
@@ -2815,8 +2966,13 @@ export class CalDAVCalendarClient {
           // RDATEs instead of stating a rule; such a master carries no RRULE at all, so an
           // RRULE-only guard read it as an ordinary one-off and dropped it on its original
           // DTSTART — the missing-event direction this guard exists to prevent.
-          const provablyOutside = fetchOptions.timeRange
-            && !event.recurrenceRule
+          //
+          // THE "WAS A WINDOW ASKED FOR" LEG IS GONE, because there is no longer a call
+          // without one: a caller naming no bounds is given today plus a month (#142), so
+          // `fetchOptions.timeRange` is set on every path through this method and testing it
+          // here only asserted that. Removing it keeps the guard's remaining conditions about
+          // what they are about — whether THIS block is one the window is entitled to judge.
+          const provablyOutside = !event.recurrenceRule
             && !event.recurrenceDates
             && !eventIntersectsWindow(event, windowStartMs, windowEndMs, configuredZone);
           if (provablyOutside) continue;
@@ -2833,7 +2989,16 @@ export class CalDAVCalendarClient {
 
     sortEventsByStart(allEvents, configuredZone);
 
-    return { events: allEvents.slice(0, limit), total: allEvents.length, windowClamp };
+    // `total` counts what was materialised, so an omitted series is NOT in it: the total is
+    // "how many events matched, of which `limit` trimmed the rest", and folding in occurrences
+    // no row represents would make a caller raise `limit` chasing rows that do not exist. The
+    // note is what discloses the omission, and it is absent when there was nothing to omit.
+    return {
+      events: allEvents.slice(0, limit),
+      total: allEvents.length,
+      windowClamp,
+      denseSeries: denseSeries.length > 0 ? denseSeries : undefined,
+    };
   }
 
   /**

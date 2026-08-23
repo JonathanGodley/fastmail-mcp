@@ -32,6 +32,7 @@ import {
   CalDAVCalendarClient,
   describeCreateCalendarEventResult,
   describeUpdateCalendarEventResult,
+  CALENDAR_MAX_OCCURRENCES_PER_SERIES,
 } from './caldav-client.js';
 // A value import, not `import type`: the redirect test below stubs a method on the
 // prototype, which needs the class itself. It still serves the type positions.
@@ -708,7 +709,13 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
       { data: makeIcal('b@fm', 'Afternoon', '20260325T140000Z'), url: '/b.ics' },
     ];
     const { client } = createMockedClient(objects);
-    const { events, total } = await client.getCalendarEvents(undefined, 50);
+    // The window is named, and named as INSTANTS, so this test is about ordering and nothing
+    // else. Left bounds-free it would get the default window (today plus a month, #142) and
+    // silently become a test that March 2026 is in the past; written as dates it would depend
+    // on whatever zone the host happens to be in.
+    const { events, total } = await client.getCalendarEvents(
+      undefined, 50, '2026-03-25T00:00:00Z', '2026-03-26T00:00:00Z',
+    );
 
     assert.equal(events.length, 3);
     assert.equal(total, 3);
@@ -739,18 +746,51 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
     assert.equal(callArgs.expand, true);
   });
 
-  it('does not pass timeRange when no dates provided', async () => {
-    const objects = [
-      { data: makeIcal('a@fm', 'Event', '20260325T100000Z'), url: '/a.ics' },
-    ];
-    const { client, mockDAVClient } = createMockedClient(objects);
-    await client.getCalendarEvents(undefined, 50);
+  it('sends a 31-day window from local today, expanded, when no dates are provided (#142)', async () => {
+    // A call naming neither bound used to go out with NO time range, and therefore with no
+    // `expand` either — tsdav drops `<C:expand>` without one. So the call most likely to be
+    // asked "what is on?" was the one call answering with series masters at their original
+    // DTSTART, and the only alternative was an open-ended expansion nobody can bound.
+    //
+    // The clock is INJECTED and the zone PINNED, because a default window computed from the
+    // real clock could only be asserted against a value this test recomputed the same way.
+    setDefaultTimezone('Australia/Sydney');
+    try {
+      const client = new CalDAVCalendarClient({
+        username: 'test',
+        password: 'test',
+        // Noon on 24 August in Sydney (+10). The local day is the 24th, whose midnight is
+        // 2026-08-23T14:00:00Z — a different UTC day, which is the point of the pin.
+        now: () => Date.parse('2026-08-24T02:00:00Z'),
+      });
+      const mockDAVClient = {
+        login: mock.fn(async () => {}),
+        fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+        fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+      };
+      (client as any).client = mockDAVClient;
 
-    const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
-    assert.equal(callArgs.timeRange, undefined);
-    // tsdav only forwards <C:expand> alongside a time range, so asking for it without one
-    // would be a silently ignored request rather than a harmless extra.
-    assert.equal(callArgs.expand, undefined);
+      const { windowClamp } = await client.getCalendarEvents(undefined, 50);
+
+      const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
+      // Local midnight today .. 31 fixed days later, widened by fourteen hours at each edge
+      // like any other window.
+      assert.deepEqual(callArgs.timeRange, {
+        start: '2026-08-23T00:00:00Z',
+        end: '2026-09-24T04:00:00Z',
+      });
+      // Expansion rides with the range here exactly as it does for a caller-named window: a
+      // default window that reported series masters would answer the wrong question.
+      assert.equal(callArgs.expand, true);
+      // And it is disclosed, for the same reason every other narrowing is: a caller who is
+      // not told reads "nothing" as an empty calendar rather than as "not the days I meant".
+      assert.ok(windowClamp, 'an invented window must be disclosed');
+      assert.equal(windowClamp!.invented, 'both');
+      assert.equal(windowClamp!.start, '2026-08-23T14:00:00Z');
+      assert.equal(windowClamp!.end, '2026-09-23T14:00:00Z');
+    } finally {
+      setDefaultTimezone(undefined);
+    }
   });
 });
 
@@ -1044,6 +1084,40 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
     const event = await client.getCalendarEventById('get1@fm');
     assert.equal(event.id, 'get1@fm');
     assert.equal(event.title, 'Findable');
+  });
+
+  it('returns the STORED start and its zone exactly as written, unexpanded', async () => {
+    // This is the call that reads a resource rather than a window over one, so it is the only
+    // one that can promise the stored property back verbatim. `list_calendar_events` used to
+    // share that promise on a bounds-free call; it no longer has one (#142), and its rows are
+    // expansion output, which the server normalises to UTC instants and strips the RRULE from.
+    setDefaultTimezone('America/New_York');
+    try {
+      const ical = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:stored@fm',
+        'DTSTART;TZID=Pacific/Auckland:20260320T083000',
+        'DTEND;TZID=Pacific/Auckland:20260320T093000',
+        'RRULE:FREQ=WEEKLY',
+        'SUMMARY:Weekly sync',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n');
+      const { client } = createMockedClientWithObjects([{ data: ical, url: '/cal/stored.ics' }]);
+
+      const event = await client.getCalendarEventById('stored@fm');
+      // The wall clock as stored — not converted, not stamped with an offset — and the TZID
+      // alongside it, because it differs from the configured zone.
+      assert.equal(event.start, '2026-03-20T08:30:00');
+      assert.equal(event.timeZone, 'Pacific/Auckland');
+      // And the series master, at its own DTSTART, with the rule intact: the unexpanded form
+      // a listing row cannot show.
+      assert.equal(event.recurrenceRule, 'FREQ=WEEKLY');
+      assert.equal(event.recurrenceId, undefined);
+    } finally {
+      setDefaultTimezone(undefined);
+    }
   });
 
   it('throws instead of returning null when the event does not exist', async () => {
@@ -5088,6 +5162,100 @@ describe('eventIntersectsWindow', () => {
   });
 });
 
+describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may be (#142)', () => {
+  // Every assertion here is about which UTC instants came back, so the zone is pinned rather
+  // than left to the machine.
+  before(() => setDefaultTimezone('UTC'));
+  after(() => setDefaultTimezone(undefined));
+
+  const WINDOW_START = '2027-03-01T00:00:00Z';
+  const WINDOW_END = '2027-03-10T00:00:00Z';
+
+  /** An expanded blob: one VEVENT block per occurrence, a minute apart, RRULE stripped. */
+  function expandedBlob(uid: string, summary: string, count: number): string {
+    const base = Date.parse('2027-03-01T00:10:00Z');
+    const blocks: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const at = new Date(base + i * 60000).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      blocks.push(['BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${at}`, `SUMMARY:${summary}`, 'END:VEVENT'].join('\r\n'));
+    }
+    return ['BEGIN:VCALENDAR', ...blocks, 'END:VCALENDAR'].join('\r\n');
+  }
+
+  function oneEvent(uid: string, summary: string, dtstart: string): string {
+    return [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${dtstart}`,
+      `SUMMARY:${summary}`, 'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  function clientOver(byCalendar: Record<string, Array<{ data: string; url: string }>>) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => Object.keys(byCalendar).map(url => ({
+        displayName: url === '/cal/work/' ? 'Work' : 'Personal', url,
+      }))),
+      fetchCalendarObjects: mock.fn(async (p: FetchObjectsParams) =>
+        byCalendar[(p as any).calendar.url] ?? []),
+    };
+    return client;
+  }
+
+  it('omits a series past the cap ENTIRELY, and answers everything else normally', async () => {
+    // Not "its first N": the first N of a hostile series would fill the whole `limit` page and
+    // push every real event off it, which is the outcome the cap exists to prevent. The caller
+    // chooses the SPAN of a window; an attacker chooses the DENSITY inside it, and anyone who
+    // can send an invitation can put a FREQ=MINUTELY series in the account.
+    const client = clientOver({
+      '/cal/work/': [
+        { data: expandedBlob('dense@fm', 'Every minute', CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '/w-dense.ics' },
+        { data: oneEvent('real@fm', 'Real meeting', '20270302T090000Z'), url: '/w-real.ics' },
+      ],
+      '/cal/personal/': [
+        { data: oneEvent('other@fm', 'Dentist', '20270303T090000Z'), url: '/p-other.ics' },
+      ],
+    });
+
+    const { events, total, denseSeries } = await client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END);
+
+    // The rest of the window answers: the other resource in the SAME calendar, and one in a
+    // second calendar, so a dense series cannot take its neighbours or its siblings with it.
+    assert.deepEqual(events.map(e => e.title), ['Real meeting', 'Dentist']);
+    // `total` counts what was materialised. Folding in occurrences no row represents would
+    // make a caller raise `limit` chasing rows that do not exist.
+    assert.equal(total, 2);
+
+    assert.ok(denseSeries, 'an omitted series must be disclosed');
+    assert.equal(denseSeries!.length, 1);
+    assert.deepEqual(denseSeries![0], {
+      title: 'Every minute',
+      id: 'dense@fm',
+      url: '/w-dense.ics',
+      calendar: 'Work',
+      occurrences: CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1,
+    });
+  });
+
+  it('materialises a series sitting exactly ON the cap', async () => {
+    // The boundary, stated in the direction that matters: the cap is "more than N", so N
+    // itself is answered. An off-by-one here silently drops a legitimate dense series.
+    const client = clientOver({
+      '/cal/work/': [
+        { data: expandedBlob('atcap@fm', 'At the cap', CALENDAR_MAX_OCCURRENCES_PER_SERIES), url: '/w-atcap.ics' },
+      ],
+    });
+
+    const { total, denseSeries } = await client.getCalendarEvents(
+      undefined, 50, WINDOW_START, WINDOW_END,
+    );
+
+    assert.equal(total, CALENDAR_MAX_OCCURRENCES_PER_SERIES);
+    // Absent, not empty: silence is what says every series in the window was materialised.
+    assert.equal(denseSeries, undefined);
+  });
+});
+
 describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () => {
   // A date-only window is resolved as a LOCAL day (#138), so every assertion about the
   // `timeRange` this client sends depends on which zone is configured. Pinning it to UTC
@@ -5134,7 +5302,12 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     };
     (client as any).client = mockDAVClient;
 
-    const { events, total } = await client.getCalendarEvents(undefined, 2);
+    // The window is named so the subject stays "earliest N across every calendar": a
+    // bounds-free call now gets today plus a month (#142), which these 2026 fixtures sit
+    // outside of.
+    const { events, total } = await client.getCalendarEvents(
+      undefined, 2, '2026-03-25T00:00:00Z', '2026-03-26T00:00:00Z',
+    );
 
     assert.equal(mockDAVClient.fetchCalendarObjects.mock.callCount(), 2);
     assert.equal(events.length, 2);
@@ -5240,7 +5413,9 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
   it('bounds a window given only a startDate, and says so', async () => {
     // With `expand` on, the missing half is the range the SERVER materialises occurrences
     // over — a 2099 default asked Fastmail to generate every occurrence of every repeating
-    // event for 73 years, and `limit` bounds none of that work.
+    // event for 73 years, and `limit` bounds none of that work. The invented half is one
+    // month: 2027-03-01 plus 31 fixed days is 2027-04-01, and the request range is that
+    // window widened by fourteen hours at each edge.
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     const mockDAVClient = {
       login: mock.fn(async () => {}),
@@ -5254,7 +5429,7 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     assert.deepEqual(callArgs.timeRange, {
       start: '2027-02-28T10:00:00Z',
-      end: '2028-03-01T14:00:00Z',
+      end: '2027-04-01T14:00:00Z',
     });
     // Never silently narrowed: a caller handed a shorter window than it asked for has to be
     // told, or "nothing after that date" reads as an empty calendar.
@@ -5265,7 +5440,7 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     assert.ok(windowClamp, 'a clamped window must be disclosed');
     assert.equal(windowClamp!.invented, 'endDate');
     assert.equal(windowClamp!.start, '2027-03-01T00:00:00Z');
-    assert.equal(windowClamp!.end, '2028-03-01T00:00:00Z');
+    assert.equal(windowClamp!.end, '2027-04-01T00:00:00Z');
     assert.equal(windowClamp!.saturated, undefined);
   });
 
@@ -5282,14 +5457,15 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
 
     const callArgs = callArguments(mockDAVClient.fetchCalendarObjects)[0];
     // A date-only endDate still covers the whole of the 10th, so the exclusive end is the
-    // following midnight and the clamp counts back from there.
+    // following midnight and the clamp counts back a month from there: 2027-03-11 less 31
+    // fixed days is 2027-02-08.
     assert.deepEqual(callArgs.timeRange, {
-      start: '2026-03-09T10:00:00Z',
+      start: '2027-02-07T10:00:00Z',
       end: '2027-03-11T14:00:00Z',
     });
     assert.ok(windowClamp, 'a clamped window must be disclosed');
     assert.equal(windowClamp!.invented, 'startDate');
-    assert.equal(windowClamp!.start, '2026-03-10T00:00:00Z');
+    assert.equal(windowClamp!.start, '2027-02-08T00:00:00Z');
     assert.equal(windowClamp!.end, '2027-03-11T00:00:00Z');
   });
 
@@ -5986,7 +6162,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     // The inversion check used to be the `else if` alternative to the clamp, so a one-sided
     // window never reached it — and the comment beside it claimed a single bound "is clamped
     // above, never inverted". Saturation makes that false: a startDate on the last
-    // representable instant leaves the invented +366 days nowhere to go, and tsdav answered
+    // representable instant leaves the invented month nowhere to go, and tsdav answered
     // with a plain Error (InternalError) over what is a caller-fixable bound.
     const { client, mockDAVClient } = mockedClient();
     await assert.rejects(
@@ -6195,7 +6371,13 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
         { data: sameZone, url: '/cal/same.ics' },
         { data: differentZone, url: '/cal/different.ics' },
       ]);
-      const { events } = await client.getCalendarEvents(undefined, 50);
+      // The window is named as instants and wide enough to hold both fixtures whichever zone
+      // each is written in. It is here because there is no bounds-free listing any more
+      // (#142) and the default window would put these 2026 fixtures out of range; the subject
+      // is still which ZONE the parser was handed, not which days were searched.
+      const { events } = await client.getCalendarEvents(
+        undefined, 50, '2026-03-19T00:00:00Z', '2026-03-22T00:00:00Z',
+      );
       const same = events.find(e => e.id === 'same@fm')!;
       const different = events.find(e => e.id === 'different@fm')!;
       assert.equal(same.timeZone, undefined);
