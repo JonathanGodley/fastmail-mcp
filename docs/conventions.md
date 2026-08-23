@@ -1863,12 +1863,23 @@ event chooses the DENSITY. Those are different questions and they get different 
 - **A span the caller named is never clamped, however long.** Asking for a century is a
   legitimate question, and shortening it silently would answer a different one.
 - **A single repeating resource that expands to more than `CALENDAR_MAX_OCCURRENCES_PER_SERIES`
-  (5000) blocks in that window is left out of the results entirely**, and named in the same
-  trailing `Note:` the window disclosure uses - title, id, occurrence count and calendar - so
-  the caller can narrow to it directly. The call still answers everything else. It is out of
-  `total` as well as out of the rows: `total` answers "how many rows did `limit` cut off", so
-  folding in occurrences no row represents would send a caller raising `limit` after rows that
-  do not exist.
+  (5000) blocks is left out of the results entirely**, and named in the same trailing `Note:`
+  the window disclosure uses - title, id, occurrence count and calendar - so the caller can
+  narrow to it directly. The call still answers everything else. It is out of `total` as well
+  as out of the rows: `total` answers "how many rows did `limit` cut off", so folding in
+  occurrences no row represents would send a caller raising `limit` after rows that do not
+  exist.
+
+  **The count is over the range REQUESTED, not the caller's window**, which is the widened one
+  described above - 14 hours past each edge. So "5001 occurrences" is a count of the blocks the
+  server returned, and for a caller window of a single day it can report 5001 where 1440 fall
+  strictly inside the day. The note says so in those terms rather than claiming the caller's
+  window, because counting only the in-window blocks would require the per-block parse the cap
+  exists to avoid. The consequence is that the threshold is applied to a set up to 28 hours
+  wider than the window asked about, so a series with slightly fewer than 5000 genuine
+  in-window occurrences can still be omitted (for a month-long window the band is roughly
+  4830-5000). That is a deliberate trade of a little precision at the boundary for not parsing
+  the payload the cap is there to refuse.
 
 **Why 5000.** It is the number that separates a real calendar from a pathological one. A daily
 event over a 10-year window is 3,653 occurrences and every 10 minutes for a month is 4,464;

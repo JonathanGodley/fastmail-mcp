@@ -1581,9 +1581,16 @@ describe('buildCalendarDensityNote', () => {
 
   it('names the one omitted series, what to do, and where to say the limit is wrong', () => {
     const note = buildCalendarDensityNote([series()]);
-    assert.match(note, /1 repeating event was left out because it expands to more than 5000 occurrences/);
+    assert.match(note, /1 repeating event was left out because it expands to more than 5000 occurrences in the range searched for this window/);
     assert.match(note, /"Standup" \(id dense@example\.invalid, 44640 occurrences, calendar Work\)/);
     assert.match(note, /narrow the window to see it/);
+    // The count is of the blocks the SERVER returned, over a range widened by 14 hours at each
+    // edge so Fastmail cannot withhold an all-day or floating event (#162). Saying "in this
+    // window" would overstate it: a caller asking about one day can be told 5001 where 1440
+    // fall inside the day. Counting only the in-window blocks would need the per-block parse
+    // this cap exists to avoid, so the number is described accurately instead of narrowed.
+    assert.match(note, /14 hours past each edge of the window named/);
+    assert.match(note, /higher than the number of occurrences falling strictly inside it/);
     // The cap is a judgement call, so the note says whose it is and how to contest it rather
     // than reading as a platform limit the caller can do nothing about.
     assert.match(note, /deliberate limit/);

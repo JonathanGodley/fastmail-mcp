@@ -175,6 +175,13 @@ export interface CalendarEventQueryResult {
 export interface DenseCalendarSeries {
   title: string;
   id: string;
+  // Carried but deliberately NOT rendered in the note. It is here for the same reason
+  // `CalendarEvent.url` is kept on an ordinary row (see the comment there): a UID is unique
+  // per collection, not per account, so where two calendars hold the same UID the url is the
+  // only thing that tells the two records apart — and a series omitted from the rows is
+  // exactly the case where no row carries it. It stays out of the note text because title, id
+  // and calendar name already identify the series for someone narrowing the window, and the
+  // note is long enough without a path in it.
   url: string;
   calendar: string;
   occurrences: number;
@@ -2212,6 +2219,14 @@ export const CALENDAR_OPEN_WINDOW_DAYS = 31;
  *   a month at every 5 minutes            8,928   trips
  *   a month of FREQ=MINUTELY             44,640   trips
  *
+ * THE COUNT IS OVER THE RANGE REQUESTED, NOT THE CALLER'S WINDOW. The blocks counted are the
+ * ones the server returned for the widened request (MAX_UTC_OFFSET_MS at each edge, #162), so
+ * the threshold is applied to a set up to 28 hours wider than the window the caller asked
+ * about — a series with slightly under 5000 genuine in-window occurrences can therefore be
+ * omitted (for a month-long window the band is roughly 4830-5000 in-window). Narrowing to the
+ * caller's window first would need the per-block parse this cap exists to avoid, so the number
+ * is described accurately in the note rather than made exact.
+ *
  * IT IS A PARSE-AND-SHOW THRESHOLD, NOT A RESPONSE SIZE. The response stays bounded by `limit`
  * (default 50, hard cap 500) exactly as before; this decides whether one resource's blocks are
  * parsed and offered at all.
@@ -2911,9 +2926,13 @@ export class CalDAVCalendarClient {
             title: parseICalValue(blocks[0], 'SUMMARY') || 'Untitled',
             id: parseICalValue(blocks[0], 'UID') || obj.url || '',
             url: obj.url || '',
-            // Coerced the way `list_calendars` and the not-found error already coerce it: a
-            // DAV displayName is typed loosely enough to arrive as a property object, and the
-            // url is the handle that always exists.
+            // STRINGIFIED the way `list_calendars` and the not-found error already stringify
+            // it, deliberately rather than unwrapped. A DAV displayName is typed loosely
+            // enough to arrive as a property object; `String()` on one yields a visible
+            // "[object Object]" marker instead of throwing, which keeps the disclosure
+            // working on a shape this server does not model. Not corrected here, because
+            // unwrapping belongs in one shared helper across all three sites rather than in
+            // whichever site noticed it. The url is the handle that always exists.
             calendar: String(cal.displayName || '') || cal.url || '',
             occurrences: blocks.length,
           });
@@ -2922,6 +2941,12 @@ export class CalDAVCalendarClient {
         // Every VEVENT in the blob, not the first: with `expand` a single resource carries
         // one block per in-window occurrence, so a first-match read drops all but one.
         // `expanded` is passed rather than sniffed — see parseCalendarObjects.
+        //
+        // `!!fetchOptions.expand` is always true now that the window branch above is
+        // unconditional, and the defensive read stays for the same reason the
+        // `trueWindowStart === undefined` arms above do: the only thing making it true is that
+        // branch, and a reader who changes the branch should get the old behaviour here rather
+        // than a hardcoded `true` that has quietly become a lie.
         for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone, blocks })) {
           // A block that STILL CARRIES A RECURRENCE CARRIER is never dropped here, whatever
           // its dates say. This branch runs on an expanded query, so a surviving master means
