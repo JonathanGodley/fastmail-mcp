@@ -50,7 +50,7 @@ The version string lives in **three hand-edited sites plus a regenerated lockfil
 
 ## Building
 
-The MCP server runs from `dist/index.js`, not `src/`. After making changes, run `npm run build` to compile. Connected MCP clients will need to reconnect to pick up the new code.
+The MCP server runs from `dist/index.js`, not `src/`. After making changes, run `npm run build` to compile. Connected MCP clients will need to reconnect to pick up the new code. A running server keeps serving the build it started with, so test a change to server code by invoking that code directly through this repo's own CLI or test entry point - going through the MCP tools answers from the old process and makes a correct change look broken.
 
 ## Testing
 
