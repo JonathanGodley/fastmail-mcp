@@ -361,8 +361,9 @@ function participantsSchemaProperty(leadIn: string) {
  * `update_calendar_event` takes no calendarId, so these two are the whole set.
  */
 const CALENDAR_ID_MATCHING_DESC =
-  'Takes either the calendar\'s `id`/URL from list_calendars or its display name, matched EXACTLY — case and ' +
-  'spacing included, though surrounding whitespace is trimmed. A value matching no calendar is rejected naming ' +
+  'Takes either the calendar\'s `id`/URL from list_calendars or its display name, matched CASE-SENSITIVELY; ' +
+  'surrounding whitespace is ignored on both sides, and list_calendars reports the trimmed name. ' +
+  'A value matching no calendar is rejected naming ' +
   'the available calendars rather than answered with an empty result, and an empty or whitespace-only string is ' +
   'such a value. Calendars list_calendars does not show cannot be named here either, on a read or on a write.';
 

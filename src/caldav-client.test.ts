@@ -5238,6 +5238,26 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
     });
   });
 
+  it('falls back to the URL when the omitted series sits in a nameless calendar', async () => {
+    // The disclosure names the calendar so the caller can narrow to it. An empty
+    // `<displayname/>` parses to `{}`, and stringifying that put "[object Object]" in the
+    // note — truthy, so the url fallback written beside it never ran and the one field that
+    // makes the disclosure actionable was a marker.
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: {}, url: '/cal/nameless/' }]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+        { data: expandedBlob('dense@fm', 'Every minute', CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '/n-dense.ics' },
+      ]),
+    };
+
+    const { denseSeries } = await client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END);
+
+    assert.equal(denseSeries!.length, 1);
+    assert.equal(denseSeries![0].calendar, '/cal/nameless/');
+  });
+
   it('materialises a series sitting exactly ON the cap', async () => {
     // The boundary, stated in the direction that matters: the cap is "more than N", so N
     // itself is answered. An off-by-one here silently drops a legitimate dense series.
@@ -6503,11 +6523,10 @@ describe('unwrapDisplayName', () => {
     assert.equal(unwrapDisplayName(null), undefined);
   });
 
-  it('reads the text out of the CDATA and text-node shapes', () => {
-    assert.equal(unwrapDisplayName({ _attributes: { 'xmlns:d': 'DAV:' }, _cdata: 'Shared' }), 'Shared');
-    assert.equal(unwrapDisplayName({ _text: 'Shared' }), 'Shared');
-    // Empty text is a name that is not there, not a name of "".
-    assert.equal(unwrapDisplayName({ _cdata: '   ' }), undefined);
+  it('drops a duplicated displayname rather than joining it into a name', () => {
+    // Two `<displayname>` elements parse to an array. That collection is malformed and has no
+    // name; the old code rendered "A,B" as though it did. The fallback is the degrade.
+    assert.equal(unwrapDisplayName(['A', 'B']), undefined);
   });
 
   it('keeps a name tsdav typed away from string', () => {
@@ -6515,6 +6534,23 @@ describe('unwrapDisplayName', () => {
     // calendar called "2026" arrives as the NUMBER 2026. It is still its name.
     assert.equal(unwrapDisplayName(2026), '2026');
     assert.equal(unwrapDisplayName(true), 'true');
+    // Lossy BEFORE we see it: `<displayname>1e3</displayname>` is already the number 1000 by
+    // the time tsdav hands it over, so "1000" is the only name that can be reported. What
+    // survives is the invariant that matters — the reported name resolves as a calendarId.
+    assert.equal(unwrapDisplayName(1000), '1000');
+  });
+
+  // DEFENSIVE ONLY — these two shapes cannot arrive from tsdav 2.3.1. It flattens `_cdata`
+  // itself (`props?.displayname?._cdata ?? props?.displayname`) and its `textFn` replaces an
+  // element with its text, so neither key survives to reach this function. They are covered
+  // because the helper handles them if that read ever changes, NOT as evidence that a server
+  // can produce them. Building a fixture on these believing them reachable is the mistake
+  // that made the first version of this fix claim a bug that cannot happen.
+  it('unwraps the CDATA and text-node shapes if tsdav ever stops flattening them', () => {
+    assert.equal(unwrapDisplayName({ _attributes: { 'xmlns:d': 'DAV:' }, _cdata: 'Shared' }), 'Shared');
+    assert.equal(unwrapDisplayName({ _text: 'Shared' }), 'Shared');
+    // Empty text is a name that is not there, not a name of "".
+    assert.equal(unwrapDisplayName({ _cdata: '   ' }), undefined);
   });
 });
 
@@ -6547,43 +6583,127 @@ describe('calendar display names that are not strings', () => {
     assert.equal(calendars.find(c => c.id === '/cal/typed/')!.displayName, 'Unnamed');
   });
 
-  it('still hides the task collection when its name arrives CDATA-wrapped', async () => {
-    // The hidden-calendar filter compares the raw value, so any non-string shape carrying the
-    // hidden name slipped past it and the collection leaked into the listing.
+  it('omits a nameless calendar\'s colour rather than emitting an object for it', async () => {
+    // The identical defect one field over: tsdav guards `description` with a string check but
+    // passes `calendarColor` through raw, so an empty `<calendar-color/>` parses to `{}` —
+    // truthy, so the `|| undefined` beside it never fired and an object went out as a colour.
     const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [
-        { displayName: 'Personal', url: '/cal/personal/' },
-        { displayName: { _cdata: 'DEFAULT_TASK_CALENDAR_NAME' }, url: '/cal/tasks/' },
+        { displayName: 'Personal', url: '/cal/personal/', calendarColor: {} },
+        { displayName: 'Work', url: '/cal/work/', calendarColor: '#aabbcc' },
       ]),
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
     };
 
     const calendars = await client.getCalendars();
 
-    assert.deepEqual(calendars.map(c => c.displayName), ['Personal']);
+    assert.equal(calendars.find(c => c.id === '/cal/personal/')!.color, undefined);
+    assert.equal(calendars.find(c => c.id === '/cal/work/')!.color, '#aabbcc');
   });
 
-  it('matches a calendarId against a name the parser wrapped', async () => {
-    // An object-shaped name never equalled the requested string, so naming that calendar was
-    // answered "Calendar not found" — an availability question answered from nothing.
+  it('still hides the task collection, which the unwrap must not disturb', async () => {
+    // NOT a bug fix, and deliberately not written as one. There is no reachable input where
+    // the raw comparison and the unwrapped one disagree here: the hidden name arrives as a
+    // plain string, and every other shape tsdav can produce ({}, {_attributes}, a number, a
+    // boolean, an array) fails to equal it either way. A padded name is not reachable either
+    // — xml-js parses with `trim: true`, which trims plain text and CDATA alike. The unwrap
+    // at this filter buys consistency with every other read of the field; this test is the
+    // regression guard that it did not cost the behaviour that was already correct.
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: 'Personal', url: '/cal/personal/' },
+        { displayName: 'DEFAULT_TASK_CALENDAR_NAME', url: '/cal/tasks/' },
+        // A nameless collection is NOT the hidden one and must survive the filter.
+        { displayName: {}, url: '/cal/nameless/' },
+      ]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+
+    const calendars = await client.getCalendars();
+
+    assert.deepEqual(calendars.map(c => c.id), ['/cal/personal/', '/cal/nameless/']);
+  });
+
+  it('matches a numeric calendarId against a calendar tsdav typed as a number', async () => {
+    // Normalising only the STORED side broke this: `<displayname>2026</displayname>` arrives
+    // as the number 2026, a caller passing the JSON number 2026 matched it by raw equality
+    // before, and `"2026" === 2026` does not. Both sides go through the one normaliser now.
     const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
     const fetchCalendarObjects = mock.fn(async (_p: FetchObjectsParams) => []);
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [
-        { displayName: { _cdata: 'Team Roster' }, url: '/cal/team/' },
+        { displayName: 2026, url: '/cal/year/' },
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects,
     };
 
-    const result = await client.getCalendarEvents('Team Roster', 50, '2026-04-01', '2026-04-30');
+    const result = await client.getCalendarEvents(2026 as unknown as string, 50, '2026-04-01', '2026-04-30');
 
     assert.equal(result.events.length, 0);
     assert.equal(fetchCalendarObjects.mock.calls.length, 1);
     const [params] = callArguments(fetchCalendarObjects, 0);
-    assert.equal(params.calendar.url, '/cal/team/');
+    assert.equal(params.calendar.url, '/cal/year/');
+    // And the name it reports back is one that resolves, which is the invariant the
+    // stringifying half of the helper exists to keep.
+    const listed = await client.getCalendars();
+    assert.equal(listed.find(c => c.id === '/cal/year/')!.displayName, '2026');
+  });
+
+  it('finds a numerically-named calendar on the write path too', async () => {
+    // The create/find path resolves `calendarId` by its own copy of the comparison, so it
+    // needed the same normalisation. Diverging here would put an event in the wrong
+    // collection, or refuse a calendar the read path accepts.
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    const createCalendarObject = mock.fn(async (_p: CreateObjectParams) => ({ ok: true }));
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: 2026, url: '/cal/year/' },
+        { displayName: 'Personal', url: '/cal/personal/' },
+      ]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+      createCalendarObject,
+    };
+
+    await client.createCalendarEvent({
+      calendarId: 2026 as unknown as string,
+      title: 'Planning',
+      start: '2026-04-07T14:00:00Z',
+      end: '2026-04-07T15:00:00Z',
+    });
+
+    assert.equal(createCalendarObject.mock.calls.length, 1);
+    const [params] = callArguments(createCalendarObject, 0);
+    assert.equal(params.calendar.url, '/cal/year/');
+  });
+
+  it('names a nameless calendar by its URL in the not-found error', async () => {
+    // The name list dropped anything unwrapping to undefined, so the message under-reported
+    // what the caller could name — and the URL it omitted is itself a working calendarId.
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: 'Personal', url: '/cal/personal/' },
+        { displayName: {}, url: '/cal/nameless/' },
+      ]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+
+    await assert.rejects(
+      () => client.getCalendarEvents('Nope', 50, '2026-04-01', '2026-04-30'),
+      (err: Error) => {
+        assert.match(err.message, /"Personal"/);
+        assert.match(err.message, /"\/cal\/nameless\/"/);
+        assert.ok(!err.message.includes('[object Object]'), err.message);
+        return true;
+      },
+    );
   });
 });

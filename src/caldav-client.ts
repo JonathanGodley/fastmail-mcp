@@ -2370,30 +2370,48 @@ const HIDDEN_TASK_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
  * tsdav 2.3.1 reads the property as `rs.props?.displayname?._cdata ?? rs.props?.displayname`
  * (`fetchCalendars`, dist/tsdav.cjs:1004) and hands the result straight through — unlike its
  * address-book path (:744), which guards with `typeof === 'string'`. What reaches us is
- * therefore whatever xml-js produced under tsdav's own parser options (:274-300), which is one
- * of these, all measured against xml-js with those options rather than assumed:
+ * therefore whatever xml-js produced under tsdav's own parser options (:274-300). The
+ * OBSERVED shapes, measured against xml-js with those options rather than assumed:
  *
  *   <displayname>Work</displayname>                 "Work"          a plain string
- *   <displayname><![CDATA[Work]]></displayname>     "Work"          tsdav's `._cdata` read
  *   <displayname>2026</displayname>                 2026            a NUMBER
  *   <displayname>true</displayname>                 true            a BOOLEAN
  *   <displayname/>  or  <displayname></displayname> {}              an EMPTY OBJECT
  *   <D:displayname xml:lang="en"/>                  {_attributes:…} an OBJECT
+ *   <displayname>A</displayname> twice              ['A','B']       an ARRAY
  *   (property absent)                               undefined
  *
+ * And the DEFENSIVE ones, which tsdav's own read means cannot arrive today — it flattens
+ * `_cdata` before we see the value, and its `textFn` replaces an element with its text so
+ * `_text` never survives either. They are handled in case tsdav changes that read, and are
+ * NOT evidence about what a live server sends. Do not build a fixture on them believing it
+ * reachable; that mistake is what made the first version of this fix claim a bug that could
+ * not happen.
+ *
+ *   <displayname><![CDATA[Work]]></displayname>     {_cdata:"Work"} tsdav flattens this today
+ *   (a parser leaving compact text in place)        {_text:"Work"}  never produced today
+ *
  * The number and boolean come from tsdav's `nativeType` (:104-114), which coerces any element
- * text that looks numeric or reads "true"/"false". The empty object is xml-js compact mode:
- * tsdav's `textFn` only fires when there IS text, so an empty element keeps its bare compact
- * form. Whitespace-only text is the same case, because `trim: true` leaves nothing behind.
+ * text that looks numeric or reads "true"/"false". THAT COERCION IS LOSSY BEFORE WE SEE IT: a
+ * calendar named `1e3` arrives as the number 1000 and can only be listed as "1000", because
+ * the original text is gone by then. What this function preserves is not the spelling but the
+ * INVARIANT that matters — the name it returns is one the caller can pass straight back as a
+ * `calendarId` and have it resolve, because both sides of that comparison come through here.
+ * The empty object is xml-js compact mode: tsdav's `textFn` only fires when there IS text, so
+ * an empty element keeps its bare compact form. Whitespace-only text is the same case,
+ * because `trim: true` leaves nothing behind.
  *
  * The object cases are why this exists. `String({})` is `"[object Object]"` — a TRUTHY string,
  * so every `|| 'Unnamed'` fallback downstream is dead on exactly the input it was written for,
- * and the marker reached the caller as a calendar name. Equality reads fail the same way and
- * more quietly: an object-shaped name never equals anything, so the hidden task collection
- * leaked into listings and a by-name `calendarId` could not match.
+ * and the marker reached the caller as a calendar name.
+ *
+ * THE ARRAY IS A DELIBERATE DEGRADE, not an oversight: duplicate `<displayname>` elements are
+ * a malformed collection, and the old code rendered them joined ("A,B") as though that were
+ * the calendar's name. It is not one, so this returns undefined and each call site falls back
+ * to something real (the URL, or "Unnamed").
  *
  * No URL fallback lives here. What an absent name should degrade to differs per call site (a
- * literal "Unnamed" in a listing, the collection URL in a density note, omission from an error
+ * literal "Unnamed" in a listing, the collection URL in a density note and in an error
  * message's name list), so the helper answers only "is there a name, and what is it".
  */
 export function unwrapDisplayName(raw: unknown): string | undefined {
@@ -2416,8 +2434,14 @@ export function unwrapDisplayName(raw: unknown): string | undefined {
 
 /** The calendars a caller is able to name, which is the only set worth listing back at them. */
 function selectableCalendars(calendars: DAVCalendar[]): DAVCalendar[] {
-  // Unwrapped before comparing: an object-shaped name never equals the hidden name, which let
-  // the task collection through into every listing built from this filter.
+  // Unwrapped before comparing, for WHITESPACE SYMMETRY and for consistency with every other
+  // read of this field — not because a typed name was leaking through. It was not: the shapes
+  // tsdav can hand back ({}, {_attributes}, a number, a boolean, an array) equal the hidden
+  // name under a raw comparison exactly as rarely as they do under this one, which is never.
+  // The one input where the two differ is a padded exact name — `'  DEFAULT_TASK_CALENDAR_NAME  '`
+  // passed this filter before and is hidden now — and the reason to care is that the caller
+  // side is trimmed too, so an untrimmed compare here would hide a calendar from `list_calendars`
+  // while still letting a `calendarId` resolve to it.
   return calendars.filter(c => unwrapDisplayName(c.displayName) !== HIDDEN_TASK_CALENDAR_NAME);
 }
 
@@ -2436,9 +2460,13 @@ function selectableCalendars(calendars: DAVCalendar[]): DAVCalendar[] {
  * it is given one input.
  */
 function calendarNotFoundError(calendarId: unknown, available: DAVCalendar[]): InvalidInputError {
+  // A nameless calendar is listed by its URL rather than dropped. Filtering it out left the
+  // caller a message that silently under-reported what they could name — and the URL is not a
+  // consolation prize here, it is a `calendarId` that works, which is exactly what this
+  // message exists to hand back. Never silently drop a promised field; see CLAUDE.md.
   const names = selectableCalendars(available)
-    .map(c => unwrapDisplayName(c.displayName))
-    .filter((n): n is string => n !== undefined);
+    .map(c => unwrapDisplayName(c.displayName) ?? c.url)
+    .filter((n): n is string => typeof n === 'string' && n.length > 0);
   const shown = names.slice(0, CALENDAR_NAME_LIST_CAP).map(n => `"${echoCallerText(n)}"`).join(', ');
   const more = names.length > CALENDAR_NAME_LIST_CAP ? `, …and ${names.length - CALENDAR_NAME_LIST_CAP} more` : '';
   const listing = names.length > 0 ? ` Available calendars: ${shown}${more}.` : '';
@@ -2448,8 +2476,9 @@ function calendarNotFoundError(calendarId: unknown, available: DAVCalendar[]): I
   // quoted. Same value class, same sentence, so the same treatment.
   return new InvalidInputError(
     `Calendar not found: "${echoCallerText(calendarId)}". calendarId takes either a calendar's URL ` +
-    '(its `id` from list_calendars) or its display name, and the name is matched EXACTLY — case and ' +
-    `spacing included.${listing}`,
+    '(its `id` from list_calendars) or its display name, and the name is matched CASE-SENSITIVELY; ' +
+    'surrounding whitespace is ignored on both sides, and list_calendars reports the trimmed name.' +
+    `${listing}`,
   );
 }
 
@@ -2766,7 +2795,15 @@ export class CalDAVCalendarClient {
         displayName: unwrapDisplayName(c.displayName) ?? 'Unnamed',
         url: c.url || '',
         description: c.description || undefined,
-        color: (c as any).calendarColor || undefined,
+        // Guarded for the same reason `displayName` is, and it is the same defect: tsdav
+        // guards `description` with `typeof === 'string'` but passes `calendarColor` through
+        // raw (dist/tsdav.cjs:1003), so an empty `<calendar-color/>` parses to `{}` — truthy,
+        // so `|| undefined` never fired and an object went out as a colour. Not routed
+        // through `unwrapDisplayName`: this is a colour, and the number/boolean coercions
+        // that make sense for a name would turn a malformed colour into a plausible one.
+        color: typeof (c as any).calendarColor === 'string' && (c as any).calendarColor.length > 0
+          ? (c as any).calendarColor
+          : undefined,
       }));
   }
 
@@ -2783,8 +2820,17 @@ export class CalDAVCalendarClient {
     // calendars. See docs/conventions.md on arguments that narrow a call.
     const requested = typeof calendarId === 'string' ? calendarId.trim() : calendarId;
     if (requested !== undefined && requested !== null) {
+      // BOTH SIDES through the same normaliser, so the comparison cannot drift. tsdav types a
+      // calendar's name away from string (a calendar called "2026" arrives as the number
+      // 2026), and normalising only the stored side turned a `calendarId` of 2026 — which
+      // matched by raw equality before — into "Calendar not found". Note this is computed
+      // separately from `requested` rather than replacing it: `requested` is what the
+      // fail-closed presence test above reads, and an empty string must stay a value that
+      // matches nothing, never one that widens the call to every calendar.
+      const requestedName = unwrapDisplayName(requested);
       const matched = targetCalendars.filter(
-        c => c.url === requested || unwrapDisplayName(c.displayName) === requested
+        c => c.url === requested ||
+          (requestedName !== undefined && unwrapDisplayName(c.displayName) === requestedName)
       );
       // A calendarId that matches nothing used to leave the list empty, so the loop below
       // never ran and the tool answered "Showing 0 of 0 results." — an availability question
@@ -3127,9 +3173,14 @@ export class CalDAVCalendarClient {
     // list. `calendarId` narrows what the call touches, so an empty or whitespace-only value
     // fails closed here for the same reason it does there.
     const requested = typeof event.calendarId === 'string' ? event.calendarId.trim() : event.calendarId;
+    // Both sides normalised, for the reason spelled out on the read path: tsdav can type a
+    // calendar's name away from string, so normalising only the stored side would reject a
+    // numeric or boolean `calendarId` that used to match by raw equality.
+    const requestedName = unwrapDisplayName(requested);
     const selectable = selectableCalendars(calendars);
     const targetCal = selectable.find(
-      c => c.url === requested || unwrapDisplayName(c.displayName) === requested
+      c => c.url === requested ||
+        (requestedName !== undefined && unwrapDisplayName(c.displayName) === requestedName)
     );
     if (!targetCal) {
       // A calendarId that matches no calendar is caller-fixable: they re-issue the call

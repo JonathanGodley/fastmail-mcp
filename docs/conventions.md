@@ -1874,7 +1874,7 @@ event chooses the DENSITY. Those are different questions and they get different 
   described above - up to 14 hours past each edge ("up to", because `shiftIsoMs` saturates the
   widened bound at the representable-date edge). So the number the note prints is a count of
   the blocks the server returned, and the shorter the caller's window the further above the
-  in-window count it can sit: a single-day window is requested as 52 hours rather than 24, so
+  in-window count it can sit: a single-day window is requested as up to 52 hours rather than 24, so
   for an evenly spaced series the count can be more than double the number of occurrences
   falling inside the day. The note says so in those terms rather than claiming the caller's
   window, because counting only the in-window blocks would require the per-block parse the cap
