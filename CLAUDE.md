@@ -50,13 +50,13 @@ The version string lives in **three hand-edited sites plus a regenerated lockfil
 
 ## Building
 
-The MCP server runs from `dist/index.js`, not `src/`. After making changes, run `npm run build` to compile. Connected MCP clients will need to reconnect to pick up the new code.
+The MCP server runs from `dist/index.js`, not `src/`. After making changes, run `npm run build` to compile. Connected MCP clients will need to reconnect to pick up the new code. A running server keeps serving the build it started with, so test a change to server code by invoking that code directly through this repo's own CLI or test entry point - going through the MCP tools answers from the old process and makes a correct change look broken.
 
 ## Testing
 
 Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
 
-**Handler logic must be unit-testable.** The `index.ts` CallTool `switch` has no test harness, so logic left inline there can only be exercised by a live run — which is not durable regression protection. When a handler does more than trivially destructure-and-delegate (orchestration, branching, threading uploaded data into multiple paths), extract it into a function that takes an **injected client** and unit-test it with a mock. The reply path is the pattern: `composeReply(args, client, attachDir)` in `src/reply-handler.ts` takes a `ReplyClient` interface (which `JmapClient` satisfies structurally), so both the send and draft attachment-threading branches are covered in `npm test` with no credentials and no network. The handler is then a thin result→text wrapper.
+**Handler logic must be unit-testable.** The `index.ts` CallTool `switch` has no test harness, so logic left inline there can only be exercised by a live run — which is not durable regression protection. When a handler does more than trivially destructure-and-delegate (orchestration, branching, threading uploaded data into multiple paths), extract it into a function that takes an **injected client** and unit-test it with a mock. The reply path is the pattern: `composeReply(args, client, attachDir)` in `src/reply-handler.ts` takes a `ReplyClient` interface (which `JmapClient` satisfies structurally), so the attachment-threading branches are covered in `npm test` with no credentials and no network. The handler is then a thin result→text wrapper.
 
 **A live harness is on-demand proof of the real external path, never the sole coverage.** The only thing that proves the real upload/send path is a raw JSON-RPC harness spawning `dist/index.js` against a live account (with `FASTMAIL_API_TOKEN` + `FASTMAIL_ATTACH_DIR`) — Fastmail's blob store can't be meaningfully mocked. Use it to verify externally-observable behavior (byte-identical round-trip, server accept/reject), but it is a manual check that runs once; it must not be the only thing testing logic that could be unit-tested. "Verified once, live" ≠ "tested going forward." The reusable harness lives at `scripts/mcp-harness.mjs` (`createClient({ env })` → `init`/`call`/`close`, matches responses by JSON-RPC `id`); use it rather than hand-writing a new client each time.
 

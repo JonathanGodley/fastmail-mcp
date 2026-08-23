@@ -3158,7 +3158,7 @@ export class JmapClient {
       ...(mergedReplyTo?.length && { replyTo: mergedReplyTo }),
       // Threading: carry inReplyTo/references as JMAP structured properties so the
       // In-Reply-To/References headers regenerate (fixes silent threading loss on reply
-      // drafts this client creates via reply_email send=false).
+      // drafts this client creates via reply_email, which only ever saves a draft).
       ...(existingEmail.inReplyTo && { inReplyTo: existingEmail.inReplyTo }),
       ...(existingEmail.references && { references: existingEmail.references }),
       // Carry the forward marking (the recorded source AND the guard's challenge floor)
