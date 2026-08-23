@@ -1054,6 +1054,32 @@ export function coerceCalendarWindowEnd(value: unknown, paramName: string, zone?
   return resolveWindowBound(value, paramName, zone, 1);
 }
 
+/**
+ * The instant local midnight at the START OF TODAY resolves to, for a caller that named no
+ * window at all.
+ *
+ * It sits here, beside the window coercions, because it has to agree with them: a bounds-free
+ * window starts on the same day a caller would get by passing today's date as a DATE-ONLY
+ * `startDate`, and the only way to guarantee that is to resolve it through the same
+ * wall-clock-to-instant path (`zoneOffsetMsAt` to read which local day `nowMs` falls in, then
+ * `wallClockToUtcMs` to put that day's midnight back on the UTC scale). Re-deriving either
+ * step here would give the default window its own DST and offset behaviour, which is exactly
+ * the drift the shared helpers exist to prevent.
+ *
+ * `nowMs` is passed in rather than read from the clock so the caller — and its tests — decide
+ * what "today" is. Year-0000 and era handling are irrelevant here in a way they are not for a
+ * caller-named bound: this value is always the present.
+ */
+export function startOfLocalDayUtcIso(nowMs: number, zone?: string): string {
+  // The wall clock in `zone` at `nowMs`, read by shifting the instant by the offset in force
+  // and taking the UTC components of the result — the same trick `zoneOffsetMsAt` uses in
+  // reverse, and the reason the offset is sampled AT `nowMs` rather than assumed.
+  const local = new Date(nowMs + zoneOffsetMsAt(nowMs, zone));
+  return toUtcIso(wallClockToUtcMs(
+    local.getUTCFullYear(), local.getUTCMonth() + 1, local.getUTCDate(), 0, 0, 0, zone,
+  ));
+}
+
 // The pagination offset shared by the list/search tools: a 0-based index into the
 // full result set (the JMAP `position` argument, RFC 8620 section 5.5). Values are
 // coerced leniently like `limit` — a stringified "40" from a client that stringifies

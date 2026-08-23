@@ -34,6 +34,10 @@
 //   - a window given only ONE bound is bounded rather than run open-ended, and the response
 //     says so — a caller handed a narrower window than it asked for must be told, or
 //     "nothing after that date" reads as an empty calendar
+//   - a call given NO bounds is bounded the same way, to the next month from today, and the
+//     note says neither bound was given rather than blaming one the caller never passed
+//     (#142). That call used to go out with no time range and therefore no `expand`, so the
+//     one call most likely to be asked "what is on?" answered with series masters
 //
 // It is READ-ONLY: it lists and reads, and creates nothing. That is deliberate beyond
 // ordinary tidiness — creating an event with participants makes the server send real iTIP
@@ -340,6 +344,29 @@ try {
   check(
     'the note names the range actually searched, so the narrowing is not silent',
     /bounded to \d+ days/.test(clampNote) && /\.\. \d{4}-/.test(clampNote),
+  );
+
+  // -----------------------------------------------------------------------
+  // A window with NO bounds is the next month, and the response says so.
+  // -----------------------------------------------------------------------
+  // This is the call that used to go out with no time range at all, and therefore with no
+  // `expand` either — so the one call most likely to be asked "what is on?" answered with
+  // series masters at their original DTSTART. It is now bounded like any other invented
+  // window (#142). Only the live server can show that the range really is sent and really is
+  // expanded; the note is the caller-facing half of the same fact.
+  console.log('\n--- a window with no bounds at all ---');
+  const noBounds = await client.call('list_calendar_events', { limit: 5 });
+  const noBoundsText = text(noBounds);
+  const defaultNote = noBoundsText.split('\n').find(l => l.startsWith('Note:')) || '';
+  console.log(`  ${defaultNote || '(no Note line)'}`);
+  check('a bounds-free call is disclosed in a trailing Note line', !!defaultNote);
+  check(
+    'the note says neither bound was given, rather than blaming one the caller never passed',
+    /no startDate or endDate/.test(defaultNote),
+  );
+  check(
+    'the note names the invented span and the range actually searched',
+    /bounded to \d+ days/.test(defaultNote) && /\.\. \d{4}-/.test(defaultNote),
   );
 } finally {
   client.close();

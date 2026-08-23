@@ -4,7 +4,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -20,6 +20,12 @@ export interface CalDAVConfig {
   // environment (the server does that through its shared multi-name lookup, so a DXT
   // user_config spelling reaches it); left unset it falls back to the username.
   displayName?: string;
+  // The clock "today" is read from, for the window a caller that named no bounds gets.
+  // Injectable so that behaviour is unit-testable at all: a default window computed from the
+  // real clock can only be asserted against a value the test recomputes the same way, which
+  // tests nothing. Defaults to `Date.now`, and is read ONCE per call so the two ends of one
+  // window cannot straddle a midnight.
+  now?: () => number;
 }
 
 export interface CalendarInfo {
@@ -162,8 +168,10 @@ export interface CalendarEventQueryResult {
 /** Why, and to what, a calendar window ended up narrower than the one the caller described. */
 export interface CalendarWindowClamp {
   // The bound the caller OMITTED, which had to be invented CALENDAR_OPEN_WINDOW_DAYS away
-  // from the one they gave. Absent when both bounds were named.
-  invented?: 'startDate' | 'endDate';
+  // from the one they gave. `'both'` is the caller who named neither: the window then starts
+  // at local midnight today and runs the same invented span forward. Absent when both bounds
+  // were named.
+  invented?: 'startDate' | 'endDate' | 'both';
   // Caller-named bounds whose resolved instant ran outside the four-digit-year range every
   // consumer of these values can express, and so were pulled back to its edge. `edge` names
   // WHICH edge, because the disclosure is an opposite statement at each end and a window can
@@ -2710,11 +2718,25 @@ export class CalDAVCalendarClient {
     // exact filter exists to remove.
     let trueWindowStart: string | undefined;
     let trueWindowEnd: string | undefined;
-    if (start || end) {
+    // UNCONDITIONAL: there is no such thing as an unwindowed listing any more. A call naming
+    // neither bound used to be sent with no time range at all, which meant no `expand` either
+    // (tsdav drops it without one) — so the one call most likely to be asked "what is on?" was
+    // the one call that answered with series masters at their original DTSTART instead of the
+    // occurrences that actually fall on those days. Bounding it is also what makes the
+    // expansion safe to turn on there: the window IS the range the server materialises over,
+    // and an absent one is the unbounded case, not the empty case (#142).
+    {
       let windowStart = start;
       let windowEnd = end;
-      let invented: 'startDate' | 'endDate' | undefined;
-      if (!windowStart) {
+      let invented: 'startDate' | 'endDate' | 'both' | undefined;
+      if (!windowStart && !windowEnd) {
+        // The same local-day rule a date-only `startDate` gets, so "no bounds" and "today's
+        // date as startDate" cannot disagree about which day today is. The clock is read once
+        // here, not per bound, so the two ends cannot straddle a midnight.
+        windowStart = startOfLocalDayUtcIso((this.config.now ?? Date.now)(), zone);
+        windowEnd = shiftIsoDays(windowStart, CALENDAR_OPEN_WINDOW_DAYS);
+        invented = 'both';
+      } else if (!windowStart) {
         windowStart = shiftIsoDays(windowEnd!, -CALENDAR_OPEN_WINDOW_DAYS);
         invented = 'startDate';
       } else if (!windowEnd) {
@@ -2753,9 +2775,16 @@ export class CalDAVCalendarClient {
           ? `both resolve to the same instant, ${windowStart}, which is a zero-length window`
           : `which resolve to the range ${windowStart} .. ${windowEnd}`;
         const quote = (v: unknown) => (v === undefined || v === null ? '(omitted)' : `"${echoCallerText(v)}"`);
-        // The one-sided arm needs its own sentence: the caller cannot "put startDate before
-        // endDate" when they only passed one, so the ordinary advice would be unfollowable.
-        const advice = invented
+        // An INVENTED bound needs its own sentence: the caller cannot "put startDate before
+        // endDate" when they passed one or neither, so the ordinary advice would be
+        // unfollowable. The no-bounds arm is separate again, because there is no bound of
+        // theirs to blame — the default window starts at today and there is nowhere for a
+        // month to go only when today itself sits at the end of the representable range.
+        const advice = invented === 'both'
+          ? 'Neither startDate nor endDate was given, so the window was taken as a month from today — but today ' +
+            'sits at the edge of the range this server can express, so that month had nowhere to go. Pass ' +
+            'startDate and endDate.'
+          : invented
           ? `${invented} was not given, so it was filled in ${CALENDAR_OPEN_WINDOW_DAYS} days away — but the bound ` +
             'you did give sits at the edge of the range this server can express, so the invented one had nowhere ' +
             'to go. Pass both startDate and endDate.'
@@ -2799,7 +2828,9 @@ export class CalDAVCalendarClient {
       fetchOptions.expand = true;
     }
 
-    // Derived from the TRUE window, never from `fetchOptions.timeRange`.
+    // Derived from the TRUE window, never from `fetchOptions.timeRange`. Both are always set
+    // now that the window branch is unconditional; the undefined arms stay because the
+    // declarations above are the only thing that says so and a type is not a guarantee.
     const windowStartMs = trueWindowStart === undefined ? NaN : Date.parse(trueWindowStart);
     const windowEndMs = trueWindowEnd === undefined ? NaN : Date.parse(trueWindowEnd);
 
@@ -2825,8 +2856,13 @@ export class CalDAVCalendarClient {
           // RDATEs instead of stating a rule; such a master carries no RRULE at all, so an
           // RRULE-only guard read it as an ordinary one-off and dropped it on its original
           // DTSTART — the missing-event direction this guard exists to prevent.
-          const provablyOutside = fetchOptions.timeRange
-            && !event.recurrenceRule
+          //
+          // THE "WAS A WINDOW ASKED FOR" LEG IS GONE, because there is no longer a call
+          // without one: a caller naming no bounds is given today plus a month (#142), so
+          // `fetchOptions.timeRange` is set on every path through this method and testing it
+          // here only asserted that. Removing it keeps the guard's remaining conditions about
+          // what they are about — whether THIS block is one the window is entitled to judge.
+          const provablyOutside = !event.recurrenceRule
             && !event.recurrenceDates
             && !eventIntersectsWindow(event, windowStartMs, windowEndMs, configuredZone);
           if (provablyOutside) continue;

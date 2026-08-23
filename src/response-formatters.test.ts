@@ -1561,6 +1561,38 @@ describe('formatArchiveResult', () => {
   });
 });
 
+describe('buildCalendarWindowNote names the bound that was invented', () => {
+  it('blames the missing half and names the one to pass, for a one-sided window', () => {
+    const note = buildCalendarWindowNote({
+      invented: 'endDate',
+      start: '2027-03-01T00:00:00Z',
+      end: '2027-04-01T00:00:00Z',
+    });
+    assert.match(note, /only startDate was given/);
+    assert.match(note, /bounded to 31 days/);
+    assert.match(note, /2027-03-01T00:00:00Z \.\. 2027-04-01T00:00:00Z \(end exclusive\)/);
+    assert.match(note, /Pass endDate explicitly/);
+    // The separator convention lives in the builder, not in the handler that concatenates it.
+    assert.ok(note.startsWith('\n\n'), JSON.stringify(note.slice(0, 4)));
+  });
+
+  // Its own sentence rather than a variation on the one above: "only startDate was given" has
+  // no referent when the caller gave neither, and neither does "pass the other one".
+  it('says no bound at all was given, and names today as the anchor, for a bounds-free window', () => {
+    const note = buildCalendarWindowNote({
+      invented: 'both',
+      start: '2026-08-23T14:00:00Z',
+      end: '2026-09-23T14:00:00Z',
+    });
+    assert.match(note, /no startDate or endDate was given/);
+    assert.match(note, /bounded to 31 days from today/);
+    assert.match(note, /2026-08-23T14:00:00Z \.\. 2026-09-23T14:00:00Z \(end exclusive\)/);
+    assert.match(note, /Pass startDate and\/or endDate to query a different span/);
+    // Not the one-sided wording, which would be a false account of what the caller passed.
+    assert.doesNotMatch(note, /only startDate was given|only endDate was given/);
+  });
+});
+
 // A saturated bound is a bound the caller CHOSE and is not getting, so the note that names it
 // has to name the right end. Saturation happens at both ends of the four-digit-year range and
 // the two are opposite statements: a startDate pulled UP to year 0000 was reported as having

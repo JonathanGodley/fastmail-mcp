@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 describe('coerceStringArray', () => {
@@ -1836,6 +1836,45 @@ describe('calendar window bounds resolve a DST gap forward (#138)', () => {
       Date.parse(coerceCalendarWindowStart('2026-04-05', 's', 'Australia/Sydney')!);
     assert.equal(spring / 3600000, 23);
     assert.equal(fall / 3600000, 25);
+  });
+});
+
+describe('startOfLocalDayUtcIso', () => {
+  // The zone is INJECTED, and the pins are the same two the window coercions use, for the same
+  // reason: on a UTC host a UTC-only test passes under both the local-day and the UTC-day
+  // reading, so it proves nothing. Sydney and New York sit on opposite sides of UTC, so a sign
+  // error cannot pass both.
+  //
+  // 2026-08-24T02:00:00Z is chosen because it is the SAME INSTANT on two different local days:
+  // noon on the 24th in Sydney (+10), and ten in the evening on the 23rd in New York (-4).
+  const INSTANT = Date.parse('2026-08-24T02:00:00Z');
+
+  it('returns local midnight at the start of the day the instant falls in, in the given zone', () => {
+    assert.equal(startOfLocalDayUtcIso(INSTANT, 'Australia/Sydney'), '2026-08-23T14:00:00Z');
+    assert.equal(startOfLocalDayUtcIso(INSTANT, 'America/New_York'), '2026-08-23T04:00:00Z');
+    assert.equal(startOfLocalDayUtcIso(INSTANT, 'UTC'), '2026-08-24T00:00:00Z');
+  });
+
+  it('agrees with a date-only startDate naming the same local day', () => {
+    // The default window has to start on the day a caller would get by passing today's date
+    // themselves. These are the two paths that must not drift: if they ever disagree, "no
+    // bounds" and "today as startDate" answer two different questions.
+    for (const zone of ['Australia/Sydney', 'America/New_York', 'UTC']) {
+      const fromClock = startOfLocalDayUtcIso(INSTANT, zone);
+      const localDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(new Date(INSTANT));
+      assert.equal(fromClock, coerceCalendarWindowStart(localDate, 'startDate', zone), zone);
+    }
+  });
+
+  it('lands on midnight on a day whose midnight is skipped by a DST transition', () => {
+    // America/Havana moves its clocks at midnight, so 2026-03-08T00:00:00 local does not
+    // exist. The wall-clock resolver takes a skipped time FORWARD by the length of the gap
+    // rather than backwards into the previous day, which is what keeps the default window
+    // from starting on the wrong date.
+    const middayThere = Date.parse('2026-03-08T16:00:00Z');
+    assert.equal(startOfLocalDayUtcIso(middayThere, 'America/Havana'), '2026-03-08T05:00:00Z');
   });
 });
 

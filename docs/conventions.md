@@ -1765,9 +1765,9 @@ Mechanics worth knowing before touching it:
   reading whenever the host sits in the zone asserted — which is how the wrong-day window sat
   under a green suite. The suite pins Sydney and New York so a sign error cannot pass both.
 
-### A one-sided window is bounded, and the bound is disclosed
+### An invented calendar window is bounded, and the bound is disclosed
 
-`startDate` and `endDate` are both optional, so one of them may have to be invented. It used
+`startDate` and `endDate` are both optional, so one or both of them may have to be invented. It used
 to be invented as 1970-01-01 / 2099-12-31, which was harmless while the window was only a
 filter and stopped being harmless the moment `expand` was added: the window is now the range
 the SERVER materialises occurrences over, so `startDate: <today>` alone asked Fastmail to
@@ -1796,6 +1796,26 @@ APIs nearest to this one invent no span at all: Cyrus's own JMAP `CalendarEvent/
 an `expandRecurrences` query with no upper bound, and Microsoft Graph's `calendarView`
 requires both bounds, so inventing a month is already the generous reading. 31 rather than 30
 so the same date next month is always inside the span, from any starting day in any month.
+
+**A caller who names NEITHER bound gets the same month, anchored on today**
+([#142](https://github.com/JonathanGodley/fastmail-mcp/issues/142)). That call used to go out
+with no time range at all, which meant no `expand` either - tsdav drops `<C:expand>` without
+one - so the call most likely to be asked "what is on?" was the one call that answered with
+series masters at their original `DTSTART` instead of the occurrences that fall on those days.
+There is no unwindowed listing any more: an absent window is the OPEN-ENDED case, which is the
+one thing this section exists to refuse, not a third thing that escapes it. `windowClamp.invented`
+carries `'both'` for it and the note gets its own sentence, because the one-sided wording blames
+a bound the caller gave ("only endDate was given") and names the missing one to pass, and
+neither half of that has a referent when the caller gave nothing.
+
+The window starts at LOCAL MIDNIGHT TODAY, resolved through the same wall-clock path a
+date-only `startDate` takes (`startOfLocalDayUtcIso` in `coerce.ts`, which calls
+`zoneOffsetMsAt` and `wallClockToUtcMs` rather than re-deriving either). "No bounds" and
+"today's date as `startDate`" must not answer two different questions. The clock is INJECTED -
+`CalDAVConfig.now`, defaulting to `Date.now` - and read once per call, so the two ends of one
+window cannot straddle a midnight and the behaviour is unit-testable at all: a default window
+computed from the real clock can only be asserted against a value the test recomputes the same
+way, which tests nothing.
 
 **Saturation is the other narrowing, and it names an EDGE.** A bound that resolves outside the
 four-digit-year range every consumer of these values can express is pulled back to that range's

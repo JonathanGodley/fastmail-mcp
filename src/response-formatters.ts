@@ -196,7 +196,17 @@ export const NOT_EXCLUDED_PHRASE = "couldn't be found, so it was NOT excluded";
 export function buildCalendarWindowNote(clamp?: CalendarWindowClamp): string {
   if (!clamp) return '';
   const notes: string[] = [];
-  if (clamp.invented) {
+  // The no-bounds case is its own sentence rather than a variation on the one-sided one: the
+  // one-sided wording blames a bound the caller gave ("only endDate was given") and names the
+  // missing one to pass, and neither half of that has a referent when the caller gave nothing.
+  if (clamp.invented === 'both') {
+    notes.push(
+      `Note: no startDate or endDate was given, so the window was bounded to ${CALENDAR_OPEN_WINDOW_DAYS} days ` +
+      `from today and ran ${clamp.start} .. ${clamp.end} (end exclusive). Events outside that range were NOT ` +
+      'searched. Pass startDate and/or endDate to query a different span — an open-ended window is not queried, ' +
+      'because recurrence expansion would materialise every occurrence of every repeating event across it.',
+    );
+  } else if (clamp.invented) {
     const given = clamp.invented === 'startDate' ? 'endDate' : 'startDate';
     notes.push(
       `Note: only ${given} was given, so the window was bounded to ${CALENDAR_OPEN_WINDOW_DAYS} days and ran ` +
