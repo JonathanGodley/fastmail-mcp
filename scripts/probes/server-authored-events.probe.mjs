@@ -34,9 +34,15 @@
 // The provenance test is the PATH, not the name. `create` mints its collection at a path
 // whose last segment starts with `mcp-164-`, and both phases match on the display name AND
 // that segment. A same-named collection on any other path is refused, loudly and non-zero,
-// by both phases: `create` will not write into it and `cleanup` will not delete it. A
-// same-named collection that IS on a minted path is this probe's own, so `create` reuses it
-// rather than minting a second and a re-run after a partial failure does not litter.
+// by both phases: `create` will not write into it and `cleanup` will not delete it.
+//
+// `create` refuses whenever such a collection exists AT ALL — having one of its own too is
+// not a reprieve, because a display name is not a unique key and the write would go to
+// whichever the server discovers first. And the writes are addressed by the minted
+// collection's URL rather than by the name, so the fixtures cannot land anywhere else even
+// if the account gains a same-named calendar mid-run. A same-named collection that IS on a
+// minted path is this probe's own, so `create` reuses it rather than minting a second and a
+// re-run after a partial failure does not litter; `cleanup` deletes every one it finds.
 //
 // NO PARTICIPANTS. None of the four events carries one. An attendee makes the server's
 // scheduling layer send a real iTIP invitation from the account under test, and the later
@@ -117,14 +123,23 @@ const abs = href => new URL(href, ROOT).href;
 // no CDATA falls through to the entity pass unchanged, which is what the sibling
 // client-authored probe does on every response.
 //
-// EVERY section, joined: a payload containing a literal `]]>` is emitted as two adjacent
-// CDATA sections split around it, so taking only the first would silently truncate the dump.
+// EVERY section, SPLICED IN PLACE. A payload containing a literal `]]>` is emitted as two
+// adjacent CDATA sections split around it, so taking only the first would truncate the dump —
+// but returning only the sections' contents is just as lossy the other way, because a MIXED
+// payload (entity-escaped text either side of a CDATA section) would lose everything outside
+// the brackets. So substitute each section with its own contents inside the original string
+// and run the entity pass over what remains, which is the only part that was ever escaped.
+const ENTITIES = t => t
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+  .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&');
 const unescapeXml = s => {
-  const sections = [...s.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)];
-  if (sections.length) return sections.map(m => m[1]).join('');
-  return s
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&');
+  let out = '';
+  let at = 0;
+  for (const m of s.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)) {
+    out += ENTITIES(s.slice(at, m.index)) + m[1];
+    at = m.index + m[0].length;
+  }
+  return out + ENTITIES(s.slice(at));
 };
 const escapeXml = s => String(s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -205,8 +220,10 @@ function calendarIsListed(body, name) {
     return names.includes(name);
   } catch {
     // Not JSON (or no payload): the quoted whole value, which still excludes a prose mention
-    // and a longer name that merely starts with this one.
-    return new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`).test(body);
+    // and a longer name that merely starts with this one. JSON.stringify supplies the quotes
+    // AND escapes any the name itself contains, so a display name holding a `"` still matches
+    // the way it was serialised rather than producing a broken needle.
+    return body.includes(JSON.stringify(name));
   }
 }
 
@@ -297,17 +314,26 @@ async function runCreate() {
   console.log(`Temporary calendar display name: ${JSON.stringify(CAL_NAME)}`);
 
   // --- the collection: reuse one THIS PROBE minted, else MKCALENDAR --------------------
-  // Name AND minted path. A same-named collection anywhere else is someone's real calendar:
-  // writing into it would hand the cleanup phase's whole-collection DELETE to their events.
+  // THE RULE: a same-named collection this probe did not mint means STOP, always — whether or
+  // not a minted one also exists. Having our own is no protection, because a display name is
+  // not a unique key: src/caldav-client.ts resolves `calendarId` as
+  // `c.url === requested || c.displayName === requested` over the discovery order, so with
+  // two collections carrying the name the write goes to whichever the server lists first,
+  // which can be the operator's real calendar. Refusing on `foreign` alone removes the
+  // ambiguity rather than betting on the order.
   const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
   const existing = sameName.find(c => isMinted(c.url));
   const foreign = sameName.find(c => !isMinted(c.url));
   let calendarUrl;
-  if (!existing && foreign) {
-    check('the display name is free, or already belongs to this probe', false,
+  if (foreign) {
+    check('no collection outside this probe carries the display name', false,
       `a calendar named ${JSON.stringify(CAL_NAME)} exists and is not this probe's`);
     console.error(`\nStopping: ${redact(foreign.url)} carries that display name but was not minted by`);
     console.error(`this probe (its path does not start with "${MINTED_PREFIX}"), so it is a real calendar.`);
+    if (existing) {
+      console.error(`This probe's own ${redact(existing.url)} carries the name too; that is exactly the`);
+      console.error('ambiguous case, because the name alone cannot say which of the two a write reaches.');
+    }
     console.error('Nothing was written. Choose another name and re-run:');
     console.error(`  python scripts/probes/run-probe.py server-authored-events.probe.mjs create "MCP probe calendar 2"`);
     return { wroteAnything: false };
@@ -348,8 +374,12 @@ async function runCreate() {
   try {
     await client.init();
 
-    // The collection has to be visible to the JMAP/CalDAV surface the server reads before
-    // create_calendar_event can address it by display name. Bounded retry, not a poll loop.
+    // The collection has to be visible to the CalDAV surface the server discovers before it
+    // can be addressed at all. Bounded retry, not a poll loop.
+    //
+    // This tests the DISPLAY NAME on purpose, and it is a measurement rather than the write
+    // target: whether a freshly minted collection becomes addressable by name, and how fast,
+    // is one of the things the run reports. The writes below use the URL regardless.
     const ATTEMPTS = 5;
     let visible = false;
     for (let attempt = 1; attempt <= ATTEMPTS && !visible; attempt++) {
@@ -363,10 +393,13 @@ async function runCreate() {
     if (!visible) return { wroteAnything: false };
 
     console.log('');
+    console.log(`Addressing the writes by URL: ${redact(calendarUrl)}`);
     for (const ev of EVENTS) {
       wroteAnything = true;
       const res = await client.call('create_calendar_event', {
-        calendarId: CAL_NAME,
+        // BY URL, never by display name. `calendarId` accepts either, and the URL is the
+        // only one of the two that names exactly one collection — see the rule above.
+        calendarId: calendarUrl,
         title: ev.title,
         ...ev.args,
       });
@@ -415,8 +448,12 @@ async function runCleanup() {
   // its own is not proof of anything: the name is a CLI argument and could name a real
   // calendar. Only a collection sitting on a path this probe minted is eligible.
   const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
-  const target = sameName.find(c => isMinted(c.url));
-  if (!target) {
+  // ALL of them, not the first. Two minted collections can legitimately carry one name: a
+  // `create` that crashed after MKCALENDAR but before it finished leaves one behind, and the
+  // next `create` mints a second (the path segment is stamped, so the two never collide).
+  // Deleting only the first would leave the other stranded with nothing to find it again.
+  const targets = sameName.filter(c => isMinted(c.url));
+  if (!targets.length) {
     const foreign = sameName.find(c => !isMinted(c.url));
     if (foreign) {
       check('the collection to delete was made by this probe', false,
@@ -428,21 +465,30 @@ async function runCleanup() {
     console.log('\nNo collection of this probe\'s with that display name - nothing to clean up.');
     return;
   }
-  console.log(`  ${redact(target.url)}`);
+  console.log(`Found ${targets.length} collection(s) minted by this probe under that name:`);
+  for (const t of targets) console.log(`  ${redact(t.url)}`);
 
-  const { status, statusText, resources } = await fetchResources(target.url);
-  console.log(`\nResources in the collection (REPORT ${status} ${statusText}): ${resources.length}`);
-  for (const r of resources) console.log(`  - ${redact(summaryOf(r.data))}`);
+  for (const target of targets) {
+    const { status, statusText, resources } = await fetchResources(target.url);
+    console.log(`\n${redact(target.url)}`);
+    console.log(`Resources in the collection (REPORT ${status} ${statusText}): ${resources.length}`);
+    for (const r of resources) console.log(`  - ${redact(summaryOf(r.data))}`);
 
-  // The whole collection, in one request: it takes every resource inside with it, and
-  // nothing outside it. No other DELETE is issued on any path.
-  const del = await dav('DELETE', target.url);
-  console.log(`\nDELETE ${redact(target.url)} -> HTTP ${del.status} ${del.statusText}`);
-  check('DELETE of the temporary collection succeeded', del.status >= 200 && del.status < 300,
-    `HTTP ${del.status} ${del.statusText}`);
+    // The whole collection, in one request: it takes every resource inside with it, and
+    // nothing outside it. No DELETE is issued against anything not in `targets`.
+    const del = await dav('DELETE', target.url);
+    console.log(`DELETE -> HTTP ${del.status} ${del.statusText}`);
+    check(`DELETE of ${redact(target.url)} succeeded`, del.status >= 200 && del.status < 300,
+      `HTTP ${del.status} ${del.statusText}`);
+  }
 
-  const stillThere = (await listCollections(homeUrl)).some(c => c.name === CAL_NAME);
-  check('the collection is gone from the calendar home', !stillThere);
+  // Scoped to MINTED collections. A name-only test would report a successful cleanup as a
+  // failure whenever a foreign collection happens to share the display name — and that
+  // foreign one is precisely what this phase refuses to touch, so its survival is correct.
+  const stillThere = (await listCollections(homeUrl))
+    .filter(c => c.name === CAL_NAME && isMinted(c.url));
+  check('every minted collection under that name is gone from the calendar home',
+    stillThere.length === 0, stillThere.length ? `${stillThere.length} remain(s)` : '');
 }
 
 // A throw leaves it unknown whether a create landed, so the banner below assumes it might
