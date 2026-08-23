@@ -1474,6 +1474,24 @@ the wrong day for an account far from UTC. That residual is DOCUMENTED rather th
 there is no information left to fix it with — and #157's write-side changes stop this server
 creating new floating values.
 
+**A third row is lost before this filter ever sees it, and it is not one of those two.** For a
+resource whose recurrence is stated only as `RDATE` — no `RRULE` — Fastmail's `time-range`
+filter indexes just `DTSTART..DTSTART+DURATION`, so the listed occurrences are invisible to it:
+a window covering one of them but NOT the series `DTSTART` matches the resource not at all,
+with `<C:expand>` and without it. That is MEASURED, by
+`calendar-rdate-expand.probe.mjs` (#165), against an `RRULE` control series whose occurrence
+falls at the IDENTICAL instant and IS returned by the very same request; two diagnostic windows
+isolate the indexed span, one covering `DTSTART` matching and one lying between `DTSTART` and
+the last `RDATE` not. The mechanism is two different walkers: `<C:expand>` runs Cyrus's own
+`icalcomponent_myforeach`, which adds `RDATE`s, while the time-range filter
+(`apply_comp_timerange`) and the indexed span (`icalrecurrenceset_get_utc_timespan`) both use
+libical's `icalcomponent_foreach_recurrence`, which in this build does not reach them. The two
+residuals above are rows that DO arrive and sit outside the window, which is why this filter
+gets a say in them at all; this one is a row the server never sends, so nothing on this side
+can keep it and no client-side filter can recover it. `list_calendar_events` can therefore
+report a day EMPTY when an `RDATE`-listed occurrence falls on it — a MISSING row, not a
+mis-dated one. Whether this server should compensate is open in #167.
+
 The window's own bounds are a separate concern from an event's stored zone entirely: they
 never carry a TZID at all, and are normalised once by `coerceCalendarWindowStart` /
 `coerceCalendarWindowEnd`, so the server's `time-range` and this filter cannot disagree about
