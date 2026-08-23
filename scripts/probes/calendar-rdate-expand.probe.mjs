@@ -297,8 +297,11 @@ const WINDOWS = {
     start: wallToUtcIso(2027, 7, 1, 0),
     end: wallToUtcIso(2027, 8, 31, 0),
   },
-  narrowSecondRdate: {
-    label: `narrow: local 2027-07-21 08:00..10:00 in ${ZONE} (only the FIRST RDATE occurrence)`,
+  // Named for the RDATE VALUE it covers, not for the occurrence's position in the series: this
+  // is the first of the two listed RDATEs, which is the series' SECOND occurrence overall
+  // (the first being the DTSTART itself).
+  narrowFirstRdateValue: {
+    label: `narrow: local 2027-07-21 08:00..10:00 in ${ZONE} (only the first RDATE value — the series' second occurrence)`,
     start: wallToUtcIso(2027, 7, 21, 8),
     end: wallToUtcIso(2027, 7, 21, 10),
   },
@@ -319,7 +322,14 @@ const WINDOWS = {
 // ---------------------------------------------------------------------------
 // iCalendar reading. Whole content lines only, the same discipline src/caldav-client.ts uses:
 // U+2028/U+2029/bare CR are inert characters inside a value, not line breaks.
-// ---------------------------------------------------------------------------
+//
+// This deliberately does NOT unfold (RFC 5545 §3.1). It does not need to: a fold breaks a long
+// line at a 75-octet boundary and the CONTINUATION starts with a space or tab, so the property
+// NAME always survives on the first physical line — every question asked here is "does a line
+// begin with RDATE / RRULE / DTSTART / RECURRENCE-ID", which that first line answers. A folded
+// continuation can never be mistaken for a property line, because it starts with whitespace.
+// (The one thing unfolding would buy is a complete VALUE for a very long RDATE list; the checks
+// here count and locate properties rather than parse a full list, so it buys nothing.)
 const contentLines = blob => blob.split(/\r\n|\n/).map(l => l.replace(/\r$/, ''));
 
 /** Split a VCALENDAR blob into its VEVENT blocks (arrays of content lines). */
@@ -482,7 +492,9 @@ try {
   }
   tempCalendarUrl = candidateUrl;
   const calendarUrl = candidateUrl;
-  console.log(`\nMKCALENDAR ${mk.status}: temporary collection created (deleted in finally).`);
+  // The URL is printed on success too, not only on a cleanup failure: if the process is killed
+  // between here and the finally, this line is the only record of what to remove.
+  console.log(`\nMKCALENDAR ${mk.status}: temporary collection created at ${redact(calendarUrl)} (deleted in finally).`);
 
   // --- PUT the fixtures ------------------------------------------------------------------
   console.log('\n--- fixtures ---');
@@ -548,14 +560,15 @@ try {
   }
 
   // --- Q3/Q4: the filter does NOT walk RDATEs -----------------------------------------------
-  // MEASURED, and it is not what the repo had recorded. The window below covers the FIRST RDATE
-  // occurrence and nothing else. The RRULE control has an occurrence at the IDENTICAL instant,
+  // MEASURED, and it is not what the repo had recorded. The window below covers the first RDATE
+  // VALUE — the series' second occurrence — and nothing else. The RRULE control has an
+  // occurrence at the IDENTICAL instant,
   // so it is the discriminator: it separates "the server does not walk RDATEs when filtering"
   // from "this window is aimed wrong". The assertions encode the measurement, so a future run
   // FAILING here means Fastmail's build CHANGED — at which point the read path's window
   // handling is worth re-deciding, not this probe re-tuned.
   console.log('\n--- Q3: narrow window over ONE RDATE occurrence, WITH expand ---');
-  const q3 = await query(calendarUrl, WINDOWS.narrowSecondRdate, true);
+  const q3 = await query(calendarUrl, WINDOWS.narrowFirstRdateValue, true);
   const d3 = Object.fromEntries(FIXTURES.map(f => [f.kind, q3.seen.get(f.kind) && describe(q3.seen.get(f.kind))]));
   for (const f of FIXTURES) if (d3[f.kind]) report(`  [${f.kind}]`, d3[f.kind]);
   dumpIfEmpty('Q3', q3);
@@ -583,7 +596,7 @@ try {
   }
 
   console.log('\n--- Q4: the same narrow window, NO expand (does the time-range filter walk RDATEs?) ---');
-  const q4 = await query(calendarUrl, WINDOWS.narrowSecondRdate, false);
+  const q4 = await query(calendarUrl, WINDOWS.narrowFirstRdateValue, false);
   const d4 = Object.fromEntries(FIXTURES.map(f => [f.kind, q4.seen.get(f.kind) && describe(q4.seen.get(f.kind))]));
   for (const f of FIXTURES) if (d4[f.kind]) report(`  [${f.kind}]`, d4[f.kind]);
   dumpIfEmpty('Q4', q4);
@@ -638,13 +651,26 @@ try {
       `expand=${span.betweenOccurrences.expand.hrefs.has(kind)} plain=${span.betweenOccurrences.plain.hrefs.has(kind)}`,
     );
   }
-  // If the two serialisations ever diverge, that is the headline, so say it in one line.
-  const formsAgree = RDATE_KINDS.every(k =>
-    (!!d3[k] === !!d3[RDATE_KINDS[0]]) && (q4.hrefs.has(k) === q4.hrefs.has(RDATE_KINDS[0])));
+  // If the two serialisations ever diverge, that is the headline, so say it in one line — and
+  // the line has to cover EVERY fact measured per form, not just the narrow-window pair. A
+  // summary that compared only Q3/Q4 would report "identical" while the forms disagreed about
+  // the expand strip or about either span window, which is the opposite of what it promises.
+  const formsProfile = k => JSON.stringify({
+    q2Returned: !!d2[k],
+    q2AnyRdate: d2[k]?.anyRdate ?? null,
+    q2Blocks: d2[k]?.blockCount ?? null,
+    q3Blob: !!d3[k],
+    q3Matched: q3.hrefs.has(k),
+    q4Blob: !!d4[k],
+    q4Matched: q4.hrefs.has(k),
+    spanDtstart: span.narrowDtstart.expand.hrefs.has(k) && span.narrowDtstart.plain.hrefs.has(k),
+    spanBetween: span.betweenOccurrences.expand.hrefs.has(k) || span.betweenOccurrences.plain.hrefs.has(k),
+  });
+  const formsAgree = RDATE_KINDS.every(k => formsProfile(k) === formsProfile(RDATE_KINDS[0]));
   check(
-    'the two RDATE serialisations behave IDENTICALLY (comma-joined vs one property per line)',
+    'the two RDATE serialisations behave IDENTICALLY on every measurement (comma-joined vs one property per line)',
     formsAgree,
-    RDATE_KINDS.map(k => `${k}: q3blob=${!!d3[k]} q4matched=${q4.hrefs.has(k)}`).join('; '),
+    RDATE_KINDS.map(k => `${k}=${formsProfile(k)}`).join('  '),
   );
 
   // --- The bytes, so the report carries them ----------------------------------------------
@@ -664,21 +690,34 @@ try {
 } catch (err) {
   check('probe ran to completion', false, redact(err?.message ?? String(err)));
 } finally {
-  // Deleting the collection removes both fixtures in one request. The PROPFIND afterwards is
+  // Deleting the collection removes every fixture in one request. The PROPFIND afterwards is
   // the only thing that proves it: a DELETE that returns 2xx and leaves the collection standing
   // would otherwise go unnoticed, and this probe writes into a live personal account.
-  if (tempCalendarUrl) {
-    const del = await dav('DELETE', tempCalendarUrl);
-    console.log(`\nCleanup: DELETE temporary collection -> HTTP ${del.status} ${del.statusText}`);
-    const after = await dav('PROPFIND', tempCalendarUrl, { body: PROPFIND(['d:resourcetype']), headers: { Depth: '0' } });
-    check(
-      'cleanup: the temporary collection is gone (PROPFIND no longer finds it)',
-      after.status === 404 || after.status === 410,
-      `DELETE ${del.status}, PROPFIND ${after.status} ${after.statusText}`,
-    );
-    if (after.status !== 404 && after.status !== 410) {
-      console.log(`  ⚠ the temporary collection may still exist at ${redact(tempCalendarUrl)} — remove it by hand`);
+  //
+  // The whole block is guarded. A network failure in the DELETE or the PROPFIND would otherwise
+  // escape the finally: it would REPLACE whatever error brought us here, skip the process.exit
+  // below, and suppress the one line naming the collection someone now has to remove by hand —
+  // the exact moment that line matters most.
+  try {
+    if (tempCalendarUrl) {
+      const del = await dav('DELETE', tempCalendarUrl);
+      console.log(`\nCleanup: DELETE temporary collection -> HTTP ${del.status} ${del.statusText}`);
+      const after = await dav('PROPFIND', tempCalendarUrl, { body: PROPFIND(['d:resourcetype']), headers: { Depth: '0' } });
+      check(
+        'cleanup: the temporary collection is gone (PROPFIND no longer finds it)',
+        after.status === 404 || after.status === 410,
+        `DELETE ${del.status}, PROPFIND ${after.status} ${after.statusText}`,
+      );
+      if (after.status !== 404 && after.status !== 410) {
+        console.log(`  ⚠ DELETE MANUALLY: ${redact(tempCalendarUrl)} — the temporary collection may still exist`);
+      }
     }
+  } catch (err) {
+    console.log(`\nCleanup FAILED: ${redact(err?.message ?? String(err))}`);
+    console.log(tempCalendarUrl
+      ? `  ⚠ DELETE MANUALLY: ${redact(tempCalendarUrl)}`
+      : '  (no temporary collection had been created, so nothing is left behind)');
+    process.exit(1);
   }
 }
 
