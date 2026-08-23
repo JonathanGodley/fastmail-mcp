@@ -1458,10 +1458,11 @@ block whatever its dates say. **Both carriers count**, and an `RRULE`-only guard
 hole: a series that lists its occurrences as `RDATE`s states no rule at all, so it read as an
 ordinary one-off and was dropped. The parsed event carries `recurrenceDates` (the raw RDATE
 values, joined) beside `recurrenceRule` so the guard and the caller can read the same fact.
-Only the `RRULE` half is known unreachable against Fastmail today: `calendar-expand.probe.mjs`
-MEASURED that Cyrus strips `RRULE` from an expanded block. The `RDATE` half is DERIVED, not
-observed — Cyrus is understood to strip `RDATE` the same way, but nothing in
-`scripts/probes/` looks at `RDATE` under `<C:expand>`, so do not read it as measured. The
+Both halves are known unreachable against Fastmail today, and both are MEASURED:
+`calendar-expand.probe.mjs` measured that Cyrus strips `RRULE` from an expanded block, and
+`calendar-rdate-expand.probe.mjs` measured the same for `RDATE` — an `RDATE`-only series comes
+back from `<C:expand>` as one VEVENT per occurrence with no `RDATE` line on any of them,
+written either as one comma-joined `RDATE` or as one property per line. The
 guard stays as resilience rather than being removed, because the claim that this filter
 "closes the gap if a server declines to expand" was false in the dangerous direction until the
 guard existed.

@@ -104,12 +104,12 @@ export interface CalendarEvent {
   // entry has. Carrying parameters would invite a precision it cannot back up. Read a real
   // occurrence date out of `list_calendar_events` with a window, which the server expands.
   //
-  // Expected to be absent on the ordinary listing path: Cyrus is understood to strip RDATE
-  // from an expanded block, the way it strips RRULE. That much has NOT been measured — the
-  // expand probe settles RRULE and nothing in scripts/probes/ looks at RDATE under
-  // `<C:expand>` — so treat it as derived, not observed. It shows up for certain on
-  // `get_calendar_event`, which returns the unexpanded master, and on any block the server
-  // declined to expand.
+  // Expected to be absent on the ordinary listing path: Cyrus strips RDATE from an expanded
+  // block, the way it strips RRULE. Both halves are MEASURED — calendar-expand.probe.mjs
+  // settles RRULE, and calendar-rdate-expand.probe.mjs settles RDATE, observing an RDATE-only
+  // series come back from `<C:expand>` as one VEVENT per occurrence with no RDATE line on any
+  // of them, in either serialisation. It shows up for certain on `get_calendar_event`, which
+  // returns the unexpanded master, and on any block the server declined to expand.
   recurrenceDates?: string;
   // ---- time zone (#139) ----
   // The IANA name DTSTART was written in, when it is anything other than the zone this
