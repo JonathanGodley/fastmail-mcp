@@ -384,6 +384,13 @@ const asIso = ms => (ms === undefined ? '(unparsed)' : new Date(ms).toISOString(
  * allows both one comma-joined value list and one property per line, so the two fixtures here
  * differ in their RDATE LINES by construction — comparing lines across the forms would compare
  * the very thing they were built to differ on. The instants are what both forms share.
+ *
+ * Only the date-time forms `lineToUtcMs` reads are handled: a UTC `Z` instant, a floating value,
+ * and a TZID naming this probe's own ZONE. `VALUE=DATE` (an all-day RDATE), `VALUE=PERIOD` (a
+ * start/duration pair) and a TZID naming any other zone all come back `undefined`. None of the
+ * fixtures uses them, and the per-form check below fails loudly if one ever appears — an
+ * unparsed value must never reach the profile, where `undefined` serialises to `null` in both
+ * forms and would let the forms-agree check pass on nothing.
  */
 const rdateInstantsIn = block =>
   propLines(block, 'RDATE').flatMap(line => {
@@ -529,6 +536,15 @@ try {
     check(`Q1 [${kind}]: the RDATE-only series is returned unexpanded`, !!d1[kind]);
     check(`Q1 [${kind}]: its RDATE value(s) survive storage intact`, !!d1[kind]?.anyRdate, d1[kind]?.rdateLines.join(' | ') ?? '(no blob)');
     check(`Q1 [${kind}]: it carries no RRULE (it recurs only by RDATE)`, d1[kind] ? !d1[kind].anyRrule : false);
+    // The forms-agree summary compares these instants, and an unparsed one is `undefined` in
+    // BOTH forms — identical, and meaningless. Assert they all parsed before anything reads them.
+    check(
+      `Q1 [${kind}]: every RDATE value parsed to an instant (nothing reaches the profile as undefined)`,
+      !!d1[kind] && d1[kind].rdateInstants.length > 0 && d1[kind].rdateInstants.every(v => v !== undefined),
+      d1[kind]
+        ? `instants=[${d1[kind].rdateInstants.map(v => (v === undefined ? 'UNPARSED' : asIso(v))).join(', ')}] from ${d1[kind].rdateLines.join(' | ')}`
+        : '(no blob)',
+    );
   }
   check('Q1 [rrule]: the RRULE control is returned with its RRULE intact', !!d1.rrule?.anyRrule, d1.rrule?.rruleLines.join(' | ') ?? '(no blob)');
 
