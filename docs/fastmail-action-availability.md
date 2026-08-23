@@ -343,6 +343,18 @@ event only" and "All occurrences", and nothing else. There is no "this and futur
 the client never authors the split that option implies elsewhere (capping the old master with an
 `UNTIL` and starting a fresh series), and a resource in that shape did not come from this client.
 
+**The repeat control offers a fixed menu.** Read off the web client's new-event form on 23 August
+2026 (opened on the test calendar and cancelled, then used to author the four events above): the
+unit is day, week, month or year, with an "every N" interval, and there are exactly three end
+modes: repeats forever; "Last occurs on" a date, which is the `UNTIL` row measured above; "Occurs"
+a number of times, which is the `COUNT` rows measured above — the forever mode was never authored,
+so how it is written is not measured. Monthly further splits into the day of the month ("on the
+23rd", following the event's own date) or the ordinal weekday ("on the 4th Sunday", likewise); only
+the ordinal-weekday branch was authored, as the `BYDAY=3TU` row above, and the day-of-month branch
+is listed under Unmeasured below. There is no control for adding arbitrary individual dates at all,
+so a series that lists its occurrences as `RDATE`s cannot be authored from this client — one found
+in an account came from another client or a raw CalDAV write.
+
 **Client noise a parser must tolerate — in both directions.** All ten resources carry
 `X-JMAP-USEDEFAULTALERTS;VALUE=BOOLEAN:TRUE`, so that one is simply what the client writes. The
 other two are not. The 22 August six carry `VALARM` blocks; **not one of the 23 August four does**.
