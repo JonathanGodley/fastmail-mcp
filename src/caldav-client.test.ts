@@ -6683,15 +6683,23 @@ describe('calendar display names that are not strings', () => {
     assert.equal(params.calendar.url, '/cal/year/');
   });
 
-  it('names a nameless calendar by its URL in the not-found error', async () => {
-    // The name list dropped anything unwrapping to undefined, so the message under-reported
-    // what the caller could name — and the URL it omitted is itself a working calendarId.
+  it('names a nameless calendar by its URL in the not-found error, WHOLE', async () => {
+    // Two defects, and the second only shows on a realistic URL. The name list first dropped
+    // anything unwrapping to undefined, so the message under-reported what the caller could
+    // name. Listing the URL then echoed it through the default 60-character limit, which
+    // truncates every real Fastmail collection URL — the prefix alone is 47 characters — and
+    // a truncated URL pasted back earns the same error again with nothing saying it was cut.
+    // The whole point of listing it is that it is a calendarId that RESOLVES, so the fixture
+    // is a full-length URL rather than the short synthetic path that cannot reach the bug.
+    const namelessUrl = 'https://caldav.fastmail.com/dav/calendars/user/user@example.invalid/a1b2c3d4e5f6/';
+    assert.ok(namelessUrl.length > 60, 'fixture must exceed the default echo limit to test it');
+
     const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [
-        { displayName: 'Personal', url: '/cal/personal/' },
-        { displayName: {}, url: '/cal/nameless/' },
+        { displayName: 'Personal', url: 'https://caldav.fastmail.com/dav/calendars/user/user@example.invalid/personal/' },
+        { displayName: {}, url: namelessUrl },
       ]),
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
     };
@@ -6700,10 +6708,38 @@ describe('calendar display names that are not strings', () => {
       () => client.getCalendarEvents('Nope', 50, '2026-04-01', '2026-04-30'),
       (err: Error) => {
         assert.match(err.message, /"Personal"/);
-        assert.match(err.message, /"\/cal\/nameless\/"/);
+        // Whole and unelided — `echoCallerText` marks a truncation with an ellipsis.
+        assert.ok(err.message.includes(`"${namelessUrl}"`), err.message);
+        assert.ok(!err.message.includes('…'), `URL was truncated: ${err.message}`);
         assert.ok(!err.message.includes('[object Object]'), err.message);
         return true;
       },
     );
+  });
+
+  it('matches a calendarId of "true" against a calendar tsdav typed as a boolean', async () => {
+    // The number is not the only coercion `nativeType` performs: `<displayname>true</displayname>`
+    // arrives as the BOOLEAN true. Same regression, same fix, and worth its own case because
+    // the boolean branch of the helper is otherwise only unit-tested.
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    const fetchCalendarObjects = mock.fn(async (_p: FetchObjectsParams) => []);
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: true, url: '/cal/boolish/' },
+        { displayName: 'Personal', url: '/cal/personal/' },
+      ]),
+      fetchCalendarObjects,
+    };
+
+    const result = await client.getCalendarEvents('true', 50, '2026-04-01', '2026-04-30');
+
+    assert.equal(result.events.length, 0);
+    assert.equal(fetchCalendarObjects.mock.calls.length, 1);
+    const [params] = callArguments(fetchCalendarObjects, 0);
+    assert.equal(params.calendar.url, '/cal/boolish/');
+    // And it is listed under the name that resolves it.
+    const listed = await client.getCalendars();
+    assert.equal(listed.find(c => c.id === '/cal/boolish/')!.displayName, 'true');
   });
 });

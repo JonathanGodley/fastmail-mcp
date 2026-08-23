@@ -2356,6 +2356,17 @@ const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
 // capped the way every other echoed list in this server is.
 const CALENDAR_NAME_LIST_CAP = 20;
 
+// A calendar URL offered in the not-found error has to arrive USABLE, because it is offered
+// as a `calendarId` to paste straight back — and `echoCallerText`'s default limit of 60 cuts
+// every real one, with nothing in the truncated value to say it was cut. Fastmail's own
+// prefix, `https://caldav.fastmail.com/dav/calendars/user/`, is 47 characters before the
+// account's email address and the collection id even gets a look in. 200 clears a long
+// address with room to spare while still bounding what one entry can add to the message; the
+// list as a whole is bounded separately by CALENDAR_NAME_LIST_CAP. Display NAMES keep the
+// 60-char default: a name is offered to be recognised, not pasted, and a caller who sees it
+// truncated can still read it off `list_calendars`.
+const CALENDAR_URL_ECHO_LIMIT = 200;
+
 /**
  * The display name Fastmail gives the hidden task collection, which `list_calendars` filters
  * out. Named once so every place that hides it hides the same thing — including the
@@ -2376,6 +2387,7 @@ const HIDDEN_TASK_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
  *   <displayname>Work</displayname>                 "Work"          a plain string
  *   <displayname>2026</displayname>                 2026            a NUMBER
  *   <displayname>true</displayname>                 true            a BOOLEAN
+ *   <displayname><![CDATA[2026]]></displayname>     "2026"          a STRING, not a number
  *   <displayname/>  or  <displayname></displayname> {}              an EMPTY OBJECT
  *   <D:displayname xml:lang="en"/>                  {_attributes:…} an OBJECT
  *   <displayname>A</displayname> twice              ['A','B']       an ARRAY
@@ -2392,7 +2404,11 @@ const HIDDEN_TASK_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
  *   (a parser leaving compact text in place)        {_text:"Work"}  never produced today
  *
  * The number and boolean come from tsdav's `nativeType` (:104-114), which coerces any element
- * text that looks numeric or reads "true"/"false". THAT COERCION IS LOSSY BEFORE WE SEE IT: a
+ * text that looks numeric or reads "true"/"false". It runs on TEXT ONLY, which is why the
+ * CDATA row above differs from the plain row directly two lines up: xml-js routes character
+ * data past the text callback, so `<![CDATA[2026]]>` survives as the string "2026" while the
+ * same four characters written as text arrive as the number 2026. Both name the same
+ * calendar, and this function reports both as "2026". THAT COERCION IS LOSSY BEFORE WE SEE IT: a
  * calendar named `1e3` arrives as the number 1000 and can only be listed as "1000", because
  * the original text is gone by then. What this function preserves is not the spelling but the
  * INVARIANT that matters — the name it returns is one the caller can pass straight back as a
@@ -2438,20 +2454,24 @@ function selectableCalendars(calendars: DAVCalendar[]): DAVCalendar[] {
   // read of this field — not because a typed name was leaking through. It was not: the shapes
   // tsdav can hand back ({}, {_attributes}, a number, a boolean, an array) equal the hidden
   // name under a raw comparison exactly as rarely as they do under this one, which is never.
-  // The one input where the two differ is a padded exact name — `'  DEFAULT_TASK_CALENDAR_NAME  '`
-  // passed this filter before and is hidden now — and the reason to care is that the caller
-  // side is trimmed too, so an untrimmed compare here would hide a calendar from `list_calendars`
-  // while still letting a `calendarId` resolve to it.
+  // Nor is a padded exact name the exception: xml-js parses with `trim: true`, which trims
+  // plain text and CDATA alike, so `'  DEFAULT_TASK_CALENDAR_NAME  '` cannot reach this code
+  // either. There is NO reachable input where the raw comparison and this one disagree. The
+  // unwrap is symmetry insurance — every other read of this field goes through the helper, and
+  // a filter that compared raw would be the one place to re-check if that ever stopped being
+  // true.
   return calendars.filter(c => unwrapDisplayName(c.displayName) !== HIDDEN_TASK_CALENDAR_NAME);
 }
 
 /**
  * The one "no calendar matched that id" error, raised by BOTH the read and the write path.
  *
- * `calendarId` accepts a CalDAV URL or a display name, and the name is matched exactly — so
- * "work" for a calendar called "Work" misses. That made a shared, self-correcting message
- * worth more than a bare echo: the available names are listed, so a caller that guessed the
- * spelling can fix the call without a second `list_calendars` round-trip.
+ * `calendarId` accepts a CalDAV URL or a display name, and the name is matched
+ * CASE-SENSITIVELY — surrounding whitespace is ignored on both sides, and `list_calendars`
+ * reports the trimmed name, so what it hands back is a value this parameter resolves. "work"
+ * for a calendar called "Work" still misses, which is what made a shared, self-correcting
+ * message worth more than a bare echo: the available names are listed, so a caller that
+ * guessed the spelling can fix the call without a second `list_calendars` round-trip.
  *
  * The listing is filtered HERE rather than at each call site, because the two call sites
  * passed different lists: the read path had already dropped the hidden task collection and
@@ -2464,12 +2484,24 @@ function calendarNotFoundError(calendarId: unknown, available: DAVCalendar[]): I
   // caller a message that silently under-reported what they could name — and the URL is not a
   // consolation prize here, it is a `calendarId` that works, which is exactly what this
   // message exists to hand back. Never silently drop a promised field; see CLAUDE.md.
-  const names = selectableCalendars(available)
-    .map(c => unwrapDisplayName(c.displayName) ?? c.url)
-    .filter((n): n is string => typeof n === 'string' && n.length > 0);
-  const shown = names.slice(0, CALENDAR_NAME_LIST_CAP).map(n => `"${echoCallerText(n)}"`).join(', ');
-  const more = names.length > CALENDAR_NAME_LIST_CAP ? `, …and ${names.length - CALENDAR_NAME_LIST_CAP} more` : '';
-  const listing = names.length > 0 ? ` Available calendars: ${shown}${more}.` : '';
+  //
+  // Which is why the two carry DIFFERENT echo limits rather than sharing one. A URL that is
+  // offered as a working handle and then truncated is worse than one omitted: the caller
+  // pastes it back and gets this same error again, with nothing saying the value was cut.
+  const entries = selectableCalendars(available)
+    .map(c => {
+      const name = unwrapDisplayName(c.displayName);
+      if (name !== undefined) return { text: name, limit: undefined };
+      const url = typeof c.url === 'string' ? c.url.trim() : '';
+      return url.length > 0 ? { text: url, limit: CALENDAR_URL_ECHO_LIMIT } : undefined;
+    })
+    .filter((e): e is { text: string; limit: number | undefined } => e !== undefined);
+  const shown = entries
+    .slice(0, CALENDAR_NAME_LIST_CAP)
+    .map(e => `"${echoCallerText(e.text, e.limit)}"`)
+    .join(', ');
+  const more = entries.length > CALENDAR_NAME_LIST_CAP ? `, …and ${entries.length - CALENDAR_NAME_LIST_CAP} more` : '';
+  const listing = entries.length > 0 ? ` Available calendars: ${shown}${more}.` : '';
   // QUOTED. The two values this path exists to reject — an empty string and a whitespace-only
   // one — render as nothing at all unquoted, so the message read "Calendar not found: ." with
   // no sign of what had been rejected, while the available names two clauses later were
@@ -2801,7 +2833,7 @@ export class CalDAVCalendarClient {
         // so `|| undefined` never fired and an object went out as a colour. Not routed
         // through `unwrapDisplayName`: this is a colour, and the number/boolean coercions
         // that make sense for a name would turn a malformed colour into a plausible one.
-        color: typeof (c as any).calendarColor === 'string' && (c as any).calendarColor.length > 0
+        color: typeof (c as any).calendarColor === 'string' && (c as any).calendarColor.trim().length > 0
           ? (c as any).calendarColor
           : undefined,
       }));
@@ -2827,6 +2859,11 @@ export class CalDAVCalendarClient {
       // separately from `requested` rather than replacing it: `requested` is what the
       // fail-closed presence test above reads, and an empty string must stay a value that
       // matches nothing, never one that widens the call to every calendar.
+      // Accepted knowingly: because the CALLER's value comes through here too, a property
+      // object such as `{_cdata: 'Work'}` now resolves where it was rejected before. The
+      // inputSchema types `calendarId` as a string so no normal MCP call can produce that
+      // shape, and lenient coercion of what a caller sends is this repo's documented posture
+      // (docs/conventions.md) — so this is left as a widening, not guarded against.
       const requestedName = unwrapDisplayName(requested);
       const matched = targetCalendars.filter(
         c => c.url === requested ||
@@ -3166,12 +3203,18 @@ export class CalDAVCalendarClient {
     const client = await this.getClient();
     const calendars = await this.discoverCalendars();
 
-    // Selected exactly as the read path selects: the same filtered list and the same trim.
-    // The two used to share only their ERROR MESSAGE, which made the divergence harder to
-    // see rather than easier — an event could be written into (and later deleted from) a
-    // collection no read tool would show, and `" Work "` failed here while succeeding on a
-    // list. `calendarId` narrows what the call touches, so an empty or whitespace-only value
-    // fails closed here for the same reason it does there.
+    // RESOLVED like the read path, but not identically, and the difference is worth naming:
+    // the read path `filter`s and queries EVERY calendar a name matches, while this `find`s
+    // and writes to the FIRST. A display name is unique per account in practice, so the two
+    // agree on every real input — but where they would not, a read unions the matches and a
+    // create silently picks one. What an ambiguous write should do (refuse, or say which it
+    // chose) is open; see issue #173. Do not "align" these by changing either behaviour here.
+    //
+    // What the two DO share, and what this comment used to be about: the same filtered
+    // calendar list, the same trim, the same fail-closed treatment of an empty value, and the
+    // same not-found error. They once shared only the error message, so an event could be
+    // written into — and later deleted from — a collection no read tool would show, and
+    // `" Work "` failed here while succeeding on a list.
     const requested = typeof event.calendarId === 'string' ? event.calendarId.trim() : event.calendarId;
     // Both sides normalised, for the reason spelled out on the read path: tsdav can type a
     // calendar's name away from string, so normalising only the stored side would reject a
