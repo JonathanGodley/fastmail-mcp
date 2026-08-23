@@ -2758,9 +2758,10 @@ export class JmapClient {
           // "wrote:" above a "> " line, or a pasted cite-blockquote): taking this way out
           // stores that body and does NOT restore the draft's real quote. Rejecting rather
           // than skipping exists to let the caller choose, so the choice has to be informed.
-          // It hangs off "read back", which does not literally address that caller: the
-          // conditional stays narrow on purpose, so the message does not nudge toward noQuote
-          // (the posture the reply-guard error below states, naming only the keep path).
+          // The final clause addresses that false-positive caller directly: reword the
+          // quote-shaped passage and keep originalEmailId, because for them noQuote is the
+          // lossy way out (the body they wrote holds no real quote to carry). The noQuote
+          // sentence itself still hangs off "read back" and does not nudge toward noQuote.
           // The forward clause is the noQuote de-forwarding below (dropForwardHeader), which
           // drops X-Forwarded-Message-Id; the recorded source instance rides with it unless the
           // draft is also a reply (see the carry at the recreate) — invisible until send_draft
@@ -2773,7 +2774,7 @@ export class JmapClient {
           const noQuoteCost = guardVariant === 'forward' && carriedForwardHeader.length > 0
             ? ", and the draft's forward marking cleared"
             : '';
-          throw new InvalidInputError(`The body you supplied already contains ${keepNoun}, and originalEmailId would rebuild it underneath, so the draft would carry it twice. If this body is the draft's own text read back, pass noQuote:true instead of originalEmailId: the body is stored exactly as written, with nothing rebuilt${noQuoteCost}. If you meant to write a fresh body, send it without ${keepNoun} and keep originalEmailId.`);
+          throw new InvalidInputError(`The body you supplied already contains ${keepNoun}, and originalEmailId would rebuild it underneath, so the draft would carry it twice. If this body is the draft's own text read back, pass noQuote:true instead of originalEmailId: the body is stored exactly as written, with nothing rebuilt${noQuoteCost}. If you meant to write a fresh body, send it without ${keepNoun} and keep originalEmailId — and if your text merely looks like ${keepNoun}, reword the passage that resembles it, because noQuote would store this body without the draft's real ${keepNoun}.`);
         }
         // Regenerate from the caller-named original — never re-resolved from the draft's
         // In-Reply-To / X-Forwarded-Message-Id (attacker-controllable), so there's no spoof

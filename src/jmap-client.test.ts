@@ -1352,6 +1352,9 @@ describe('updateDraft', () => {
       () => client.updateDraft('draft-1', { htmlBody: RAW_HTML_QUOTE, originalEmailId: 'orig-1' }),
       (err: Error) => {
         assert.match(err.message, /already contains the quote.*carry it twice.*noQuote:true/s);
+        // The false-positive escape route: a caller whose own prose merely resembles the
+        // quote is told to reword it, not steered into noQuote (which would drop the real quote).
+        assert.match(err.message, /merely looks like the quote.*reword/s);
         // A reply draft has no forward marking, so the forward-only clause must not appear.
         assert.doesNotMatch(err.message, /forward marking/);
         return true;
@@ -4160,6 +4163,8 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
       () => client.updateDraft('fdraft-1', { htmlBody: FWD_HTML, originalEmailId: 'orig-1' }),
       (err: Error) => {
         assert.match(err.message, /already contains the forwarded block.*carry it twice.*noQuote:true/s);
+        // The false-positive escape route, variant-worded for the forward block.
+        assert.match(err.message, /merely looks like the forwarded block.*reword/s);
         // This draft HAS a recorded source, so noQuote would clear it — and the refusal that
         // recommends noQuote has to say so.
         assert.match(err.message, /forward marking/);

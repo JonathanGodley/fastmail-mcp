@@ -501,9 +501,10 @@ Design points, each load-bearing:
   **Why reject rather than skip the rebuild.** Skipping was the alternative. The caller's new
   body is untrusted and prose can false-positive a marker; a silent skip on a false positive
   would drop the quote entirely, which is precisely the #37 data-loss class this guard exists
-  to prevent. A refusal on a false positive costs one round trip, and the body is then stored
-  verbatim under `noQuote`. Announced error over silent error, the same posture the signature
-  guard takes.
+  to prevent. A refusal on a false positive costs one round trip, and the refusal names the way
+  through for that caller too: reword the quote-shaped passage and keep `originalEmailId` —
+  taking `noQuote` there would store the body verbatim, without the draft's real quote.
+  Announced error over silent error, the same posture the signature guard takes.
 - **The original is the caller-named `originalEmailId`, never re-resolved from the draft's
   `In-Reply-To`.** `In-Reply-To` is an attacker-controllable header; resolving it to fetch a
   message would be a confused-deputy / quote-spoofing surface. The id is trusted, not
