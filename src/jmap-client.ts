@@ -2460,6 +2460,11 @@ export class JmapClient {
     // that isn't preserving by construction, force the caller to choose: regenerate+keep
     // from a caller-named originalEmailId, or deliberately noQuote. Supersedes the fork.8
     // new-body-scan (bypassable + html-only); see docs/email-bodies.md, #42, #30.
+    // The new body is consulted in exactly ONE place — the keep path below (#145), where a
+    // body that already carries the block originalEmailId would rebuild is REFUSED. That
+    // does not reopen the bypass this redesign closed, because it can only ever make a call
+    // fail: no new-body content exempts an edit from the challenge, it can only earn a
+    // second, narrower one.
     const isReply = !!existingEmail.inReplyTo?.length;
     const oldHtmlQuoted = hasQuoteMarker(existingHtmlValue);
     const oldTextQuoted = hasTextQuoteMarker(existingTextValue);
@@ -2510,12 +2515,16 @@ export class JmapClient {
     const clearedText = clear.has('textBody');
     const touchesBody = wroteHtml || wroteText || clearedHtml || clearedText;
 
-    // The caller's OWN html, snapshotted before the keep path can replace it with a rebuilt
-    // body. The checks that must not see this server's own output — an authored reference to
-    // a server-managed identifier is an error, while the rebuilt quote is full of them by
-    // design — read this, never updates.htmlBody. Snapshotted BEFORE the signature step
-    // below for the same reason: the signature is this server's markup, not the caller's.
+    // The caller's OWN bodies, snapshotted before the keep path can replace them with a
+    // rebuilt body. The checks that must not see this server's own output — an authored
+    // reference to a server-managed identifier is an error, while the rebuilt quote is full of
+    // them by design — read these, never updates.htmlBody/textBody. Snapshotted BEFORE the
+    // signature step below for the same reason: the signature is this server's markup, not the
+    // caller's. That matters to the keep-path duplicate check (#145) as well as to the
+    // identifier scan: an identity whose html signature contains a cite-blockquote would
+    // otherwise trip that check on this server's own appended block.
     const callerWrittenHtml = updates.htmlBody;
+    const callerWrittenText = updates.textBody;
 
     // ---- The sending identity's signature (#33) ----
     // Positioned here for two reasons. It must run BEFORE the quote rebuild further down,
@@ -2719,6 +2728,33 @@ export class JmapClient {
       if (updates.originalEmailId && updates.noQuote === true) {
         throw new InvalidInputError(`Pass either originalEmailId (keep ${keepNoun}) or noQuote (discard it), not both.`);
       } else if (updates.originalEmailId) {
+        // The ONE place this guard consults the caller's NEW body (#145) — and it can only
+        // ever make the call FAIL, never pass, so it does not reopen the bypassable new-body
+        // scan the #42 redesign closed above: an edit still cannot exempt itself by supplying
+        // quote-shaped content. A keep rebuilds the variant's block UNDERNEATH the body
+        // supplied, so a body that ALREADY carries that block stores it twice — and the
+        // plain-text read-edit-write loop the signature docs prescribe (read the draft, edit
+        // the words, hand the whole text back) hands back exactly such a body.
+        //
+        // Read as the caller WROTE them: the signature step above has already rewritten
+        // updates.htmlBody/textBody with this server's own markup. Variant-matched like
+        // oldTextMarked above — a forward of a reply legitimately reproduces "wrote:\n> " in
+        // its text, so checking the other variant's marker would misfire there.
+        //
+        // REJECT, not skip-the-rebuild. Skipping was the alternative and lost: the caller's
+        // new body is untrusted and prose can false-positive a marker, so a silent skip on a
+        // false positive DROPS the quote — the #37 data-loss class this guard exists to
+        // prevent — while a refusal costs one round trip and the body is then stored verbatim
+        // under noQuote. Do not "improve" this into a skip.
+        //
+        // The && wroteHtml / && wroteText terms make this false when the edit writes neither
+        // body, so a clear-only keep still falls through to the "can't regenerate on a body
+        // you're not writing" refusal below rather than being answered here.
+        const keepHtmlMarked = guardVariant === 'reply' ? hasQuoteMarker : hasForwardMarker;
+        const keepTextMarked = guardVariant === 'reply' ? hasTextQuoteMarker : hasTextForwardMarker;
+        if ((wroteHtml && keepHtmlMarked(callerWrittenHtml)) || (wroteText && keepTextMarked(callerWrittenText))) {
+          throw new InvalidInputError(`The body you supplied already contains ${keepNoun}, and originalEmailId would rebuild it underneath, so the draft would carry it twice. If this body is the draft's own text read back, pass noQuote:true instead of originalEmailId and it is stored as written. If you meant to write a fresh body, send it without ${keepNoun} and keep originalEmailId.`);
+        }
         // Regenerate from the caller-named original — never re-resolved from the draft's
         // In-Reply-To / X-Forwarded-Message-Id (attacker-controllable), so there's no spoof
         // surface. The id is trusted, not validated against the draft's headers (that check

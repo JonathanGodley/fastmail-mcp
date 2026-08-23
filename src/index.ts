@@ -1105,7 +1105,7 @@ const TOOLS = [
             },
             originalEmailId: {
               type: 'string',
-              description: "When editing the body of a REPLY or FORWARD draft, the id of the message this draft replies to OR forwards (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original / forwarded-message block. Without it, a body edit that would drop them is rejected. Rebuilding APPENDS the quote to the body you supply: if the body you are sending already contains the quoted original — which it does whenever you read the draft, edit the words, and send the whole text back — pass noQuote:true instead, or the draft will end up carrying the quote twice.",
+              description: "When editing the body of a REPLY or FORWARD draft, the id of the message this draft replies to OR forwards (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original / forwarded-message block. Without it, a body edit that would drop them is rejected. Rebuilding APPENDS the quote to the body you supply: if the body you are sending already contains the quoted original — which it does whenever you read the draft, edit the words, and send the whole text back — pass noQuote:true instead; such a call is rejected rather than storing the quote twice.",
             },
             noQuote: {
               type: ['boolean', 'string'],

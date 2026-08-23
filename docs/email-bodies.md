@@ -480,6 +480,27 @@ Design points, each load-bearing:
   is one *this server* generated, so its quote shape is reliable. The markers (`hasQuoteMarker`
   on html, `hasTextQuoteMarker` on text) are tolerant *presence* checks that only govern
   whether the guard fires; `originalEmailId` is the authoritative way to keep the quote.
+- **The one exception, and why it is not a bypass (#145).** The keep path *does* read the
+  caller's new body, in exactly one place and in exactly one direction: a keep whose supplied
+  body already carries the block `originalEmailId` would rebuild is **rejected**, naming
+  `noQuote: true` as the way to store that body as written. The rebuild *appends*, so without
+  this the draft silently stored the attribution and the quoted original twice — which is what
+  the plain-text read-edit-write loop the signature section prescribes hands back every time.
+  This does not reopen the bypass above, because consulting the new body can only ever make a
+  call **fail**, never pass: no new-body content exempts an edit from the challenge.
+  The check runs on the bodies as the caller *wrote* them, before the signature step appends
+  this server's own markup (an identity whose html signature contains a cite-blockquote must
+  not trip it), and before the original is fetched, so the refusal costs no round trip to the
+  store and does not depend on the named original resolving. It is variant-scoped like the
+  stored-body check — reply markers on a reply draft, forward markers on a forward draft —
+  because a forward *of* a reply legitimately reproduces `wrote:\n> ` in its text.
+
+  **Why reject rather than skip the rebuild.** Skipping was the alternative. The caller's new
+  body is untrusted and prose can false-positive a marker; a silent skip on a false positive
+  would drop the quote entirely, which is precisely the #37 data-loss class this guard exists
+  to prevent. A refusal on a false positive costs one round trip, and the body is then stored
+  verbatim under `noQuote`. Announced error over silent error, the same posture the signature
+  guard takes.
 - **The original is the caller-named `originalEmailId`, never re-resolved from the draft's
   `In-Reply-To`.** `In-Reply-To` is an attacker-controllable header; resolving it to fetch a
   message would be a confused-deputy / quote-spoofing surface. The id is trusted, not
