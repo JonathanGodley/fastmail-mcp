@@ -655,16 +655,31 @@ try {
   // the line has to cover EVERY fact measured per form, not just the narrow-window pair. A
   // summary that compared only Q3/Q4 would report "identical" while the forms disagreed about
   // the expand strip or about either span window, which is the opposite of what it promises.
+  //
+  // Two rules keep it honest as the probe grows. Every query the forms are measured under gets
+  // a field, Q1 (the STORED form, before any expansion) included — otherwise the summary could
+  // call the forms identical while the server had rewritten one of them on the way in. And each
+  // field holds ONE observation: a pair of window results combined with && or || collapses to
+  // the same value for genuinely different outcomes, so the four span results are four fields.
   const formsProfile = k => JSON.stringify({
+    q1Returned: !!d1[k],
+    q1AnyRdate: d1[k]?.anyRdate ?? null,
+    q1RdateLineCount: d1[k]?.rdateLines?.length ?? null,
+    q1AnyRrule: d1[k]?.anyRrule ?? null,
     q2Returned: !!d2[k],
     q2AnyRdate: d2[k]?.anyRdate ?? null,
     q2Blocks: d2[k]?.blockCount ?? null,
+    // The instants themselves, not just how many: two forms can expand to the same COUNT of
+    // occurrences at different times, and that would be a divergence this line must not miss.
+    q2Instants: (d2[k]?.blocks ?? []).map(b => b.dtstartMs),
     q3Blob: !!d3[k],
     q3Matched: q3.hrefs.has(k),
     q4Blob: !!d4[k],
     q4Matched: q4.hrefs.has(k),
-    spanDtstart: span.narrowDtstart.expand.hrefs.has(k) && span.narrowDtstart.plain.hrefs.has(k),
-    spanBetween: span.betweenOccurrences.expand.hrefs.has(k) || span.betweenOccurrences.plain.hrefs.has(k),
+    spanDtstartExpand: span.narrowDtstart.expand.hrefs.has(k),
+    spanDtstartPlain: span.narrowDtstart.plain.hrefs.has(k),
+    spanBetweenExpand: span.betweenOccurrences.expand.hrefs.has(k),
+    spanBetweenPlain: span.betweenOccurrences.plain.hrefs.has(k),
   });
   const formsAgree = RDATE_KINDS.every(k => formsProfile(k) === formsProfile(RDATE_KINDS[0]));
   check(
@@ -713,10 +728,10 @@ try {
       }
     }
   } catch (err) {
+    // Reaching here means tempCalendarUrl was set: nothing in the try block runs until it is,
+    // so with no collection created there is nothing here that can throw.
     console.log(`\nCleanup FAILED: ${redact(err?.message ?? String(err))}`);
-    console.log(tempCalendarUrl
-      ? `  ⚠ DELETE MANUALLY: ${redact(tempCalendarUrl)}`
-      : '  (no temporary collection had been created, so nothing is left behind)');
+    console.log(`  ⚠ DELETE MANUALLY: ${redact(tempCalendarUrl)}`);
     process.exit(1);
   }
 }
