@@ -208,9 +208,9 @@ const summaryOf = data => (data.match(/^SUMMARY:(.*)$/m)?.[1] ?? '(no SUMMARY)')
  *  The URL, never the display name. A name test cannot tell this run's collection from an
  *  earlier run's sitting under the same name: the earlier one is already listed, so the wait
  *  would succeed on attempt 1 and report the fresh collection as visible before the server
- *  had ever seen it. The URL is the only value in the payload that names exactly one
- *  collection. Compared with any trailing slash removed, since the two sides mint it from
- *  different places and need not agree on that. */
+ *  had ever seen it. The walk matches `url`/`href` by choice; either names exactly one
+ *  collection, where a display name does not. Compared with any trailing slash removed,
+ *  since the two sides mint it from different places and need not agree on that. */
 const sameCalendarUrl = (a, b) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
 
 function calendarIsListed(body, url) {
@@ -227,8 +227,8 @@ function calendarIsListed(body, url) {
     walk(payload);
     return urls.some(u => sameCalendarUrl(u, url));
   } catch {
-    // Not JSON (or no payload): the URL as a plain substring, with and without the trailing
-    // slash. Still unambiguous — the stamped path segment appears nowhere else.
+    // Not JSON (or no payload): the URL as a plain substring. Still unambiguous — the
+    // stamped path segment appears nowhere else.
     const bare = url.replace(/\/+$/, '');
     return body.includes(bare);
   }
