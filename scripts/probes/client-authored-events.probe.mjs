@@ -20,7 +20,8 @@
 // Raw CalDAV over bare fetch (PROPFIND discovery → calendar-query REPORT), not the built
 // server and not tsdav: the point is what the client wrote, with none of our parsing in
 // the way. Read-only; creates and deletes nothing. Output redacts the account name and
-// every email-shaped string.
+// every email-shaped string, and unwraps the CDATA the server wraps calendar-data and
+// display names in, so the bytes printed are the bytes stored.
 
 const USERNAME = process.env.FASTMAIL_CALDAV_USERNAME;
 const PASSWORD = process.env.FASTMAIL_CALDAV_PASSWORD;
@@ -61,6 +62,29 @@ const unescapeXml = s => s
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
   .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&');
 
+// XML text that may carry CDATA sections. Cyrus wraps calendar-data and display names in them,
+// so a plain unescape leaves the `<![CDATA[` … `]]>` markers sitting in the printed bytes.
+//
+// The unwrap has to be POSITIONAL. Inside a section the text is literal (no entities); outside
+// it, the ordinary escaping applies. So each section's contents are spliced back in exactly
+// where it sat and only the text around it is unescaped. Returning just the sections' contents
+// would silently drop the non-CDATA text of a mixed payload, and unescaping the whole string
+// would corrupt a literal `&amp;` that the CDATA existed to protect.
+const decodeXmlText = s => {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const start = s.indexOf('<![CDATA[', i);
+    if (start < 0) return out + unescapeXml(s.slice(i));
+    const end = s.indexOf(']]>', start + 9);
+    // Unterminated section: nothing reliable left to splice, so treat the rest as ordinary text
+    // rather than dropping it.
+    if (end < 0) return out + unescapeXml(s.slice(i));
+    out += unescapeXml(s.slice(i, start)) + s.slice(start + 9, end);
+    i = end + 3;
+  }
+};
+
 const PROPFIND = props =>
   `<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
   `<d:prop>${props.map(p => `<${p}/>`).join('')}</d:prop></d:propfind>`;
@@ -98,7 +122,7 @@ for (const block of responses(homePf.text)) {
   const href = (el(block, 'href') ?? '').trim();
   if (!href || abs(href) === home) continue;
   if (!/calendar[\s/>]/.test(el(block, 'resourcetype') ?? '')) continue;
-  collections.push({ url: abs(href), name: el(block, 'displayname') ?? '(unnamed)' });
+  collections.push({ url: abs(href), name: decodeXmlText(el(block, 'displayname') ?? '(unnamed)') });
 }
 console.log(`Calendar collections: ${collections.length}`);
 for (const c of collections) console.log(`  - ${redact(c.name)}  ${redact(c.url)}`);
@@ -110,7 +134,7 @@ const found = [];
 for (const c of collections) {
   const res = await dav('REPORT', c.url, { body: queryXml(windowStart, windowEnd), headers: { Depth: '1' } });
   for (const block of responses(res.text)) {
-    const data = unescapeXml(el(block, 'calendar-data') ?? '');
+    const data = decodeXmlText(el(block, 'calendar-data') ?? '');
     if (!data) continue;
     const summary = (data.match(/^SUMMARY.*$/m) ?? [''])[0];
     if (WANTED.some(w => summary.includes(w))) {
