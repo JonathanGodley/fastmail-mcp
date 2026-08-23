@@ -379,6 +379,18 @@ function lineToUtcMs(line) {
 const occurrenceMs = o => wallToUtcMs(o.y, o.mo, o.d, o.h);
 const asIso = ms => (ms === undefined ? '(unparsed)' : new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z'));
 
+/**
+ * Every instant an RDATE property names, whatever serialisation carried it. RFC 5545 §3.8.5.2
+ * allows both one comma-joined value list and one property per line, so the two fixtures here
+ * differ in their RDATE LINES by construction — comparing lines across the forms would compare
+ * the very thing they were built to differ on. The instants are what both forms share.
+ */
+const rdateInstantsIn = block =>
+  propLines(block, 'RDATE').flatMap(line => {
+    const params = line.slice(0, line.indexOf(':'));
+    return line.slice(line.indexOf(':') + 1).split(',').map(v => lineToUtcMs(`${params}:${v}`));
+  });
+
 /** Everything one expanded blob says about a resource, in the terms the checks below need. */
 function describe(blob) {
   const blocks = veventBlocks(blob);
@@ -387,6 +399,7 @@ function describe(blob) {
     anyRdate: blocks.some(b => propLines(b, 'RDATE').length > 0),
     anyRrule: blocks.some(b => propLines(b, 'RRULE').length > 0),
     rdateLines: blocks.flatMap(b => propLines(b, 'RDATE')),
+    rdateInstants: [...new Set(blocks.flatMap(rdateInstantsIn))].sort((a, b) => (a ?? Infinity) - (b ?? Infinity)),
     rruleLines: blocks.flatMap(b => propLines(b, 'RRULE')),
     blocks: blocks.map(b => ({
       dtstartLine: propLines(b, 'DTSTART')[0],
@@ -656,15 +669,19 @@ try {
   // summary that compared only Q3/Q4 would report "identical" while the forms disagreed about
   // the expand strip or about either span window, which is the opposite of what it promises.
   //
-  // Two rules keep it honest as the probe grows. Every query the forms are measured under gets
+  // Three rules keep it honest as the probe grows. Every query the forms are measured under gets
   // a field, Q1 (the STORED form, before any expansion) included — otherwise the summary could
-  // call the forms identical while the server had rewritten one of them on the way in. And each
+  // call the forms identical while the server had rewritten one of them on the way in. Each
   // field holds ONE observation: a pair of window results combined with && or || collapses to
   // the same value for genuinely different outcomes, so the four span results are four fields.
+  // And no field may encode the serialisation itself: an RDATE LINE COUNT is 1 for the
+  // comma-joined fixture and 2 for the one-per-line fixture by construction, so a profile
+  // carrying it could never report agreement. Per-form storage integrity is checked separately
+  // above; what belongs here is the parsed instants, which both forms share.
   const formsProfile = k => JSON.stringify({
     q1Returned: !!d1[k],
     q1AnyRdate: d1[k]?.anyRdate ?? null,
-    q1RdateLineCount: d1[k]?.rdateLines?.length ?? null,
+    q1RdateInstants: d1[k]?.rdateInstants ?? null,
     q1AnyRrule: d1[k]?.anyRrule ?? null,
     q2Returned: !!d2[k],
     q2AnyRdate: d2[k]?.anyRdate ?? null,
