@@ -1350,7 +1350,12 @@ describe('updateDraft', () => {
     mockReplyUpdate(client, DUAL_REPLY);
     await assert.rejects(
       () => client.updateDraft('draft-1', { htmlBody: RAW_HTML_QUOTE, originalEmailId: 'orig-1' }),
-      /already contains the quote.*carry it twice.*noQuote:true/s,
+      (err: Error) => {
+        assert.match(err.message, /already contains the quote.*carry it twice.*noQuote:true/s);
+        // A reply draft has no forward marking, so the forward-only clause must not appear.
+        assert.doesNotMatch(err.message, /forward marking/);
+        return true;
+      },
     );
   });
 
@@ -1363,7 +1368,11 @@ describe('updateDraft', () => {
         'draft-1',
         { htmlBody: PLAIN_HTML, textBody: RAW_TEXT_QUOTE, originalEmailId: 'orig-1' },
       ),
-      /already contains the quote.*noQuote:true/s,
+      (err: Error) => {
+        assert.match(err.message, /already contains the quote.*noQuote:true/s);
+        assert.doesNotMatch(err.message, /forward marking/);
+        return true;
+      },
     );
   });
 
@@ -4149,7 +4158,13 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
     await assert.rejects(
       () => client.updateDraft('fdraft-1', { htmlBody: FWD_HTML, originalEmailId: 'orig-1' }),
-      /already contains the forwarded block.*carry it twice.*noQuote:true/s,
+      (err: Error) => {
+        assert.match(err.message, /already contains the forwarded block.*carry it twice.*noQuote:true/s);
+        // This draft HAS a recorded source, so noQuote would clear it — and the refusal that
+        // recommends noQuote has to say so.
+        assert.match(err.message, /forward marking/);
+        return true;
+      },
     );
     const fetchedOriginal = makeReq.mock.calls.some((c: any) => {
       const [method, params] = c.arguments[0].methodCalls[0];
@@ -4158,11 +4173,30 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     assert.equal(fetchedOriginal, false, 'the refusal must precede the originalEmailId fetch');
   });
 
+  it('does not claim a forward-marking cost on a draft that has no marking to clear (#145)', async () => {
+    // Marker-only forward draft: a recognizable block but no recorded source, so noQuote has
+    // no header to drop. The refusal still stands (the block would be rebuilt underneath), but
+    // the clause naming what noQuote costs must not appear — it would be untrue here.
+    mockForwardUpdate(client, HEADERLESS_FORWARD);
+    await assert.rejects(
+      () => client.updateDraft('fdraft-1', { htmlBody: FWD_HTML, originalEmailId: 'orig-1' }),
+      (err: Error) => {
+        assert.match(err.message, /already contains the forwarded block.*noQuote:true/s);
+        assert.doesNotMatch(err.message, /forward marking/);
+        return true;
+      },
+    );
+  });
+
   it('rejects a keep whose own text body already carries the dashed forwarded line (#145)', async () => {
     mockForwardUpdate(client, TEXT_ONLY_FORWARD);
     await assert.rejects(
       () => client.updateDraft('fdraft-1', { textBody: FWD_TEXT, originalEmailId: 'orig-1' }),
-      /already contains the forwarded block.*noQuote:true/s,
+      (err: Error) => {
+        assert.match(err.message, /already contains the forwarded block.*noQuote:true/s);
+        assert.match(err.message, /forward marking/);
+        return true;
+      },
     );
   });
 

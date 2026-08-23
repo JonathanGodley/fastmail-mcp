@@ -459,9 +459,9 @@ replaces the whole body (the recreate above writes it verbatim), an edit that re
 clears the body would silently drop the quote. `edit_draft` guards against this.
 
 **The decision is made on the EXISTING (stored) body, not the caller's new body** (with one
-refuse-only exception, below). A reply
-draft (one with an `In-Reply-To` header) "has a quote" when its stored `htmlBody` matches
-`hasQuoteMarker` OR its stored `textBody` matches `hasTextQuoteMarker`. When the draft has a
+refuse-only exception, below). A reply draft (one with an `In-Reply-To` header) "has a quote"
+when its stored `htmlBody` matches `hasQuoteMarker` OR its stored `textBody` matches
+`hasTextQuoteMarker`. When the draft has a
 quote and the edit touches the body in a way that isn't quote-preserving by construction (see
 the carve-outs below), the edit is **rejected** unless the caller resolves it one of two ways:
 
