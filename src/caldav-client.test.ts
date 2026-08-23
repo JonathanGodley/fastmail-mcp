@@ -6717,6 +6717,46 @@ describe('calendar display names that are not strings', () => {
     );
   });
 
+  it('bounds an offered URL at 200 and a name at 60, and echoes a rejected URL whole', async () => {
+    // Pins the two limits against each other, because they are easy to collapse into one and
+    // the whole point is that they differ. A URL is offered to be PASTED BACK, so it gets
+    // room; a name is offered to be RECOGNISED, so it keeps the shared default. And the
+    // REJECTED value gets the URL bound too — the caller who lands here is often one who
+    // mistyped a URL, and 60 characters cuts inside the fixed prefix, where two different
+    // wrong URLs render identically.
+    const prefix = 'https://caldav.fastmail.com/dav/calendars/user/user@example.invalid/';
+    const overlongUrl = `${prefix}${'a'.repeat(260 - prefix.length)}/`;
+    const overlongName = `Team ${'x'.repeat(80)}`;
+    const rejectedUrl = `${prefix}typo-but-realistic-collection-id/`;
+    assert.ok(overlongUrl.length > 200, 'URL fixture must exceed the URL bound');
+    assert.ok(overlongName.length > 60, 'name fixture must exceed the default bound');
+    assert.ok(rejectedUrl.length > 60, 'rejected fixture must exceed the default bound');
+
+    const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [
+        { displayName: overlongName, url: '/cal/long-name/' },
+        { displayName: {}, url: overlongUrl },
+      ]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+
+    await assert.rejects(
+      () => client.getCalendarEvents(rejectedUrl, 50, '2026-04-01', '2026-04-30'),
+      (err: Error) => {
+        // The rejected value survives intact, so the caller can see WHICH URL missed.
+        assert.ok(err.message.includes(`Calendar not found: "${rejectedUrl}"`), err.message);
+        // An offered URL past the bound is cut AT the bound, and says so with the ellipsis.
+        assert.ok(err.message.includes(`"${overlongUrl.slice(0, 200)}…"`), err.message);
+        assert.ok(!err.message.includes(overlongUrl), 'a 260-char URL must not appear whole');
+        // A name past 60 keeps the shared default rather than inheriting the URL bound.
+        assert.ok(err.message.includes(`"${overlongName.slice(0, 60)}…"`), err.message);
+        return true;
+      },
+    );
+  });
+
   it('matches a calendarId of "true" against a calendar tsdav typed as a boolean', async () => {
     // The number is not the only coercion `nativeType` performs: `<displayname>true</displayname>`
     // arrives as the BOOLEAN true. Same regression, same fix, and worth its own case because

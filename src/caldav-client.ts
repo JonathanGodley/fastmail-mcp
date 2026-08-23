@@ -2365,6 +2365,10 @@ const CALENDAR_NAME_LIST_CAP = 20;
 // list as a whole is bounded separately by CALENDAR_NAME_LIST_CAP. Display NAMES keep the
 // 60-char default: a name is offered to be recognised, not pasted, and a caller who sees it
 // truncated can still read it off `list_calendars`.
+//
+// Deliberately HERE rather than in coerce.ts beside DATE_ECHO_LIMIT and ZONE_ECHO_LIMIT: this
+// one has a single consumer, and it belongs next to CALENDAR_NAME_LIST_CAP, which bounds the
+// other half of the same message.
 const CALENDAR_URL_ECHO_LIMIT = 200;
 
 /**
@@ -2388,6 +2392,8 @@ const HIDDEN_TASK_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
  *   <displayname>2026</displayname>                 2026            a NUMBER
  *   <displayname>true</displayname>                 true            a BOOLEAN
  *   <displayname><![CDATA[2026]]></displayname>     "2026"          a STRING, not a number
+ *       (a string by the time it reaches us: the raw `{_cdata:…}` shape is what the
+ *        DEFENSIVE table below covers, because tsdav flattens it before we see it)
  *   <displayname/>  or  <displayname></displayname> {}              an EMPTY OBJECT
  *   <D:displayname xml:lang="en"/>                  {_attributes:…} an OBJECT
  *   <displayname>A</displayname> twice              ['A','B']       an ARRAY
@@ -2506,8 +2512,14 @@ function calendarNotFoundError(calendarId: unknown, available: DAVCalendar[]): I
   // one — render as nothing at all unquoted, so the message read "Calendar not found: ." with
   // no sign of what had been rejected, while the available names two clauses later were
   // quoted. Same value class, same sentence, so the same treatment.
+  //
+  // And echoed at the URL bound, not the 60-char default, because the value being REJECTED is
+  // itself often a URL — a caller who mistyped one is exactly who reaches here. 60 characters
+  // leaves nothing past the 47-character fixed prefix, so two different wrong URLs render
+  // byte-identical and the echo stops telling the caller which one they sent. Same bound the
+  // offered URLs get.
   return new InvalidInputError(
-    `Calendar not found: "${echoCallerText(calendarId)}". calendarId takes either a calendar's URL ` +
+    `Calendar not found: "${echoCallerText(calendarId, CALENDAR_URL_ECHO_LIMIT)}". calendarId takes either a calendar's URL ` +
     '(its `id` from list_calendars) or its display name, and the name is matched CASE-SENSITIVELY; ' +
     'surrounding whitespace is ignored on both sides, and list_calendars reports the trimmed name.' +
     `${listing}`,
@@ -2833,8 +2845,10 @@ export class CalDAVCalendarClient {
         // so `|| undefined` never fired and an object went out as a colour. Not routed
         // through `unwrapDisplayName`: this is a colour, and the number/boolean coercions
         // that make sense for a name would turn a malformed colour into a plausible one.
+        // Trimmed on the way OUT as well as in the guard, so the two agree the way the name
+        // path already does. No reachable input differs; consistency only.
         color: typeof (c as any).calendarColor === 'string' && (c as any).calendarColor.trim().length > 0
-          ? (c as any).calendarColor
+          ? (c as any).calendarColor.trim()
           : undefined,
       }));
   }

@@ -351,12 +351,14 @@ function participantsSchemaProperty(leadIn: string) {
 /**
  * How `calendarId` is matched, said ONCE for the two tools that take one.
  *
- * The read and the write path resolve the parameter identically — same filtered calendar
- * list, same trim, same fail-closed treatment of an empty value, and literally the same
- * not-found error. Only the descriptions had diverged: 394 characters on the read side
- * against 41 on the write side ("ID of the calendar to create the event in"), so a caller
- * reading the write tool could not learn that a display name works, that it is matched
- * exactly, or that a miss is rejected rather than answered emptily.
+ * The read and the write path share how the parameter RESOLVES — same filtered calendar list,
+ * same trim, same fail-closed treatment of an empty value, and literally the same not-found
+ * error — though not what they do with a tie: the read path queries every calendar a name
+ * matches and the create path takes the first (issue #173). Only the descriptions had
+ * diverged: 394 characters on the read side against 41 on the write side ("ID of the calendar
+ * to create the event in"), so a caller reading the write tool could not learn that a display
+ * name works, that it is matched case-sensitively with surrounding whitespace ignored on both
+ * sides, or that a miss is rejected rather than answered emptily.
  *
  * `update_calendar_event` takes no calendarId, so these two are the whole set.
  */
