@@ -1525,15 +1525,32 @@ describe('updateDraft', () => {
     // Each edit rebuilds the quote from the original, so each edit loses them again. Repeating
     // the disclosure is correct: the alternative is an edit that drops images and says nothing.
     mockReplyUpdate(client, DUAL_REPLY);
-    // A FRESH args object per call, because the keep path rewrites updates.htmlBody in place
-    // with the rebuilt (quote-bearing) body. Reusing one object would hand the second call the
-    // first call's output rather than the caller's html — which the #145 duplicate check now
-    // correctly refuses. Two separate edits is what this test means; a real caller's arguments
-    // are parsed fresh per request, so they never alias this way.
+    // A FRESH args object per call, because two separate edits is what this test means: each
+    // one is made with the caller's own html, not with the rebuilt (quote-bearing) body the
+    // one before it produced — which the #145 duplicate check would correctly refuse. Building
+    // the arguments per call states that outright instead of leaning on updateDraft leaving
+    // its caller's object alone (#170).
     const args = () => ({ htmlBody: '<p>edited twice</p>', originalEmailId: 'orig-relative' });
     const first = await client.updateDraft('draft-1', args());
     const second = await client.updateDraft('draft-1', args());
     assert.deepEqual(second.notes, first.notes);
+  });
+
+  it('leaves the caller\'s own updates object untouched when it rebuilds the quote', async () => {
+    // The rebuilt, quote-bearing body is the server's output, and an argument object belongs to
+    // the caller: a call that wrote its output back over the html it was handed would silently
+    // change a value the caller can still read, and would hand any second call made with the
+    // same object the first call's body instead of the caller's.
+    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
+    const args = { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-1' };
+    const before = structuredClone(args);
+    await client.updateDraft('draft-1', args);
+    // The rebuild has to have actually run, or there is no rewritten body to write back and
+    // the assertion below would hold for the wrong reason.
+    const draft = createdDraft(makeReq);
+    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
+    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
+    assert.deepEqual(args, before);
   });
 
   it('says nothing of the sort when the rebuilt quote carries every reference it found', async () => {

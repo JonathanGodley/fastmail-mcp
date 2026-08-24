@@ -2492,7 +2492,7 @@ export class JmapClient {
     const forwardMarkers = oldHtmlForwarded || oldTextForwarded;
 
     // Mutually exclusive dispatch: compute both, run at most ONE variant — the keep path
-    // MUTATES updates.htmlBody/textBody and falls through, so two sequential blocks would
+    // REPLACES the working bodies below and falls through, so two sequential blocks would
     // rebuild the body twice. Both engaged → reply wins: on a pathological both-marker
     // draft an originalEmailId keep regenerates the REPLY shape — loud, no silent loss,
     // but a tie-break, not a claim of correctness. (A forward OF a reply carries
@@ -2515,23 +2515,38 @@ export class JmapClient {
     const clearedText = clear.has('textBody');
     const touchesBody = wroteHtml || wroteText || clearedHtml || clearedText;
 
-    // The caller's OWN bodies, snapshotted before the keep path can replace them with a
-    // rebuilt body. The checks that must not see this server's own output — an authored
-    // reference to a server-managed identifier is an error, while the rebuilt quote is full of
-    // them by design — read these, never updates.htmlBody/textBody. Snapshotted BEFORE the
-    // signature step below for the same reason: the signature is this server's markup, not the
-    // caller's. That matters to the keep-path duplicate check (#145) as well as to the
-    // identifier scan: an identity whose html signature contains a cite-blockquote would
-    // otherwise trip that check on this server's own appended block.
+    // The caller's OWN bodies, held apart from the working bodies below — which the signature
+    // step and the keep path replace with this server's own rewritten text. The checks that
+    // must not see this server's own output — an authored reference to a server-managed
+    // identifier is an error, while the rebuilt quote is full of them by design — read these,
+    // never workingHtml/workingText. Held apart BEFORE the signature step below for the same
+    // reason: the signature is this server's markup, not the caller's. That matters to the
+    // keep-path duplicate check (#145) as well as to the identifier scan: an identity whose
+    // html signature contains a cite-blockquote would otherwise trip that check on this
+    // server's own appended block.
     const callerWrittenHtml = updates.htmlBody;
     const callerWrittenText = updates.textBody;
 
+    // The bodies as this method rewrites them: seeded from what the caller wrote, then replaced
+    // by the signature append and again by the quote rebuild. Every later read of "the body"
+    // reads these, so nothing writes back into the caller's own `updates` object (#170) — over
+    // MCP each request parses fresh arguments, but an in-process caller (a test, the probe
+    // harness) can reuse one object across calls and must not be handed this call's output as
+    // the next call's input.
+    //
+    // Two sequential locals rather than one copy of `updates` taken at the top, on purpose:
+    // the readers below are ORDERED, and each must see the body as it stands at ITS point in
+    // the sequence — the quote rebuild takes the post-signature body as its input, which a
+    // single snapshot made before the signature step could not supply. Do not "simplify" this
+    // into a spread copy.
+    let workingHtml = updates.htmlBody;
+    let workingText = updates.textBody;
+
     // ---- The sending identity's signature (#33) ----
     // Positioned here for two reasons. It must run BEFORE the quote rebuild further down,
-    // which replaces updates.htmlBody with the quote-appended body — appending after that
-    // would put the sign-off underneath the quoted history. And it must run AFTER the
-    // callerWrittenHtml snapshot above, so the reserved-identifier scan judges only what the
-    // caller wrote.
+    // which replaces workingHtml with the quote-appended body — appending after that would
+    // put the sign-off underneath the quoted history. And it must run AFTER callerWrittenHtml
+    // is taken above, so the reserved-identifier scan judges only what the caller wrote.
     //
     // The trigger is deliberately NOT the flag alone. A draft that already carries a
     // signature block was signed because somebody asked for it; a later edit that rewrites
@@ -2603,27 +2618,28 @@ export class JmapClient {
     // preserved verbatim (a metadata-only edit) or dropped as the unwritten partner, and in
     // neither case is there caller text to sign.
     const writtenBodies = {
-      ...(wroteText && { textBody: updates.textBody }),
-      ...(wroteHtml && { htmlBody: updates.htmlBody }),
+      ...(wroteText && { textBody: workingText }),
+      ...(wroteHtml && { htmlBody: workingHtml }),
     };
-    // Why the sign-off did not land, read off the bodies as the caller WROTE them — before
-    // the append below rewrites them, because the reason is only legible against their own
-    // text. This runs the same plan the append does rather than restating any part of it,
-    // which is what makes it total: every reason the compose paths can report is reachable
-    // here, including the one this used to miss. An identity whose signature is images-only
-    // HTML is not signature-LESS, so the old `editSignature === undefined` gate armed
-    // nothing for it — and an edit leaving that draft as plain text then appended nothing
-    // and said nothing, silently dropping a sign-off the draft was carrying.
+    // Why the sign-off did not land, read off the bodies as the caller WROTE them — taken
+    // before the append below replaces the working bodies, because the reason is only
+    // legible against their own text. This runs the same plan the append does rather than
+    // restating any part of it, which is what makes it total: every reason the compose
+    // paths can report is reachable here, including the one this used to miss. An identity
+    // whose signature is images-only HTML is not signature-LESS, so the old
+    // `editSignature === undefined` gate armed nothing for it — and an edit leaving that
+    // draft as plain text then appended nothing and said nothing, silently dropping a
+    // sign-off the draft was carrying.
     const signatureSkip = signatureWanted
       ? signatureSkipReason(writtenBodies, editSignature)
       : undefined;
     if (signatureWanted) {
-      const before = { textBody: updates.textBody, htmlBody: updates.htmlBody };
+      const before = { textBody: workingText, htmlBody: workingHtml };
       const signed = applySignature(writtenBodies, editSignature);
-      if (wroteHtml && signed.htmlBody !== undefined) updates.htmlBody = signed.htmlBody;
-      if (wroteText && signed.textBody !== undefined) updates.textBody = signed.textBody;
+      if (wroteHtml && signed.htmlBody !== undefined) workingHtml = signed.htmlBody;
+      if (wroteText && signed.textBody !== undefined) workingText = signed.textBody;
       reAppendedSignature = updates.appendSignature === undefined
-        && (updates.htmlBody !== before.htmlBody || updates.textBody !== before.textBody);
+        && (workingHtml !== before.htmlBody || workingText !== before.textBody);
     }
     // What the result says when it did not land. Two framings, because two different things
     // asked for it:
@@ -2736,8 +2752,8 @@ export class JmapClient {
         // plain-text read-edit-write loop the signature docs prescribe (read the draft, edit
         // the words, hand the whole text back) hands back exactly such a body.
         //
-        // Read as the caller WROTE them: the signature step above has already rewritten
-        // updates.htmlBody/textBody with this server's own markup. Variant-matched like
+        // Read as the caller WROTE them: the signature step above has already replaced the
+        // working bodies with this server's own markup. Variant-matched like
         // oldTextMarked above — a forward of a reply legitimately reproduces "wrote:\n> " in
         // its text, so checking the other variant's marker would misfire there.
         //
@@ -2823,19 +2839,19 @@ export class JmapClient {
           const rebuilt = guardVariant === 'reply'
             ? buildReplyBodies({
                 original,
-                ...(wroteHtml && { htmlBody: updates.htmlBody }),
-                ...(wroteText && { textBody: updates.textBody }),
+                ...(wroteHtml && { htmlBody: workingHtml }),
+                ...(wroteText && { textBody: workingText }),
                 quoteOriginal: true,
                 ...(quoteCidMap && { cidMap: quoteCidMap }),
               })
             : buildForwardBodies({
                 original,
-                ...(wroteHtml && { htmlBody: updates.htmlBody }),
-                ...(wroteText && { textBody: updates.textBody }),
+                ...(wroteHtml && { htmlBody: workingHtml }),
+                ...(wroteText && { textBody: workingText }),
                 ...(quoteCidMap && { cidMap: quoteCidMap }),
               });
-          if (wroteHtml) updates.htmlBody = rebuilt.htmlBody;
-          if (wroteText) updates.textBody = rebuilt.textBody;
+          if (wroteHtml) workingHtml = rebuilt.htmlBody;
+          if (wroteText) workingText = rebuilt.textBody;
           droppedUnsupportedQuoteImages = rebuilt.quoteImages?.droppedUnsupportedImages ?? 0;
           if (guardVariant === 'reply') {
             // Loud-fail a keep request that produced no quote: the caller asked to KEEP via
@@ -2850,8 +2866,8 @@ export class JmapClient {
             // input (the new body is kept); it just turns a confusing quote-less result into an
             // actionable error instead of a silent one. The `||` accepts the edit if ANY
             // written format kept a marker, so a partially-quotable original still keeps.
-            const restored = (wroteHtml && hasQuoteMarker(updates.htmlBody))
-              || (wroteText && hasTextQuoteMarker(updates.textBody));
+            const restored = (wroteHtml && hasQuoteMarker(workingHtml))
+              || (wroteText && hasTextQuoteMarker(workingText));
             if (!restored) {
               throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' has no quotable content for the body/bodies this edit wrote, so the quote can't be restored. Either the message has nothing to quote (an attachment-only or calendar-only message), or its content is images and this edit wrote only a plain-text body — images cannot be quoted as text. Check the id, write htmlBody as well, or use noQuote to drop the quote deliberately.`);
             }
@@ -2944,10 +2960,10 @@ export class JmapClient {
     // Raw merge: a written body drops the unwritten partner (single-format intent);
     // a no-body edit preserves both; clearFields force the body absent.
     const mergedTextRaw = clear.has('textBody') ? undefined
-      : (updates.textBody !== undefined ? updates.textBody
+      : (workingText !== undefined ? workingText
       : (wroteAnyBody ? undefined : existingTextValue));
     const mergedHtmlRaw = clear.has('htmlBody') ? undefined
-      : (updates.htmlBody !== undefined ? updates.htmlBody
+      : (workingHtml !== undefined ? workingHtml
       : (wroteAnyBody ? undefined : existingHtmlValue));
 
     // Guard: editing textBody alone while a non-empty htmlBody survives (checked against
