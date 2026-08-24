@@ -8,9 +8,10 @@
 //
 // Usage: node scripts/mutate-commit.mjs <commit> [--tests src/a.test.ts,src/b.test.ts]
 //
-// Test files are chosen from the commit by default. `--tests` overrides that, which is
-// needed when the mechanical choice picks up a test Stryker cannot run: a drift guard that
-// reads src/*.ts as TEXT (index-env.test.ts, readme-inventory.test.ts) sees Stryker's
+// Test files are chosen BY NAME by default: for each changed src/X.ts, every src/X*.test.ts
+// that exists, plus any test file the commit itself changed. `--tests` overrides that, which
+// is needed when the name match picks up a test Stryker cannot run: a drift guard that reads
+// src/*.ts as TEXT (index-env.test.ts, readme-inventory.test.ts) sees Stryker's
 // instrumentation in the file and fails the initial run before any mutant is tried.
 //
 // Writes the Stryker config, sandbox and report OUTSIDE the repo tree (os.tmpdir by
@@ -18,6 +19,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,9 +46,11 @@ function changedRanges(rev) {
   const ranges = new Map();
   let file = null;
   for (const line of diff.split('\n')) {
-    const header = /^\+\+\+ b\/(.+)$/.exec(line);
-    if (header) {
-      file = header[1].trim();
+    if (line.startsWith('+++ ')) {
+      // `+++ /dev/null` is a file the commit DELETED. Reset rather than fall through, so its
+      // hunks cannot be attributed to whichever file was named before it.
+      const header = /^\+\+\+ b\/(.+)$/.exec(line);
+      file = header ? header[1].trim() : null;
       continue;
     }
     const hunk = /^@@ -\S+ \+(\d+)(?:,(\d+))? @@/.exec(line);
@@ -119,19 +123,32 @@ console.log(`scratch     ${OUT_DIR}\n`);
 // reported as a failure instead of silently re-reporting the last run's numbers.
 writeFileSync(REPORT_FILE, '');
 
-const run = spawnSync('npx', ['stryker', 'run', CONFIG_FILE], {
+// NO SHELL, and not through `npx`. `npx` on Windows is a .cmd, so running it needed
+// `shell: true`, and under a shell the config path went through UNQUOTED: a MUTATE_OUT_DIR
+// containing a space arrived as two arguments and Stryker refused the run with "too many
+// arguments for 'run'". Naming npx.cmd directly instead is not an option either - Node
+// refuses to spawn a .cmd without a shell (EINVAL). So the CLI is resolved here and handed to
+// this same Node binary, which takes its arguments as an array and never re-splits them.
+const strykerPkg = createRequire(path.join(REPO, 'package.json')).resolve('@stryker-mutator/core/package.json');
+const strykerBin = path.join(path.dirname(strykerPkg), JSON.parse(readFileSync(strykerPkg, 'utf8')).bin.stryker);
+
+const run = spawnSync(process.execPath, [strykerBin, 'run', CONFIG_FILE], {
   cwd: REPO,
   stdio: ['ignore', 'inherit', 'inherit'],
-  shell: process.platform === 'win32',
 });
 
 let report;
 try {
   report = JSON.parse(readFileSync(REPORT_FILE, 'utf8'));
 } catch {
-  console.error(`\nStryker produced no report at ${REPORT_FILE} (exit ${run.status}).`);
-  console.error('If it failed the initial test run, one of the selected tests reads src/*.ts as');
-  console.error('text and is seeing Stryker\'s instrumentation. Re-run with --tests to drop it.');
+  // Deliberately NOT a diagnosis. Stryker's own output has streamed to this terminal already,
+  // so the reason is on screen; naming one cause as though it were the cause sent a
+  // space-in-the-path failure off after a test-selection problem it did not have.
+  const how = run.error ? `could not start it: ${run.error.message}`
+    : run.signal ? `killed by ${run.signal}` : `exit status ${run.status}`;
+  console.error(`\nStryker produced no report at ${REPORT_FILE} (${how}).`);
+  console.error('Its output above says why. Most often one of the selected tests reads src/*.ts');
+  console.error('as text and is seeing Stryker\'s instrumentation; --tests drops that test.');
   process.exit(run.status || 1);
 }
 
