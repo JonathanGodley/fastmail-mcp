@@ -153,8 +153,10 @@ live next to each other:
 `src/tool-schema.test.ts` enforces both halves against the source: it fails on any tool
 parameter declared `type: 'boolean'`, and on any bare `!!` read of a boolean parameter in a
 handler file. It reads `src/index.ts` as text rather than spawning the built server and
-calling `tools/list`, because `npm test` runs `tsx` over `src/` and never builds first, so
-a guard reading a stale `dist/` would miss exactly the newly added tool it exists to catch.
+calling `tools/list`. `npm test` builds first now (the `pretest` script), so a stale `dist/`
+is no longer the hazard it once was - but a direct `tsx --test` on this file bypasses
+`pretest`, and a guard reading `dist/` would then miss exactly the newly added tool it
+exists to catch.
 `tsc` does not rewrite string literals, so the source and the shipped schema cannot
 disagree here.
 
