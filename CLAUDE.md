@@ -54,7 +54,9 @@ The MCP server runs from `dist/index.js`, not `src/`. After making changes, run 
 
 ## Testing
 
-Run `npx tsc --noEmit` and `npm test` before committing. All tests must pass.
+Run `npx tsc --noEmit`, `npm run typecheck:tests` and `npm test` before committing. All tests must pass.
+
+`npm test` compiles first, via a `pretest` script. That is not a convenience: `built-server.test.ts` spawns `dist/index.js` as a real external process and asserts in a `before` hook that the build exists and is newer than `src/`. A `before` hook that throws makes the test runner report its suite as **cancelled**, not failed - so testing without a build gives `fail 0` and a green-looking exit path, with the real reason buried in a stack trace. `pretest` removes that trap from the normal route; the assertion stays as the backstop for anyone invoking `tsx --test` on those files directly.
 
 **Handler logic must be unit-testable.** The `index.ts` CallTool `switch` has no test harness, so logic left inline there can only be exercised by a live run — which is not durable regression protection. When a handler does more than trivially destructure-and-delegate (orchestration, branching, threading uploaded data into multiple paths), extract it into a function that takes an **injected client** and unit-test it with a mock. The reply path is the pattern: `composeReply(args, client, attachDir)` in `src/reply-handler.ts` takes a `ReplyClient` interface (which `JmapClient` satisfies structurally), so the attachment-threading branches are covered in `npm test` with no credentials and no network. The handler is then a thin result→text wrapper.
 
