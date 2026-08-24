@@ -13,6 +13,7 @@ coverage/
 .claude/skills/**
 !.claude/skills/**/
 !.claude/skills/**/SKILL.md
+!.claude/skills/**/TEMPLATE.md
 *.dxt
 test-live*.sh
 test-live*.mjs
