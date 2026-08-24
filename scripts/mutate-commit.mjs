@@ -46,11 +46,16 @@ function changedRanges(rev) {
   const ranges = new Map();
   let file = null;
   for (const line of diff.split('\n')) {
-    if (line.startsWith('+++ ')) {
-      // `+++ /dev/null` is a file the commit DELETED. Reset rather than fall through, so its
-      // hunks cannot be attributed to whichever file was named before it.
-      const header = /^\+\+\+ b\/(.+)$/.exec(line);
-      file = header ? header[1].trim() : null;
+    // A REAL header only: a "b/" path, or /dev/null for a file the commit DELETED. Testing
+    // for the "+++ " prefix alone also matched an ADDED CONTENT line whose own text begins
+    // "++ ", which cleared the file being parsed and dropped its remaining hunks. An added
+    // line reading exactly "++ b/<path>" would still fool this; a source line of that shape
+    // is not worth tracking `diff --git` state to exclude.
+    const header = /^\+\+\+ (b\/(.+)|\/dev\/null)$/.exec(line);
+    if (header) {
+      // Reset on the deleted file rather than falling through, so its hunks cannot be
+      // attributed to whichever file was named before it.
+      file = header[2] === undefined ? null : header[2].trim();
       continue;
     }
     const hunk = /^@@ -\S+ \+(\d+)(?:,(\d+))? @@/.exec(line);
