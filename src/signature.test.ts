@@ -1088,6 +1088,23 @@ describe('edit_draft preserves a signature the draft already carries', () => {
     assert.match(seen.created.bodyValues.text.value, /Kind regards,\nTest User$/);
   });
 
+  it('leaves the caller\'s own updates object untouched when it appends the signature', async () => {
+    // The signed body is the server's output, and an argument object belongs to the caller: a
+    // call that wrote its output back over the html it was handed would silently change a value
+    // the caller can still read, and would hand any second call made with the same object a body
+    // that already ends in the sign-off.
+    const client = makeClient();
+    const seen = mockUpdate(client, signedDraft());
+
+    const args = { htmlBody: '<p>Rewritten.</p>' };
+    const before = structuredClone(args);
+    await client.updateDraft('draft-1', args);
+    // The append has to have actually run, or there is no signed body to write back and the
+    // assertion below would hold for the wrong reason.
+    assert.ok(hasSignatureMarker(seen.created.bodyValues.html.value), seen.created.bodyValues.html.value);
+    assert.deepEqual(args, before);
+  });
+
   it('drops it when the edit says appendSignature:false, and says nothing', async () => {
     const client = makeClient();
     const seen = mockUpdate(client, signedDraft());
