@@ -1865,48 +1865,36 @@ event chooses the DENSITY. Those are different questions and they get different 
 - **A span the caller named is never clamped, however long.** Asking for a century is a
   legitimate question, and shortening it silently would answer a different one.
 - **A single repeating resource that expands to more than `CALENDAR_MAX_OCCURRENCES_PER_SERIES`
-  (5000) blocks is left out of the results entirely**, and named in the same trailing `Note:`
-  the window disclosure uses - title, id, occurrence count and calendar - so the caller can
-  narrow to it directly. The call still answers everything else. It is out of `total` as well
-  as out of the rows: `total` answers "how many rows did `limit` cut off", so folding in
-  occurrences no row represents would send a caller raising `limit` after rows that do not
-  exist.
-
-  **The count is over the range REQUESTED, not the caller's window**, which is the widened one
-  described above - up to 14 hours past each edge ("up to", because `shiftIsoMs` saturates the
-  widened bound at the representable-date edge). So the number the note prints is a count of
-  the blocks the server returned, and the shorter the caller's window the further above the
-  in-window count it can sit: a single-day window is requested as up to 52 hours rather than 24, so
-  for an evenly spaced series the count can be more than double the number of occurrences
-  falling inside the day. The note says so in those terms rather than claiming the caller's
-  window, because counting only the in-window blocks would require the per-block parse the cap
-  exists to avoid.
-
-  The consequence is that the threshold is applied to a set up to 28 hours wider than the
-  window asked about, so a series with slightly fewer than 5000 genuine in-window occurrences
-  can still be omitted. For a 31-day window the requested range is 772 hours against the
-  caller's 744, so an evenly spaced series trips from about 4819 in-window occurrences up
-  (5000 x 744/772). That is a deliberate trade of a little precision at the boundary for not
-  parsing the payload the cap is there to refuse.
+  (5000) blocks REFUSES the call.** `getCalendarEvents` throws on the first such resource, and
+  the error names the series - title, id, occurrence count and calendar - says the limit is
+  deliberate, and asks the caller to narrow the window or open an issue if they have a genuine
+  use for a series that dense. That is the owner's ruling: the previous behaviour left the
+  series out and disclosed it in a trailing `Note:`, and a hard, visible error was chosen over a
+  note a reader could skim past.
 
 **Why 5000.** It is the number that separates a real calendar from a pathological one. A daily
 event over a 10-year window is 3,653 occurrences and every 10 minutes for a month is 4,464;
 both pass. Every 5 minutes for a month is 8,928 and `FREQ=MINUTELY` for a month is 44,640; both
 trip. The threshold is deliberately far above anything a person schedules, because the cost of
-a false positive - a legitimate series vanishing from a listing - is much higher than the cost
-of parsing a few thousand extra blocks.
-
-**Why omit rather than truncate.** Truncating a dense series to its first N occurrences reads
-as the safer choice and is not: the results are sorted by start time and trimmed to `limit`, so
-a `FREQ=MINUTELY` series' first few hundred occurrences would fill the entire page and push
-every genuine event off it. The caller would get a plausible-looking answer that is wrong.
-Omitting the series costs the caller one event and keeps the rest of the listing intact, and
-the `Note:` makes the omission impossible to miss.
+a false positive is now the whole answer: a legitimate series over the cap refuses every listing
+that covers it (unless scoped to another calendar) until the caller narrows the window, which is
+far more expensive than parsing a few thousand extra blocks.
 
 **Attacker-authored, not merely accidental.** Calendar content in this deployment comes from
 anyone who can send an invitation, so density is not just a user's mistake to be tolerated - a
-one-line `RRULE` is enough to make any listing on the account useless. That is the same
-threat model the whole-content-line rule below rests on.
+one-line `RRULE` is enough to make any listing on the account useless - by flooding it, if the
+series were rendered, or by refusing it, under the cap, which is why the refusal names the series
+so the caller can act on it. That is the same threat model the whole-content-line rule below
+rests on.
+
+**The residual of the refusal, stated plainly: a hostile series DOES fail every listing whose
+window covers it**, until the caller narrows the window past it, scopes the call to a calendar
+that does not hold it (`calendarId`), or removes the event in the Fastmail client - this server
+refuses to delete any recurring series (#146), so removal is never something a caller can do from
+here. The omit-and-disclose behaviour this replaced kept the listing answering, and that
+counterweight went with it. The owner chose a hard, visible error over a note a reader could skim
+past, so nothing here promises that one hostile invitation cannot blank a listing - it can, and
+that is the accepted price of the caller being told rather than left to notice.
 
 **The residual: this bounds what is PARSED, never what is generated or transferred.** Cyrus's
 CalDAV expansion has no cap of its own (`expand_cb` returns 1 unconditionally, and
