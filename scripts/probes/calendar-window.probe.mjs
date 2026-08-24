@@ -44,16 +44,20 @@
 // invitations, and deleting one sends cancellations (see the README), so a calendar probe
 // that writes is not a safe default.
 //
-// WHAT IT DOES NOT COVER: a timezone other than the host's. `run-probe.py` forwards the
-// launching shell's environment but takes only the API token and the CalDAV credentials from
-// the MCP client config, so it carries no FASTMAIL_TIMEZONE across — and the local config sets
-// none anyway. Unless the shell exports FASTMAIL_TIMEZONE (or TZ), the built server reads
-// dates in whatever zone this machine runs in, which makes the "a date-only window is the
-// caller's LOCAL day" assertion below hold trivially on a UTC host: local midnight IS UTC
-// midnight there, so a broken zone resolution would still pass. The real zone coverage is the
-// unit tests, which drive named zones and DST edges directly (src/coerce.test.ts,
-// src/caldav-client.test.ts); export FASTMAIL_TIMEZONE=Australia/Sydney before running this if
-// you want the live path to exercise a non-zero offset too.
+// WHAT IT DOES NOT COVER: a timezone other than the host's, unless one is deliberately supplied.
+// `run-probe.py` forwards FASTMAIL_TIMEZONE from the MCP client config, and separately, as with
+// every value here, a shell-exported FASTMAIL_TIMEZONE or TZ reaches the child too, since the
+// launcher starts from a copy of its own environment before layering the config's FASTMAIL_TIMEZONE
+// on top - so when the config and a shell-exported FASTMAIL_TIMEZONE are both set, the config value
+// wins, not the other way round. (An exported TZ is different: the launcher never touches it, so
+// any precedence between TZ and FASTMAIL_TIMEZONE is the server's own, not the launcher's layering.)
+// But the local config sets no timezone today, so unless one of those routes is used, the built
+// server reads dates in whatever zone this machine runs in, which makes the "a date-only window
+// is the caller's LOCAL day" assertion below hold trivially on a UTC host: local midnight IS UTC
+// midnight there, so a broken zone resolution would still pass. The real zone coverage is the unit
+// tests, which drive named zones and DST edges directly (src/coerce.test.ts,
+// src/caldav-client.test.ts); export FASTMAIL_TIMEZONE=Australia/Sydney before running this (or set
+// it in the MCP client config) if you want the live path to exercise a non-zero offset too.
 //
 // Run: python scripts/probes/run-probe.py calendar-window.probe.mjs [startDate endDate [singleDay]]
 // Requires FASTMAIL_API_TOKEN plus FASTMAIL_CALDAV_USERNAME/PASSWORD; the launcher injects
