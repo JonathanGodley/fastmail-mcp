@@ -9,26 +9,39 @@ on:
     tags:
       - 'v*'
 
-# Read-only by default. The job below opts up to contents: write because it
-# publishes the release asset, and that scope bounds every step in the job.
+# Read-only by default, and now scoped that way in practice rather than only on
+# paper. Split into two jobs so that only the job that actually publishes the
+# release runs with contents: write.
 #
-# GITHUB_TOKEN is not ambient in a run: step — Actions does not put it into the
-# environment, so npm ci and the pack step hold no credential. It is NOT confined
-# to the release step's env:, though: actions/checkout and actions/setup-node
-# both declare token as a default input (github.token, and github.token when the
-# server is github.com, respectively), so at the SHAs pinned below it reaches
-# three places, two of them implicitly. Those two run write-scoped today only
-# because this job asks for contents: write; under a build/release job split they
-# would run read-scoped. That narrowing is the open request in issue #103.
-# The checkout at least leaves no pushable git credential behind
-# (persist-credentials: false), and the artifact is gated on the test suite and
-# the secret scan before anything is packed.
+# GITHUB_TOKEN is not ambient in a run: step - Actions does not put it into the
+# environment, so npm ci and the pack step hold no credential either way. It IS
+# an implicit default input on actions/checkout and actions/setup-node at the
+# SHAs pinned below (github.token, and github.token when the server is
+# github.com, respectively), so those two actions reach the token regardless of
+# which job they run in - but the build job below asks for contents: read, so
+# they now run read-scoped instead of write-scoped. Only the release job asks
+# for contents: write, because its publish step needs it - that scope applies
+# to the whole job, so both steps above the publish step (download and
+# verify) run write-scoped too, not only the one that needs it. It stays
+# narrow anyway: the job does no checkout of its own, so there is no working
+# tree and no stored git credential for the token to act through -
+# action-gh-release does not read a tree either.
+#
+# The release job runs on every trigger, including workflow_dispatch. The
+# artifact upload/download runs unconditionally regardless of the tag gate,
+# and so does the "Verify the artifact name crossed the job boundary" step
+# below: it reads `needs.build.outputs.dxt_file` with no `if:` of its own,
+# unlike the publish step, whose `with:` block - the only other reader of
+# that output - is only evaluated on a tagged push. So a dispatch run still
+# proves the output resolves to a non-empty value naming a file that actually
+# landed in the job's workspace, which is the hand-off this split depends on
+# - it does not exercise the publish step itself, only what feeds it.
 #
 # A separate residual, which the split does not address, is artifact content
 # rather than token reach: npm ci runs third-party install scripts in the same
 # workspace that is about to be packed, so a compromised dependency could alter
-# dist/ before pack. That is why the pack tool is pinned by exact version and the
-# release is gated behind the scan.
+# dist/ before pack. That is why the pack tool is pinned by exact version and
+# the release is gated behind the scan.
 permissions:
   contents: read
 
@@ -36,7 +49,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the release and upload the .dxt to it
+      contents: read
+    outputs:
+      dxt_file: ${{ steps.compute-version.outputs.dxt_file }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -79,12 +94,14 @@ jobs:
         run: npx --yes @anthropic-ai/dxt@0.2.6 pack
 
       - name: Compute version and rename artifact
+        id: compute-version
         shell: bash
         run: |
           VERSION=$(node -p "require('./package.json').version")
           FILE=$(ls -1 *.dxt | head -n1)
           mv "$FILE" "fastmail-mcp-$VERSION.dxt"
           echo "DXT_FILE=fastmail-mcp-$VERSION.dxt" >> $GITHUB_ENV
+          echo "dxt_file=fastmail-mcp-$VERSION.dxt" >> $GITHUB_OUTPUT
 
       # Boot the archive that is about to be published, not the working tree it
       # was built from. This is what catches a .dxtignore pattern that strips
@@ -125,11 +142,44 @@ jobs:
           name: fastmail-mcp-dxt
           path: ${{ env.DXT_FILE }}
 
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload the .dxt to it
+    steps:
+      # No checkout here - action-gh-release below does not read the tree,
+      # which is most of what makes this job's write scope narrow: no working
+      # tree, no stored git credential for the token to act through.
+      - name: Download artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fastmail-mcp-dxt
+
+      # Guards the filename hand-off itself, unconditionally - no tag gate. The publish
+      # step below is the only other reader of `needs.build.outputs.dxt_file`, and it is
+      # skipped on everything but a tagged push, so without this the hand-off this split
+      # depends on would go unexercised on every workflow_dispatch run and uncaught on a
+      # tagged one too: an empty `files:` is not itself an error, so a broken hand-off
+      # would publish a release with nothing attached, silently.
+      #
+      # Bound through env: rather than interpolated straight into the run: body, even
+      # though this value only ever comes from package.json's version string today -
+      # Actions expands an interpolated `${{ }}` into the script as source text before the
+      # shell runs it, in a job that holds contents: write, so there is no reason to take
+      # that path when passing it as data through the environment works just as well.
+      - name: Verify the artifact name crossed the job boundary
+        env:
+          DXT_FILE: ${{ needs.build.outputs.dxt_file }}
+        run: |
+          test -n "$DXT_FILE"
+          test -f "$DXT_FILE"
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
-          files: ${{ env.DXT_FILE }}
+          files: ${{ needs.build.outputs.dxt_file }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
