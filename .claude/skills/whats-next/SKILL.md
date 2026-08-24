@@ -7,7 +7,7 @@ argument-hint: "[optional focus, e.g. 'upstream' or an issue topic]"
 # What's Next — fastmail-mcp edition
 
 **First: invoke the `whats-next-core` skill and follow its procedure. If the
-Skill tool is unavailable, Read `C:/Users/JG/.claude/skills/whats-next-core/SKILL.md`
+Skill tool is unavailable, Read `~/.claude/skills/whats-next-core/SKILL.md`
 in full instead.** It carries the shared triage discipline and the output
 contract; the sections below are this repo's half — sources, tiers, judgement,
 hygiene. Improvements to the shared discipline go in the core skill;
@@ -16,8 +16,9 @@ repo-specific lessons go here.
 ## Sources
 
 1. **Fork issues** — `gh issue list --repo JonathanGodley/fastmail-mcp
-   --state open --limit 200`. (⚠️ `gh` defaults to upstream in this clone; the
-   `--repo` flag is mandatory on every command.) **Top tiers = bugs, and
+   --state open --limit 200`. (This checkout pins bare `gh` commands to the
+   fork via `gh repo set-default`; the explicit `--repo` flag keeps the
+   command correct in a checkout without that default.) **Top tiers = bugs, and
    anything blocking the next release** — judged from content, since issues
    carry no priority labels: `gh issue view --repo JonathanGodley/fastmail-mcp
    <n> --comments` on every candidate before judging it. Never triage off a
@@ -37,10 +38,9 @@ upstream, and post-release feedback channels.
 
 ## Judgement (repo-specific)
 
-- **Nothing is ever a "chase" against the upstream maintainer** — they are
-  active in bursts and absent in between, and the fork deliberately never
-  blocks on their review. Upstream work is scheduled by the fork's release
-  cadence (the drift check runs at release), not by silence.
+- **Nothing is ever a "chase" against the upstream maintainer** — the fork
+  deliberately never blocks on their review. Upstream work is scheduled by the
+  fork's release cadence (the drift check runs at release), not by silence.
 - **The issues are the tracker AND the rationale record.** An old open issue
   may be deliberately parked with a stated decision inside it — read for one
   before ranking it urgent. A closed issue is settled; it is not a candidate.

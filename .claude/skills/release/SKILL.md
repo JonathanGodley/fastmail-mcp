@@ -5,7 +5,7 @@ description: Cut a fastmail-mcp fork release on origin (JonathanGodley/fastmail-
 
 # Cut a fork release
 
-This encodes the **Releasing** and **Version** sections of `CLAUDE.md` as a runnable checklist. Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`); `gh` defaults to the upstream `MadLlama25/fastmail-mcp`, so **every** release/tag/issue command needs `--repo JonathanGodley/fastmail-mcp`.
+This encodes the **Releasing** and **Version** sections of `CLAUDE.md` as a runnable checklist. Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). This checkout pins bare `gh` commands to the fork via `gh repo set-default`; keep the explicit `--repo JonathanGodley/fastmail-mcp` on every release/tag/issue command anyway, so the command stays correct in a checkout without that default.
 
 The dangerous steps (anything that pushes, publishes, or closes a public issue) are grouped AFTER the checkpoint in step 4. Do the verification steps first; do not cross the checkpoint until its precondition holds.
 
@@ -93,7 +93,7 @@ gh issue close <N> --repo JonathanGodley/fastmail-mcp --comment "<cite the relea
 
 ## Gotchas
 
-- `gh` defaults to **upstream** → always pass `--repo JonathanGodley/fastmail-mcp`.
+- Bare `gh` reaches the fork only via this checkout's `gh repo set-default` → still pass `--repo JonathanGodley/fastmail-mcp` explicitly.
 - A bare `(#N)` in a commit message does NOT auto-close an issue — only `Closes/Fixes/Resolves #N` on a default-branch push does.
 - Tag must be **annotated** (`-a`), not lightweight.
 - Release notes and the tag message must be **codename-free** and consumer-facing.
