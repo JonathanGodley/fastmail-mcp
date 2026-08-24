@@ -5172,13 +5172,25 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
   const WINDOW_START = '2027-03-01T00:00:00Z';
   const WINDOW_END = '2027-03-10T00:00:00Z';
 
-  /** An expanded blob: one VEVENT block per occurrence, a minute apart, RRULE stripped. */
-  function expandedBlob(uid: string, summary: string, count: number): string {
+  /**
+   * An expanded blob: one VEVENT block per occurrence, a minute apart, RRULE stripped.
+   *
+   * `uid` or `summary` given as undefined OMITS that property, which is how the refusal
+   * message's fallback arms are reached: neither is required by iCalendar's grammar, so a
+   * real resource can arrive without either.
+   */
+  function expandedBlob(uid: string | undefined, summary: string | undefined, count: number): string {
     const base = Date.parse('2027-03-01T00:10:00Z');
     const blocks: string[] = [];
     for (let i = 0; i < count; i++) {
       const at = new Date(base + i * 60000).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-      blocks.push(['BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${at}`, `SUMMARY:${summary}`, 'END:VEVENT'].join('\r\n'));
+      blocks.push([
+        'BEGIN:VEVENT',
+        ...(uid === undefined ? [] : [`UID:${uid}`]),
+        `DTSTART:${at}`,
+        ...(summary === undefined ? [] : [`SUMMARY:${summary}`]),
+        'END:VEVENT',
+      ].join('\r\n'));
     }
     return ['BEGIN:VCALENDAR', ...blocks, 'END:VCALENDAR'].join('\r\n');
   }
@@ -5231,6 +5243,14 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
         assert.match(message, /id dense@fm/);
         assert.match(message, new RegExp(`${CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1} occurrences`));
         assert.match(message, /calendar Work/);
+        // THE LIMIT ITSELF. This message is the only place a caller is ever told the number —
+        // the tool description and README deliberately stopped carrying it — so the figure is
+        // pinned here, interpolated from the constant rather than written as a literal so a
+        // deliberate change to the cap moves the assertion with it.
+        assert.match(
+          message,
+          new RegExp(`more than the ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} this server will materialise`),
+        );
         // The cap is a judgement call, so the message says whose it is and how to contest it
         // rather than reading as a platform limit the caller can do nothing about.
         assert.match(message, /deliberate limit/);
@@ -5258,6 +5278,67 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
       () => client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END),
       (err: unknown) => {
         assert.match((err as Error).message, /calendar \/cal\/nameless\//);
+        return true;
+      },
+    );
+  });
+
+  it('calls a dense series with no SUMMARY "Untitled"', async () => {
+    // SUMMARY is optional in iCalendar, so a resource can arrive without one. The message
+    // opens by quoting the title, and an empty pair of quotes there reads as a rendering
+    // fault rather than as "this series has no name".
+    const client = clientOver({
+      '/cal/work/': [
+        { data: expandedBlob('dense@fm', undefined, CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '/w-dense.ics' },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END),
+      (err: unknown) => {
+        assert.match((err as Error).message, /repeating event "Untitled"/);
+        return true;
+      },
+    );
+  });
+
+  it('leaves the id empty when the dense resource has neither a UID nor a url', async () => {
+    // The floor under the id: UID first, the resource url as the handle that normally exists
+    // when there is not, and an empty string under both. Nothing may be invented there — a
+    // placeholder would be echoed back as an id the caller could go looking for.
+    const client = clientOver({
+      '/cal/work/': [
+        { data: expandedBlob(undefined, 'Every minute', CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '' },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END),
+      (err: unknown) => {
+        // The title still identifies it, which is why an empty id is survivable.
+        assert.match((err as Error).message, /"Every minute" \(id , calendar Work\)/);
+        return true;
+      },
+    );
+  });
+
+  it('leaves the calendar empty when it has neither a name nor a url', async () => {
+    // The same floor one field along. A collection with no displayName and no url is the only
+    // case where the message can name no calendar at all, and it must still be the refusal
+    // rather than a marker like "[object Object]" or the string "undefined".
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{}]),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+        { data: expandedBlob('dense@fm', 'Every minute', CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '/x-dense.ics' },
+      ]),
+    };
+
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END),
+      (err: unknown) => {
+        assert.match((err as Error).message, /id dense@fm, calendar \) expands to/);
         return true;
       },
     );
