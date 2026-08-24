@@ -15,6 +15,7 @@
     "pretest": "npm run build",
     "test": "tsx --test src/*.test.ts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
+    "mutate": "node scripts/mutate-commit.mjs",
     "scan:secrets": "node scripts/scan-secrets.mjs --all"
   },
   "engines": {
@@ -39,6 +40,7 @@
     "tsdav": "^2.3.1"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
     "@types/debug": "^4.1.12",
     "@types/html-to-text": "^9.0.4",
     "@types/node": "^20.19.43",
