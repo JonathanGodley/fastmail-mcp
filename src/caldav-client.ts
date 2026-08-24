@@ -163,30 +163,6 @@ export interface CalendarEventQueryResult {
   // sentence down here instead put the wording somewhere no formatter test can reach it and
   // gave the separator convention a second home.
   windowClamp?: CalendarWindowClamp;
-  // Series left OUT of `events` and `total` because one resource expanded to more than
-  // CALENDAR_MAX_OCCURRENCES_PER_SERIES blocks in the RANGE REQUESTED for this window, which
-  // is the widened one rather than the caller's own (see CALENDAR_MAX_OCCURRENCES_PER_SERIES
-  // for what that does to the threshold). ABSENT when nothing was
-  // omitted, so silence means every series was materialised — the same never-silently-degrade
-  // rule `windowClamp` follows, and the same STRUCTURE-not-prose shape: the wording lives in
-  // `buildCalendarDensityNote` where a formatter test can reach it.
-  denseSeries?: DenseCalendarSeries[];
-}
-
-/** One repeating event too dense to materialise, described well enough to find and narrow to. */
-export interface DenseCalendarSeries {
-  title: string;
-  id: string;
-  // Carried but deliberately NOT rendered in the note. It is here for the same reason
-  // `CalendarEvent.url` is kept on an ordinary row (see the comment there): a UID is unique
-  // per collection, not per account, so where two calendars hold the same UID the url is the
-  // only thing that tells the two records apart — and a series omitted from the rows is
-  // exactly the case where no row carries it. It stays out of the note text because title, id
-  // and calendar name already identify the series for someone narrowing the window, and the
-  // note is long enough without a path in it.
-  url: string;
-  calendar: string;
-  occurrences: number;
 }
 
 /** Why, and to what, a calendar window ended up narrower than the one the caller described. */
@@ -2221,25 +2197,17 @@ export const CALENDAR_OPEN_WINDOW_DAYS = 31;
  *   a month at every 5 minutes            8,928   trips
  *   a month of FREQ=MINUTELY             44,640   trips
  *
- * THE COUNT IS OVER THE RANGE REQUESTED, NOT THE CALLER'S WINDOW. The blocks counted are the
- * ones the server returned for the widened request (MAX_UTC_OFFSET_MS at each edge, #162), so
- * the threshold is applied to a set up to 28 hours wider than the window the caller asked
- * about — a series with slightly under 5000 genuine in-window occurrences can therefore be
- * omitted. For a 31-day window the widened range is 772 hours against the caller's 744, so an
- * evenly spaced series trips the threshold from about 4819 in-window occurrences up
- * (5000 x 744/772); the shorter the window, the wider that gap gets. Narrowing to the
- * caller's window first would need the per-block parse this cap exists to avoid, so the number
- * is described accurately in the note rather than made exact.
+ * The count is of the blocks the server returned for the widened request, so it can slightly
+ * exceed the in-window occurrence count; that imprecision is accepted rather than paying the
+ * per-block parse the cap exists to avoid.
  *
  * IT IS A PARSE-AND-SHOW THRESHOLD, NOT A RESPONSE SIZE. The response stays bounded by `limit`
  * (default 50, hard cap 500) exactly as before; this decides whether one resource's blocks are
  * parsed and offered at all.
  *
- * A tripped resource is left OUT of the rows entirely rather than truncated to its first N.
- * Truncating would fill the whole `limit` page with one series and push every real event off
- * it, which is the outcome the cap exists to prevent — one hostile invitation cannot blank a
- * listing. The omission is disclosed by name, count and calendar in a trailing note, so it is
- * never silent, and the call still answers.
+ * A TRIPPED RESOURCE FAILS THE CALL. `getCalendarEvents` throws an InvalidInputError naming the
+ * series — title, id, occurrence count and calendar — on the first resource over the threshold,
+ * and the caller narrows the window and asks again.
  *
  * THE RESIDUAL, stated because it is not fixed: this bounds what this server PARSES and SHOWS,
  * never what Cyrus generates or transfers. Cyrus's `expand_cb` returns 1 unconditionally and
@@ -3064,7 +3032,6 @@ export class CalDAVCalendarClient {
     const windowEndMs = trueWindowEnd === undefined ? NaN : Date.parse(trueWindowEnd);
 
     const allEvents: CalendarEvent[] = [];
-    const denseSeries: DenseCalendarSeries[] = [];
     for (const cal of targetCalendars) {
       const objects = await client.fetchCalendarObjects({ calendar: cal, ...fetchOptions });
       for (const obj of objects) {
@@ -3074,24 +3041,37 @@ export class CalDAVCalendarClient {
         // rather than re-derived by it.
         const blocks = extractVEventBlocks(obj.data || '');
         if (blocks.length > CALENDAR_MAX_OCCURRENCES_PER_SERIES) {
-          // NOT PARSED, and not truncated to its first N either: the first N of a hostile
-          // series would fill the whole `limit` page and push every real event off it. The
-          // title and id come from the first block, which is the same pair a row would have
-          // carried and is two property reads rather than a parse of the whole payload.
-          denseSeries.push({
-            title: parseICalValue(blocks[0], 'SUMMARY') || 'Untitled',
-            id: parseICalValue(blocks[0], 'UID') || obj.url || '',
-            url: obj.url || '',
-            // UNWRAPPED through the shared helper, the same one `list_calendars` and the
-            // not-found error use. A DAV displayName arrives as a property object whenever the
-            // element is empty or attribute-only, and stringifying one produced a visible
-            // "[object Object]" in the disclosure — truthy, so the url fallback beside it never
-            // ran. The helper answers "is there a name"; the url is the handle that always
-            // exists when there is not.
-            calendar: unwrapDisplayName(cal.displayName) ?? cal.url ?? '',
-            occurrences: blocks.length,
-          });
-          continue;
+          // THE CALL FAILS on the FIRST such resource — nothing is parsed, nothing is
+          // collected, and no listing is returned. Answering without the series put the one
+          // thing the caller most needed to know at the bottom of a response that otherwise
+          // looked complete. InvalidInputError, because narrowing the window is the CALLER's
+          // action: the handler maps it to InvalidParams.
+          //
+          // The title and id come from the first block, which is the same pair a row would
+          // have carried and is two property reads rather than a parse of the whole payload.
+          const title = parseICalValue(blocks[0], 'SUMMARY') || 'Untitled';
+          const id = parseICalValue(blocks[0], 'UID') || obj.url || '';
+          // UNWRAPPED through the shared helper, the same one `list_calendars` and the
+          // not-found error use. A DAV displayName arrives as a property object whenever the
+          // element is empty or attribute-only, and stringifying one produced a visible
+          // "[object Object]" — truthy, so the url fallback beside it never ran. The helper
+          // answers "is there a name"; the url is the handle that always exists when there is
+          // not.
+          const calendar = unwrapDisplayName(cal.displayName) ?? cal.url ?? '';
+          // TITLE, ID AND CALENDAR ARE ATTACKER-AUTHORED — anyone who can send an invitation
+          // wrote them — so each goes through the shared echo: control characters (and
+          // U+2028/2029) scrubbed so none can forge an extra line, trimmed, cut with a visible
+          // marker (#141). The guarantee is "no extra LINES", not "no attacker prose": a title
+          // reading like a second sentence still renders verbatim inside its quotes on this one
+          // line, which is accepted rather than guessed at by a prose filter.
+          throw new InvalidInputError(
+            `Refused: repeating event "${echoCallerText(title)}" (id ${echoCallerText(id)}, ` +
+            `calendar ${echoCallerText(calendar)}) expands to ${blocks.length} occurrences in the ` +
+            `range searched for this window, more than the ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} ` +
+            'this server will materialise for one series. This is a deliberate limit; narrow the ' +
+            'window to list around it. If you have a genuine use for a series this dense, open an ' +
+            'issue at https://github.com/JonathanGodley/fastmail-mcp/issues.',
+          );
         }
         // Every VEVENT in the blob, not the first: with `expand` a single resource carries
         // one block per in-window occurrence, so a first-match read drops all but one.
@@ -3140,15 +3120,13 @@ export class CalDAVCalendarClient {
 
     sortEventsByStart(allEvents, configuredZone);
 
-    // `total` counts what was materialised, so an omitted series is NOT in it: the total is
-    // "how many events matched, of which `limit` trimmed the rest", and folding in occurrences
-    // no row represents would make a caller raise `limit` chasing rows that do not exist. The
-    // note is what discloses the omission, and it is absent when there was nothing to omit.
+    // `total` is "how many events matched, of which `limit` trimmed the rest". Every series in
+    // the window is in it: a resource too dense to materialise fails the call above rather than
+    // being quietly left out of this count.
     return {
       events: allEvents.slice(0, limit),
       total: allEvents.length,
       windowClamp,
-      denseSeries: denseSeries.length > 0 ? denseSeries : undefined,
     };
   }
 
