@@ -1876,13 +1876,21 @@ event chooses the DENSITY. Those are different questions and they get different 
 event over a 10-year window is 3,653 occurrences and every 10 minutes for a month is 4,464;
 both pass. Every 5 minutes for a month is 8,928 and `FREQ=MINUTELY` for a month is 44,640; both
 trip. The threshold is deliberately far above anything a person schedules, because the cost of
-a false positive - a legitimate series vanishing from a listing - is much higher than the cost
-of parsing a few thousand extra blocks.
+a false positive is now the whole answer: a legitimate series over the cap refuses every listing
+that covers it until the caller narrows the window, which is far more expensive than parsing a
+few thousand extra blocks.
 
 **Attacker-authored, not merely accidental.** Calendar content in this deployment comes from
 anyone who can send an invitation, so density is not just a user's mistake to be tolerated - a
 one-line `RRULE` is enough to make any listing on the account useless. That is the same
 threat model the whole-content-line rule below rests on.
+
+**The residual of the refusal, stated plainly: a hostile series DOES fail every listing whose
+window covers it**, until the caller narrows the window past it or the event is removed from the
+account. The omit-and-disclose behaviour this replaced kept the listing answering, and that
+counterweight went with it. The owner chose a hard, visible error over a note a reader could skim
+past, so nothing here promises that one hostile invitation cannot blank a listing - it can, and
+that is the accepted price of the caller being told rather than left to notice.
 
 **The residual: this bounds what is PARSED, never what is generated or transferred.** Cyrus's
 CalDAV expansion has no cap of its own (`expand_cb` returns 1 unconditionally, and

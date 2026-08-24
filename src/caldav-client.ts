@@ -2401,8 +2401,8 @@ const HIDDEN_TASK_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
  * to something real (the URL, or "Unnamed").
  *
  * No URL fallback lives here. What an absent name should degrade to differs per call site (a
- * literal "Unnamed" in a listing, the collection URL in a density note and in an error
- * message's name list), so the helper answers only "is there a name, and what is it".
+ * literal "Unnamed" in a listing, the collection URL in the too-dense refusal message and in an
+ * error message's name list), so the helper answers only "is there a name, and what is it".
  */
 export function unwrapDisplayName(raw: unknown): string | undefined {
   const scalar =
