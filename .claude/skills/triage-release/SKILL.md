@@ -34,7 +34,7 @@ Two rules, each of which caught real errors on the first run (23 Aug 2026):
 
 - **Re-derive each issue's load-bearing claim from the code.** Read the actual gate, guard or
   format the issue describes; run a quick probe where reading is ambiguous. Issue text, issue
-  status and any recorded verdict are candidates, not evidence - see `~/.claude/rules/working-with-jg.md`
+  status and any recorded verdict are candidates, not evidence - see `~/.claude/memory/trusting-the-record.md`
   §Trusting the record.
 - **Shipped-vs-NEW is decided mechanically against the tag, never inferred from where the work
   "belongs".** Does the defective code exist at the last tag? `git show <tag>:<file>` or

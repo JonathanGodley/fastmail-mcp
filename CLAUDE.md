@@ -76,7 +76,7 @@ The sharpest local example of a scope call that wasn't a disposition: #37 guarde
 ## Parallel work: one worktree per concern, kept alive through review
 
 **One worktree per implementer, a lone agent included** - the shared-index reason and the incident
-are in `~/.claude/rules/agents.md`; the change it swallowed here was #133. The main instance
+are in `~/.claude/memory/delegating.md` (indexed from `~/.claude/rules/index.md`); the change it swallowed here was #133. The main instance
 orchestrates: it partitions the work, routes findings, and merges. It does not implement.
 
 **Keep each worktree alive until its work is reviewed AND its findings are fixed.** Merging as
