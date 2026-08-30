@@ -611,10 +611,15 @@ export function noteDiscardedTextPart(): string {
   );
 }
 
-// Why this edit returns no bodyHash. Each names the read that issues one, because the
+// Why this edit returns no bodyHash. Each names the caller's way out, because the
 // alternative — omitting the field and saying nothing — is the silent-drop failure: a
 // caller that got a hash from the last edit and none from this one has no way to tell a
 // withheld hash from a forgotten one.
+//
+// The way out is a re-read for every case EXCEPT a degraded stored body, where a re-read
+// issues no hash either (get_email withholds on the same flags) and the remedy is to
+// recreate the draft. A note that sends the caller to a read that cannot answer is a
+// non-terminating remedy, which is no remedy at all.
 //
 // A hash is returned ONLY over a re-read of the stored parts after the write, never over
 // the bytes the call sent: a store may normalise what it stores, and a hash over the sent
@@ -631,7 +636,8 @@ export const NOTE_BODY_HASH_DERIVED_PART =
 
 export const NOTE_BODY_HASH_DEGRADED =
   'the saved draft was re-read to compute one, but the server flagged its stored body as ' +
-  'truncated or as having encoding problems. Read the draft with get_email to get a bodyHash.';
+  'truncated or as having encoding problems, so no read can prove you saw it whole. ' +
+  'Recreate the draft rather than editing its body again.';
 
 export function noteBodyHashUnreadable(reason: string): string {
   return (

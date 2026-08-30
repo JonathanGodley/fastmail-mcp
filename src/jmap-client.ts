@@ -3168,15 +3168,33 @@ export class JmapClient {
     // are all one rule: the caller may carry a hash forward only when it already knows,
     // byte for byte, what the saved draft's governing body part says.
     //
-    //  - A metadata-only edit is body-invariant, so it neither needs a hash nor issues one:
-    //    whatever hash the caller already holds is still current.
+    //  - A metadata-only edit writes no body, so it neither needs a hash nor issues one, and
+    //    on an ordinary draft it leaves both stored bodies exactly as they were.
+    //    BODY-INVARIANCE IS WHAT THAT PATH AIMS AT, NOT A PROPERTY IT CAN PROMISE, and two
+    //    known shapes break it. A draft carrying a body part that declares no content type
+    //    at all comes out of the recreate with an EMPTY body — nothing selects that part —
+    //    so a metadata edit destroys the one thing it was meant not to touch. And a recreate
+    //    that re-files an image out of a body list changes the deduplicated part SET the
+    //    hash covers, with no body written, so a hash the caller is holding can go stale
+    //    under an edit that wrote none.
+    //    The hash is not the lever for either, and must not be bent into one. It is demanded
+    //    only on an edit that TOUCHES the body (the guard above sits inside `touchesBody`),
+    //    so it never reaches the metadata path where the loss happens; withholding it would
+    //    take away the body edit — the one operation that cannot lose the body, since the
+    //    caller supplies it — and leave the destructive path exactly as it was. The second
+    //    case costs the caller a re-read on its next body edit, which is the guard working.
     //  - A flagged edit expands `{{signature}}` INTO the stored body, so what landed is not
     //    what the caller wrote. No hash; the note says to re-read.
-    //  - An edit whose governing part is one this server DERIVED (an html clear that leaves
-    //    the draft's own stored text, a text fallback generated from new html) is the same
-    //    case: the caller did not write those bytes. The governing part is the html when the
-    //    message ships one and the text otherwise, because that is the part a later edit has
-    //    to hand back.
+    //  - An edit whose governing part is one this server DERIVED (an html clear on a draft
+    //    that HAD html, leaving the fallback generated from it; a text fallback generated
+    //    from new html) is the same case: the caller did not write those bytes. The
+    //    governing part is the html when the message ships one and the text otherwise,
+    //    because that is the part a later edit has to hand back.
+    //    "Derived" is the test, not "not supplied by this call": clearing htmlBody on a
+    //    draft that never had one leaves the caller's OWN stored text standing, unchanged
+    //    and already proved read by the hash this call passed, so that edit issues a hash.
+    //    Withholding there would send the caller to a re-read for bytes it wrote itself,
+    //    under a reason ("derived from html") that is false of the draft.
     //
     // PROVENANCE, and it is the whole point: a hash that is returned is computed from a
     // RE-READ of the saved draft, never from the bytes this call sent. Hashing the sent
@@ -3185,7 +3203,9 @@ export class JmapClient {
     // remove — and it would pass any test that only checks a hash came back. When the
     // re-read fails or comes back truncated there is NO fallback to the sent bytes: the
     // result carries no hash and says why.
-    const governingSupplied = !isBlank(htmlBodyValue) ? wroteHtml : wroteText;
+    const governingSupplied = !isBlank(htmlBodyValue)
+      ? wroteHtml
+      : wroteText || (isBlank(existingHtmlValue) && textBodyValue === existingTextValue);
     let issuedBodyHash: string | undefined;
     let bodyHashWithheld: string | undefined;
     if (touchesBody) {
@@ -3201,7 +3221,15 @@ export class JmapClient {
           // encoding problem — makes the hash unrepresentative of what is stored, and an
           // unrepresentative hash is worse than none: the caller's next edit would pass a
           // guard it should have failed.
-          if (savedParts.length === 0 || savedParts.some((p) => p.degraded || p.value === undefined)) {
+          //
+          // Degradation is what the SERVER flagged, and nothing else. A part carrying no
+          // body value at all is not degradation: it is an embedded image the server routed
+          // into a body list, which `bodyHash` covers with a sentinel precisely so it can be
+          // hashed. Treating it as degraded would tell the caller the server flagged
+          // truncation when it flagged nothing — and would disagree with the read side,
+          // which withholds on `degraded` alone (see resolveDraftBodyHash), so the identical
+          // draft would get a hash from get_email and none from here.
+          if (savedParts.length === 0 || savedParts.some((p) => p.degraded)) {
             bodyHashWithheld = NOTE_BODY_HASH_DEGRADED;
           } else {
             issuedBodyHash = bodyHash(savedParts);

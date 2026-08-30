@@ -183,6 +183,13 @@ const BODY_TEXT_SIGNALS = ['quotedBytesStripped', 'quotedStripSkipped', 'bodyTex
 // one was issued, and bodyHashWithheld when it was not, because "no hash, and here is
 // why" is the promised answer and silence is the failure mode the ride-along exists to
 // prevent.
+//
+// The two are also each other's ride-along, which is what makes `fields: ["bodyHash"]`
+// answerable. That projection names no body field, so the read cannot have shown the body
+// and no hash can be issued honestly — but the answer is the withheld REASON, which names
+// the fields to add, not an empty object. Dropping it would leave the minimal projection a
+// caller reaches for after reading "pass the bodyHash get_email returns" returning `{}`:
+// the silent-drop failure, through exactly the door this ride-along was built to shut.
 const BODY_HASH_SIGNALS = ['bodyHash', 'bodyHashWithheld'] as const;
 
 export function projectEmail(
@@ -213,7 +220,7 @@ export function projectEmail(
     }
   }
 
-  if (fields.has('bodyText') || fields.has('bodyHtml')) {
+  if (fields.has('bodyText') || fields.has('bodyHtml') || BODY_HASH_SIGNALS.some((s) => fields.has(s))) {
     for (const signal of BODY_HASH_SIGNALS) {
       if (!fields.has(signal) && Object.prototype.hasOwnProperty.call(source, signal)) {
         projected[signal] = source[signal];

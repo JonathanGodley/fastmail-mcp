@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EMAIL_FIELD_NAMES, parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { simplifyEmail } from './email-formatter.js';
+import { attachDraftBodyHash } from './body-hash.js';
 import { InvalidInputError } from './coerce.js';
 
 // A raw JMAP email carrying one value of every field class the simplified shape
@@ -343,6 +344,69 @@ describe('projectEmail', () => {
     const projected = projectEmail(withHash, new Set(['bodyText', 'bodyHash'])) as Record<string, any>;
     assert.equal(Object.keys(projected).filter((k) => k === 'bodyHash').length, 1);
     assert.equal(projected.bodyHash, 'bh1-abc');
+  });
+
+  // The two halves ride along with EACH OTHER as well, which is what makes the minimal
+  // projection answerable: `fields:["bodyHash"]` names no body field, so the read cannot
+  // have shown the body and no hash can be honestly issued — but the answer owed is the
+  // withheld REASON naming the fields to add, not an empty object.
+  it('emits the withheld reason when the caller projected bodyHash alone', () => {
+    const withheld = { ...simplifyEmail(rawEmail()), bodyHashWithheld: 'read with fields: ["bodyText", "bodyHash"]' } as any;
+    const projected = projectEmail(withheld, new Set(['bodyHash'])) as Record<string, any>;
+    assert.equal(projected.bodyHashWithheld, 'read with fields: ["bodyText", "bodyHash"]');
+  });
+
+  it('emits the hash when the caller projected bodyHashWithheld alone and one was issued', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    const projected = projectEmail(withHash, new Set(['bodyHashWithheld'])) as Record<string, any>;
+    assert.equal(projected.bodyHash, 'bh1-abc');
+  });
+});
+
+// ---------- the composition, which is where the silence used to happen ----------
+//
+// Each end read correctly on its own: attachDraftBodyHash always attaches one of the two
+// fields to a draft, and the projection carries a named field through. Composed, the
+// narrowest useful projection returned `{}` — the caller named the token it wanted and got
+// nothing at all. These run both steps in the order get_email runs them.
+describe('get_email draft body hash through a projection', () => {
+  function draft(overrides: Record<string, any> = {}): any {
+    return rawEmail({ keywords: { $draft: true }, ...overrides });
+  }
+
+  function readDraft(raw: any, fieldNames?: string[]): Record<string, any> {
+    const fields = parseEmailFields(fieldNames);
+    const simplified = simplifyEmail(raw, { includeHtml: wantsHtmlBody(fields) });
+    attachDraftBodyHash(raw, simplified, { raw: false, fields, stripQuoted: false });
+    return projectEmail(simplified, fields) as Record<string, any>;
+  }
+
+  it('answers fields:["bodyHash"] with the reason, naming the read that would issue one', () => {
+    const result = readDraft(draft(), ['bodyHash']);
+    assert.notDeepEqual(result, {});
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld, /bodyText/);
+    assert.match(result.bodyHashWithheld, /bodyHash/);
+  });
+
+  it('answers fields:["bodyHtml"] on a two-part draft with the reason, not silence', () => {
+    const result = readDraft(draft(), ['bodyHtml']);
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld, /bodyText/);
+  });
+
+  it('issues the hash once the projection shows the whole stored body', () => {
+    const result = readDraft(draft(), ['bodyText', 'bodyHtml', 'bodyHash']);
+    assert.match(result.bodyHash, /^bh1-[0-9a-f]{32}$/);
+    assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  it('carries neither field through any projection of a non-draft', () => {
+    for (const names of [['bodyHash'], ['bodyText'], ['bodyText', 'bodyHtml']]) {
+      const result = readDraft(rawEmail(), names);
+      assert.equal('bodyHash' in result, false, names.join(','));
+      assert.equal('bodyHashWithheld' in result, false, names.join(','));
+    }
   });
 });
 

@@ -6,7 +6,7 @@ import { JmapClient } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
-import { bodyHash, collectDraftBodyParts } from './body-hash.js';
+import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
 
 // ---------- helpers ----------
@@ -1493,6 +1493,44 @@ describe('updateDraft', () => {
     });
     assert.ok(result.bodyHash);
     assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  // A body part carrying no stored VALUE is not a degraded read. It is an embedded image the
+  // server routed into a body list, which the hash covers with a sentinel of its own — and
+  // the read side treats it exactly that way, so counting it as degradation here would make
+  // get_email and edit_draft give different answers about the identical saved draft, under a
+  // note claiming the server flagged truncation when it flagged nothing.
+  it('issues the hash when the saved draft carries a body part with no stored value', async () => {
+    const savedWithImagePart = { ...REPLY_BASE, id: 'draft-2',
+      textBody: [{ partId: 'text', type: 'text/plain' }],
+      htmlBody: [
+        { partId: 'html', type: 'text/html' },
+        { blobId: 'blob-img', type: 'image/png', cid: 'img@example.com', disposition: 'inline' },
+      ],
+      bodyValues: { text: { value: '[image]' }, html: { value: '<p>x</p><img src="cid:img@example.com">' } } };
+    mockBodyEdit(client, HTML_ONLY_REPLY, savedWithImagePart);
+
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>x</p>', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.equal(result.bodyHash, hashOf(savedWithImagePart));
+    // The two sides agree on that draft, which is the property the predicate exists to keep.
+    assert.deepEqual(
+      resolveDraftBodyHash(savedWithImagePart, { bodyText: true, bodyHtml: true, stripQuoted: false }),
+      { bodyHash: result.bodyHash },
+    );
+  });
+
+  // Clearing htmlBody on a draft that never HAD html leaves the caller's own stored text
+  // standing — not a part derived from html — and this call proved it read those bytes.
+  it('issues the hash when an html clear leaves the caller\'s own text on a text-only draft', async () => {
+    mockBodyEdit(client, TEXT_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      clearFields: ['htmlBody'], bodyHash: hashOf(TEXT_ONLY_REPLY),
+    });
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.ok(result.bodyHash);
   });
 
   it('issues the hash on an html-alone edit, whose derived text part is not the governing one', async () => {
