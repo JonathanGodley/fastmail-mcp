@@ -54,8 +54,12 @@ try {
   let r = await c.call('edit_draft', { emailId: D0, subject: 'Foreign-shape roundtrip fixture (edited subject)' });
   check('metadata edit succeeded', !r.isError, text(r).slice(0, 300));
   const d1 = idOf(text(r)); if (d1) trash.push(d1);
-  r = await c.call('get_email', { emailId: d1 });
+  // verbose:true so the read returns BOTH stored parts: this draft carries a text/plain and
+  // a text/html part, and get_email issues a bodyHash only for a read that showed the whole
+  // stored body. Without it the read withholds and the body edits below cannot be made.
+  r = await c.call('get_email', { emailId: d1, verbose: true });
   let em = jsonOf(text(r));
+  check('metadata edit: read issues a bodyHash', typeof em.bodyHash === 'string', JSON.stringify(em.bodyHashWithheld ?? em.bodyHash));
   let st = await rawBodies(c, d1);
   check('metadata edit: cid verbatim + isInline', findImg(em)?.isInline === true, JSON.stringify(findImg(em) ?? em.attachments));
   check('metadata edit: html still references cid', st.html.includes(`cid:${CID}`), st.html.slice(0, 150));
@@ -65,11 +69,12 @@ try {
   // Edit 2: body-touching, KEEPING the reference — full pipeline runs against
   // the real @-bearing foreign cid; no false un-recreatable/broken-draft reject
   const newHtml = `<div><p>Edited body, image kept below.</p><img src="cid:${CID}"><p>After image.</p></div>`;
-  r = await c.call('edit_draft', { emailId: d1, htmlBody: newHtml });
+  r = await c.call('edit_draft', { emailId: d1, htmlBody: newHtml, bodyHash: em.bodyHash });
   check('body-touching edit succeeded', !r.isError, text(r).slice(0, 300));
   const d2 = idOf(text(r)); if (d2) trash.push(d2);
-  r = await c.call('get_email', { emailId: d2 });
+  r = await c.call('get_email', { emailId: d2, verbose: true });
   em = jsonOf(text(r));
+  check('body edit: read issues a bodyHash', typeof em.bodyHash === 'string', JSON.stringify(em.bodyHashWithheld ?? em.bodyHash));
   st = await rawBodies(c, d2);
   check('body edit: cid part survives verbatim', !!findImg(em), JSON.stringify((em.attachments ?? []).map(a => a.cid)));
   check('body edit: isInline true', findImg(em)?.isInline === true);
@@ -77,7 +82,7 @@ try {
   check('body edit: derived text has no cid leak', !st.txt.includes('cid:'), JSON.stringify(st.txt.slice(0, 120)));
 
   // Edit 3: body edit that DROPS the reference — loud degrade, part carried
-  r = await c.call('edit_draft', { emailId: d2, htmlBody: '<p>Image reference removed entirely.</p>' });
+  r = await c.call('edit_draft', { emailId: d2, htmlBody: '<p>Image reference removed entirely.</p>', bodyHash: em.bodyHash });
   check('ref-dropping edit succeeded', !r.isError, text(r).slice(0, 300));
   const d3 = idOf(text(r)); if (d3) trash.push(d3);
   check('ref-dropping edit emitted the degrade note', /became regular attachments/.test(text(r)), text(r).split('\n').filter(l => /image|attachment/i.test(l)).join(' | ').slice(0, 300));
