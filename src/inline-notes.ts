@@ -9,6 +9,7 @@
 // then got removed must be reported once, as removed, not twice. The ledger below is what
 // makes that true by construction.
 import { describePart, isAuthorableCid } from './inline-images.js';
+import type { BlockUnavailableCause } from './body-tokens.js';
 
 // ---------------------------------------------------------------------------
 // Sizes
@@ -309,13 +310,22 @@ export function rejectDanglingCidRef(value: string, availability: AttachmentAvai
     : `${lead} Remove the <img> reference, or recreate the draft without it.`;
 }
 
-/** The body references one of this server's own identifiers, which callers must not author. */
+/**
+ * The body authors a NEW reference to one of this server's own identifiers.
+ *
+ * Scoped to a reference naming no part the draft already carries: a minted identifier is
+ * durable now — it survives an edit for as long as the body keeps referencing it — so an
+ * image-bearing draft read back and handed straight back is full of these references, and
+ * refusing them all would refuse the first edit of every such draft. What stays refused is
+ * AUTHORING one, which names an image the draft does not have.
+ */
 export function rejectReservedCidRef(value: string): string {
   return (
     `htmlBody references cid "${describePart(value)}", a server-managed identifier for ` +
-    'quoted images. These identifiers are reused across edits but regenerated when the ' +
-    'quote is dropped and re-added — never reference them directly. To embed your own ' +
-    'image, add an attachments item with a cid of your choosing.'
+    'quoted images, and this draft carries no part under it. A minted identifier survives ' +
+    'an edit for as long as your body keeps referencing it, and a reference you drop takes ' +
+    'the part with it — but never author a NEW one. To embed your own image, add an ' +
+    'attachments item with a cid of your choosing.'
   );
 }
 
@@ -325,20 +335,6 @@ export function rejectRemovalDanglingRef(value: string): string {
     `removeAttachments would remove an image the draft's body still references ` +
     `(cid "${describePart(value)}"). Remove the <img> reference in the same call, ` +
     'or keep the attachment.'
-  );
-}
-
-/**
- * A removal targets an image the kept quote supplies.
- *
- * The recovery names a body write on purpose: dropping the quote on an edit that writes no
- * body rewrites nothing, so suggesting the flag alone would steer straight into a second
- * refusal.
- */
-export function rejectRemovalOfQuoteCarriedPart(): string {
-  return (
-    'That attachment is embedded by the kept quote; the rebuilt quote would re-embed it. ' +
-    'Use noQuote with a replacement body to drop the quote and its images instead.'
   );
 }
 
@@ -477,6 +473,170 @@ export function rejectInterleavedTextParts(): string {
   return (
     "This draft's body interleaves multiple text parts of the same type (a layout this " +
     `server cannot preserve). ${RECREATE_RECIPE} (see issue #85).`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Body tokens, and the read a body edit has to prove
+// ---------------------------------------------------------------------------
+//
+// These sentences serve BOTH compose and edit, which is why they live here rather than in
+// either handler. The two tools treat the same body very differently — draft_email refuses
+// what would ship wrong, because the body is wholly the caller's; edit_draft NOTES it,
+// because the body may be a foreign one handed back and a refusal keyed on its text could
+// be planted by the original's author and would then recur on every edit — so the split
+// between a refusal and a note below is deliberate and is not a wording choice.
+
+/** Why a block had nothing to put at a token's position, as one clause of a sentence. */
+export const CAUSE_SENTENCE: Record<BlockUnavailableCause, string> = {
+  'no-signature': 'the sending identity has no signature configured',
+  'no-text-form': 'the signature has no plain-text form (it is images only)',
+  'nothing-quotable': 'the original has nothing quotable in any format',
+  'nothing-quotable-in-this-form': 'the original has nothing quotable in this part\'s format',
+};
+
+/** A token that was placed and had nothing to expand to. Per part, never merged. */
+export function noteTokenEmpty(token: string, part: string, cause: BlockUnavailableCause): string {
+  return (
+    `{{${token}}} in ${part} was removed: ${CAUSE_SENTENCE[cause]}. ` +
+    'The rest of that part was stored as written.'
+  );
+}
+
+/**
+ * A body edit arrived with no proof that the caller read the body it replaces.
+ *
+ * The sentence explains WHY rather than just naming the parameter, because the reason is
+ * the whole of the rule: this tool stores what it is handed and preserves nothing, so the
+ * hash is the only thing standing between a stale read and a silent overwrite.
+ */
+export function rejectMissingBodyHash(): string {
+  return (
+    'This edit writes the draft\'s body, so it needs bodyHash — proof you have read the body ' +
+    'you are replacing. edit_draft stores the body you supply byte for byte and keeps nothing ' +
+    'of what is there, so an edit written from a stale read overwrites whatever changed in ' +
+    'between. Read the draft with get_email (fields: ["bodyText", "bodyHtml", "bodyHash"]) and ' +
+    'pass the bodyHash it returns. Metadata-only edits need none.'
+  );
+}
+
+/** The hash was current when it was issued and is not current now. */
+export function rejectStaleBodyHash(): string {
+  return (
+    'The bodyHash you passed is not this draft\'s current one, so its body changed after the ' +
+    'read that issued it (the web UI, another client, or an edit you have already made). ' +
+    'Nothing was written. Read the draft again with get_email, re-apply your changes to the ' +
+    'body it returns, and pass the bodyHash from that read.'
+  );
+}
+
+/** expandSignature was passed with nothing for it to expand. */
+export function rejectExpandSignatureWithoutToken(wroteAnyBody: boolean): string {
+  return wroteAnyBody
+    ? 'expandSignature: true was passed but the body you supplied carries no {{signature}}, so ' +
+      'there is nothing to expand. Place {{signature}} where the sign-off goes — above any ' +
+      'quoted or forwarded history — or drop the flag and the body is stored as written.'
+    : 'expandSignature: true was passed but this edit writes no body, so there is nothing to ' +
+      'expand it in. Supply textBody or htmlBody carrying {{signature}}, or drop the flag.';
+}
+
+/**
+ * A flagged edit's written part carries more than one `{{signature}}`.
+ *
+ * Refused rather than noted, and that is the one text-keyed refusal on this tool: passing
+ * the flag is the caller claiming the written part as its own, so the compose-style refusal
+ * applies. The escape is named because the extra token is usually one the caller did not
+ * write — a literal `{{signature}}` inside the quoted original it handed back.
+ */
+export function rejectRepeatedSignatureToken(part: string, count: number): string {
+  return (
+    `${part} carries ${count} {{signature}} tokens, and expandSignature would expand every one ` +
+    'of them. Keep the one where the sign-off goes and write the others as \\{{signature}} to ' +
+    'store them as text. A body you read back from a reply can carry one inside the quoted ' +
+    'original; that is the one to escape, and the escape is needed in each expandSignature call.'
+  );
+}
+
+/** The written part carries a `{{signature}}` the stored part did not, and no flag came with it. */
+export function noteSignatureTokenStored(part: string, count: number): string {
+  const plural = count === 1 ? '' : 's';
+  return (
+    `${part} carries ${count} {{signature}} token${plural} the stored body did not, and this ` +
+    'edit stored the body as written. Pass expandSignature: true to expand it.'
+  );
+}
+
+/** `{{quote}}` / `{{forward}}` reached the edit path, where neither expands. */
+export function noteHistoryTokenStored(tokens: string[]): string {
+  const named = tokens.map((t) => `{{${t}}}`).join(' and ');
+  const verb = tokens.length > 1 ? 'were' : 'was';
+  return (
+    `${named} ${verb} stored as written: those tokens expand on draft_email only, where the ` +
+    'block is built from the message being replied to or forwarded. edit_draft stores whatever ' +
+    'history you hand back to it.'
+  );
+}
+
+/** A spelling close enough to a token to be worth naming, stored as the caller wrote it. */
+export function noteNearMissToken(text: string, token: string): string {
+  return (
+    `The body you supplied carries "${describePart(text)}", which is not a token and was stored ` +
+    `as written. The token is exactly {{${token}}}.`
+  );
+}
+
+/** An escaped spelling this edit is about to ship with its backslash intact. */
+export function noteEscapedTokenShips(text: string): string {
+  return (
+    `The body you supplied carries "${describePart(text)}", an escaped token spelling the stored ` +
+    'body did not. An edit without expandSignature stores the body byte for byte, so the ' +
+    'backslash ships with it; the escape is only needed in an expandSignature call.'
+  );
+}
+
+/** One supplied part took the sign-off and the other carried no token to take it. */
+export function noteSignatureExpandedInOnePart(withToken: string, without: string): string {
+  return (
+    `{{signature}} expanded in ${withToken}; ${without} carries none, so it was stored without a ` +
+    'sign-off and a recipient reading that alternative sees none.'
+  );
+}
+
+/** An html-alone edit drops whatever plain-text part the draft was storing. */
+export function noteDiscardedTextPart(): string {
+  return (
+    'This edit wrote htmlBody alone, so the draft\'s stored plain-text part was discarded and a ' +
+    'fresh fallback derived from your html. If that part was hand-written, supply it as textBody ' +
+    'alongside htmlBody.'
+  );
+}
+
+// Why this edit returns no bodyHash. Each names the read that issues one, because the
+// alternative — omitting the field and saying nothing — is the silent-drop failure: a
+// caller that got a hash from the last edit and none from this one has no way to tell a
+// withheld hash from a forgotten one.
+//
+// A hash is returned ONLY over a re-read of the stored parts after the write, never over
+// the bytes the call sent: a store may normalise what it stores, and a hash over the sent
+// bytes would refuse the next edit as stale on a draft nobody had touched.
+
+export const NOTE_BODY_HASH_AFTER_EXPANSION =
+  'this edit expanded {{signature}}, so the stored body carries a block you have not read. ' +
+  'Read the draft with get_email to get a bodyHash for the next body edit.';
+
+export const NOTE_BODY_HASH_DERIVED_PART =
+  'this edit left the draft\'s plain-text part standing as its body, and that part is derived ' +
+  'from html rather than written by you. Read the draft with get_email to get a bodyHash for ' +
+  'the next body edit.';
+
+export const NOTE_BODY_HASH_DEGRADED =
+  'the saved draft was re-read to compute one, but the server flagged its stored body as ' +
+  'truncated or as having encoding problems. Read the draft with get_email to get a bodyHash.';
+
+export function noteBodyHashUnreadable(reason: string): string {
+  return (
+    `re-reading the saved draft to compute one failed (${reason}). Read the draft with ` +
+    'get_email to get a bodyHash.'
   );
 }
 

@@ -47,9 +47,12 @@ export interface ForwardParams {
 // 2026-07-05): embedded CR/LF and non-ASCII are REJECTED (failing the whole create),
 // and embedded angle brackets round-trip MANGLED (split into two ids). The value
 // comes verbatim from the forwarded — attacker-controlled — message, so pre-vet it
-// and treat a malformed id as absent: the forward still works, and the edit guard's
-// body markers still gate; only the recorded-source affordance is lost. Exported for
-// edit_draft's forward keep path, which re-points the recorded source the same way.
+// and treat a malformed id as absent: the forward still works, and only the
+// recorded-source affordance is lost. Exported for draft_email's forward mode, which
+// records the same header from the same untrusted source. `edit_draft` never writes this
+// header — it carries whatever the draft already stores, or drops it whole when the caller
+// names forwardedMessageId in clearFields — so nothing on the edit path re-vets a value
+// that was vetted when the draft was composed.
 export function isSettableMessageId(id: unknown): id is string {
   return (
     typeof id === 'string' &&

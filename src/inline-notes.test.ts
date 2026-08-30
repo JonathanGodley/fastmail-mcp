@@ -27,7 +27,6 @@ import {
   rejectDanglingCidRef,
   rejectNoteCidRef,
   rejectRemovalDanglingRef,
-  rejectRemovalOfQuoteCarriedPart,
   rejectReservedCidRef,
   rejectUnrecreatableCid,
 } from './inline-notes.js';
@@ -288,13 +287,18 @@ describe('the refusals a call raises', () => {
     assert.ok(!message.includes('‮'));
   });
 
-  it('refuses a reference to one of this server\'s own identifiers', () => {
+  // Scoped to AUTHORING one: the caller's body names a minted identifier the draft carries
+  // no part under. Handing back a reference to a part the draft actually has is the normal
+  // read-edit-write shape and never reaches this message, so the wording must not tell the
+  // caller to stop referencing them — only to stop inventing them.
+  it('refuses a reference authoring one of this server\'s own identifiers', () => {
     assert.equal(
       rejectReservedCidRef(MINT),
-      `htmlBody references cid "${MINT}", a server-managed identifier for quoted images. ` +
-      'These identifiers are reused across edits but regenerated when the quote is dropped ' +
-      'and re-added — never reference them directly. To embed your own image, add an ' +
-      'attachments item with a cid of your choosing.',
+      `htmlBody references cid "${MINT}", a server-managed identifier for quoted images, ` +
+      'and this draft carries no part under it. A minted identifier survives an edit for as ' +
+      'long as your body keeps referencing it, and a reference you drop takes the part with ' +
+      'it — but never author a NEW one. To embed your own image, add an attachments item ' +
+      'with a cid of your choosing.',
     );
   });
 
@@ -303,14 +307,6 @@ describe('the refusals a call raises', () => {
       rejectRemovalDanglingRef('logo'),
       'removeAttachments would remove an image the draft\'s body still references ' +
       '(cid "logo"). Remove the <img> reference in the same call, or keep the attachment.',
-    );
-  });
-
-  it('refuses to prune an image the kept quote would put straight back', () => {
-    assert.equal(
-      rejectRemovalOfQuoteCarriedPart(),
-      'That attachment is embedded by the kept quote; the rebuilt quote would re-embed it. ' +
-      'Use noQuote with a replacement body to drop the quote and its images instead.',
     );
   });
 

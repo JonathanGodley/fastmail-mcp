@@ -305,6 +305,45 @@ describe('projectEmail', () => {
     assert.equal('quotedBytesStripped' in projected, false);
     assert.equal('quotedStripSkipped' in projected, false);
   });
+
+  // The draft body hash rides along with EITHER body field, for the same reason: it is what
+  // edit_draft demands before it will write a body, so a projection that returns the body and
+  // drops the hash hands back the thing the caller asked for and withholds what makes it
+  // usable. Both halves ride — the hash, and the reason there is none.
+  it('emits bodyHash alongside a projected bodyText, and alongside a projected bodyHtml', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    for (const field of ['bodyText', 'bodyHtml']) {
+      const projected = projectEmail(withHash, new Set([field])) as Record<string, any>;
+      assert.equal(projected.bodyHash, 'bh1-abc', field);
+    }
+  });
+
+  it('emits bodyHashWithheld the same way, because the reason is the promised answer', () => {
+    const withheld = { ...simplifyEmail(rawEmail()), bodyHashWithheld: 'this read stripped quoted history' } as any;
+    const projected = projectEmail(withheld, new Set(['bodyText'])) as Record<string, any>;
+    assert.equal(projected.bodyHashWithheld, 'this read stripped quoted history');
+  });
+
+  it('does not emit either half when no body field was projected', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    const projected = projectEmail(withHash, new Set(['id', 'subject']));
+    assert.equal('bodyHash' in projected, false);
+    assert.equal('bodyHashWithheld' in projected, false);
+  });
+
+  // Both are ordinary projectable names too, so a caller that wants the token and nothing
+  // else can ask for it by name without dragging a body it does not need.
+  it('projects bodyHash on its own when the caller names it', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    assert.deepEqual(projectEmail(withHash, new Set(['bodyHash'])), { bodyHash: 'bh1-abc' });
+  });
+
+  it('emits the ride-along exactly once when the caller also named it', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    const projected = projectEmail(withHash, new Set(['bodyText', 'bodyHash'])) as Record<string, any>;
+    assert.equal(Object.keys(projected).filter((k) => k === 'bodyHash').length, 1);
+    assert.equal(projected.bodyHash, 'bh1-abc');
+  });
 });
 
 // ---------- the get_email read path (#69) ----------

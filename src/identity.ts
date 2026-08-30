@@ -66,7 +66,9 @@ export interface ResolvedSignature {
  * Read the sign-off off one identity. Undefined when it has none configured — an identity
  * with a blank signature is signature-less. A call that asked for one then gets nothing
  * appended AND is told so: undefined here becomes the `no-signature` skip reason, which
- * every compose path and edit_draft report (see SignatureSkipReason in src/reply-quote.ts).
+ * every compose path reports (see SignatureSkipReason in src/reply-quote.ts). `edit_draft`
+ * reports it as a `no-signature` cause on the `{{signature}}` it was asked to expand — a
+ * different sentence, for the same fact, because there the caller placed the token itself.
  */
 export function signatureOf(identity: any): ResolvedSignature | undefined {
   const html = typeof identity?.htmlSignature === 'string' && !isBlank(identity.htmlSignature)

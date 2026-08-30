@@ -4,8 +4,7 @@ import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
 import {
-  buildQuoteBlocks, buildForwardBlocks, emptyQuoteImages,
-  signatureHtmlBlock, signatureTextBlock,
+  buildQuoteBlocks, buildForwardBlocks, emptyQuoteImages, signatureBlock,
 } from './reply-quote.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
@@ -23,7 +22,7 @@ import {
   buildUnionParts, checkInlineClosure, describePart, isImageType, sanitizeQuoteHtml,
 } from './inline-images.js';
 import type { CidPart } from './inline-images.js';
-import { InlineNoteLedger, describePartNames } from './inline-notes.js';
+import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
 import { isSettableMessageId, sanitizeEmlFilename } from './forward-handler.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
@@ -378,44 +377,16 @@ function quoteBlock(content: string | undefined, anyForm: boolean): BodyBlock {
   return unavailable(anyForm ? 'nothing-quotable-in-this-form' : 'nothing-quotable');
 }
 
-/** The signature as a block for one part, with the cause when the identity offers none. */
-function signatureBlock(
-  signature: ResolvedSignature | undefined, part: PartName, messageShipsHtml: boolean,
-): BodyBlock {
-  if (!signature) return unavailable('no-signature');
-  const content = part === 'htmlBody'
-    ? signatureHtmlBlock(signature)
-    // htmlShips decides WHICH text form, and it is the MESSAGE question — a non-blank html
-    // part exists — not whether this part carries a token. See signatureTextBlock.
-    : signatureTextBlock(signature, messageShipsHtml);
-  if (content === undefined || isBlank(content)) {
-    // An identity that has a signature but no form this part can carry (an images-only html
-    // signature, in a text part) is a different sentence from having none at all.
-    return unavailable(part === 'htmlBody' ? 'no-signature' : 'no-text-form');
-  }
-  return { available: true, content };
-}
+// signatureBlock lives in reply-quote.ts beside the two block builders it chooses between:
+// edit_draft expands {{signature}} too, and the rule for WHICH form a part gets is one rule.
 
 // ---------------------------------------------------------------------------
 // Notes
 // ---------------------------------------------------------------------------
 
-const CAUSE_SENTENCE: Record<BlockUnavailableCause, string> = {
-  'no-signature': 'the sending identity has no signature configured',
-  'no-text-form': 'the signature has no plain-text form (it is images only)',
-  'nothing-quotable': 'the original has nothing quotable in any format',
-  'nothing-quotable-in-this-form': 'the original has nothing quotable in this part\'s format',
-};
-
-/** A token that was placed and had nothing to expand to. Per part, never merged. */
-function noteTokenEmpty(
-  token: BodyTokenName, part: PartName, cause: BlockUnavailableCause,
-): string {
-  return (
-    `{{${token}}} in ${partWord(part)} was removed: ${CAUSE_SENTENCE[cause]}. ` +
-    'The rest of that part was stored as written.'
-  );
-}
+// CAUSE_SENTENCE and noteTokenEmpty live in inline-notes.ts: edit_draft emits the same two
+// sentences from its own expansion, and a second copy of the cause wording is how the two
+// surfaces drift apart.
 
 /**
  * The identity has a signature and the caller placed none.
@@ -911,7 +882,7 @@ function emptyTokenNotes(expansions: Map<PartName, BodyTokenExpansion>): string[
       const key = `${site.name}:${site.cause}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push(noteTokenEmpty(site.name, part, site.cause));
+      out.push(noteTokenEmpty(site.name, partWord(part), site.cause));
     }
   }
   return out;

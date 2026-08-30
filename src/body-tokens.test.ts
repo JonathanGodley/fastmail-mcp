@@ -363,3 +363,78 @@ describe('body tokens — a long run of braces is scanned in linear time', () =>
     assert.ok(out.text.endsWith('\n[SIG]'), out.text.slice(-20));
   });
 });
+
+// The two shapes edit_draft needs and no compose surface does: a scan that reports what the
+// caller escaped, and a block form that leaves a token exactly as typed.
+//
+// Both exist because edit_draft stores an unflagged body byte for byte. It has to be able to
+// tell the caller what the stored part will contain, and it must never delete a spelling it
+// was not asked to expand.
+describe('body tokens — escapes are reported as facts, not defects', () => {
+  it('lists each escaped spelling with the backslash the caller typed', () => {
+    const part = String.raw`a \{{signature}} and a \{{quote}} here`;
+    const scan = scanBodyTokens(part);
+    assert.deepEqual(scan.escapes.map((e) => e.text), [String.raw`\{{signature}}`, String.raw`\{{quote}}`]);
+    // An escape is neither a token nor a near-miss nor an unexpanded spelling.
+    assert.deepEqual(scan.tokens, []);
+    assert.deepEqual(scan.nearMisses, []);
+    assert.deepEqual(scan.otherSpellings, []);
+    assert.equal(scan.counts.signature, 0);
+  });
+
+  it('records an escaped NEAR-MISS spelling too, where no name is available to report', () => {
+    // Branch 1 does not capture a name, which is why `escapes` is a site list and not a
+    // count: the only thing that can be quoted back is the literal text.
+    const scan = scanBodyTokens(String.raw`\{{SIGNATURE}}`);
+    assert.deepEqual(scan.escapes.map((e) => e.text), [String.raw`\{{SIGNATURE}}`]);
+    assert.deepEqual(scan.nearMisses, []);
+  });
+
+  it('reports nothing for an unescaped token or for prose braces', () => {
+    assert.deepEqual(scanBodyTokens('{{signature}}').escapes, []);
+    assert.deepEqual(scanBodyTokens(String.raw`use \{quote} in a template`).escapes, []);
+  });
+});
+
+describe('body tokens — the as-written block leaves a token exactly as typed', () => {
+  const AS_WRITTEN: BodyBlocks = {
+    signature: available('[SIG]'),
+    quote: { available: 'as-written' },
+    forward: { available: 'as-written' },
+  };
+
+  it('keeps the spelling in the text and marks the site asWritten', () => {
+    const out = expandBodyTokens('sign here {{signature}} and quote here {{quote}}', AS_WRITTEN);
+    assert.equal(out.text, 'sign here [SIG] and quote here {{quote}}');
+    const quoteSite = out.tokens.find((t) => t.name === 'quote')!;
+    assert.equal(quoteSite.asWritten, true);
+    assert.equal(quoteSite.expanded, false);
+    assert.equal(quoteSite.cause, undefined); // nothing was unavailable, so nothing to explain
+    assert.equal(quoteSite.text, '{{quote}}');
+  });
+
+  it('still counts the site, so a caller can say the token expanded nowhere', () => {
+    const out = expandBodyTokens('{{forward}} {{forward}}', AS_WRITTEN);
+    assert.equal(out.counts.forward, 2);
+    assert.equal(out.tokens.filter((t) => t.asWritten).length, 2);
+    assert.equal(out.text, '{{forward}} {{forward}}');
+  });
+
+  // The distinction that matters: an unavailable block REMOVES the token (and says why),
+  // while as-written keeps it. A handler that stores the body byte for byte needs the second
+  // one — removal would be this server silently editing the caller's body.
+  it('is not the same answer as an unavailable block', () => {
+    const removed = expandBodyTokens('x {{quote}} y', NO_BLOCKS);
+    assert.equal(removed.text, 'x  y');
+    assert.equal(removed.tokens[0].cause, 'nothing-quotable');
+    assert.equal(removed.tokens[0].asWritten, undefined);
+  });
+
+  // And not the same as no block at all, which also removes — the form edit_draft must never
+  // reach for on a token it does not offer.
+  it('is not the same answer as an absent block', () => {
+    const out = expandBodyTokens('x {{quote}} y', { signature: available('[SIG]'), quote: undefined, forward: undefined });
+    assert.equal(out.text, 'x  y');
+    assert.equal(out.tokens[0].asWritten, undefined);
+  });
+});

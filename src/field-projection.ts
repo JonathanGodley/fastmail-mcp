@@ -58,6 +58,8 @@ const EMAIL_FIELD_MAP: Record<keyof SimplifiedEmail, true> = {
   quotedBytesStripped: true,
   quotedStripSkipped: true,
   bodyTextUnavailable: true,
+  bodyHash: true,
+  bodyHashWithheld: true,
   blobId: true,
   size: true,
   keywords: true,
@@ -174,6 +176,15 @@ export function wantsHtmlBody(fields: ReadonlySet<string> | undefined): boolean 
  */
 const BODY_TEXT_SIGNALS = ['quotedBytesStripped', 'quotedStripSkipped', 'bodyTextUnavailable'] as const;
 
+// The draft body hash rides along with EITHER body field, for the same reason and by the
+// same rule. It is what edit_draft demands before it will write a body, so a projection
+// that returns the body but drops the hash hands back exactly the thing the caller needs
+// and silently withholds the token that makes it usable. Both halves ride: the hash when
+// one was issued, and bodyHashWithheld when it was not, because "no hash, and here is
+// why" is the promised answer and silence is the failure mode the ride-along exists to
+// prevent.
+const BODY_HASH_SIGNALS = ['bodyHash', 'bodyHashWithheld'] as const;
+
 export function projectEmail(
   email: SimplifiedEmail,
   fields: ReadonlySet<string> | undefined,
@@ -196,6 +207,14 @@ export function projectEmail(
 
   if (fields.has('bodyText')) {
     for (const signal of BODY_TEXT_SIGNALS) {
+      if (!fields.has(signal) && Object.prototype.hasOwnProperty.call(source, signal)) {
+        projected[signal] = source[signal];
+      }
+    }
+  }
+
+  if (fields.has('bodyText') || fields.has('bodyHtml')) {
+    for (const signal of BODY_HASH_SIGNALS) {
       if (!fields.has(signal) && Object.prototype.hasOwnProperty.call(source, signal)) {
         projected[signal] = source[signal];
       }

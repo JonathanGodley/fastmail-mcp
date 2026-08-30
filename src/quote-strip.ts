@@ -7,8 +7,8 @@ import { InvalidInputError } from './coerce.js';
 // per message stays constant.
 //
 // This is a different job from the marker checks in reply-quote.ts, which is why it lives
-// in its own module: hasQuoteMarker/hasTextQuoteMarker recognise OUR OWN emitted quote on a
-// draft we are about to edit, and only decide whether a guard fires. Here the input is
+// in its own module: hasQuoteMarker/hasTextQuoteMarker recognise OUR OWN emitted quote, and
+// nothing acts on the answer — no write path reads them. Here the input is
 // whatever a FOREIGN client produced, and a match DELETES text from the output — so the
 // rules below are deliberately narrower and every match must be one of a small set of
 // conventional, machine-emitted shapes.

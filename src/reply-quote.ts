@@ -3,6 +3,7 @@ import { formatAddress, formatReplyDate } from './email-formatter.js';
 import { buildCidMap, resolveCidRefs, sanitizeQuoteHtml } from './inline-images.js';
 import type { CidMapping, CidPart, MintedInlinePart } from './inline-images.js';
 import type { ResolvedSignature } from './identity.js';
+import type { BodyBlock } from './body-tokens.js';
 
 // Build the reply bodies (caller's new text + an attributed, top-posted quote of the
 // original), matching the Fastmail web client with a portable quote-bar. createDraft adds
@@ -203,11 +204,11 @@ const QUOTE_OPEN = '<blockquote type="cite" style="margin:0 0 0 .8ex;border-left
 // Gmail's `class="gmail_quote"`. Both are tool-generated on a <blockquote>, so neither
 // false-positives on a hand-written prose blockquote — a bare <blockquote> is deliberately NOT
 // a marker. Tolerant of attribute order and quote style ("..." / '...' / bare). This is a
-// PRESENCE check, not a content check: any such blockquote counts and an empty shell passes —
-// edit_draft's guard treats originalEmailId as the authoritative way to keep/regenerate the
-// quote, so a loose marker here only governs whether the guard fires — and, on the keep path,
-// whether a caller-supplied body is refused for already carrying the quote (#145); it can only
-// ever refuse on caller input, never exempt. Other clients (e.g.
+// PRESENCE check, not a content check: any such blockquote counts and an empty shell passes.
+// NO WRITE PATH READS IT ANY MORE: edit_draft used to fire a quote-preservation challenge off
+// it, and that whole mechanism is gone — an edit now stores the body it is handed byte for
+// byte, so a quote survives because the caller handed it back. What is left is a recogniser
+// for reads that summarise a body. Other clients (e.g.
 // Outlook's div-based quoting) aren't recognized; see the recognition residual in
 // docs/email-bodies.md.
 export function hasQuoteMarker(html: string | null | undefined): boolean {
@@ -219,12 +220,9 @@ export function hasQuoteMarker(html: string | null | undefined): boolean {
 // followed (allowing blank lines between) by a "> "-prefixed quote line. buildReplyBodies
 // emits exactly `${attribution}\n${quoteText(...)}`, so the runtime form is `wrote:\n> `;
 // the blank-line / CRLF tolerance is belt-and-suspenders for how a store/fetch round-trip or
-// a future format tweak might re-serialize it. Mostly used on the OLD (stored) text, which is
-// what decides whether edit_draft's guard fires. The one caller-input use is that guard's keep
-// path (#145), where a supplied body already carrying the quote originalEmailId would rebuild
-// is REFUSED — read-only in the refuse direction, so caller input can never use this to make an
-// edit pass. Like hasQuoteMarker this is a PRESENCE check that only governs whether the guard
-// fires; originalEmailId is the authoritative keep path.
+// a future format tweak might re-serialize it. Like hasQuoteMarker, a PRESENCE check with no
+// write path reading it: edit_draft's quote-preservation challenge, which was its one
+// consumer, is gone.
 // NOTE: each `([ \t]*\r?\n)*` iteration consumes a mandatory `\r?\n` over a class disjoint
 // from `\n` (no zero-width match), so this can't catastrophically backtrack — do NOT relax it
 // into a `\s*` / nested-quantifier form that could.
@@ -425,6 +423,33 @@ export function signatureTextBlock(
 }
 
 /**
+ * The signature as a `{{signature}}` block for one part, carrying the cause when the identity
+ * offers nothing this part can hold.
+ *
+ * Here rather than in either handler because BOTH tools expand the token — `draft_email` on
+ * the body it composes, `edit_draft` on a flagged edit — and the rule for which form a part
+ * gets is one rule. `messageShipsHtml` is the MESSAGE question (a non-blank html part
+ * exists), never "does this part carry a token"; see signatureTextBlock for why the answer
+ * is not simply "whichever form was configured".
+ */
+export function signatureBlock(
+  signature: ResolvedSignature | undefined,
+  part: 'textBody' | 'htmlBody',
+  messageShipsHtml: boolean,
+): BodyBlock {
+  if (!signature) return { available: false, cause: 'no-signature' };
+  const content = part === 'htmlBody'
+    ? signatureHtmlBlock(signature)
+    : signatureTextBlock(signature, messageShipsHtml);
+  if (content === undefined || isBlank(content)) {
+    // An identity that has a signature but no form this part can carry (an images-only html
+    // signature, in a text part) is a different sentence from having none at all.
+    return { available: false, cause: part === 'htmlBody' ? 'no-signature' : 'no-text-form' };
+  }
+  return { available: true, content };
+}
+
+/**
  * Why an append did not land where it was asked to. Every one of these is a call that ASKED
  * for a signature and did not fully get one, so each is reportable: the caller cannot see the
  * stored body from here, and a flag that silently no-ops is indistinguishable from one that
@@ -512,7 +537,7 @@ function planSignature(
 
 // The forward separator, as a whole-line test: this server's '----- Original message -----'
 // (FORWARD_MARKER_LINE) and Gmail's '---------- Forwarded message ----------'. Deliberately
-// the same shape hasTextForwardMarker matches, so a body that guard calls forwarded is a body
+// the same shape hasTextForwardMarker matches, so a body that one calls forwarded is a body
 // this one agrees is forwarded. Anchored at the dashes, so a '> '-quoted separator inside a
 // reply quote is quoted content and does not cut the body short — the same answer
 // hasTextForwardMarker gives, whose line anchor the '>' likewise defeats.
@@ -765,14 +790,6 @@ export function noteSignatureUnavailableOnEdit(
     default:
       return `${head}no signature is available for the address this edit sends as${who} — it has none configured, or it is not one of your verified identities — so the edited draft carries none.${tail}`;
   }
-}
-
-// The original's html as the quote builders read it. Exported so a caller that has to decide
-// which embedded images the quote will display — edit_draft, which resolves that against the
-// draft's own surviving parts before the quote is rebuilt — reads exactly the same string
-// these builders will quote, instead of reimplementing the body-list read.
-export function readQuotableHtml(original: any): string {
-  return readBodyList(original?.htmlBody, original?.bodyValues || {}, 'text/html', '<div>[…]</div>');
 }
 
 /**
@@ -1253,10 +1270,9 @@ export function buildForwardBodies(input: {
 // HTML) loses the attribute and cannot false-trip this. Disjoint from
 // hasQuoteMarker by tag name (div vs blockquote) — the official Fastmail client
 // uses <blockquote type="cite"> for replies and <div type="cite"> only for
-// forwards (probed live 2026-07-05). Like hasQuoteMarker, a PRESENCE check that
-// governs whether edit_draft's guard fires and — on the keep path — whether a
-// caller-supplied body is refused for already carrying the block (#145, refuse
-// only, never exempt); originalEmailId is the authoritative keep path.
+// forwards (probed live 2026-07-05). Like hasQuoteMarker, a PRESENCE check with
+// no write path reading it: edit_draft's forward-preservation challenge, which
+// was its one consumer, is gone.
 export function hasForwardMarker(html: string | null | undefined): boolean {
   if (!html) return false;
   return /<div\b[^>]*\btype\s*=\s*["']?cite\b/i.test(html);
@@ -1271,9 +1287,8 @@ export function hasForwardMarker(html: string | null | undefined): boolean {
 // ">", so that draft dispatches to the reply variant. This must also match
 // htmlToText(<the html block>) — an html-only forward stores a derived
 // text/plain alternative (pinned by test). Matching pasted forwarded content of
-// the same conventional shape is an accepted, documented cost: the guard
-// over-asks loudly and noQuote resolves it in one step — which is also the
-// answer when this fires on a caller-supplied keep body (#145). Linear-time: every
+// the same conventional shape is an accepted, documented cost, and a cheap one now
+// that no write path refuses anything on the strength of it. Linear-time: every
 // quantifier consumes from classes disjoint from its neighbors.
 export function hasTextForwardMarker(text: string | null | undefined): boolean {
   if (!text) return false;

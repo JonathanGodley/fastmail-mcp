@@ -238,12 +238,13 @@ describe('coerceBool', () => {
     assert.equal(coerceBool(0), undefined);
   });
 
-  // Pins the edit_draft noQuote handler seam: index.ts computes
-  // `coerceBool(args.noQuote) === true` before calling updateDraft (which takes a real
-  // boolean). The schema admits ['boolean','string'], so a lenient client's string
-  // "true" must coerce to a real drop, and NOTHING ELSE may — a garbage string
-  // yielding undefined can never silently discard a quote/forwarded block.
-  it('noQuote seam: string "true" becomes a real drop; anything unrecognized never does', () => {
+  // Pins the edit_draft expandSignature handler seam: editDraft computes
+  // `coerceBool(args.expandSignature) === true` before calling updateDraft (which takes a
+  // real boolean). The schema admits ['boolean','string'], so a lenient client's string
+  // "true" must coerce to a real expansion, and NOTHING ELSE may. False is the safe
+  // direction here: unflagged stores the body exactly as written, so a garbage string
+  // yielding undefined can never make this server rewrite a body nobody asked it to touch.
+  it('expandSignature seam: string "true" expands; anything unrecognized never does', () => {
     assert.equal(coerceBool('true') === true, true);
     assert.equal(coerceBool(true) === true, true);
     assert.equal(coerceBool('false') === true, false);

@@ -143,6 +143,17 @@ export interface BodyTokenScan {
    * spelling swallow a real token inside it and hide it from this very list.
    */
   otherSpellings: BodySpellingSite[];
+  /**
+   * Every ESCAPED spelling, as the caller wrote it (`\{{signature}}`, backslash included).
+   *
+   * Reported as sites rather than by token name because branch 1 does not capture the name,
+   * and a handler that needs one quotes the literal text back instead. An escape is not a
+   * refusal and not a near-miss — the caller asked for that text — so nothing here is a
+   * defect. It is here for the one caller that must tell the reader what is about to ship:
+   * `edit_draft` stores an unflagged body byte for byte, so an escape in it ships WITH its
+   * backslash, and the caller learns that from a comparison against the stored part.
+   */
+  escapes: BodySpellingSite[];
 }
 
 /**
@@ -165,10 +176,19 @@ export type BlockUnavailableCause =
 /**
  * One block, for one part. An unavailable block carries WHY, because the handler has to name
  * the cause to the caller — a token that expands to nothing must never vanish in silence.
+ *
+ * `'as-written'` is the third answer, and it is not a degraded form of either: the token is
+ * one this call does not offer AND the part is stored byte for byte, so the spelling has to
+ * survive the pass exactly as typed. `undefined` (no entry at all) removes the token, which
+ * is right for a handler that never authorised it and wrong for `edit_draft`, whose whole
+ * contract is that an unflagged body is stored as written — a `{{quote}}` in a body handed
+ * back to it is text, not an instruction, and deleting it would silently edit the caller's
+ * body. The site is still reported, so the caller is told the token expanded nowhere.
  */
 export type BodyBlock =
   | { available: true; content: string }
-  | { available: false; cause: BlockUnavailableCause };
+  | { available: false; cause: BlockUnavailableCause }
+  | { available: 'as-written' };
 
 /**
  * The blocks for one part, one per token.
@@ -182,8 +202,13 @@ export type BodyBlocks = Record<BodyTokenName, BodyBlock | undefined>;
 
 /** One token site after expansion. */
 export interface ExpandedTokenSite extends BodyTokenSite {
-  /** True when the block's content was substituted here. False when the token was removed. */
+  /**
+   * True when the block's content was substituted here. False when the token was removed —
+   * or left exactly as typed, which `asWritten` is what distinguishes.
+   */
   expanded: boolean;
+  /** The block was `'as-written'`, so the spelling is still in the text, verbatim. */
+  asWritten?: true;
   /**
    * Why nothing was substituted, on an unexpanded site whose block named a cause.
    *
@@ -270,7 +295,7 @@ function classify(
  * an escape is consumed only where substitution runs, so a scanned part keeps its text exactly.
  */
 export function scanBodyTokens(part: string): BodyTokenScan {
-  const scan: BodyTokenScan = { tokens: [], counts: zeroCounts(), nearMisses: [], otherSpellings: [] };
+  const scan: BodyTokenScan = { tokens: [], counts: zeroCounts(), nearMisses: [], otherSpellings: [], escapes: [] };
   // The pattern is module-level and `g`, so it carries `lastIndex` between calls, and the two
   // methods used here treat that state OPPOSITELY. `replace` (in expandBodyTokens) resets
   // `lastIndex` to 0 before matching, so it is immune and it leaves the pattern at 0. `matchAll`
@@ -300,9 +325,11 @@ export function scanBodyTokens(part: string): BodyTokenScan {
       case 'other':
         scan.otherSpellings.push({ index, text });
         break;
-      // An escape means the caller asked for that text; prose was never a token. Neither is
-      // reported, because neither is something the caller has to be told about.
+      // An escape means the caller asked for that text, so it is recorded as a fact and
+      // never as a defect — see `escapes`. Prose was never a token and is reported nowhere.
       case 'escape':
+        scan.escapes.push({ index, text });
+        break;
       case 'prose':
         break;
     }
@@ -319,7 +346,8 @@ export function scanBodyTokens(part: string): BodyTokenScan {
  * because the caller is the one who wrote the body around the token.
  *
  * A token with nothing to expand to is REMOVED, and the result says so per site, with the
- * cause its block named.
+ * cause its block named. A token whose block is `'as-written'` is left exactly as typed and
+ * reported as such — see BodyBlock for why that is a third answer and not a removal.
  *
  * `authored` must be the caller's own body and nothing else — never a part that has already
  * had fetched content joined into it.
@@ -357,13 +385,17 @@ export function expandBodyTokens(authored: string, blocks: BodyBlocks): BodyToke
         case 'token': {
           counts[c.name]++;
           const block = blocks[c.name];
+          if (block?.available === 'as-written') {
+            tokens.push({ name: c.name, index, text: whole, expanded: false, asWritten: true });
+            return whole;
+          }
           const site: ExpandedTokenSite = {
             name: c.name,
             index,
             text: whole,
             expanded: block?.available === true,
           };
-          if (block && !block.available) site.cause = block.cause;
+          if (block?.available === false) site.cause = block.cause;
           tokens.push(site);
           // The block's own content is returned from a FUNCTION replacer, so it is never
           // rescanned and never reinterpreted: a `{{signature}}` inside a quoted attacker

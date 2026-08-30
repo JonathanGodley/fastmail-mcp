@@ -141,7 +141,21 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
   const replaced = fingerprint
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
     : '';
-  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${formatInlineNotes(result.notes)}`;
+  // The token the caller's NEXT edit of this draft needs, or the reason there isn't one.
+  // Printed rather than left in the structured result because an unprinted hash is a hash
+  // the caller cannot use, and an unprinted WITHHELD reason reads to it as "the tool forgot"
+  // — it would go looking for a field that is deliberately absent.
+  //
+  // bodyHashWithheld gets the same redaction as orphanedOldDraftReason and for the same
+  // reason: one of its forms interpolates the message from a failed re-read, which is
+  // server/exception text reaching a caller on a RETURNED result, where the CallTool catch
+  // never sees it.
+  const hash = result.bodyHash
+    ? ` Body hash for your next edit of this draft: ${result.bodyHash}`
+    : result.bodyHashWithheld
+      ? ` No body hash was issued: ${redactBearerTokens(result.bodyHashWithheld)}`
+      : '';
+  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}${formatInlineNotes(result.notes)}`;
 }
 
 // The send_draft result text. Reports the submission, then what happened to the message
