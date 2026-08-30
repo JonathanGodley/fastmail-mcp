@@ -619,10 +619,13 @@ export function noteDiscardedTextPart(): string {
 // caller that got a hash from the last edit and none from this one has no way to tell a
 // withheld hash from a forgotten one.
 //
-// The way out is a re-read for every case EXCEPT a degraded stored body, where a re-read
-// issues no hash either (get_email withholds on the same flags) and the remedy is to
-// recreate the draft. A note that sends the caller to a read that cannot answer is a
-// non-terminating remedy, which is no remedy at all.
+// The way out is a re-read for every case EXCEPT the ones a re-read cannot answer either —
+// a stored body the server flagged, or one carrying a part no read returns — where the
+// remedy is to recreate the draft. A note that sends the caller to a read that cannot
+// answer is a non-terminating remedy, which is no remedy at all. Those cases are NOT
+// enumerated here: the two below are the reasons this edit path owns, and everything about
+// the saved body is asked of `resolveDraftBodyHash` and reported through
+// `noteBodyHashAfterReRead`, so one rule decides it for both tools.
 //
 // A hash is returned ONLY over a re-read of the stored parts after the write, never over
 // the bytes the call sent: a store may normalise what it stores, and a hash over the sent
@@ -637,10 +640,18 @@ export const NOTE_BODY_HASH_DERIVED_PART =
   'from html rather than written by you. Read the draft with get_email to get a bodyHash for ' +
   'the next body edit.';
 
-export const NOTE_BODY_HASH_DEGRADED =
-  'the saved draft was re-read to compute one, but the server flagged its stored body as ' +
-  'truncated or as having encoding problems, so no read can prove you saw it whole. ' +
-  'Recreate the draft rather than editing its body again.';
+/**
+ * A withheld-hash reason decided by the READ side, said on the edit surface.
+ *
+ * `edit_draft` does not judge the saved body itself: it asks `resolveDraftBodyHash` about
+ * the draft it just re-read, so the two tools cannot disagree about the same stored bytes.
+ * Those reasons are written for a caller that performed a read, and the caller of
+ * `edit_draft` performed none — without this prefix, "this read did not return it whole"
+ * names a read the caller never issued.
+ */
+export function noteBodyHashAfterReRead(reason: string): string {
+  return `the saved draft was re-read to compute one, but ${reason}`;
+}
 
 export function noteBodyHashUnreadable(reason: string): string {
   return (

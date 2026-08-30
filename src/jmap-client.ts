@@ -7,7 +7,7 @@ import { signatureBlock } from './reply-quote.js';
 import { matchesIdentity, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
-import { bodyHash, collectDraftBodyParts, draftPartKey } from './body-hash.js';
+import { bodyHash, collectDraftBodyParts, draftPartKey, resolveDraftBodyHash } from './body-hash.js';
 import {
   buildUnionParts, cidKey, describePart, sanitizeDownloadFilename,
   checkInlineClosure, isRecreatableCid, isReservedCid, reconcileInlineParts,
@@ -24,7 +24,7 @@ import {
   rejectInterleavedTextParts, rejectMissingBodyHash,
   rejectRemovalDanglingRef, rejectRepeatedSignatureToken, rejectReservedCidRef,
   rejectStaleBodyHash, rejectUncarriableBodyPart, rejectUnrecreatableCid,
-  NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DEGRADED, NOTE_BODY_HASH_DERIVED_PART,
+  NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DERIVED_PART, noteBodyHashAfterReRead,
 } from './inline-notes.js';
 import type { AttachmentAvailability } from './inline-notes.js';
 // unlink is a security control, not a convenience: the exclusive-create download
@@ -2622,9 +2622,12 @@ export class JmapClient {
     // comparable by construction. The window between this recompute and the write is
     // accepted; there is no `ifInState` on the Email/set below.
     //
-    // Gated on `touchesBody`: a metadata edit is body-invariant, so it neither needs a hash
-    // nor returns one. A body edit that carries none is refused rather than let through,
-    // because the whole point is that the caller cannot tell a stale body from a fresh one.
+    // Gated on `touchesBody`: a metadata edit writes no body, so it neither needs a hash nor
+    // returns one. What the gate does NOT rest on is body-invariance — the metadata path AIMS
+    // at leaving both stored bodies alone and cannot promise it; the comment on the hand-back
+    // below names the two shapes where it fails and why the hash is not the lever for either.
+    // A body edit that carries no hash is refused rather than let through, because the whole
+    // point is that the caller cannot tell a stale body from a fresh one.
     if (touchesBody) {
       if (typeof updates.bodyHash !== 'string' || updates.bodyHash.trim() === '') {
         throw new InvalidInputError(rejectMissingBodyHash());
@@ -3191,14 +3194,20 @@ export class JmapClient {
     //    what the caller wrote. No hash; the note says to re-read.
     //  - An edit whose governing part is one this server DERIVED (an html clear on a draft
     //    that HAD html, leaving the fallback generated from it; a text fallback generated
-    //    from new html) is the same case: the caller did not write those bytes. The
-    //    governing part is the html when the message ships one and the text otherwise,
-    //    because that is the part a later edit has to hand back.
+    //    from new html) is the same case, and the test is SEEN-NESS, not authorship: those
+    //    bytes were generated during this very call, so nothing the caller holds has shown
+    //    them to it. Not even the hash it just passed — on a dual draft that hash may itself
+    //    have come from an html-alone edit rather than a read, in which case the derived text
+    //    part it covers was never displayed to the caller either. The governing part is the
+    //    html when the message ships one and the text otherwise, because that is the part a
+    //    later edit has to hand back.
     //    "Derived" is the test, not "not supplied by this call": clearing htmlBody on a
-    //    draft that never had one leaves the caller's OWN stored text standing, unchanged
-    //    and already proved read by the hash this call passed, so that edit issues a hash.
-    //    Withholding there would send the caller to a re-read for bytes it wrote itself,
-    //    under a reason ("derived from html") that is false of the draft.
+    //    draft that never had one leaves the draft's EXISTING stored text standing —
+    //    unchanged, and shown to the caller by whatever read produced the hash this call
+    //    passed — so that edit issues a hash. Who wrote those bytes is beside the point; a
+    //    foreign draft's text qualifies exactly as the caller's own does. Withholding there
+    //    would send the caller to a re-read for bytes a read had already shown it, under a
+    //    reason ("derived from html") that is false of the draft.
     //
     // PROVENANCE, and it is the whole point: a hash that is returned is computed from a
     // RE-READ of the saved draft, never from the bytes this call sent. Hashing the sent
@@ -3220,23 +3229,41 @@ export class JmapClient {
       } else {
         try {
           const saved = await this.readDraftBody(newEmailId);
-          const savedParts = collectDraftBodyParts(saved);
-          // A part the re-read could not return whole — truncated, or flagged as an
-          // encoding problem — makes the hash unrepresentative of what is stored, and an
-          // unrepresentative hash is worse than none: the caller's next edit would pass a
-          // guard it should have failed.
+          // WHETHER THE SAVED BODY CAN BE HASHED HONESTLY IS THE READ SIDE'S RULE, ASKED
+          // RATHER THAN RE-STATED. `resolveDraftBodyHash` already decides it for `get_email`
+          // — a part the server flagged as truncated or as an encoding problem, a part no
+          // read returns because its declared type does not match the list it sits in — and
+          // it has more branches than any hand-written test here ever had. Asking it is what
+          // makes the hash this call hands back and the hash a later `get_email` issues agree
+          // about the same saved draft BY CONSTRUCTION, instead of by two expressions someone
+          // has to keep in step. They had already drifted: the same saved object could get a
+          // hash from here and "recreate the draft" from the very next read.
           //
-          // Degradation is what the SERVER flagged, and nothing else. A part carrying no
-          // body value at all is not degradation: it is an embedded image the server routed
-          // into a body list, which `bodyHash` covers with a sentinel precisely so it can be
-          // hashed. Treating it as degraded would tell the caller the server flagged
-          // truncation when it flagged nothing — and would disagree with the read side,
-          // which withholds on `degraded` alone (see resolveDraftBodyHash), so the identical
-          // draft would get a hash from get_email and none from here.
-          if (savedParts.length === 0 || savedParts.some((p) => p.degraded)) {
-            bodyHashWithheld = NOTE_BODY_HASH_DEGRADED;
+          // THE DESCRIPTOR IS A CLAIM, NOT A SET OF DEFAULTS. `resolveDraftBodyHash` asks
+          // what the response SHOWED, and two of its branches exist only because a read can
+          // be field-scoped or quote-stripped. Neither can happen here: `readDraftBody` is
+          // ours, unconditional, and fetches both body lists whole. Passing anything less
+          // than a whole read would make this path withhold with a reason about a `fields`
+          // selection on a call that has no `fields` — a false note of exactly the kind this
+          // guard exists to avoid. A post-write withhold must never carry a read-scope
+          // reason; there is a test that asserts only that.
+          const outcome = resolveDraftBodyHash(saved, {
+            bodyText: true,
+            bodyHtml: true,
+            stripQuoted: false,
+          });
+          if (!outcome) {
+            // It answers for drafts and returns nothing for anything else. What this call
+            // just created and re-read is a draft, so an absent outcome is not a body
+            // problem at all — the re-read did not come back as the draft we wrote. Raising
+            // it lands on the read-failure note below, which is the honest description, and
+            // stops the promised field vanishing with no trace.
+            throw new Error(`the saved draft '${newEmailId}' did not read back as a draft`);
+          }
+          if ('bodyHash' in outcome) {
+            issuedBodyHash = outcome.bodyHash;
           } else {
-            issuedBodyHash = bodyHash(savedParts);
+            bodyHashWithheld = noteBodyHashAfterReRead(outcome.bodyHashWithheld);
           }
         } catch (err) {
           bodyHashWithheld = noteBodyHashUnreadable(err instanceof Error ? err.message : String(err));
@@ -3276,6 +3303,11 @@ export class JmapClient {
    * one exists to answer a different question: not "did the parts land" but "what exactly do
    * they say". Its `fetchTextBodyValues`/`fetchHTMLBodyValues` are what make the returned
    * hash a statement about the STORED bytes rather than about the request.
+   *
+   * `keywords` is fetched for one reason: the caller hands this straight to
+   * `resolveDraftBodyHash`, which answers for drafts and returns nothing at all for anything
+   * else. Without it the saved message reads as a non-draft and the hash would go missing
+   * with no reason attached — the silent drop, arriving through an omitted property.
    */
   private async readDraftBody(emailId: string): Promise<any> {
     const session = await this.getSession();
@@ -3285,7 +3317,7 @@ export class JmapClient {
         ['Email/get', {
           accountId: session.accountId,
           ids: [emailId],
-          properties: ['id', 'textBody', 'htmlBody', 'bodyValues'],
+          properties: ['id', 'keywords', 'textBody', 'htmlBody', 'bodyValues'],
           bodyProperties: [...EMAIL_BODY_PROPERTIES],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,

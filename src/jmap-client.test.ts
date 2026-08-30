@@ -1473,6 +1473,86 @@ describe('updateDraft', () => {
     const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
     assert.equal(result.bodyHash, undefined);
     assert.match(result.bodyHashWithheld!, /truncated or as having encoding problems/);
+    assert.match(result.bodyHashWithheld!, /the saved draft was re-read/);
+  });
+
+  // The saved body is judged by the READ side's rule, so a shape get_email refuses to hash
+  // is one edit_draft refuses to hash too. Before, this draft got a hash here and "recreate
+  // the draft" from the very next read of the same saved object.
+  it('withholds the hash when the saved draft carries a body part no read returns', async () => {
+    const mismatched = { ...REPLY_BASE, id: 'draft-2',
+      textBody: [{ partId: 'text', type: 'text/plain' }, { partId: 'stray', type: 'text/html' }],
+      bodyValues: { text: { value: 'x' }, stray: { value: '<p>hidden</p>' } } };
+    mockBodyEdit(client, TEXT_ONLY_REPLY, mismatched);
+    const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /a body part no read returns/);
+    assert.match(result.bodyHashWithheld!, /Recreate the draft/);
+    // The same reason the read side gives for the same saved object, said on this surface.
+    const readSide = resolveDraftBodyHash(mismatched, { bodyText: true, bodyHtml: true, stripQuoted: false })!;
+    assert.ok('bodyHashWithheld' in readSide);
+    assert.ok(result.bodyHashWithheld!.endsWith((readSide as { bodyHashWithheld: string }).bodyHashWithheld));
+  });
+
+  // The other half of the same routing: an empty saved part set is a body, not a degraded
+  // read. get_email hashes it, so this does too — the old predicate reported it as the
+  // server having flagged truncation, which it had not.
+  it('issues the hash when the saved draft comes back with no body parts at all', async () => {
+    const empty = { ...REPLY_BASE, id: 'draft-2', textBody: [], htmlBody: [], bodyValues: {} };
+    mockBodyEdit(client, TEXT_ONLY_REPLY, empty);
+    const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.equal(result.bodyHash, hashOf(empty));
+  });
+
+  // THE pin on the routing, and it is not implied by the shapes above. resolveDraftBodyHash
+  // takes a descriptor of what a read SHOWED, and two of its branches exist only because a
+  // read can be field-scoped or quote-stripped. This path controls its own re-read and so
+  // claims a whole one; passing anything less would make an edit that has no `fields` at all
+  // withhold with a reason about the caller's `fields` selection. This stays meaningful as
+  // the read side grows branches, which is exactly when it would otherwise break in silence.
+  it('never withholds with a reason about the read\'s scope, whatever the saved draft looks like', async () => {
+    const shapes: Record<string, any> = {
+      truncated: { textBody: [{ partId: 't', type: 'text/plain' }],
+        bodyValues: { t: { value: 'partial', isTruncated: true } } },
+      encodingProblem: { textBody: [{ partId: 't', type: 'text/plain' }],
+        bodyValues: { t: { value: 'partial', isEncodingProblem: true } } },
+      unreturnablePart: { textBody: [{ partId: 't', type: 'text/plain' }, { partId: 's', type: 'text/html' }],
+        bodyValues: { t: { value: 'x' }, s: { value: '<p>hidden</p>' } } },
+      emptyPartSet: { textBody: [], htmlBody: [], bodyValues: {} },
+      htmlOnly: { htmlBody: [{ partId: 'h', type: 'text/html' }], bodyValues: { h: { value: '<p>x</p>' } } },
+    };
+    for (const [name, shape] of Object.entries(shapes)) {
+      mockBodyEdit(client, TEXT_ONLY_REPLY, { ...REPLY_BASE, id: 'draft-2', ...shape });
+      const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+      const withheld = result.bodyHashWithheld ?? '';
+      assert.equal(/fields:/.test(withheld), false, name);
+      assert.equal(/stripQuoted/.test(withheld), false, name);
+      assert.equal(/verbose/.test(withheld), false, name);
+      assert.equal(/did not return the draft's stored body whole/.test(withheld), false, name);
+    }
+  });
+
+  // resolveDraftBodyHash answers for drafts and returns nothing for anything else, so a
+  // re-read that does not come back as one would drop the promised field with no trace.
+  it('withholds with a reason when the saved message does not read back as a draft', async () => {
+    const notADraft = { ...REPLY_BASE, id: 'draft-2', keywords: {},
+      textBody: [{ partId: 't', type: 'text/plain' }], bodyValues: { t: { value: 'x' } } };
+    mockBodyEdit(client, TEXT_ONLY_REPLY, notADraft);
+    const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /did not read back as a draft/);
+  });
+
+  it('asks the server for the keywords that decide it, so the re-read can be judged at all', async () => {
+    const makeReq = mockBodyEdit(client, TEXT_ONLY_REPLY);
+    await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    const [reRead] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][0] === 'Email/get' && req.methodCalls[0][1].ids?.[0] === 'draft-2',
+      're-reading the saved draft',
+    );
+    assert.ok(reRead.methodCalls[0][1].properties.includes('keywords'));
   });
 
   it('withholds the hash when the governing part is one this server derived', async () => {
@@ -1656,6 +1736,7 @@ describe('updateDraft', () => {
     assert.equal(createdDraft(makeReq).bodyValues.html.value, body);
     assert.ok(result.notes?.some((n) => /an escaped token spelling the stored body did not/.test(n)));
   });
+
 
   // A near-miss is REPORTED here rather than refused, which is the opposite of draft_email.
   // The body may be a foreign one handed back, so a refusal keyed on its text could be
