@@ -1626,11 +1626,11 @@ describe('updateDraft', () => {
     assert.equal(makeReq.mock.calls.some((c) => c.arguments[0].methodCalls[0][1].create), false);
   });
 
-  // The escape, under the flag: the backslash is consumed, the bare braces are stored, and
-  // the result says so — because from the next edit's point of view that stored token is
-  // indistinguishable from one the original's author planted, and it will never expand again
-  // unless the caller flags that edit too.
-  it('consumes the escape under the flag, stores the bare token, and reports it', async () => {
+  // The escape, under the flag: the backslash is consumed and the bare braces are stored.
+  // NO note is emitted for it, and that is what this pins. The escape notes exist to tell an
+  // UNFLAGGED caller that its backslash shipped as literal text, which is not what happened
+  // here — under the flag the escape did exactly what it is for.
+  it('consumes the escape under the flag and stores the bare token, silently', async () => {
     mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
     const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
     const result = await client.updateDraft('draft-1', {
