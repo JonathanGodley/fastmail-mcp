@@ -88,6 +88,13 @@ export function draftTextBodyType(type: unknown, listType: DraftTextType): Draft
  * text type, the Apple Mail text-image-text layout whose ordering a flat rebuild cannot
  * express (issue #85). Undefined when the body has no such pair.
  *
+ * A part that declares NO content type counts as the list it sits in, like everywhere else
+ * here — which is what makes ONE typeless part in a list the caller's body, carried, and a
+ * typeless part BESIDE a typed one a pair. The pair is refused rather than resolved because
+ * a lookup asked for one format would have to CHOOSE between two candidates, and either
+ * choice drops the other part as silently as #179 dropped the typeless one. Refusing is new
+ * for drafts that edit today, and they edit today only by losing a part without saying so.
+ *
  * ONE EXPRESSION, TWO CONSUMERS, DELIBERATELY. `updateDraft` refuses every edit of this
  * shape, metadata-only included, and a read that issued a `bodyHash` for it would hand out
  * a lost-update guard that can never be spent (#180). The read withholds and the write
@@ -116,14 +123,7 @@ export function draftInterleavedTextType(email: any): string | undefined {
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const type = classifyPartType(part.type);
-      // OUT OF STEP WITH THE REST OF THIS MODULE, and knowingly so for now: a part that
-      // declares no type is skipped here, where every other reader of a body list treats it
-      // as the content of the list it sits in (see draftTextBodyType). The consequence is
-      // #179 — such a part is invisible to this check and is dropped by the edit that
-      // follows it.
-      if (!type) continue;
-      const countsAs = draftTextBodyType(type, list.listType);
+      const countsAs = draftTextBodyType(classifyPartType(part.type), list.listType);
       if (countsAs === undefined) continue;
 
       const count = (counts.get(countsAs) ?? 0) + 1;
@@ -292,6 +292,23 @@ export function resolveDraftBodyHash(email: any, read: DraftBodyHashRead): Draft
         'this draft carries a body part no read returns (a part whose declared type does not ' +
         'match the body list it sits in), so no read can prove you saw the whole body. ' +
         'Recreate the draft rather than editing its body.',
+    };
+  }
+
+  // The hash is a token to SPEND on an edit, so a draft no edit of which can be made gets
+  // none. `updateDraft` refuses every edit of this shape, a metadata-only one included, so
+  // a hash issued here could never be spent and would send the caller off to compose an
+  // edit against a draft that will refuse it (#180). One expression decides both — the read
+  // withholds for exactly the drafts the write refuses because they ask the same function.
+  // Reported ahead of stripQuoted for the same reason the degraded case is: no second read
+  // would issue a hash either, so naming one would send the caller nowhere.
+  const interleaved = draftInterleavedTextType(email);
+  if (interleaved) {
+    return {
+      bodyHashWithheld:
+        `this draft's body interleaves multiple ${interleaved} parts, a layout editing ` +
+        'cannot preserve, so every edit of this draft is refused and a bodyHash could never ' +
+        'be spent. Recreate the draft rather than editing its body (see issue #85).',
     };
   }
 

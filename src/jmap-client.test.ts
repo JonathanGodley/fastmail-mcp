@@ -3865,6 +3865,42 @@ describe('updateDraft embedded images (#13)', () => {
     );
   });
 
+  // #179: a body part that declares no content type is the body of whichever list carries it
+  // (RFC 8621 §4.1.4 — the lists are the authority, not the part's own `type`). The lookup
+  // used to demand a type-exact match, find nothing, and recreate the draft with the body
+  // gone. On a one-part draft that was the whole message.
+  it('carries a body part that declares no content type through a metadata edit', async () => {
+    const typeless = {
+      ...EXISTING_DRAFT,
+      textBody: [{ partId: 'text' }],
+      htmlBody: null,
+      attachments: [],
+    };
+    const makeReq = mockEdit(client, typeless);
+    await edit({ subject: 'Renamed' });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.text.value, 'Old body');
+    assert.equal(draft.htmlBody, undefined); // body-invariant: no html part invented
+  });
+
+  // The same widening pairs a typeless part with a typed one in the same list, which is the
+  // interleaved shape by another name: a lookup for that format would have two candidates and
+  // no way to choose, so it is refused rather than silently resolved to one of them.
+  it('refuses a body where a typeless part sits beside a typed one', async () => {
+    const paired = {
+      ...EXISTING_DRAFT,
+      textBody: [{ partId: 'text', type: 'text/plain' }, { partId: 'extra' }],
+      htmlBody: null,
+      bodyValues: { text: { value: 'Old body' }, extra: { value: 'and more' } },
+      attachments: [],
+    };
+    mockEdit(client, paired);
+    await assert.rejects(
+      () => edit({ subject: 'X' }),
+      /interleaves multiple text parts of the same type.*see issue #85/s,
+    );
+  });
+
   it('raises a body-shape refusal before an attachment one', async () => {
     const weird = {
       ...EXISTING_DRAFT,
