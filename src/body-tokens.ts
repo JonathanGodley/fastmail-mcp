@@ -271,9 +271,19 @@ function classify(
  */
 export function scanBodyTokens(part: string): BodyTokenScan {
   const scan: BodyTokenScan = { tokens: [], counts: zeroCounts(), nearMisses: [], otherSpellings: [] };
-  // The pattern is module-level and `g`, so it carries `lastIndex` between calls. `matchAll`
-  // and `replace` both reset it themselves today; the reset is here so that a future read
-  // through `exec` or `test` cannot make this function's answer depend on the call before it.
+  // The pattern is module-level and `g`, so it carries `lastIndex` between calls, and the two
+  // methods used here treat that state OPPOSITELY. `replace` (in expandBodyTokens) resets
+  // `lastIndex` to 0 before matching, so it is immune and it leaves the pattern at 0. `matchAll`
+  // does NOT reset: it copies `lastIndex` into the clone it iterates and honours the copy,
+  // leaving the original untouched. A non-zero value arriving here would therefore start the
+  // scan partway through the part and report every token BEFORE that offset as absent, and it
+  // would not throw doing it: a wrong answer wearing a clean one's face.
+  // Before deciding this line is dead, check the EXPOSURE and not just the mechanism above,
+  // which is how the previous version of this comment stayed wrong. `BODY_TOKEN_RE` is private
+  // to this module and its only uses are the `matchAll` below and that `replace`; nothing calls
+  // `test` or `exec` on it, and those are the methods that leave a non-zero value behind. So the
+  // value is always 0 today, and this assignment costs one write to make the truncation above
+  // unreachable rather than merely absent.
   BODY_TOKEN_RE.lastIndex = 0;
   for (const m of part.matchAll(BODY_TOKEN_RE)) {
     const index = m.index ?? 0;
