@@ -317,7 +317,7 @@ describe('buildForwardBodies — format emission matrix', () => {
   it('caller html only: html = note + block + sanitized original; text side left to the downstream fallback', () => {
     const out = buildForwardBodies({ original: fwdOriginal(), htmlBody: '<p>see below</p>' });
     assert.equal(out.textBody, undefined);
-    assert.match(out.htmlBody!, /^<p>see below<\/p><div><br>----- Original message -----/);
+    assert.match(out.htmlBody!, /^<p>see below<\/p><div>----- Original message -----/);
   });
   it('caller html only over a text-only original: original text escaped into the html (caller chose html)', () => {
     const out = buildForwardBodies({ original: textOnlyOriginal(), htmlBody: '<p>note</p>' });
@@ -332,7 +332,7 @@ describe('buildForwardBodies — format emission matrix', () => {
     const out = buildForwardBodies({ original: fwdOriginal(), textBody: 'my custom text', htmlBody: '<p>my html</p>' });
     assert.match(out.textBody!, /^my custom text\n\n\n----- Original message -----/);
     assert.match(out.textBody!, /original text/);
-    assert.match(out.htmlBody!, /^<p>my html<\/p><div><br>----- Original message -----/);
+    assert.match(out.htmlBody!, /^<p>my html<\/p><div>----- Original message -----/);
   });
   it('attachment-only original: the header block stands alone (no empty cite shell)', () => {
     const out = buildForwardBodies({ original: attachmentOnlyOriginal() });
@@ -456,5 +456,52 @@ describe('normalizeName NEL widening also protects the reply attribution line', 
     const attribution = textBody!.split('\n').find((l) => l.includes('wrote:'))!;
     assert.equal(attribution.includes(nel), false);
     assert.match(attribution, /Eve Impostor wrote:/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The blocks, carved out of the two builders
+// ---------------------------------------------------------------------------
+
+// Late import, beside the suites that use it (same convention as the forward suites above).
+import { buildForwardBlocks, buildQuoteBlocks } from './reply-quote.js';
+
+describe('buildQuoteBlocks — a block starts at its attribution line', () => {
+  it('carries no separator of its own; the joins in buildReplyBodies supply them', () => {
+    const original = fwdOriginal();
+    const blocks = buildQuoteBlocks({ original, htmlShips: true });
+    assert.ok(blocks.textBlock!.startsWith('On '), blocks.textBlock);
+    assert.ok(blocks.htmlBlock!.startsWith('<div>On '), blocks.htmlBlock);
+    const out = buildReplyBodies({ original, textBody: 'r', htmlBody: '<p>r</p>', quoteOriginal: true });
+    assert.equal(out.textBody, `r\n\n${blocks.textBlock}`);
+    assert.equal(out.htmlBody, `<p>r</p><div><br></div>${blocks.htmlBlock}`);
+  });
+
+  it('an original quotable in no format yields no block at all (no orphan attribution)', () => {
+    const blocks = buildQuoteBlocks({ original: attachmentOnlyOriginal(), htmlShips: true });
+    assert.equal(blocks.textBlock, undefined);
+    assert.equal(blocks.htmlBlock, undefined);
+    assert.equal(blocks.images.htmlQuoteShips, false);
+  });
+});
+
+describe('buildForwardBlocks — a block starts at its header line', () => {
+  it('does NOT open with a <br>: that was a separator sitting inside the block\'s own div', () => {
+    const { htmlBlock } = buildForwardBlocks({ original: fwdOriginal(), htmlShips: true });
+    assert.doesNotMatch(htmlBlock, /^<div><br>/);
+    assert.ok(htmlBlock.startsWith('<div>----- Original message -----<br>'), htmlBlock);
+  });
+
+  it('buildForwardBodies puts NOTHING in its place — the note abuts the block', () => {
+    const out = buildForwardBodies({ original: fwdOriginal(), htmlBody: '<p>note</p>' });
+    const { htmlBlock } = buildForwardBlocks({ original: fwdOriginal(), htmlShips: true });
+    assert.equal(out.htmlBody, `<p>note</p>${htmlBlock}`);
+  });
+
+  it('the text block starts at the marker line; the blank lines stay on the join', () => {
+    const { textBlock } = buildForwardBlocks({ original: fwdOriginal(), htmlShips: false });
+    assert.ok(textBlock.startsWith('----- Original message -----'), textBlock);
+    const out = buildForwardBodies({ original: fwdOriginal(), textBody: 'note' });
+    assert.equal(out.textBody, `note\n\n\n${textBlock}`);
   });
 });

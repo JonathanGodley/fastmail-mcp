@@ -4167,7 +4167,7 @@ describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
     await client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>', originalEmailId: 'orig-1' });
     const draft = createdDraftObj(makeReq);
     const html = draft.bodyValues[draft.htmlBody[0].partId].value;
-    assert.match(html, /^<p>new note<\/p><div><br>----- Original message -----/);
+    assert.match(html, /^<p>new note<\/p><div>----- Original message -----/);
     assert.match(html, /ORIGINAL HTML BODY/);
     assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
   });

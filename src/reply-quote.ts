@@ -33,7 +33,8 @@ function stripSentinels(s: string): string {
   return s.replace(/\n?\[body truncated\]/g, '').replace(/\n?\[encoding issues detected\]/g, '');
 }
 
-// Both quote builders sanitize the original's html through the shared two-pass sanitizer in
+// Both BLOCK builders — buildQuoteBlocks and buildForwardBlocks, which is where the two
+// passes below run — sanitize the original's html through the shared two-pass sanitizer in
 // src/inline-images.ts. Its safety floor is the same one this file has always applied —
 // formatting tags kept, script/style/handlers and ALL unscoped attributes dropped (no global
 // '*' key; style is the classic CSS-exfil/mXSS vector), schemes pinned, and any <img> whose
@@ -774,6 +775,123 @@ export function readQuotableHtml(original: any): string {
   return readBodyList(original?.htmlBody, original?.bodyValues || {}, 'text/html', '<div>[…]</div>');
 }
 
+/**
+ * The attributed reply quote, one block per body format.
+ *
+ * A BLOCK STARTS AT ITS ATTRIBUTION LINE. The separator between the caller's own body and the
+ * block — `\n\n` in text, `<div><br></div>` in html — is NOT part of it. The separator belongs
+ * to the concatenation and is deleted with it, so a caller that places a block somewhere else
+ * in a body it wrote itself is not handed our spacing along with the block.
+ */
+export interface QuoteBlocks {
+  /** The attributed text quote. Undefined when there is nothing to put in one. */
+  textBlock?: string;
+  /** The attributed html quote. Undefined when the original is quotable in no format at all. */
+  htmlBlock?: string;
+  /** What the two passes decided about the original's embedded images. */
+  images: QuoteImageOutcome;
+}
+
+/**
+ * Build the reply quote's blocks, running both image passes (see the pass-ordering note at the
+ * top of this file, which is what this function's PASS 1 / PASS 2 comments refer to).
+ *
+ * `htmlShips` is an INPUT rather than a decision made here: it is a fact about the message
+ * being composed, not about the original, and the two callers do not answer it the same way —
+ * a forward with no caller body ships html where a reply would not.
+ */
+export function buildQuoteBlocks(input: {
+  original: any;            // raw JMAP email from getEmailById (textBody/htmlBody arrays + bodyValues + date)
+  /** Whether the message being composed ships an html part at all. */
+  htmlShips: boolean;
+  timezone?: string;
+  // See buildReplyBodies: the edit path's rewrite-only channel.
+  cidMap?: Map<string, string>;
+  // See buildReplyBodies: the compose path's channel, where this builder runs both passes.
+  quoteImages?: QuoteImageInput;
+}): QuoteBlocks {
+  const { original, htmlShips, timezone, cidMap, quoteImages } = input;
+
+  const bodyValues = original?.bodyValues || {};
+  const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
+  const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
+
+  // PASS 1 — collect. Decides quotable content (content-based, not raw presence) and, for a
+  // compose path, which references resolve. Nothing is minted here.
+  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  const htmlQuotable = collected.quotable;
+  const textQuotable = !isBlank(origText);
+
+  // Whether a quote reproducing the original's own html ships. Two things turn on it: only
+  // such a quote can display an embedded image, and the text side's image policy follows —
+  // when one ships, an image the quote carries is something the reader can look at, so the
+  // text alternative may say an image is there; when none does, a placeholder would describe
+  // an absent thing.
+  const htmlQuoteShips = htmlShips && htmlQuotable;
+
+  // PASS 2 — map. Runs ONLY on a branch that ships an html quote, so an identifier is minted
+  // only when a body exists to reference it.
+  const resolved = htmlQuoteShips && quoteImages
+    ? buildCidMap({
+        refs: collected.refs,
+        sourceParts: quoteImages.sourceParts ?? [],
+        ...(quoteImages.mint && { mint: quoteImages.mint }),
+      })
+    : null;
+  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const mapped = htmlQuotable && quoteMap
+    ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
+    : null;
+  const sanitizedHtml = htmlQuotable ? (mapped ? mapped.html : collected.html) : '';
+
+  const images: QuoteImageOutcome = {
+    minted: resolved?.minted ?? [],
+    mappings: resolved?.mappings ?? [],
+    resolvedParts: collected.resolvedParts,
+    unresolvedRefs: collected.unresolvedRefs,
+    droppedDataImages: collected.droppedDataImages,
+    // Read off the pass that produced the html actually shipped: only that pass drops a
+    // reference form it cannot carry, and only when its output is what ships.
+    droppedUnsupportedImages: htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0,
+    htmlQuoteShips,
+  };
+
+  // No quotable original (attachment-only / ICS-only, or an image-only original whose images
+  // cannot be carried): no block at all, in either format — the attribution goes with the
+  // quote, so there is no orphan "On … wrote:" over an empty one. Whatever the references
+  // pointed at is reported as dropped by the caller.
+  if (!htmlQuotable && !textQuotable) return { images };
+
+  // Attribution in LOCAL time; the date is omitted (never "Invalid Date") when the original
+  // has no usable sentAt/receivedAt, and the line drops the leading "On " + comma in that case.
+  const senderRaw = original?.from?.[0]?.name || original?.from?.[0]?.email || '';
+  const name = normalizeName(senderRaw);
+  const date = formatReplyDate(original?.sentAt ?? original?.receivedAt, timezone);
+  const attribution = date ? `On ${date}, ${name} wrote:` : `${name} wrote:`;
+
+  const blocks: QuoteBlocks = { images };
+
+  // text quote source: the original's text, else a readable conversion of its html. The
+  // conversion runs over the RAW original html, exactly as it always has — deriving from
+  // the sanitized output instead would silently change the derived text of every html
+  // original, embedded images or not, because the quote floor drops tags that carry text.
+  const textSource = pick(
+    origText,
+    htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', quoteMap),
+  );
+  // A blank source gets no attribution and no quote. An "On … wrote:" over an empty "> "
+  // line describes a quote that is not there, and it would arm this server's own text
+  // quote marker, so the next edit of the draft would be challenged over a quote it has
+  // never had. (The forward builder has always had this gate; the reply builder gains it.)
+  if (!isBlank(textSource)) blocks.textBlock = `${attribution}\n${quoteText(textSource)}`;
+
+  // rich quote: prefer the sanitized html; else a text-only original → escaped block.
+  const htmlSource = htmlQuotable ? sanitizedHtml : textToHtmlBlock(origText);
+  blocks.htmlBlock = `<div>${escapeHtml(attribution)}</div>${QUOTE_OPEN}${htmlSource}</blockquote>`;
+
+  return blocks;
+}
+
 export function buildReplyBodies(input: {
   original: any;            // raw JMAP email from getEmailById (textBody/htmlBody arrays + bodyValues + date)
   textBody?: string;        // caller's new text
@@ -784,12 +902,13 @@ export function buildReplyBodies(input: {
   // EDIT path's channel: it resolved the references against the draft's own surviving parts
   // and hands the finished map in, so this builder only rewrites.
   cidMap?: Map<string, string>;
-  // The COMPOSE path's channel: no draft exists yet, so the builder runs both passes itself
-  // and reports what it decided on `quoteImages` in the result.
+  // The COMPOSE path's channel: no draft exists yet, so the block builder runs both passes
+  // and what it decided is reported on `quoteImages` in the result.
   quoteImages?: QuoteImageInput;
   // The sending identity's sign-off, already resolved by the caller (this builder does no
   // I/O). Appended to the caller's own body BEFORE anything below runs, which is what puts
-  // it above the quote — and what gets it onto the two passthrough branches too.
+  // it above the quote — and what gets it onto the branches that return the caller's bodies
+  // with no quote at all, too.
   signature?: ResolvedSignature;
 }): { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } {
   const {
@@ -814,106 +933,35 @@ export function buildReplyBodies(input: {
   // carried. There is no quote-text-without-images setting: the images ARE the quoted body.
   if (!quoteOriginal) return passthrough();
 
-  const bodyValues = original?.bodyValues || {};
-  const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
-  const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
-
-  // PASS 1 — collect. Decides quotable content (content-based, not raw presence) and, for a
-  // compose path, which references resolve. Nothing is minted here.
-  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
-  const htmlQuotable = collected.quotable;
-  const textQuotable = !isBlank(origText);
-
-  const carriedNothing = (): QuoteImageOutcome => ({
-    minted: [],
-    mappings: [],
-    resolvedParts: collected.resolvedParts,
-    unresolvedRefs: collected.unresolvedRefs,
-    droppedDataImages: collected.droppedDataImages,
-    // No html quote ships on this branch, so nothing was rewritten and nothing dropped.
-    droppedUnsupportedImages: 0,
-    htmlQuoteShips: false,
+  const blocks = buildQuoteBlocks({
+    original,
+    htmlShips: htmlBody !== undefined,
+    timezone,
+    cidMap,
+    quoteImages,
   });
-
-  // No quotable original (attachment-only / ICS-only, or an image-only original whose images
-  // cannot be carried): skip the quote AND the attribution — no orphan "On … wrote:" over an
-  // empty quote. Whatever the references pointed at is reported as dropped by the caller.
-  if (!htmlQuotable && !textQuotable) return passthrough(carriedNothing());
-
-  // Attribution in LOCAL time; the date is omitted (never "Invalid Date") when the original
-  // has no usable sentAt/receivedAt, and the line drops the leading "On " + comma in that case.
-  const senderRaw = original?.from?.[0]?.name || original?.from?.[0]?.email || '';
-  const name = normalizeName(senderRaw);
-  const date = formatReplyDate(original?.sentAt ?? original?.receivedAt, timezone);
-  const attribution = date ? `On ${date}, ${name} wrote:` : `${name} wrote:`;
 
   const out: { textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome } = {};
 
-  // Whether a quote reproducing the original's own html ships. Two things turn on it: only
-  // such a quote can display an embedded image, and the text side's image policy follows —
-  // when one ships, an image the quote carries is something the reader can look at, so the
-  // text alternative may say an image is there; when none does, a placeholder would describe
-  // an absent thing.
-  const htmlQuoteShips = htmlBody !== undefined && htmlQuotable;
-
-  // PASS 2 — map. Runs ONLY on a branch that ships an html quote, so an identifier is minted
-  // only when a body exists to reference it.
-  const resolved = htmlQuoteShips && quoteImages
-    ? buildCidMap({
-        refs: collected.refs,
-        sourceParts: quoteImages.sourceParts ?? [],
-        ...(quoteImages.mint && { mint: quoteImages.mint }),
-      })
-    : null;
-  const quoteMap = resolved ? resolved.cidMap : cidMap;
-  const mapped = htmlQuotable && quoteMap
-    ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
-    : null;
-  const sanitizedHtml = htmlQuotable ? (mapped ? mapped.html : collected.html) : '';
-
+  // The joins. Each separator lives HERE, not in the block: the block starts at its
+  // attribution line, so placing one somewhere else in a body carries no spacing with it.
+  // An absent block leaves the caller's body exactly as it came in.
   if (textBody !== undefined) {
-    // text quote source: the original's text, else a readable conversion of its html. The
-    // conversion runs over the RAW original html, exactly as it always has — deriving from
-    // the sanitized output instead would silently change the derived text of every html
-    // original, embedded images or not, because the quote floor drops tags that carry text.
-    const textSource = pick(
-      origText,
-      htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', quoteMap),
-    );
-    // A blank source gets no attribution and no quote. An "On … wrote:" over an empty "> "
-    // line describes a quote that is not there, and it would arm this server's own text
-    // quote marker, so the next edit of the draft would be challenged over a quote it has
-    // never had. (The forward builder has always had this gate; the reply builder gains it.)
-    out.textBody = isBlank(textSource)
+    out.textBody = blocks.textBlock === undefined
       ? textBody
-      : `${textBody ?? ''}\n\n${attribution}\n${quoteText(textSource)}`;
+      : `${textBody}\n\n${blocks.textBlock}`;
   }
-
   if (htmlBody !== undefined) {
-    // rich quote: prefer the sanitized html; else a text-only original → escaped block.
-    const htmlSource = htmlQuotable ? sanitizedHtml : textToHtmlBlock(origText);
-    out.htmlBody = `${htmlBody ?? ''}<div><br></div><div>${escapeHtml(attribution)}</div>${QUOTE_OPEN}${htmlSource}</blockquote>`;
+    out.htmlBody = blocks.htmlBlock === undefined
+      ? htmlBody
+      : `${htmlBody}<div><br></div>${blocks.htmlBlock}`;
   }
-
-  // Read off the pass that produced the html actually shipped: only that pass drops a
-  // reference form it cannot carry, and only when its output is what ships.
-  const droppedUnsupportedImages = htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0;
 
   // Reported when the caller asked about the original's images, and ALSO whenever there is a
-  // loss only this pass can see. The edit path supplies a Content-ID map rather than parts —
-  // it resolved its own images already — so it asks for no outcome; without this second arm
-  // its quote could drop an image and say nothing.
-  if (quoteImages || droppedUnsupportedImages > 0) {
-    out.quoteImages = {
-      minted: resolved?.minted ?? [],
-      mappings: resolved?.mappings ?? [],
-      resolvedParts: collected.resolvedParts,
-      unresolvedRefs: collected.unresolvedRefs,
-      droppedDataImages: collected.droppedDataImages,
-      droppedUnsupportedImages,
-      htmlQuoteShips,
-    };
-  }
+  // loss only the mapping pass can see. The edit path supplies a Content-ID map rather than
+  // parts — it resolved its own images already — so it asks for no outcome; without this
+  // second arm its quote could drop an image and say nothing.
+  if (quoteImages || blocks.images.droppedUnsupportedImages > 0) out.quoteImages = blocks.images;
 
   return out;
 }
@@ -964,6 +1012,122 @@ function forwardHeaderLines(original: any): string[] {
   return lines;
 }
 
+/**
+ * The forwarded-message block, one per body format.
+ *
+ * Same rule as QuoteBlocks: A BLOCK STARTS AT ITS HEADER LINE, and the separator between the
+ * caller's note and the block belongs to the concatenation — `\n\n\n` in text, and in html
+ * nothing at all.
+ *
+ * The html join is empty because the block used to OPEN with a `<br>`, sitting inside the
+ * block's own div, separating it from the caller's note. Carving the block out DROPS that
+ * `<br>`; it is not moved to the join. A block has to read the same wherever a caller places
+ * it, and a leading blank line is only ever right directly under a note — under a `<div>`-per-
+ * paragraph body it is a stray gap, and at the top of a body it opens the message with one. So
+ * a forwarded message's stored html no longer opens with it: a deliberate behaviour change,
+ * pinned by a test.
+ *
+ * Both blocks are always built. Unlike a reply quote there is no "nothing to quote" case: the
+ * header block IS the forward's content, and it stands alone over an attachment-only original.
+ */
+export interface ForwardBlocks {
+  /** The header block, with the original's text below it when there is any. */
+  textBlock: string;
+  /** The header block, with the original's html (or its escaped text) cited below it. */
+  htmlBlock: string;
+  /**
+   * Whether the original's html is worth reproducing. Exposed because the forward builder's
+   * no-note arm reads it to choose which format a bare forward emits.
+   */
+  htmlQuotable: boolean;
+  /** What the two passes decided about the original's embedded images. */
+  images: QuoteImageOutcome;
+}
+
+/**
+ * Build the forwarded-message blocks, running both image passes (see the pass-ordering note at
+ * the top of this file). `htmlShips` is an input for the same reason it is on buildQuoteBlocks
+ * — and here the answer is not the reply's: a forward with no caller body at all still ships
+ * html when the original has quotable html.
+ */
+export function buildForwardBlocks(input: {
+  original: any;      // raw JMAP email from getEmailById (body lists + bodyValues + addresses)
+  /** Whether the message being composed ships an html part at all. */
+  htmlShips: boolean;
+  // See buildReplyBodies: the edit path's rewrite-only channel.
+  cidMap?: Map<string, string>;
+  // See buildReplyBodies: the compose path's channel, where this builder runs both passes.
+  quoteImages?: QuoteImageInput;
+}): ForwardBlocks {
+  const { original, htmlShips, cidMap, quoteImages } = input;
+
+  const bodyValues = original?.bodyValues || {};
+  const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
+  const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
+
+  // PASS 1 — collect (see buildQuoteBlocks). An original whose body is nothing but embedded
+  // images becomes quotable here, which is also what flips this tool's no-caller-body default
+  // from a text forward to an html one for such a message.
+  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  const htmlQuotable = collected.quotable;
+  const textQuotable = !isBlank(origText);
+
+  const lines = forwardHeaderLines(original);
+  const headerText = lines.join('\n');
+  // No leading <br>: it was the separator under the caller's note, sitting inside the block's
+  // own div, and carving the block out drops it rather than moving it to the join — see
+  // ForwardBlocks for why a block cannot carry its own leading blank line.
+  const headerHtml = `<div>${lines.map(escapeHtml).join('<br>')}<br></div>`;
+
+  // Content below the block. Text form: the original's own text, else a
+  // readable conversion of its html; may be blank (attachment-only original),
+  // in which case the block stands alone. HTML form: the sanitized original
+  // html, else the original text escaped — never fabricated from nothing.
+  // The text side's image policy needs the html half of the emission decision up front, for
+  // the same reason the reply builder does — a placeholder must not describe an image no
+  // format carries.
+  const htmlQuoteShips = htmlQuotable && htmlShips;
+
+  // PASS 2 — map, on a branch that ships the original's html and nowhere else.
+  const resolved = htmlQuoteShips && quoteImages
+    ? buildCidMap({
+        refs: collected.refs,
+        sourceParts: quoteImages.sourceParts ?? [],
+        ...(quoteImages.mint && { mint: quoteImages.mint }),
+      })
+    : null;
+  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const mapped = htmlQuotable && quoteMap
+    ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
+    : null;
+  const sanitizedHtml = htmlQuotable ? (mapped ? mapped.html : collected.html) : '';
+
+  const textSource = pick(
+    origText,
+    htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', quoteMap),
+  );
+  const htmlSource = htmlQuotable ? sanitizedHtml : (textQuotable ? textToHtmlBlock(origText) : '');
+  const below = !isBlank(textSource) ? `\n\n${textSource}` : '';
+  const cite = htmlSource ? `${FORWARD_OPEN}${htmlSource}</div>` : '';
+
+  return {
+    textBlock: `${headerText}${below}`,
+    htmlBlock: `${headerHtml}${cite}`,
+    htmlQuotable,
+    images: {
+      minted: resolved?.minted ?? [],
+      mappings: resolved?.mappings ?? [],
+      resolvedParts: collected.resolvedParts,
+      unresolvedRefs: collected.unresolvedRefs,
+      droppedDataImages: collected.droppedDataImages,
+      // Only the rewriting pass drops a reference form it cannot carry, and only its output
+      // ships an html forwarded block.
+      droppedUnsupportedImages: htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0,
+      htmlQuoteShips,
+    },
+  };
+}
+
 // Build the forward bodies: the caller's note (optional) above a forwarded-
 // message header block, with the original reproduced verbatim below it (no "> "
 // prefixing — that is reply quoting). Unlike buildReplyBodies there is no
@@ -974,7 +1138,8 @@ export function buildForwardBodies(input: {
   htmlBody?: string;
   // See buildReplyBodies: the edit path's rewrite-only channel.
   cidMap?: Map<string, string>;
-  // See buildReplyBodies: the compose path's channel, where this builder runs both passes.
+  // See buildReplyBodies: the compose path's channel, handed to the block builder, which is
+  // what runs both passes.
   quoteImages?: QuoteImageInput;
   // See buildReplyBodies: the resolved sign-off, appended to the caller's note so it lands
   // above the forwarded-message block rather than under the message being forwarded.
@@ -998,59 +1163,21 @@ export function buildForwardBodies(input: {
     signature,
   );
 
-  const bodyValues = original?.bodyValues || {};
-  const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
-  const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
+  const blocks = buildForwardBlocks({
+    original,
+    htmlShips: htmlBody !== undefined || textBody === undefined,
+    cidMap,
+    quoteImages,
+  });
+  const htmlQuotable = blocks.htmlQuotable;
 
-  // PASS 1 — collect (see buildReplyBodies). An original whose body is nothing but embedded
-  // images becomes quotable here, which is also what flips this tool's no-caller-body default
-  // from a text forward to an html one for such a message.
-  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
-  const htmlQuotable = collected.quotable;
-  const textQuotable = !isBlank(origText);
-
-  const lines = forwardHeaderLines(original);
-  const textBlock = lines.join('\n');
-  const htmlBlock = `<div><br>${lines.map(escapeHtml).join('<br>')}<br></div>`;
-
-  // Content below the block. Text form: the original's own text, else a
-  // readable conversion of its html; may be blank (attachment-only original),
-  // in which case the block stands alone. HTML form: the sanitized original
-  // html, else the original text escaped — never fabricated from nothing.
-  // Which formats this forward emits is decided at the bottom of this function; the text
-  // side's image policy needs the html half of that decision up front, for the same reason
-  // the reply builder does — a placeholder must not describe an image no format carries.
-  const htmlQuoteShips = htmlQuotable && (htmlBody !== undefined || textBody === undefined);
-
-  // PASS 2 — map, on a branch that ships the original's html and nowhere else.
-  const resolved = htmlQuoteShips && quoteImages
-    ? buildCidMap({
-        refs: collected.refs,
-        sourceParts: quoteImages.sourceParts ?? [],
-        ...(quoteImages.mint && { mint: quoteImages.mint }),
-      })
-    : null;
-  const quoteMap = resolved ? resolved.cidMap : cidMap;
-  const mapped = htmlQuotable && quoteMap
-    ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
-    : null;
-  const sanitizedHtml = htmlQuotable ? (mapped ? mapped.html : collected.html) : '';
-
-  const textSource = pick(
-    origText,
-    htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', quoteMap),
-  );
-  const htmlSource = htmlQuotable ? sanitizedHtml : (textQuotable ? textToHtmlBlock(origText) : '');
-
+  // The joins. A separator belongs here rather than inside the block, which in html means no
+  // separator at all: the block's old leading <br> is dropped, not moved. See ForwardBlocks.
   const composeText = (note: string | undefined): string => {
     const prefix = note && !isBlank(note) ? `${note}\n\n\n` : '';
-    const below = !isBlank(textSource) ? `\n\n${textSource}` : '';
-    return `${prefix}${textBlock}${below}`;
+    return `${prefix}${blocks.textBlock}`;
   };
-  const composeHtml = (note: string | undefined): string => {
-    const cite = htmlSource ? `${FORWARD_OPEN}${htmlSource}</div>` : '';
-    return `${note ?? ''}${htmlBlock}${cite}`;
-  };
+  const composeHtml = (note: string | undefined): string => `${note ?? ''}${blocks.htmlBlock}`;
 
   // Which formats are emitted:
   //   - caller supplied a format → that format, with the note on top (both
@@ -1080,21 +1207,9 @@ export function buildForwardBodies(input: {
     else if (block === undefined || isBlank(block)) signatureSkip = htmlQuotable ? 'no-signature' : 'no-text-form';
   }
   if (signatureSkip) out.signatureSkip = signatureSkip;
-  // Only the rewriting pass drops a reference form it cannot carry, and only its output
-  // ships an html forwarded block. Reported on the same two arms as the reply builder's —
-  // see the comment there for why a loss is reported even when nothing asked.
-  const droppedUnsupportedImages = htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0;
-  if (quoteImages || droppedUnsupportedImages > 0) {
-    out.quoteImages = {
-      minted: resolved?.minted ?? [],
-      mappings: resolved?.mappings ?? [],
-      resolvedParts: collected.resolvedParts,
-      unresolvedRefs: collected.unresolvedRefs,
-      droppedDataImages: collected.droppedDataImages,
-      droppedUnsupportedImages,
-      htmlQuoteShips,
-    };
-  }
+  // Reported on the same two arms as the reply builder's — see the comment there for why a
+  // loss is reported even when nothing asked.
+  if (quoteImages || blocks.images.droppedUnsupportedImages > 0) out.quoteImages = blocks.images;
   return out;
 }
 
