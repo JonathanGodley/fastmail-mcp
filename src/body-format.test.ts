@@ -289,6 +289,24 @@ describe('assertBodyInputs — CDATA (#78)', () => {
     assert.throws(() => assertBodyInputs({ textBody: '\n  <![CDATA[Hi there]]>' }), /textBody is wrapped in a CDATA section/);
   });
 
+  // The caller most likely to hit that refusal never typed the token: an htmlBody may
+  // legally carry an escaped `&lt;![CDATA[`, which unescapes when the plain-text alternative
+  // is derived from it, and handing that derived text back on a later edit is refused. The
+  // remedy has to name htmlBody, because the text part is regenerated from the markup and
+  // editing it alone cannot clear the token.
+  it('names htmlBody as the place to fix a text part that was derived rather than typed', () => {
+    const derivedFromEscapedHtml = htmlToText('<p>&lt;![CDATA[ raw ]]&gt; is the wrapper</p>');
+    assert.match(derivedFromEscapedHtml.trimStart(), /^<!\[CDATA\[/);
+    assert.throws(
+      () => assertBodyInputs({ textBody: derivedFromEscapedHtml }),
+      /htmlBody in that case/,
+    );
+    assert.throws(
+      () => assertBodyInputs({ textBody: derivedFromEscapedHtml }),
+      /regenerated from it/,
+    );
+  });
+
   it('leaves an embedded CDATA token in a plain-text body alone (never markup-parsed)', () => {
     assert.doesNotThrow(() => assertBodyInputs({ textBody: 'The config uses <![CDATA[ raw ]]> around the query.' }));
   });

@@ -709,6 +709,8 @@ Both are opt-in and neither changes any default.
 
 The CDATA rule differs by format, because the damage does. In `htmlBody` a section is rejected **wherever** it appears, since a mid-body one swallows just as much as a wrapper (to show a literal CDATA token in HTML you have to escape it as `&lt;![CDATA[`, which passes). In `textBody` only a body that **starts** with `<![CDATA[` is rejected — a plain-text part is never markup-parsed, so an XML snippet quoted inside a plain-text message is real content and keeps working. A bare `]]>` with no opening token is left alone in both formats: it renders as ordinary text and survives the text derivation intact.
 
+The `textBody` refusal names `htmlBody` as the place to fix it, because the caller that trips it usually never typed the token. An `htmlBody` may legally carry an escaped `&lt;![CDATA[`; that escape **unescapes** when the plain-text alternative is derived from the markup, so handing the derived text back on a later `edit_draft` is refused. Editing `textBody` alone cannot clear it — the part is regenerated from the HTML — so the markup is the only thing that can change.
+
 All of these are checked against **your** body, before any reply quote or forwarded-message block is merged in, so the reply and forward paths are covered rather than shadowed by the quote.
 
 ### Signing a message

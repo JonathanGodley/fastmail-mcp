@@ -88,13 +88,19 @@ function requireBodyString(name: string, value: unknown): string | undefined {
 //        content that must keep working. A bare `]]>` is left alone in BOTH formats for
 //        the same reason: without an opening token it renders as literal text and survives
 //        the text derivation intact, so rejecting it would only block real prose.
+//        The textBody refusal names HTMLBODY as the place to fix it, because the caller
+//        that trips it most often never typed the token: an htmlBody may legally carry an
+//        escaped `&lt;![CDATA[`, that escape unescapes when the plain-text alternative is
+//        derived, and handing the derived text back on a later edit is then refused. A
+//        remedy pointing at the text part would be unactionable there — the part is
+//        regenerated from the markup, so only the markup can change it.
 export function assertBodyInputs(bodies: { textBody?: unknown; htmlBody?: unknown }): void {
   const text = requireBodyString('textBody', bodies?.textBody);
   const html = requireBodyString('htmlBody', bodies?.htmlBody);
 
   if (text !== undefined && CDATA_START.test(text.trimStart())) {
     throw new InvalidInputError(
-      'textBody is wrapped in a CDATA section. Pass the message body as a plain string with no <![CDATA[ ... ]]> wrapper.',
+      'textBody is wrapped in a CDATA section. Pass the message body as a plain string with no <![CDATA[ ... ]]> wrapper. If you did not write that token, it was derived rather than typed: the plain-text part of an HTML message is generated from the markup, and an escaped &lt;![CDATA[ in htmlBody unescapes into it. Change htmlBody in that case — the text part is regenerated from it, so editing textBody alone cannot clear this.',
     );
   }
 
