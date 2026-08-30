@@ -7,7 +7,10 @@ import { signatureBlock } from './reply-quote.js';
 import { matchesIdentity, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
-import { bodyHash, collectDraftBodyParts, draftPartKey, resolveDraftBodyHash } from './body-hash.js';
+import {
+  bodyHash, classifyPartType, collectDraftBodyParts, draftInterleavedTextType, draftPartKey,
+  isTextBodyType, resolveDraftBodyHash,
+} from './body-hash.js';
 import {
   buildUnionParts, cidKey, describePart, sanitizeDownloadFilename,
   checkInlineClosure, isRecreatableCid, isReservedCid, reconcileInlineParts,
@@ -500,15 +503,9 @@ function resolveAttachmentRef(parts: any[], attachmentId: string): { part: any; 
 // hash a caller proves its read with have to agree on what counts as one part, or a draft
 // this file calls single-format would hash as two.
 
-// Content type without its parameters, lowercased. For CLASSIFYING only — the value stored
-// or sent for a part is always the server's own string (RFC 2045 §5.1).
-function classifyPartType(type: unknown): string {
-  if (typeof type !== 'string') return '';
-  const semicolon = type.indexOf(';');
-  return (semicolon === -1 ? type : type.slice(0, semicolon)).trim().toLowerCase();
-}
-
-const TEXT_BODY_TYPES = new Set(['text/plain', 'text/html']);
+// `classifyPartType` and `isTextBodyType` come from body-hash.ts, alongside the rest of the
+// rule about what a body list carries — see the block comment there for why the rule lives
+// at that layer rather than this one.
 
 // The non-text body parts the recreate can reproduce. The media three are what RFC 8621
 // §4.1.4 routes into a body list in the first place; message/rfc822 is there because
@@ -533,6 +530,11 @@ export interface DraftBodyShape {
 /**
  * Decide whether a draft's body is a shape the immutable-email recreate can rebuild.
  *
+ * The interleaved half is `draftInterleavedTextType` in body-hash.ts, so the read that
+ * issues a `bodyHash` and this guard answer that question with ONE expression rather than
+ * two kept in step. What stays here is the half that shapes a MESSAGE — the offending part
+ * and whether it is media, so the refusal can name what it found.
+ *
  * Deduping FIRST is load-bearing, not an optimization: a single-format draft lists its one
  * text part under both textBody and htmlBody, so a raw count would see two text/plain parts
  * on an ordinary plain-text draft and refuse to edit it. A typeless part is left alone —
@@ -542,9 +544,11 @@ export interface DraftBodyShape {
 export function classifyDraftBodyShape(email: any): DraftBodyShape {
   const lists = [email?.textBody, email?.htmlBody].filter(Array.isArray) as any[][];
   const seen = new Set<string>();
-  const textTypeCounts = new Map<string, number>();
   const shape: DraftBodyShape = {};
   let index = 0;
+
+  const interleaved = draftInterleavedTextType(email);
+  if (interleaved) shape.interleavedTextType = interleaved;
 
   for (const list of lists) {
     for (const part of list) {
@@ -554,13 +558,7 @@ export function classifyDraftBodyShape(email: any): DraftBodyShape {
       seen.add(key);
 
       const type = classifyPartType(part.type);
-      if (!type || TEXT_BODY_TYPES.has(type)) {
-        if (!type) continue;
-        const count = (textTypeCounts.get(type) ?? 0) + 1;
-        textTypeCounts.set(type, count);
-        if (count > 1 && !shape.interleavedTextType) shape.interleavedTextType = type;
-        continue;
-      }
+      if (!type || isTextBodyType(type)) continue;
 
       const carriable = isCarriableBodyType(type)
         && typeof part.blobId === 'string' && part.blobId !== '';

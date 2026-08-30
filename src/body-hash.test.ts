@@ -14,7 +14,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  attachDraftBodyHash, bodyHash, collectDraftBodyParts, draftPartKey, isDraftEmail,
+  attachDraftBodyHash, bodyHash, classifyPartType, collectDraftBodyParts,
+  draftInterleavedTextType, draftPartKey, draftTextBodyType, isDraftEmail, isTextBodyType,
   resolveDraftBodyHash,
 } from './body-hash.js';
 import type { SimplifiedEmail } from './email-formatter.js';
@@ -51,6 +52,103 @@ describe('draftPartKey', () => {
     assert.equal(draftPartKey({ partId: '', blobId: 'b' }, 7), 'b:b');
     assert.equal(draftPartKey({ partId: '', blobId: '' }, 7), 'i:7');
     assert.equal(draftPartKey(undefined, 3), 'i:3');
+  });
+});
+
+describe('classifyPartType', () => {
+  it('drops the parameters and lowercases, and answers empty for a non-string', () => {
+    assert.equal(classifyPartType('TEXT/Plain; charset=utf-8'), 'text/plain');
+    assert.equal(classifyPartType('  text/html  '), 'text/html');
+    assert.equal(classifyPartType(undefined), '');
+    assert.equal(classifyPartType(42), '');
+  });
+});
+
+describe('draftTextBodyType', () => {
+  it('answers the part\'s own type when it declares one a body list displays', () => {
+    assert.equal(draftTextBodyType('text/plain', 'text/plain'), 'text/plain');
+    // The list it sits in does not override a type the part declares: an html part listed
+    // under textBody (§4.1.4 aliases a single-format draft's one part into both) is still
+    // html, and calling it plain would make an ordinary html-only draft look interleaved.
+    assert.equal(draftTextBodyType('text/html', 'text/plain'), 'text/html');
+  });
+
+  it('answers the LIST\'s type for a part that declares none', () => {
+    // RFC 8621 §4.1.4 puts a part into a body list to say a client should display it there,
+    // so list membership is the authority when the type is absent — which is how extractBody
+    // has always read one.
+    assert.equal(draftTextBodyType(undefined, 'text/plain'), 'text/plain');
+    assert.equal(draftTextBodyType(undefined, 'text/html'), 'text/html');
+    assert.equal(draftTextBodyType(null, 'text/html'), 'text/html');
+    assert.equal(draftTextBodyType('', 'text/html'), 'text/html');
+  });
+
+  it('answers undefined for anything that is not displayed text', () => {
+    assert.equal(draftTextBodyType('image/png', 'text/html'), undefined);
+    assert.equal(draftTextBodyType('application/pdf', 'text/plain'), undefined);
+    // Taken verbatim: a caller that wants parameters stripped classifies first. A truthy
+    // non-string is not an absent type and must not fall through to the list's type.
+    assert.equal(draftTextBodyType('text/plain; charset=utf-8', 'text/plain'), undefined);
+    assert.equal(draftTextBodyType(42, 'text/plain'), undefined);
+  });
+
+  it('agrees with isTextBodyType about which types a body list displays', () => {
+    assert.equal(isTextBodyType('text/plain'), true);
+    assert.equal(isTextBodyType('text/html'), true);
+    assert.equal(isTextBodyType('image/png'), false);
+    assert.equal(isTextBodyType(undefined), false);
+  });
+});
+
+// The shape a flat recreate has no spelling for (#85). One expression, asked by BOTH the
+// edit-side guard and the read that issues a bodyHash — pinned here rather than beside
+// either caller, so a change to it is seen as a change to both.
+describe('draftInterleavedTextType', () => {
+  it('names the type when two DISTINCT parts count as one text type', () => {
+    assert.equal(draftInterleavedTextType(draft({
+      textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'b', type: 'text/plain' }],
+    })), 'text/plain');
+  });
+
+  it('counts across the two lists, not within one', () => {
+    assert.equal(draftInterleavedTextType(draft({
+      textBody: [{ partId: 'a', type: 'text/html' }],
+      htmlBody: [{ partId: 'b', type: 'text/html' }],
+    })), 'text/html');
+  });
+
+  // Deduping FIRST is what keeps an ordinary single-format draft editable: §4.1.4 aliases
+  // its one part into both lists, so a raw count would see two text/plain parts.
+  it('answers undefined for the ordinary draft shapes', () => {
+    assert.equal(draftInterleavedTextType(TEXT_ONLY), undefined);
+    assert.equal(draftInterleavedTextType(DUAL), undefined);
+    assert.equal(draftInterleavedTextType(draft({})), undefined);
+    assert.equal(draftInterleavedTextType(draft({ textBody: 'not an array' })), undefined);
+  });
+
+  it('classifies the type, so two spellings of one type still interleave', () => {
+    assert.equal(draftInterleavedTextType(draft({
+      textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'b', type: 'TEXT/Plain; charset=utf-8' }],
+    })), 'text/plain');
+  });
+
+  it('ignores parts a body list does not display as text', () => {
+    assert.equal(draftInterleavedTextType(draft({
+      textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'i', type: 'image/png', blobId: 'B' }],
+      htmlBody: [{ partId: 'j', type: 'image/png', blobId: 'C' }],
+    })), undefined);
+  });
+
+  // The state this leaves #179 in, pinned so the repair is visible as a change: a part that
+  // declares no type is skipped here, where every other reader of a body list treats it as
+  // the content of the list it sits in.
+  it('today skips a part that declares no content type', () => {
+    assert.equal(draftInterleavedTextType(draft({
+      textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'b' }],
+    })), undefined);
+    assert.equal(draftInterleavedTextType(draft({
+      textBody: [{ partId: 'a' }, { partId: 'b' }],
+    })), undefined);
   });
 });
 

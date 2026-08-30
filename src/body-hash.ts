@@ -37,6 +37,104 @@ export function draftPartKey(part: any, fallback: number): string {
   return `i:${fallback}`;
 }
 
+// ---------------------------------------------------------------------------
+// What a body list carries, as one rule
+// ---------------------------------------------------------------------------
+//
+// Three places have to agree about which part of a body list is that list's displayed
+// text: the read that shows the caller a body, the hash over what it showed, and the
+// edit-side guard that decides whether a flat recreate can express the draft. They live in
+// different modules, so the rule itself lives here — the lowest of the three — and the
+// others call down to it.
+
+// Content type without its parameters, lowercased. For CLASSIFYING only — the value stored
+// or sent for a part is always the server's own string (RFC 2045 §5.1).
+export function classifyPartType(type: unknown): string {
+  if (typeof type !== 'string') return '';
+  const semicolon = type.indexOf(';');
+  return (semicolon === -1 ? type : type.slice(0, semicolon)).trim().toLowerCase();
+}
+
+/** The two content types a draft's body lists carry as displayed text. */
+export type DraftTextType = 'text/plain' | 'text/html';
+
+/** Whether a content type is one a body list carries as displayed text. */
+export function isTextBodyType(type: unknown): type is DraftTextType {
+  return type === 'text/plain' || type === 'text/html';
+}
+
+/**
+ * The text body type a part counts as inside one of a draft's two body lists, or undefined
+ * when it is not displayed text at all.
+ *
+ * A part that declares NO content type counts as the list it sits in. That is not leniency:
+ * RFC 8621 §4.1.4 puts a part into `textBody` or `htmlBody` precisely to say a client should
+ * display it there, so LIST MEMBERSHIP IS THE AUTHORITY WHEN THE TYPE IS ABSENT. It is also
+ * how the reader has always behaved — `extractBody` displays a typeless part in whichever
+ * list carries it — so anything that disagrees is reasoning about a part the caller can see.
+ *
+ * `type` is taken as the caller holds it: a caller that classifies (strips parameters,
+ * lowercases) passes the classified string, one that compares the server's string verbatim
+ * passes that. The absent-type rule is the same either way, which is the part that has to
+ * be shared.
+ */
+export function draftTextBodyType(type: unknown, listType: DraftTextType): DraftTextType | undefined {
+  if (type === undefined || type === null || type === '') return listType;
+  return isTextBodyType(type) ? type : undefined;
+}
+
+/**
+ * The text body type a draft's body alternates between: two DISTINCT parts counting as one
+ * text type, the Apple Mail text-image-text layout whose ordering a flat rebuild cannot
+ * express (issue #85). Undefined when the body has no such pair.
+ *
+ * ONE EXPRESSION, TWO CONSUMERS, DELIBERATELY. `updateDraft` refuses every edit of this
+ * shape, metadata-only included, and a read that issued a `bodyHash` for it would hand out
+ * a lost-update guard that can never be spent (#180). The read withholds and the write
+ * refuses for exactly the same drafts because they ask this one function, not because two
+ * conditions are kept in step by hand.
+ *
+ * Deduping FIRST is load-bearing, not an optimization: a single-format draft lists its one
+ * text part under both `textBody` and `htmlBody`, so a raw count would see two text/plain
+ * parts on an ordinary plain-text draft and call it interleaved.
+ */
+export function draftInterleavedTextType(email: any): string | undefined {
+  const seen = new Set<string>();
+  const counts = new Map<string, number>();
+  let index = 0;
+
+  for (const list of [
+    { parts: email?.textBody, listType: 'text/plain' as const },
+    { parts: email?.htmlBody, listType: 'text/html' as const },
+  ]) {
+    if (!Array.isArray(list.parts)) continue;
+    for (const part of list.parts) {
+      if (!part) continue;
+      // The fallback counter advances for every part examined, duplicates included, so it
+      // matches collectDraftBodyParts' numbering on the same message.
+      const key = draftPartKey(part, index++);
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const type = classifyPartType(part.type);
+      // OUT OF STEP WITH THE REST OF THIS MODULE, and knowingly so for now: a part that
+      // declares no type is skipped here, where every other reader of a body list treats it
+      // as the content of the list it sits in (see draftTextBodyType). The consequence is
+      // #179 — such a part is invisible to this check and is dropped by the edit that
+      // follows it.
+      if (!type) continue;
+      const countsAs = draftTextBodyType(type, list.listType);
+      if (countsAs === undefined) continue;
+
+      const count = (counts.get(countsAs) ?? 0) + 1;
+      counts.set(countsAs, count);
+      if (count > 1) return countsAs;
+    }
+  }
+
+  return undefined;
+}
+
 /** One deduplicated body part, with what the read returned for it. */
 export interface CollectedBodyPart {
   key: string;
@@ -53,10 +151,11 @@ export interface CollectedBodyPart {
   degraded: boolean;
   /**
    * Whether `simplifyEmail`'s `bodyText` / `bodyHtml` would carry this part's value. The
-   * test mirrors `extractBody`'s exactly (a part with NO declared type is carried by
-   * whichever list it sits in); it is duplicated rather than shared because the two answer
-   * different questions — that one builds a string, this one decides whether the caller
-   * has seen the bytes it is about to hand back.
+   * test is `draftTextBodyType` above, over the server's string verbatim, which mirrors
+   * `extractBody`'s exactly (a part with NO declared type is carried by whichever list it
+   * sits in). `extractBody` keeps its own copy rather than calling down, because the two
+   * answer different questions — that one builds a string, this one decides whether the
+   * caller has seen the bytes it is about to hand back.
    */
   showsInText: boolean;
   showsInHtml: boolean;
@@ -82,8 +181,18 @@ export function collectDraftBodyParts(email: any): CollectedBodyPart[] {
     if (!Array.isArray(list.parts)) continue;
     for (const part of list.parts) {
       if (!part) continue;
-      // The fallback counter advances for every part examined, duplicates included, so it
-      // matches classifyDraftBodyShape's numbering on the same message.
+      // TWO WALKS, ON PURPOSE, and this is the whole disposition of that — there is no
+      // issue tracking it. This loop and `draftInterleavedTextType`'s above cross the same
+      // two lists with the same `draftPartKey` dedupe and the same fallback-index
+      // convention, and those two things are still coordinated BY HAND: the counter
+      // advances for every part examined, duplicates included, so the numbering matches.
+      // What is NO LONGER coordinated by hand is the rule that decides what a body list
+      // carries — `draftTextBodyType` is one expression and both walks ask it.
+      // They are deliberately NOT merged into one traversal. They produce different things
+      // (this one a part map with values, degradation and per-list visibility; that one a
+      // single verdict), so sharing the walk would mean a shared iterator plus two
+      // consumers — machinery, not a simplification — and it would reshape the traversal
+      // the hash's own coverage rests on in order to fix something that is not broken here.
       const key = draftPartKey(part, index++);
       let entry = parts.get(key);
       if (!entry) {
@@ -99,7 +208,8 @@ export function collectDraftBodyParts(email: any): CollectedBodyPart[] {
         };
         parts.set(key, entry);
       }
-      const carriable = !entry.type || entry.type === (list.inText ? 'text/plain' : 'text/html');
+      const listType = list.inText ? 'text/plain' : 'text/html';
+      const carriable = draftTextBodyType(entry.type, listType) === listType;
       if (list.inText) entry.showsInText ||= carriable;
       else entry.showsInHtml ||= carriable;
     }
