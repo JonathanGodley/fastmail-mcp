@@ -1737,6 +1737,21 @@ describe('updateDraft', () => {
     assert.ok(result.notes?.some((n) => /an escaped token spelling the stored body did not/.test(n)));
   });
 
+  // The converse, and the half the description used to state unconditionally. The escape
+  // notes are keyed on a COUNT RISE against the stored bytes, exactly as the {{signature}}
+  // note is, so an escape the body handed back already carried ships in silence — otherwise
+  // the original author's text would be reported back on every edit of that draft forever.
+  it('says nothing about an escape the body handed back already carried', async () => {
+    const stored = String.raw`<p>they wrote \{{signature}} in the original</p>`;
+    const carriesEscape = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: stored } } };
+    const makeReq = mockBodyEdit(client, carriesEscape);
+    const result = await client.updateDraft('draft-1', { htmlBody: stored, bodyHash: hashOf(carriesEscape) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, stored);
+    assert.equal((result.notes ?? []).some((n) => /an escaped token spelling/.test(n)), false);
+  });
+
 
   // A near-miss is REPORTED here rather than refused, which is the opposite of draft_email.
   // The body may be a foreign one handed back, so a refusal keyed on its text could be
