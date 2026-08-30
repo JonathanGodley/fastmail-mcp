@@ -158,6 +158,17 @@ describe('the notes a call emits', () => {
     );
   });
 
+  it('takes the remedy from its caller, for a tool whose caller has a better lever', () => {
+    // The default remedy is right where the forward's format is inferred and re-running as
+    // .eml is the only lever. On a tool where the caller places the block themselves it is
+    // not, so the sentence ends where that caller's fix is.
+    assert.equal(
+      noteForwardPooled(1, ['logo.png'], 'put the token in htmlBody.'),
+      '1 media part(s) could not be embedded and were attached as regular attachments: ' +
+      '"logo.png" — put the token in htmlBody.',
+    );
+  });
+
   it('reports attachments the caller asked to leave behind', () => {
     assert.equal(
       noteAttachmentsExcluded(5, 2, false),
@@ -514,6 +525,22 @@ describe('emitInlineNotes', () => {
     droppedDataImages: 0,
     droppedUnsupportedImages: 0,
     ...over,
+  });
+
+  it('passes a caller-supplied pooled remedy through to the sentence', () => {
+    assert.deepEqual(
+      emitInlineNotes(
+        tally({ pooled: 1, pooledNames: ['logo.png'] }),
+        { surface: 'forward', pooledRemedy: 'put the token in htmlBody.' },
+      ),
+      ['1 media part(s) could not be embedded and were attached as regular attachments: ' +
+       '"logo.png" — put the token in htmlBody.'],
+    );
+    // Omitted, the shared default stands.
+    assert.match(
+      emitInlineNotes(tally({ pooled: 1, pooledNames: [] }), { surface: 'forward' })[0],
+      /re-run with asAttachment: true for full fidelity, then delete this draft\.$/,
+    );
   });
 
   it('describes an embed in the words of the tool that did it', () => {

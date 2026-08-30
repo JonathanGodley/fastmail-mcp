@@ -223,21 +223,51 @@ interface PartScan {
   scan: BodyTokenScan;
 }
 
+const TOKEN_ORDER = ['signature', 'quote', 'forward'] as const;
+
 /**
  * Refuse everything about the caller's tokens that is refusable, from the scan alone.
  *
  * All of it runs BEFORE any block is built and before any substitution, so a refused call
  * has fetched an original and nothing else — no blob written, no draft stored.
+ *
+ * THE ORDER IS FIXED AND IS OVER THE WHOLE CALL, NOT PER PART: wrong-mode token, near-miss,
+ * repeat, one-part, then the two forward gates. Each is a separate pass across every supplied
+ * part, and that is the point — a per-part loop lets part A's near-miss beat part B's
+ * wrong-mode token, so the same call refuses differently depending on which body the caller
+ * happened to write first.
+ *
+ * The wrong-mode pass leads because of what it spans. It matches the exact token AND every
+ * near-miss spelling of a history token this mode does not accept, so `{{forward}}`,
+ * `{{Forward}}` and `{{{forward}}}` on a reply are all refused FOR THE MODE. Run the
+ * near-miss pass first and `{{{forward}}}` on a reply is refused for its spelling, with a
+ * message telling the caller to write `{{forward}}` — the very spelling the next gate would
+ * then refuse. Every other count and presence test here (repeat, one-part, the forward gates)
+ * is over unescaped EXACT tokens only.
  */
 function assertTokensAcceptable(
   parts: PartScan[], mode: DraftEmailMode, asAttachment: boolean,
 ): void {
   const history = HISTORY_TOKEN[mode];
 
+  // --- 1. A history token this mode does not accept, in any spelling -------
+  // `BodyTokenSite.name` carries the name a near-miss near-missed, so the near-misses can be
+  // read for the mode question without a second scan surface.
+  for (const { scan } of parts) {
+    for (const site of [...scan.tokens, ...scan.nearMisses]) {
+      if (site.name === 'signature' || site.name === history) continue;
+      throw bad(
+        `{{${site.name}}} does not apply to mode:'${mode}'` +
+        (history ? `; use {{${history}}} instead.` : ' (a new message has no history to place).'),
+      );
+    }
+  }
+
+  // --- 2. A near-miss spelling of a token this mode DOES accept ------------
+  // REFUSED, not coerced. `docs/conventions.md` bounds leniency at "rejected when guessing
+  // would change the message", and guessing here would put a signature block into a body
+  // that spelled something else.
   for (const { part, scan } of parts) {
-    // A near-miss is REFUSED, not coerced. `docs/conventions.md` bounds leniency at
-    // "rejected when guessing would change the message", and guessing here would put a
-    // signature block into a body that spelled something else.
     const miss = scan.nearMisses[0];
     if (miss) {
       throw bad(
@@ -246,33 +276,31 @@ function assertTokensAcceptable(
         ESCAPE_HINT,
       );
     }
+  }
 
-    for (const name of ['signature', 'quote', 'forward'] as const) {
-      if (scan.counts[name] === 0) continue;
-      if (name === 'signature') continue;
-      if (name !== history) {
-        throw bad(
-          `{{${name}}} does not apply to mode:'${mode}'` +
-          (history ? `; use {{${history}}} instead.` : ' (a new message has no history to place).'),
-        );
-      }
-      if (name === 'forward' && asAttachment) {
-        throw bad(
-          '{{forward}} does not apply to an asAttachment forward: the original rides whole ' +
-          'as a .eml attachment, so there is no block to place. Drop the token, or drop ' +
-          'asAttachment to forward inline.',
-        );
-      }
+  // --- 3. The same token twice in one part ---------------------------------
+  // Expansion is a single pass over every site, so a repeat really would store the block
+  // twice — a second copy of a stranger's whole message, or a second sign-off. There is no
+  // reading of a body that wants that, and the caller who meant the braces as text has the
+  // escape.
+  for (const { part, scan } of parts) {
+    for (const name of TOKEN_ORDER) {
+      if (scan.counts[name] < 2) continue;
+      throw bad(
+        `{{${name}}} appears ${scan.counts[name]} times in ${partWord(part)}; a token may be ` +
+        'placed once per part, and expanding it twice would store the block twice. Remove the ' +
+        `extra one, or escape it (\\{{${name}}}) to ship the braces as text there.`,
+      );
     }
   }
 
-  // A token in one SUPPLIED part but not the other is the caller's slip — a message whose
-  // html carries the sign-off and whose text alternative silently does not. A source that
-  // has one form and not the other is a different thing and is reported per part as a note,
-  // not refused here.
+  // --- 4. A token in one SUPPLIED part but not the other -------------------
+  // The caller's slip — a message whose html carries the sign-off and whose text alternative
+  // silently does not. A SOURCE that has one form and not the other is a different thing and
+  // is reported per part as a note, not refused here.
   if (parts.length === 2) {
     const [a, b] = parts as [PartScan, PartScan];
-    for (const name of ['signature', 'quote', 'forward'] as const) {
+    for (const name of TOKEN_ORDER) {
       const inA = a.scan.counts[name] > 0;
       const inB = b.scan.counts[name] > 0;
       if (inA === inB) continue;
@@ -286,21 +314,27 @@ function assertTokensAcceptable(
     }
   }
 
+  // --- 5. The two forward gates, last ---------------------------------------
+  if (mode === 'forward' && asAttachment && parts.some((p) => p.scan.counts.forward > 0)) {
+    throw bad(
+      '{{forward}} does not apply to an asAttachment forward: the original rides whole ' +
+      'as a .eml attachment, so there is no block to place. Drop the token, or drop ' +
+      'asAttachment to forward inline.',
+    );
+  }
+
   // A forward that places no {{forward}} and does not ride as .eml forwards nothing, while
   // still carrying the original's attachments, recording the source, and marking the
   // original forwarded on send. Unlike a reply without {{quote}} — which is simply a
   // message — that is a shape with no honest reading, so it is refused rather than noted.
   // Presence test only: whether the block turns out to have content is a later question.
-  if (mode === 'forward' && !asAttachment) {
-    const placed = parts.some((p) => p.scan.counts.forward > 0);
-    if (!placed) {
-      throw bad(
-        'A forward must place {{forward}} in a body part, or pass asAttachment:true to send ' +
-        'the original whole as a .eml. Without one of those the draft forwards nothing while ' +
-        "still carrying the original's attachments. The minimal spelling is " +
-        'htmlBody: "{{forward}}".',
-      );
-    }
+  if (mode === 'forward' && !asAttachment && !parts.some((p) => p.scan.counts.forward > 0)) {
+    throw bad(
+      'A forward must place {{forward}} in a body part, or pass asAttachment:true to send ' +
+      'the original whole as a .eml. Without one of those the draft forwards nothing while ' +
+      "still carrying the original's attachments. The minimal spelling is " +
+      'htmlBody: "{{forward}}".',
+    );
   }
 }
 
@@ -379,6 +413,31 @@ function noteSignatureNotPlaced(identityEmail: string | undefined): string {
     'place the token and pass expandSignature: true.'
   );
 }
+
+/**
+ * A `{{forward}}` whose block ships only in the TEXT form, over an original that really has
+ * html to reproduce.
+ *
+ * A token note of its own rather than a line on the image sentence, because the loss is the
+ * FORMATTING first: the images riding as attachments is the visible half, but a forward of a
+ * formatted message reproduced as plain text is degraded even when it carries no images at
+ * all. The remedy has to terminate, so it names the one move that fixes both halves.
+ */
+const NOTE_FORWARD_TEXT_FORM =
+  '{{forward}} ships in the text form only and the original ships HTML, so this forward loses ' +
+  'its formatting and its inline images ride as attachments; put {{forward}} in htmlBody to ' +
+  'keep both.';
+
+/**
+ * What the pooled-media sentence ends on for THIS tool, on the path above.
+ *
+ * The shared default tells the caller to re-run with `asAttachment: true`, which on
+ * `draft_email` is a call the token gate refuses while `{{forward}}` is still in the body —
+ * a remedy that does not terminate. Named here so the two sentences give one instruction.
+ */
+const POOLED_REMEDY_PLACE_IN_HTML =
+  'put {{forward}} in htmlBody to embed them, or drop the token and pass asAttachment: true ' +
+  'to forward the original whole.';
 
 /** A reply that placed no {{quote}}: the default flipped, so a forgotten token is reported. */
 const NOTE_REPLY_UNQUOTED =
@@ -554,6 +613,10 @@ export async function composeDraftEmail(
   }
 
   let forwardSourceParts: { part: CidPart; inBodyList: boolean }[] = [];
+  // True when the forwarded block ships in its TEXT form while the original really has html
+  // worth reproducing — the cell NOTE_FORWARD_TEXT_FORM is about. Read off the builder's own
+  // `htmlQuotable`, so it cannot disagree with the arm that chose the form.
+  let forwardTextFormOnly = false;
   if (historyPlaced && mode === 'forward') {
     forwardSourceParts = buildUnionParts(original).filter((u) => u.part?.blobId);
     const built = buildForwardBlocks({
@@ -562,6 +625,7 @@ export async function composeDraftEmail(
       quoteImages: { sourceParts: forwardSourceParts.map((u) => u.part) },
     });
     quoteImages = built.images;
+    forwardTextFormOnly = !historyHtmlShips && built.htmlQuotable;
     // The forwarded block always has a header block, so it is never "nothing quotable" in
     // the way a reply quote can be — but a caller can still place the token in a part whose
     // form carries nothing below the headers, and the note above says which.
@@ -772,6 +836,9 @@ export async function composeDraftEmail(
     ...ledger.emit({
       surface: mode === 'forward' ? 'forward' : 'reply',
       ...(carry.resolvedPartCount !== undefined && { resolvedPartCount: carry.resolvedPartCount }),
+      // Only on the path where placing the token in htmlBody really is the fix; anywhere
+      // else the shared "re-run with asAttachment" remedy is the right one.
+      ...(forwardTextFormOnly && { pooledRemedy: POOLED_REMEDY_PLACE_IN_HTML }),
     }),
     ...(droppedMinted.length > 0
       ? [noteMintedDropped(droppedMinted.map((p) => p.name), droppedMinted.length)]
@@ -784,6 +851,7 @@ export async function composeDraftEmail(
       readBack: (id) => client.getEmailById(id),
     }),
     ...emptyTokenNotes(expansions),
+    ...(forwardTextFormOnly ? [NOTE_FORWARD_TEXT_FORM] : []),
     // Presence only, on a SUPPLIED body, so a body-less reply and an attachment-only stash
     // are silent.
     ...(!signaturePlaced && signature && supplied.length > 0

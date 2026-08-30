@@ -137,6 +137,24 @@ describe('draft_email — mode', () => {
     );
   });
 
+  it('takes the recipient fields and the threading headers as an array OR a bare string', async () => {
+    // Both declarations are `['array','string']` and both run through the lenient coercer,
+    // so a client that sends one address or one Message-ID as a scalar is not rejected.
+    const { client, calls } = spyClient();
+    await compose(
+      {
+        mode: 'new', to: 'sam@example.com', cc: 'cara@example.com',
+        inReplyTo: 'thread@example.com', references: 'root@example.com,thread@example.com',
+        textBody: 'hi',
+      },
+      client,
+    );
+    assert.deepEqual(calls.draft.to, ['sam@example.com']);
+    assert.deepEqual(calls.draft.cc, ['cara@example.com']);
+    assert.deepEqual(calls.draft.inReplyTo, ['thread@example.com']);
+    assert.deepEqual(calls.draft.references, ['root@example.com', 'thread@example.com']);
+  });
+
   it("keeps create_draft's contentless guard on mode:'new', testing bodies with isBlank", async () => {
     const { client } = spyClient();
     await assert.rejects(() => compose({ mode: 'new' }, client), /At least one of to, subject, textBody, htmlBody, or attachments/);
@@ -223,6 +241,70 @@ describe('draft_email — token refusals, decided before anything is built', () 
         client,
       ),
       /\{\{quote\}\} is in textBody but not in htmlBody\./,
+    );
+  });
+
+  it('refuses the same token twice in one part', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'a {{quote}} b {{quote}} c' }, client),
+      /\{\{quote\}\} appears 2 times in textBody; a token may be placed once per part.*escape it \(\\\{\{quote\}\}\)/s,
+    );
+    await assert.rejects(
+      () => compose({ mode: 'new', htmlBody: '<div>{{signature}}</div><div>{{signature}}</div>' }, client),
+      /\{\{signature\}\} appears 2 times in htmlBody/,
+    );
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('counts unescaped EXACT tokens only, so an escaped twin is not a repeat', async () => {
+    const { client, calls } = spyClient();
+    await compose({ mode: 'new', textBody: 'a {{signature}} b \\{{signature}} c' }, client);
+    assert.equal(calls.draft.textBody, 'a Kind regards,\nTest User b {{signature}} c');
+  });
+
+  it("refuses a wrong-mode token in ANY spelling, for the mode rather than the spelling", async () => {
+    // The near-miss message would name {{forward}} — the very spelling the mode gate then
+    // refuses — so the mode gate has to run first.
+    const { client } = spyClient();
+    for (const spelling of ['{{forward}}', '{{Forward}}', '{{{forward}}}']) {
+      await assert.rejects(
+        () => compose({ mode: 'reply', originalEmailId: 'o1', htmlBody: `<p>hi</p>${spelling}` }, client),
+        /\{\{forward\}\} does not apply to mode:'reply'; use \{\{quote\}\} instead\./,
+        spelling,
+      );
+    }
+    // A single brace each side is ordinary prose and reaches no gate at all.
+    const { client: c2, calls } = spyClient();
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'see {forward} below\n{{quote}}' }, c2);
+    assert.match(calls.draft.textBody, /see \{forward\} below/);
+  });
+
+  it('runs each gate across the WHOLE call, so no part can jump the order', async () => {
+    // textBody is scanned first, so a per-part loop would report its near-miss and never
+    // reach htmlBody's wrong-mode token.
+    const { client } = spyClient();
+    await assert.rejects(
+      () => compose(
+        { mode: 'reply', originalEmailId: 'o1', textBody: 'hi {{Quote}}', htmlBody: '<p>hi</p>{{forward}}' },
+        client,
+      ),
+      /\{\{forward\}\} does not apply to mode:'reply'/,
+    );
+    // And the one-part refusal comes before both forward gates.
+    await assert.rejects(
+      () => compose(
+        { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], asAttachment: true, htmlBody: '<p>n</p>{{forward}}', textBody: 'n' },
+        client,
+      ),
+      /\{\{forward\}\} is in htmlBody but not in textBody\./,
+    );
+    await assert.rejects(
+      () => compose(
+        { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>n</p>{{signature}}', textBody: 'n' },
+        client,
+      ),
+      /\{\{signature\}\} is in htmlBody but not in textBody\./,
     );
   });
 
@@ -491,6 +573,90 @@ describe("draft_email — mode:'forward' with asAttachment", () => {
 });
 
 // ---------------------------------------------------------------------------
+// A forwarded block that ships only in its text form
+// ---------------------------------------------------------------------------
+
+describe('draft_email — {{forward}} shipping in the text form over an html original', () => {
+  const TEXT_FORM_NOTE =
+    '{{forward}} ships in the text form only and the original ships HTML, so this forward ' +
+    'loses its formatting and its inline images ride as attachments; put {{forward}} in ' +
+    'htmlBody to keep both.';
+
+  it('says the formatting is lost and names the remedy that fixes it', async () => {
+    const { client, calls } = spyClient(withInlineImage());
+    const r = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], textBody: 'FYI\n{{forward}}' },
+      client,
+    );
+    assert.equal(calls.draft.htmlBody, undefined);
+    assert.ok(r.notes!.includes(TEXT_FORM_NOTE), JSON.stringify(r.notes));
+    // The image sentence's remedy is corrected to match: the shared default sends the caller
+    // to `asAttachment: true`, which this tool refuses while {{forward}} is in the body.
+    assert.ok(r.notes!.some((n) => n.startsWith('1 media part(s) could not be embedded')
+      && n.endsWith('put {{forward}} in htmlBody to embed them, or drop the token and pass '
+        + 'asAttachment: true to forward the original whole.')), JSON.stringify(r.notes));
+    assert.ok(r.notes!.every((n) => !/re-run with asAttachment: true for full fidelity/.test(n)));
+  });
+
+  it('says nothing when the block ships as html', async () => {
+    const { client } = spyClient(withInlineImage());
+    const r = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>FYI</p>{{forward}}' },
+      client,
+    );
+    assert.ok(r.notes!.every((n) => n !== TEXT_FORM_NOTE), JSON.stringify(r.notes));
+  });
+
+  it('says nothing when the original has no html to lose', async () => {
+    const textOnly = makeOriginal({ htmlBody: undefined, bodyValues: { t: { value: 'plain original' } } });
+    const { client } = spyClient(textOnly);
+    const r = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], textBody: 'FYI\n{{forward}}' },
+      client,
+    );
+    assert.ok((r.notes ?? []).every((n) => n !== TEXT_FORM_NOTE), JSON.stringify(r.notes));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The identity whose signature expands
+// ---------------------------------------------------------------------------
+
+describe('draft_email — {{signature}} expands the FROM identity, not the first or the default', () => {
+  // Three identities, deliberately arranged so "first", "default" and "the From one" are all
+  // different rows: nothing here can pass by picking a fixed index.
+  const IDENTITIES = [
+    { id: 'a', email: 'first@example.com', textSignature: 'FIRST SIGN-OFF' },
+    { id: 'b', email: 'me@example.com', mayDelete: false, textSignature: 'DEFAULT SIGN-OFF' },
+    { id: 'c', email: 'alias@example.com', textSignature: 'ALIAS SIGN-OFF' },
+  ];
+
+  it('expands the identity named by `from`', async () => {
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => IDENTITIES });
+    await compose(
+      { mode: 'new', from: 'alias@example.com', to: ['sam@example.com'], textBody: 'hi\n{{signature}}' },
+      client,
+    );
+    assert.equal(calls.draft.textBody, 'hi\nALIAS SIGN-OFF');
+    assert.equal(calls.draft.from, 'alias@example.com');
+  });
+
+  it('expands the account default when `from` is omitted, not the first row', async () => {
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => IDENTITIES });
+    await compose({ mode: 'new', to: ['sam@example.com'], textBody: 'hi\n{{signature}}' }, client);
+    assert.equal(calls.draft.textBody, 'hi\nDEFAULT SIGN-OFF');
+  });
+
+  it('names the From identity in the not-placed warning too', async () => {
+    const { client } = spyClient(makeOriginal(), { getIdentities: async () => IDENTITIES });
+    const r = await compose(
+      { mode: 'new', from: 'alias@example.com', to: ['sam@example.com'], textBody: 'hi' }, client,
+    );
+    assert.ok(r.notes!.some((n) => n.startsWith('Identity alias@example.com has a signature')));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The receipt
 // ---------------------------------------------------------------------------
 
@@ -502,18 +668,21 @@ describe('draft_email — the receipt', () => {
   });
 
   it('reports per part: position order, what expanded and how many times', async () => {
+    // Position order, not an inferred one: the sign-off is placed BELOW the history here, and
+    // the receipt says so without judging it. A token may appear only once per part, so the
+    // counts are pinned across a part that carries two DIFFERENT tokens.
     const { client } = spyClient();
     const r = await compose(
       {
         mode: 'reply', originalEmailId: 'o1',
-        htmlBody: '<p>hi</p><div>{{signature}}</div><div>{{signature}}</div><div>{{quote}}</div>',
-        textBody: 'hi\n{{signature}}\n{{signature}}\n{{quote}}',
+        htmlBody: '<p>hi</p><div>{{quote}}</div><div>{{signature}}</div>',
+        textBody: 'hi\n{{quote}}\n{{signature}}',
       },
       client,
     );
     const html = r.tokens!.parts.find((p) => p.part === 'htmlBody')!;
-    assert.deepEqual(html.order, ['signature', 'signature', 'quote']);
-    assert.deepEqual(html.expanded, [{ token: 'signature', count: 2 }, { token: 'quote', count: 1 }]);
+    assert.deepEqual(html.order, ['quote', 'signature']);
+    assert.deepEqual(html.expanded, [{ token: 'quote', count: 1 }, { token: 'signature', count: 1 }]);
     assert.deepEqual(html.removed, []);
     assert.deepEqual(r.tokens!.parts.map((p) => p.part), ['htmlBody', 'textBody']);
   });

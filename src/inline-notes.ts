@@ -105,13 +105,26 @@ export function noteForwardUnresolvedReferences(count: number): string {
   );
 }
 
-/** Media that could not be embedded and rides the forward as a regular attachment. */
-export function noteForwardPooled(count: number, names: (string | null | undefined)[]): string {
+/** The remedy the pooled sentence ends on when the caller names no other one. */
+export const POOLED_REMEDY_RERUN =
+  're-run with asAttachment: true for full fidelity, then delete this draft.';
+
+/**
+ * Media that could not be embedded and rides the forward as a regular attachment.
+ *
+ * The REMEDY is a parameter because it is not the same sentence on every tool. On a tool
+ * where the forward's format is inferred, re-running as .eml is the only lever the caller
+ * has. On one where the caller places the block themselves, the fix is usually to place it
+ * in the html part instead — and telling that caller to "re-run with asAttachment: true"
+ * sends them at a call the token gate would refuse.
+ */
+export function noteForwardPooled(
+  count: number, names: (string | null | undefined)[], remedy: string = POOLED_REMEDY_RERUN,
+): string {
   const listed = describePartNames(names, count);
   return (
     `${count} media part(s) could not be embedded and were attached as regular attachments` +
-    `${listed ? `: ${listed}` : ''} — re-run with asAttachment: true for full fidelity, ` +
-    'then delete this draft.'
+    `${listed ? `: ${listed}` : ''} — ${remedy}`
   );
 }
 
@@ -635,6 +648,11 @@ export interface InlineNoteContext {
   reEmbeddedCount?: number;
   /** Set when the body contained reference-shaped text this server could not act on. */
   unparsableCidText?: boolean;
+  /**
+   * How to end the pooled sentence, for a tool whose caller has a better lever than
+   * re-running as .eml. Defaults to POOLED_REMEDY_RERUN. See noteForwardPooled.
+   */
+  pooledRemedy?: string;
 }
 
 /**
@@ -681,7 +699,9 @@ export function emitInlineNotes(tally: NoteTally, context: InlineNoteContext): s
     );
   }
 
-  if (tally.pooled > 0) notes.push(noteForwardPooled(tally.pooled, tally.pooledNames));
+  if (tally.pooled > 0) {
+    notes.push(noteForwardPooled(tally.pooled, tally.pooledNames, context.pooledRemedy));
+  }
 
   if (tally.notIncluded > 0) {
     notes.push(
