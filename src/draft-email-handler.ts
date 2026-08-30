@@ -23,7 +23,6 @@ import {
 } from './inline-images.js';
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
-import { isSettableMessageId, sanitizeEmlFilename } from './forward-handler.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 
 // ---------------------------------------------------------------------------
@@ -441,6 +440,54 @@ function noteMintedDropped(names: (string | null | undefined)[], total: number):
     'were dropped: after expansion no body written by this call references them. ' +
     'A token placed inside a comment or an attribute is the usual cause.'
   );
+}
+
+// ---------------------------------------------------------------------------
+// Forward-mode hygiene on values taken from the forwarded message
+// ---------------------------------------------------------------------------
+
+// Fastmail validates header:…:asMessageIds values on Email/set (probed live
+// 2026-07-05): embedded CR/LF and non-ASCII are REJECTED (failing the whole create),
+// and embedded angle brackets round-trip MANGLED (split into two ids). The value
+// comes verbatim from the forwarded — attacker-controlled — message, so pre-vet it
+// and treat a malformed id as absent: the forward still works, and only the
+// recorded-source affordance is lost. `edit_draft` never writes this header — it
+// carries whatever the draft already stores, or drops it whole when the caller names
+// forwardedMessageId in clearFields — and it does NOT re-vet what it carries. That is
+// not because the value was vetted before: a draft composed in another client was never seen
+// by this function. It is because a value Fastmail will not accept fails the CREATE loudly,
+// with the old draft still intact (the recreate creates before it disposes), so the caller
+// gets an error and one recovery step — clear the marking — rather than a silent drop.
+export function isSettableMessageId(id: unknown): id is string {
+  return (
+    typeof id === 'string' &&
+    id.length > 0 &&
+    id.length <= 998 && // RFC 5322 line limit; anything longer is garbage, not an id
+    /^[\x21-\x7e]+$/.test(id) && // printable ASCII only — no spaces, controls, or non-ASCII
+    !id.includes('<') &&
+    !id.includes('>')
+  );
+}
+
+// Filename for the attached .eml, derived from the ORIGINAL's subject (the name
+// describes the attached message, not the new wrapper — a caller subject override
+// does not affect it). The value is consumed as a SAVE NAME by receiving clients,
+// so strip control chars (\p{Cc} covers C0 and C1 incl. U+0085), Unicode
+// format/bidi controls (\p{Cf}, e.g. U+202E right-to-left override), path
+// separators and the Windows drive/ADS colon, and leading dots; cap the length.
+// Windows reserved device names (CON, NUL, …) deliberately survive as e.g.
+// "CON.eml" — a save-time nuisance the receiving client handles, same
+// receiver-sanitizes posture as carried attachment names (docs/security-model.md).
+export function sanitizeEmlFilename(subject: string | null | undefined): string {
+  const stripped = (subject ?? '')
+    .replace(/[\p{Cc}\p{Cf}]/gu, '')
+    .replace(/[/\\:]/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  // Cap by CODE POINTS, not UTF-16 units — a unit slice can split a surrogate pair
+  // and leave a lone surrogate, invalid on the wire.
+  const cleaned = [...stripped].slice(0, 80).join('').trim();
+  return `${cleaned || 'forwarded-message'}.eml`;
 }
 
 // ---------------------------------------------------------------------------
