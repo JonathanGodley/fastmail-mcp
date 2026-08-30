@@ -299,11 +299,22 @@ describe('assertBodyInputs — CDATA (#78)', () => {
     assert.match(derivedFromEscapedHtml.trimStart(), /^<!\[CDATA\[/);
     assert.throws(
       () => assertBodyInputs({ textBody: derivedFromEscapedHtml }),
-      /htmlBody in that case/,
+      /In that case change htmlBody/,
     );
     assert.throws(
       () => assertBodyInputs({ textBody: derivedFromEscapedHtml }),
-      /regenerated from it/,
+      /regenerated from the markup/,
+    );
+  });
+
+  // The remedy has to say to DROP the offending textBody, not just to fix the html: the
+  // check reads the caller's arguments, so a caller that corrects its markup and hands the
+  // derived text straight back beside it is refused again by the same sentence.
+  it('tells the caller to omit textBody, since fixing htmlBody alone does not clear the refusal', () => {
+    const derivedFromEscapedHtml = htmlToText('<p>&lt;![CDATA[ raw ]]&gt; is the wrapper</p>');
+    assert.throws(
+      () => assertBodyInputs({ textBody: derivedFromEscapedHtml, htmlBody: '<p>corrected markup</p>' }),
+      /omit textBody/,
     );
   });
 

@@ -93,14 +93,22 @@ function requireBodyString(name: string, value: unknown): string | undefined {
 //        escaped `&lt;![CDATA[`, that escape unescapes when the plain-text alternative is
 //        derived, and handing the derived text back on a later edit is then refused. A
 //        remedy pointing at the text part would be unactionable there — the part is
-//        regenerated from the markup, so only the markup can change it.
+//        regenerated from the markup, so only the markup can change it. It also says to
+//        OMIT textBody, because fixing the html and handing the derived text back beside it
+//        trips this same refusal: the check reads the caller's arguments, not the draft.
+//        The sentence is CONDITIONAL ("if you did not write that token") rather than split
+//        per surface the way `rejectReservedCidRef` is, deliberately. That one split because
+//        its diagnosis clause was FALSE on one of its two surfaces, which is a correctness
+//        problem. Every clause here is TRUE on both: a compose caller did type the token,
+//        and the sentence tells it so before offering the other reading. Matching the shape
+//        of a neighbouring message for its own sake would be churn.
 export function assertBodyInputs(bodies: { textBody?: unknown; htmlBody?: unknown }): void {
   const text = requireBodyString('textBody', bodies?.textBody);
   const html = requireBodyString('htmlBody', bodies?.htmlBody);
 
   if (text !== undefined && CDATA_START.test(text.trimStart())) {
     throw new InvalidInputError(
-      'textBody is wrapped in a CDATA section. Pass the message body as a plain string with no <![CDATA[ ... ]]> wrapper. If you did not write that token, it was derived rather than typed: the plain-text part of an HTML message is generated from the markup, and an escaped &lt;![CDATA[ in htmlBody unescapes into it. Change htmlBody in that case — the text part is regenerated from it, so editing textBody alone cannot clear this.',
+      'textBody is wrapped in a CDATA section. Pass the message body as a plain string with no <![CDATA[ ... ]]> wrapper. If you did not write that token, it was derived rather than typed: the plain-text part of an HTML message is generated from the markup, and an escaped &lt;![CDATA[ in htmlBody unescapes into it. In that case change htmlBody and omit textBody entirely — the text part is regenerated from the markup, so editing textBody alone cannot clear this, and handing the derived text back alongside your corrected htmlBody trips this same refusal again.',
     );
   }
 
