@@ -81,6 +81,20 @@ function count(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
+/**
+ * The refusal message a call produced, for assertions about what a message must NOT contain.
+ * A `assert.rejects` regex can only pin what is present; an absent spelling needs the string.
+ * Fails the test if the call resolved rather than refusing.
+ */
+async function messageFrom(run: () => Promise<unknown>): Promise<string> {
+  try {
+    await run();
+  } catch (err) {
+    return (err as Error).message;
+  }
+  assert.fail('expected the call to be refused, but it resolved');
+}
+
 // ---------------------------------------------------------------------------
 // Mode, and the parameters that belong to one mode
 // ---------------------------------------------------------------------------
@@ -174,11 +188,50 @@ describe('draft_email — token refusals, decided before anything is built', () 
     for (const miss of ['{{Quote}}', '{{{quote}}}', '{quote}}']) {
       await assert.rejects(
         () => compose({ mode: 'reply', originalEmailId: 'o1', htmlBody: `<p>hi</p>${miss}` }, client),
-        /which is not a token.*exact spellings are \{\{signature\}\}, \{\{quote\}\} and \{\{forward\}\}/s,
+        /which is not a token.*on mode:'reply' the exact spellings are \{\{signature\}\} and \{\{quote\}\}/s,
         miss,
       );
     }
     assert.equal(calls.draft, undefined);
+  });
+
+  it('names only the spellings the mode accepts, so the refusal offers nothing it would reject', async () => {
+    // The mode gate refuses the other mode's history token in every spelling, so listing it
+    // here would hand the caller a spelling this same call is about to reject.
+    const { client } = spyClient();
+
+    const replyMessage = await messageFrom(
+      () => compose({ mode: 'reply', originalEmailId: 'o1', htmlBody: '<p>hi</p>{{Signature}}' }, client),
+    );
+    assert.match(replyMessage, /which is not a token/);
+    assert.ok(replyMessage.includes('{{quote}}'), replyMessage);
+    assert.ok(!replyMessage.includes('{{forward}}'), replyMessage);
+
+    const forwardMessage = await messageFrom(
+      () => compose(
+        { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>hi</p>{{Signature}}' },
+        client,
+      ),
+    );
+    assert.ok(forwardMessage.includes('{{forward}}'), forwardMessage);
+    assert.ok(!forwardMessage.includes('{{quote}}'), forwardMessage);
+
+    // A new message has no history token at all, so it is offered neither — and the sentence
+    // goes singular rather than leaving "the exact spellings are {{signature}}".
+    const newMessage = await messageFrom(
+      () => compose({ mode: 'new', htmlBody: '<p>hi</p>{{Signature}}' }, client),
+    );
+    assert.match(newMessage, /on mode:'new' the exact spelling is \{\{signature\}\}, lower case/);
+    assert.ok(!newMessage.includes('{{quote}}'), newMessage);
+    assert.ok(!newMessage.includes('{{forward}}'), newMessage);
+
+    // The half that was already right stays: the caller's own spelling is named back, and
+    // the escape — valid in every mode — is still offered.
+    for (const message of [replyMessage, forwardMessage, newMessage]) {
+      assert.ok(message.includes('"{{Signature}}"'), message);
+      assert.match(message, /escape them: \\\{\{signature\}\} ships the literal token/);
+      assert.match(message, /consumed only before a token name/);
+    }
   });
 
   it('treats internal whitespace as part of the token, not as a near-miss', async () => {
@@ -264,8 +317,9 @@ describe('draft_email — token refusals, decided before anything is built', () 
   });
 
   it("refuses a wrong-mode token in ANY spelling, for the mode rather than the spelling", async () => {
-    // The near-miss message would name {{forward}} — the very spelling the mode gate then
-    // refuses — so the mode gate has to run first.
+    // The near-miss message lists this mode's own spellings, so on a reply it would answer
+    // {{{forward}}} with {{signature}} and {{quote}} and never say the true thing — that a
+    // reply has no forwarded block at all. The mode gate has to run first to say it.
     const { client } = spyClient();
     for (const spelling of ['{{forward}}', '{{Forward}}', '{{{forward}}}']) {
       await assert.rejects(

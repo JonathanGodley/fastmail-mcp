@@ -160,11 +160,28 @@ export interface DraftEmailClient {
 // Refusal wording
 // ---------------------------------------------------------------------------
 
-const TOKEN_SPELLINGS = '{{signature}}, {{quote}} and {{forward}}';
+/**
+ * The clause naming the spellings THIS mode accepts, for the near-miss refusal.
+ *
+ * Scoped to the mode, never the full three: the wrong-mode gate that runs before the
+ * near-miss pass refuses the other mode's history token in every spelling, so a message that
+ * listed `{{forward}}` on a reply would hand the caller a spelling this same call is about to
+ * reject. `{{signature}}` applies in every mode; the history token is the mode's own, and
+ * `new` has none — which is why the clause carries its own verb and article rather than
+ * being interpolated into a fixed plural sentence.
+ */
+function acceptedSpellings(mode: DraftEmailMode): string {
+  const history = HISTORY_TOKEN[mode];
+  return history
+    ? `the exact spellings are {{signature}} and {{${history}}}`
+    : 'the exact spelling is {{signature}}';
+}
 
+// Mode-agnostic on purpose: it states what the backslash does, and `{{signature}}` is a valid
+// token in all three modes, so the example never offers a spelling any mode would refuse.
 const ESCAPE_HINT =
   'To write braces as text, escape them: \\{{signature}} ships the literal token. ' +
-  'The backslash is consumed only before one of the three names.';
+  'The backslash is consumed only before a token name.';
 
 function bad(message: string): McpError {
   return new McpError(ErrorCode.InvalidParams, message);
@@ -240,10 +257,12 @@ const TOKEN_ORDER = ['signature', 'quote', 'forward'] as const;
  * The wrong-mode pass leads because of what it spans. It matches the exact token AND every
  * near-miss spelling of a history token this mode does not accept, so `{{forward}}`,
  * `{{Forward}}` and `{{{forward}}}` on a reply are all refused FOR THE MODE. Run the
- * near-miss pass first and `{{{forward}}}` on a reply is refused for its spelling, with a
- * message telling the caller to write `{{forward}}` — the very spelling the next gate would
- * then refuse. Every other count and presence test here (repeat, one-part, the forward gates)
- * is over unescaped EXACT tokens only.
+ * near-miss pass first and `{{{forward}}}` on a reply is refused for its spelling instead,
+ * by a message that answers a caller reaching for the forwarded block with this mode's own
+ * spellings — `{{signature}}` and `{{quote}}` — and never says the thing that is actually
+ * wrong, which is that a reply has no forwarded block to place. Every other count and
+ * presence test here (repeat, one-part, the forward gates) is over unescaped EXACT tokens
+ * only.
  */
 function assertTokensAcceptable(
   parts: PartScan[], mode: DraftEmailMode, asAttachment: boolean,
@@ -272,7 +291,7 @@ function assertTokensAcceptable(
     if (miss) {
       throw bad(
         `${partWord(part)} carries "${describePart(miss.text)}", which is not a token: ` +
-        `the exact spellings are ${TOKEN_SPELLINGS}, lower case, with two braces each side. ` +
+        `on mode:'${mode}' ${acceptedSpellings(mode)}, lower case, with two braces each side. ` +
         ESCAPE_HINT,
       );
     }
