@@ -317,7 +317,12 @@ describe('composeDraft — embedding the caller\'s own images (#13)', () => {
         { to: ['a@b.example'], subject: 'Hi', htmlBody: '<img src="cid:ii-' + 'a'.repeat(32) + '@inline.invalid">' },
         client, '/attach/root', false,
       ),
-      (e: any) => e instanceof InvalidInputError && /server-managed identifier/.test(e.message),
+      // A compose has no draft, so the refusal must not diagnose one: it says the identifier
+      // is the server's to assign, and leaves the remedy (attach your own cid) unchanged.
+      (e: any) => e instanceof InvalidInputError
+        && /server-managed identifier/.test(e.message)
+        && !/this draft/.test(e.message)
+        && /add an attachments item with a cid of your choosing/.test(e.message),
     );
   });
 

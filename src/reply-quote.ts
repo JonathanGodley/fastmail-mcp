@@ -205,12 +205,13 @@ const QUOTE_OPEN = '<blockquote type="cite" style="margin:0 0 0 .8ex;border-left
 // false-positives on a hand-written prose blockquote — a bare <blockquote> is deliberately NOT
 // a marker. Tolerant of attribute order and quote style ("..." / '...' / bare). This is a
 // PRESENCE check, not a content check: any such blockquote counts and an empty shell passes.
-// NO WRITE PATH READS IT ANY MORE: edit_draft used to fire a quote-preservation challenge off
-// it, and that whole mechanism is gone — an edit now stores the body it is handed byte for
-// byte, so a quote survives because the caller handed it back. What is left is a recogniser
-// for reads that summarise a body. Other clients (e.g.
-// Outlook's div-based quoting) aren't recognized; see the recognition residual in
-// docs/email-bodies.md.
+// NOTHING READS IT TODAY: edit_draft used to fire a quote-preservation challenge off it, and
+// that whole mechanism is gone — an edit now stores the body it is handed byte for byte, so a
+// quote survives because the caller handed it back. It is kept, exported and tested because
+// it is where "which markup counts as a machine-emitted quote" is written down, and the
+// stripQuoted reader deliberately matches on its own separate rules (see quote-strip.ts, which
+// explains why the two are not the same question). Other clients (e.g. Outlook's div-based
+// quoting) aren't recognized; see the recognition residual in docs/email-bodies.md.
 export function hasQuoteMarker(html: string | null | undefined): boolean {
   if (!html) return false;
   return /<blockquote[^>]*\b(?:type\s*=\s*["']?cite|class\s*=\s*["'][^"']*\bgmail_quote\b)/i.test(html);
@@ -708,16 +709,6 @@ export function signatureSkipReason(
 }
 
 /**
- * What edit_draft says when it re-appended a signature nobody asked about in that call.
- *
- * The re-append is preservation of an EARLIER decision, so it is the one signature outcome
- * that happens without being requested in the same breath — and therefore the one the
- * result has to announce.
- */
-export const NOTE_SIGNATURE_REAPPENDED =
-  "The identity's configured signature was re-appended: this draft already carried one and the body you supplied did not. Pass appendSignature:false to drop it instead.";
-
-/**
  * What a compose call says when appendSignature:true appended nothing.
  *
  * The flag is an input the caller cannot verify without re-reading the draft, so an append
@@ -739,10 +730,10 @@ export function noteSignatureNotAppended(
   // The no-signature arm names an ADDRESS rather than an identity, and says both ways it can
   // fail. `signatureOf(undefined)` is what reaches this arm, and "undefined" covers two
   // different things: a verified identity with the field blank, and an address that is not a
-  // verified identity at all. edit_draft reaches the second on a stored `from` it never
-  // vetted (only an EXPLICIT from is rejected), where "set one in Fastmail" is both false and
-  // unactionable. Same wording as noteSignatureUnavailableOnEdit's default arm, which had it
-  // right; this one is not a different fact.
+  // verified identity at all. Naming only the first — "set one in Fastmail" — would be both
+  // false and unactionable for a caller sending as the second, so the arm names both. The
+  // edit side reports the same fact in its own words, on the {{signature}} it was asked to
+  // expand (see signatureOf); this arm is the compose-side wording of it, not a rival fact.
   const whoAddress = identityAddress
     ? `the address this message sends as (${identityAddress})`
     : 'the address this message sends as';
@@ -758,37 +749,6 @@ export function noteSignatureNotAppended(
       return `${head}this message ships no HTML body, and ${who} has no plain-text form of its signature to write into the text part.`;
     case 'text-part-unsigned':
       return `appendSignature was requested and the HTML body was signed, but its plain-text alternative was not: ${who} has an HTML signature with no readable text in it (images only), so there is nothing to write into the text part. A recipient reading the plain-text alternative sees no sign-off.`;
-  }
-}
-
-/**
- * What edit_draft says when a draft that WAS carrying a signature comes out of the edit
- * without one (or without it everywhere), because the keep could not be honoured.
- *
- * The preserve branch is armed by the stored draft, so this is the caller's OMITTED flag
- * meaning "keep it" and the keep failing. Silence here would drop a block the draft was
- * carrying with nothing said — see the never-silently-drop rule in CLAUDE.md. It is a
- * separate function from `noteSignatureNotAppended` for exactly that reason: nothing in this
- * call asked, so a note opening "appendSignature was requested" would be untrue.
- *
- * The reason is passed in rather than assumed. `no-signature` is not the only way a keep
- * fails: an identity whose signature is images-only html has nothing to put in a draft this
- * edit converts to plain text, and that loses the sign-off just as completely.
- */
-export function noteSignatureUnavailableOnEdit(
-  fromAddress: string | undefined,
-  reason: SignatureSkipReason = 'no-signature',
-): string {
-  const who = fromAddress ? ` (${fromAddress})` : '';
-  const head = "This draft carried the sending identity's signature, but ";
-  const tail = ' Write the sign-off into the body if you want it back.';
-  switch (reason) {
-    case 'text-part-unsigned':
-      return `${head}only its HTML body carries it now: the signature configured for the address this edit sends as${who} is images only, so there is no plain-text form to write into the text alternative you supplied. A recipient reading that alternative sees no sign-off.${tail}`;
-    case 'no-text-form':
-      return `${head}this edit leaves it as a plain-text message and the signature configured for the address this edit sends as${who} is images-only HTML, so there is no plain-text form to carry over — the edited draft carries none.${tail}`;
-    default:
-      return `${head}no signature is available for the address this edit sends as${who} — it has none configured, or it is not one of your verified identities — so the edited draft carries none.${tail}`;
   }
 }
 
@@ -897,9 +857,11 @@ export function buildQuoteBlocks(input: {
     htmlToText(origHtml, htmlQuoteShips ? 'resolve' : 'suppress', quoteMap),
   );
   // A blank source gets no attribution and no quote. An "On … wrote:" over an empty "> "
-  // line describes a quote that is not there, and it would arm this server's own text
-  // quote marker, so the next edit of the draft would be challenged over a quote it has
-  // never had. (The forward builder has always had this gate; the reply builder gains it.)
+  // line describes a quote that is not there: the draft opens by telling its reader that
+  // the original follows, and nothing does. It is also text the caller then has to delete
+  // by hand on every edit, since an edit stores the body it is handed and this server
+  // recognises nothing in it. (The forward builder has always had this gate; the reply
+  // builder gains it.)
   if (!isBlank(textSource)) blocks.textBlock = `${attribution}\n${quoteText(textSource)}`;
 
   // rich quote: prefer the sanitized html; else a text-only original → escaped block.

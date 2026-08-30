@@ -732,7 +732,8 @@ export async function composeDraftEmail(
     // Lossless form: the Email's own blobId is the raw RFC 5322 message. Inserted AFTER the
     // empty-after-expansion check above, which is what keeps a caller-supplied part being
     // tested on its own terms while a body-less forward still ships something readable. The
-    // filler matches no forward marker, so the edit guard's marker path stays inert.
+    // filler is ordinary prose rather than a forwarded-message block, and nothing downstream
+    // reads it back: an edit of this draft replaces it like any other body.
     if (isBlank(params.textBody) && isBlank(params.htmlBody)) {
       params.textBody = 'Forwarded message attached.';
       params.htmlBody = undefined;

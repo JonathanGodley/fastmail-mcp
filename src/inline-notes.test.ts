@@ -6,7 +6,6 @@ import {
   formatSize,
   InlineNoteLedger,
   noteAttachmentsExcluded,
-  noteClearedAndReEmbedded,
   noteDegradedToAttachments,
   noteDraftEmbeds,
   noteDroppedDataImages,
@@ -224,13 +223,6 @@ describe('the notes a call emits', () => {
     assert.equal(noteDraftEmbeds(1, KB214), 'This draft embeds 1 image(s) (214 KB).');
   });
 
-  it('reports an attachment wipe alongside the rebuilt quote', () => {
-    assert.equal(
-      noteClearedAndReEmbedded(2, 1),
-      'Cleared 2 attachment(s); the kept quote re-embedded 1 image(s).',
-    );
-  });
-
   it('reports what a sent message actually carried', () => {
     assert.equal(
       noteSentWithEmbedded(2, MB1_4),
@@ -300,6 +292,15 @@ describe('the refusals a call raises', () => {
       'it — but never author a NEW one. To embed your own image, add an attachments item ' +
       'with a cid of your choosing.',
     );
+  });
+
+  // The compose surface has no draft, so the edit wording would describe a thing that does
+  // not exist. The remedy is the same on both; only the diagnosis moves.
+  it('diagnoses the same refusal differently on a compose, where there is no draft', () => {
+    const message = rejectReservedCidRef(MINT, 'compose');
+    assert.ok(!message.includes('this draft'));
+    assert.ok(message.includes('this server assigns them itself — a body never authors one.'));
+    assert.ok(message.includes('add an attachments item with a cid of your choosing.'));
   });
 
   it('refuses a removal the surviving body still references', () => {
@@ -663,17 +664,6 @@ describe('emitInlineNotes', () => {
     assert.deepEqual(emitInlineNotes(tally({ removed: 1 }), { surface: 'draft' }), [
       'Removed 1 image(s) that were embedded in the quote.',
     ]);
-  });
-
-  it('reports an attachment wipe alongside what the rebuilt quote put back', () => {
-    assert.deepEqual(
-      emitInlineNotes(tally(), {
-        surface: 'draft',
-        clearedAttachmentCount: 2,
-        reEmbeddedCount: 1,
-      }),
-      ['Cleared 2 attachment(s); the kept quote re-embedded 1 image(s).'],
-    );
   });
 
   it('reports reference-shaped text that was left alone', () => {

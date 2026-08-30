@@ -1586,13 +1586,17 @@ describe('updateDraft', () => {
 
   it('refuses the flag when the body carries no {{signature}} to expand', async () => {
     mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
-    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
     await assert.rejects(
       () => client.updateDraft('draft-1', {
         htmlBody: '<p>Thanks.</p>', expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
       }),
       /carries no \{\{signature\}\}/,
     );
+    // Refused before anything is written, the same as its sibling below: the caller's body
+    // was otherwise perfectly storable, so an implementation that stored it and complained
+    // afterwards would leave a draft rewritten by a call that reported failure.
+    assert.equal(makeReq.mock.calls.some((c) => c.arguments[0].methodCalls[0][1].create), false);
   });
 
   // THE PAIR. Same body, same draft, the flag the only difference. A table built only from

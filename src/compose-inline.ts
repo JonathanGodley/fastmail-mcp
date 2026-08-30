@@ -131,9 +131,14 @@ export function planAuthoredInlineImages(input: AuthoredInlineInput): AuthoredIn
   const preciseRefs = sanitizeQuoteHtml(html, { mode: 'collect' }).refs;
   for (const ref of preciseRefs) {
     // Identifiers of the server's own shape are refused outright rather than treated as
-    // dangling: they are regenerated whenever a quote is dropped and re-added, so a message
-    // that references one directly is broken on the next edit even if it works today.
-    if (isReservedCid(ref)) throw new InvalidInputError(rejectReservedCidRef(ref));
+    // dangling, and on THIS surface the reason is not durability. A minted identifier is
+    // durable — it survives an edit for as long as the body keeps referencing it, which is
+    // what lets an image-bearing draft be read and handed straight back. What cannot happen
+    // is a body claiming one in advance: this server assigns them when it carries an image
+    // out of a quoted or forwarded original, and a compose call has no earlier message to
+    // have carried anything out of, so a reference of that shape was authored by the caller
+    // and names nothing that can ever exist.
+    if (isReservedCid(ref)) throw new InvalidInputError(rejectReservedCidRef(ref, 'compose'));
     if (suppliedCids.has(ref)) continue;
     throw new InvalidInputError(
       input.surface === 'note'

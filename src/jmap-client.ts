@@ -305,9 +305,10 @@ export const EMAIL_PROPERTIES_COMPACT = [
 // The two provenance headers this server records on drafts are deliberately
 // VERBOSE-tier, not COMPACT: list items already show forward-ness via the isForwarded
 // keyword flag, and the header VALUES are needed only when operating on a specific
-// draft — the edit guard's recovery (X-Forwarded-Message-Id) and inspecting which
-// stored copy send_draft will mark (X-Fastmail-MCP-Source-Id, see SOURCE_ID_HEADER
-// below) — both get_email contexts.
+// draft — de-forwarding one (X-Forwarded-Message-Id, which edit_draft carries through
+// or drops on clearFields, and which send_draft reads to decide what to mark) and
+// inspecting which stored copy send_draft will mark (X-Fastmail-MCP-Source-Id, see
+// SOURCE_ID_HEADER below) — both get_email contexts.
 // Corollary, not a gap: getThread uses EMAIL_PROPERTIES_COMPACT by default, so an
 // ordinary thread read (including raw:true) doesn't surface forwardedMessageId or
 // sourceEmailId — consistent with this decision. getThread's includeBodies mode (#74)
@@ -578,9 +579,12 @@ export interface AttachmentRemovalPlan {
   /**
    * The refusal a bad ref earned, held rather than thrown.
    *
-   * Resolution runs EARLY (the rebuilt quote has to know which parts survive it) but the
-   * body-shape guards must keep raising first, so this is raised at the point in the order
-   * the removal loop always occupied. Resolution itself performs no I/O and throws nothing.
+   * Resolution runs EARLY, alongside the other signals read off the stored draft, and it is
+   * pure: no I/O, and it throws nothing. Holding the refusal is what makes that placement
+   * free. The body-shape guards, and the hash check behind them, must still be the first
+   * thing a caller hears about — a removal complaint on a call that is going to be refused
+   * for its body shape sends the caller to fix the wrong argument — so this is raised at the
+   * point in the order the removal loop always occupied.
    */
   error?: PathAccessError;
 }

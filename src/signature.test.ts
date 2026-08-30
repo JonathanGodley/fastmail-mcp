@@ -19,8 +19,8 @@ import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applySignature, hasSignatureMarker, signatureHtmlBlock, signatureTextBlock,
-  buildReplyBodies, buildForwardBodies, NOTE_SIGNATURE_REAPPENDED, signatureSkipReason,
-  noteSignatureNotAppended, noteSignatureUnavailableOnEdit,
+  buildReplyBodies, buildForwardBodies, signatureSkipReason,
+  noteSignatureNotAppended,
 } from './reply-quote.js';
 import { selectIdentity, signatureOf } from './identity.js';
 import { composeDraft } from './compose-handler.js';

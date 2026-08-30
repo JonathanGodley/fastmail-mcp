@@ -225,11 +225,6 @@ export function noteDraftEmbeds(count: number, bytes: number): string {
   return `This draft embeds ${count} image(s) (${formatSize(bytes)}).`;
 }
 
-/** An attachment wipe on an edit that also rebuilt the quote. */
-export function noteClearedAndReEmbedded(cleared: number, reEmbedded: number): string {
-  return `Cleared ${cleared} attachment(s); the kept quote re-embedded ${reEmbedded} image(s).`;
-}
-
 /** What a sent message actually carried, reported back on the send. */
 export function noteSentWithEmbedded(count: number, bytes: number): string {
   return `Sent with ${count} embedded image(s) (${formatSize(bytes)}).`;
@@ -319,10 +314,18 @@ export function rejectDanglingCidRef(value: string, availability: AttachmentAvai
  * refusing them all would refuse the first edit of every such draft. What stays refused is
  * AUTHORING one, which names an image the draft does not have.
  */
-export function rejectReservedCidRef(value: string): string {
+export function rejectReservedCidRef(value: string, surface: 'edit' | 'compose' = 'edit'): string {
+  // The DIAGNOSIS differs by surface; the remedy does not. On an edit there is a draft to
+  // check the reference against, and what is wrong is that it carries no part under that
+  // identifier. On a compose there is no draft at all, so the same clause would describe a
+  // thing that does not exist — what is wrong there is simply that the body authored an
+  // identifier this server assigns itself.
+  const diagnosis = surface === 'edit'
+    ? 'and this draft carries no part under it'
+    : 'and this server assigns them itself — a body never authors one';
   return (
     `htmlBody references cid "${describePart(value)}", a server-managed identifier for ` +
-    'quoted images, and this draft carries no part under it. A minted identifier survives ' +
+    `quoted images, ${diagnosis}. A minted identifier survives ` +
     'an edit for as long as your body keeps referencing it, and a reference you drop takes ' +
     'the part with it — but never author a NEW one. To embed your own image, add an ' +
     'attachments item with a cid of your choosing.'
@@ -809,9 +812,6 @@ export interface InlineNoteContext {
   keepNoun?: string;
   /** False when the caller asked for the original's attachments to be left behind. */
   includeOriginalAttachments?: boolean;
-  /** Set when this call wiped the draft's attachments and rebuilt the quote. */
-  clearedAttachmentCount?: number;
-  reEmbeddedCount?: number;
   /** Set when the body contained reference-shaped text this server could not act on. */
   unparsableCidText?: boolean;
   /**
@@ -887,12 +887,6 @@ export function emitInlineNotes(tally: NoteTally, context: InlineNoteContext): s
 
   if (tally.droppedUnsupportedImages > 0) {
     notes.push(noteDroppedUnsupportedImages(tally.droppedUnsupportedImages));
-  }
-
-  if (context.clearedAttachmentCount) {
-    notes.push(
-      noteClearedAndReEmbedded(context.clearedAttachmentCount, context.reEmbeddedCount ?? 0),
-    );
   }
 
   if (context.unparsableCidText) notes.push(noteUnparsableCidText());

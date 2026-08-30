@@ -51,8 +51,11 @@ export interface ForwardParams {
 // recorded-source affordance is lost. Exported for draft_email's forward mode, which
 // records the same header from the same untrusted source. `edit_draft` never writes this
 // header — it carries whatever the draft already stores, or drops it whole when the caller
-// names forwardedMessageId in clearFields — so nothing on the edit path re-vets a value
-// that was vetted when the draft was composed.
+// names forwardedMessageId in clearFields — and it does NOT re-vet what it carries. That is
+// not because the value was vetted before: a draft composed in another client was never seen
+// by this function. It is because a value Fastmail will not accept fails the CREATE loudly,
+// with the old draft still intact (the recreate creates before it disposes), so the caller
+// gets an error and one recovery step — clear the marking — rather than a silent drop.
 export function isSettableMessageId(id: unknown): id is string {
   return (
     typeof id === 'string' &&
