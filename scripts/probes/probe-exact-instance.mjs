@@ -11,8 +11,9 @@
 // $answered keyword — both reverted/trashed in cleanup on the way out.
 //
 // 1. Find a real duplicated pair (two stored copies of one Message-ID, none $answered).
-// 2. reply_email to the FILED (non-Sent) copy, addressed to the authorized test
-//    address, subject overridden + no quote so no real content/subject leaves.
+// 2. draft_email mode:'reply' to the FILED (non-Sent) copy, addressed to the authorized
+//    test address, subject overridden and no {{quote}} placed, so no real content or
+//    subject leaves the account.
 // 3. Assert the draft carries X-Fastmail-MCP-Source-Id = the filed copy's id.
 // 4. send_draft; assert the result reports the original marked (not the old
 //    ambiguous skip), then assert $answered landed on the filed copy ONLY.
@@ -84,8 +85,8 @@ try {
   const priorKeywords = { ...(filed.keywords ?? {}) };
 
   // Reply to the FILED copy — the two-step Message-ID lookup would see BOTH copies and skip.
-  const replyRes = text(await c.call('reply_email', {
-    originalEmailId: filed.id, to: TEST_ADDR, subject: SUBJECT, quoteOriginal: false,
+  const replyRes = text(await c.call('draft_email', {
+    mode: 'reply', originalEmailId: filed.id, to: TEST_ADDR, subject: SUBJECT,
     htmlBody: '<p>Automated probe of exact-instance thread-state marking; please ignore.</p>',
   }));
   const m = replyRes.match(/Email ID: ([^\s).,]+)/);

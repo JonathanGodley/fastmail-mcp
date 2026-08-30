@@ -183,7 +183,7 @@ describe('draft_email — mode', () => {
     assert.deepEqual(calls.draft.references, ['root@example.com', 'thread@example.com']);
   });
 
-  it("keeps create_draft's contentless guard on mode:'new', testing bodies with isBlank", async () => {
+  it("keeps the contentless-draft guard on mode:'new', testing bodies with isBlank", async () => {
     const { client } = spyClient();
     await assert.rejects(() => compose({ mode: 'new' }, client), /At least one of to, subject, textBody, htmlBody, or attachments/);
     // A whitespace-only body is contentless too. The old handler tested truthiness here and

@@ -1,4 +1,5 @@
-// Reply/forward quote-carry live smoke: minted ii-...@inline.invalid cids,
+// Quote/forward-carry live smoke over draft_email's {{quote}} and {{forward}} tokens:
+// minted ii-...@inline.invalid cids,
 // keep-rebuild reuse (stable identifiers), text-only-reply drop note, the
 // unsupported-reference-form drop count, flag-off forwards still carrying body
 // images, asAttachment untouched, and the send_draft transmit receipt (one
@@ -72,7 +73,7 @@ try {
     { h: { value: '<div>C body.<img src="cid:orig-c@fix.example" alt="c logo"> tail</div>' } });
 
   // 1. html reply to the image original: embed + mint
-  let r = await c.call('reply_email', { originalEmailId: FIX_A, htmlBody: '<p>Thanks for the picture.</p>' });
+  let r = await c.call('draft_email', { mode: 'reply', originalEmailId: FIX_A, htmlBody: '<p>Thanks for the picture.</p>{{quote}}' });
   check('reply: draft created', !r.isError, text(r).slice(0, 250));
   check('reply: embed note', /This draft embeds 1 image\(s\) from the quoted message \(/.test(text(r)), text(r).split('\n').filter(l => /image/i.test(l)).join(' | '));
   const d1 = idOf(text(r)); if (d1) trash.push(d1);
@@ -95,7 +96,7 @@ try {
   check('edit keep-rebuild: minted cid reused verbatim', !!minted2 && minted2 === minted1, `${minted1} vs ${minted2}`);
 
   // 3. text-only reply: no mint, drop reported
-  r = await c.call('reply_email', { originalEmailId: FIX_A, textBody: 'Plain text reply only.' });
+  r = await c.call('draft_email', { mode: 'reply', originalEmailId: FIX_A, textBody: 'Plain text reply only.\n\n{{quote}}' });
   check('text reply: draft created', !r.isError, text(r).slice(0, 250));
   check('text reply: dropped note', /image\(s\) from the quoted message were dropped/.test(text(r)), text(r).split('\n').filter(l => /image/i.test(l)).join(' | '));
   const d3 = idOf(text(r)); if (d3) trash.push(d3);
@@ -104,7 +105,7 @@ try {
   check('text reply: no attachments (nothing pooled/minted)', (em.attachments ?? []).length === 0, JSON.stringify(em.attachments ?? []));
 
   // 4. reply to relative-src original: unsupported-form drops counted + noted
-  r = await c.call('reply_email', { originalEmailId: FIX_B, htmlBody: '<p>About that page.</p>' });
+  r = await c.call('draft_email', { mode: 'reply', originalEmailId: FIX_B, htmlBody: '<p>About that page.</p>{{quote}}' });
   check('rel reply: draft created', !r.isError, text(r).slice(0, 250));
   check('rel reply: unsupported-form note, count 2', /2 image\(s\) in the quoted message used a reference form this server cannot carry into a quote and were dropped/.test(text(r)), text(r).split('\n').filter(l => /image/i.test(l)).join(' | '));
   const d4 = idOf(text(r)); if (d4) trash.push(d4);
@@ -112,7 +113,7 @@ try {
   check('rel reply: quote text survives the drops', st.html.includes('Rel refs.'), st.html.slice(0, 200));
 
   // 5. forward: embed + mint, "from the original" wording
-  r = await c.call('forward_email', { originalEmailId: FIX_A, to: SELF });
+  r = await c.call('draft_email', { mode: 'forward', originalEmailId: FIX_A, to: SELF, htmlBody: '{{forward}}' });
   check('forward: draft created', !r.isError, text(r).slice(0, 250));
   check('forward: embed note (original wording)', /This draft embeds 1 image\(s\) from the original \(/.test(text(r)), text(r).split('\n').filter(l => /image/i.test(l)).join(' | '));
   const d5 = idOf(text(r)); if (d5) trash.push(d5);
@@ -121,7 +122,7 @@ try {
   check('forward: minted cid on draft', (em.attachments ?? []).some(a => MINT_RE.test(a.cid ?? '')), JSON.stringify((em.attachments ?? []).map(a => a.cid)));
 
   // 6. forward flag-off: zip excluded + counted, body image still carried
-  r = await c.call('forward_email', { originalEmailId: FIX_C, to: SELF, includeOriginalAttachments: false });
+  r = await c.call('draft_email', { mode: 'forward', originalEmailId: FIX_C, to: SELF, includeOriginalAttachments: false, htmlBody: '{{forward}}' });
   check('flag-off forward: draft created', !r.isError, text(r).slice(0, 250));
   check('flag-off forward: exclusion note + carried sentence', /not included because includeOriginalAttachments is false/.test(text(r)) && /Body-embedded images were still carried/.test(text(r)), text(r).split('\n').filter(l => /includ|image/i.test(l)).join(' | ').slice(0, 300));
   const d6 = idOf(text(r)); if (d6) trash.push(d6);
@@ -130,7 +131,7 @@ try {
   check('flag-off forward: image carried, zip absent', (em.attachments ?? []).some(a => MINT_RE.test(a.cid ?? '')) && !(em.attachments ?? []).some(a => /zip/i.test(a.name ?? '') || a.type === 'application/zip'), JSON.stringify((em.attachments ?? []).map(a => ({ n: a.name, t: a.type }))));
 
   // 7. asAttachment forward untouched: .eml, no embed note
-  r = await c.call('forward_email', { originalEmailId: FIX_A, to: SELF, asAttachment: true });
+  r = await c.call('draft_email', { mode: 'forward', originalEmailId: FIX_A, to: SELF, asAttachment: true });
   check('asAttachment forward: draft created', !r.isError, text(r).slice(0, 250));
   check('asAttachment forward: no embed note', !/This draft embeds/.test(text(r)), text(r).split('\n').filter(l => /image/i.test(l)).join(' | '));
   const d7 = idOf(text(r)); if (d7) trash.push(d7);

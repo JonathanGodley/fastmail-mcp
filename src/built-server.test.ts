@@ -147,10 +147,13 @@ describe('every error path reaching tool output is redacted', () => {
 
   it('redacts the top-level PathAccessError branch', async () => {
     await registerCredential();
-    // create_draft has no local try/catch, so an attachment path rejection travels
-    // to the CallTool catch and is mapped there.
-    const message = await callAndCaptureError('create_draft', {
-      subject: 'redaction probe',
+    // edit_draft has no local try/catch, so an attachment path rejection travels
+    // to the CallTool catch and is mapped there. It is the vehicle because its
+    // attachment upload runs before it touches the network: draft_email resolves the
+    // sending identity first, so with an unusable token that call dies on the session
+    // fetch and never reaches the path guard this test is about.
+    const message = await callAndCaptureError('edit_draft', {
+      emailId: 'e1',
       attachments: [{ path: outsidePath }],
     });
     assertRedacted(message);
@@ -184,7 +187,7 @@ describe('every error path reaching tool output is redacted', () => {
 describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
   before(() => assertDistIsCurrent());
 
-  // The advertised attachments description of create_draft, from a server started with the
+  // The advertised attachments description of draft_email, from a server started with the
   // given flag value. Every FASTMAIL_* name is stripped from the child environment first, so
   // an ambient setting cannot be what the assertion sees.
   async function attachmentsClause(value: string | undefined): Promise<string> {
@@ -199,7 +202,7 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
     try {
       await client.init();
       const result: any = await client.list();
-      const tool = result.tools.find((t: any) => t.name === 'create_draft');
+      const tool = result.tools.find((t: any) => t.name === 'draft_email');
       return String(tool.inputSchema.properties.attachments.description);
     } finally {
       client.close();

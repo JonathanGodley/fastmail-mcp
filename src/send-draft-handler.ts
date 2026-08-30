@@ -102,8 +102,8 @@ export async function sendDraftAndMaintainKeywords(
   const source = selectSource(sourceReferences);
   if (!source) return sent(); // a fresh compose has no original to mark
 
-  // Exact-instance path. reply_email/forward_email record the JMAP id of the stored
-  // instance the caller actually composed from (X-Fastmail-MCP-Source-Id); a
+  // Exact-instance path. draft_email's reply and forward modes record the JMAP id of the
+  // stored instance the caller actually composed from (X-Fastmail-MCP-Source-Id); a
   // Message-ID names a MESSAGE, and an account can hold several stored copies of one
   // message, so only this pointer can say WHICH copy to mark — matching what
   // Fastmail's own client does (it marks the instance replied to, not every copy;

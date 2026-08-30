@@ -158,7 +158,7 @@ describe('formatSendDraftResult', () => {
     assert.match(text, /the lookup failed/);
   });
 
-  it('stays silent about a keyword-write failure, matching reply_email and forward_email', () => {
+  it('stays silent about a keyword-write failure: the send itself succeeded', () => {
     const text = formatSendDraftResult({
       submissionId: 'sub-1',
       keywordMaintenance: { kind: 'reply', messageId: 'orig@example.com', originalEmailId: 'orig-1', marked: false },

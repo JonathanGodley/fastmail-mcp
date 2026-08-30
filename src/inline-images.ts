@@ -220,7 +220,7 @@ const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])[ .]*$/i;
 // underscores, drop leading dots and the whitespace that would otherwise shield them,
 // and cap by code point so a surrogate pair is never split.
 //
-// forward_email's sanitizeEmlFilename applies a similar treatment and is deliberately
+// draft_email's sanitizeEmlFilename applies a similar treatment and is deliberately
 // NOT folded into this one: the two diverge on both ends. That helper appends ".eml"
 // (which neutralizes a reserved device name, so it lets them through) and falls back
 // to "forwarded-message"; this one produces the name a download declares, where a
@@ -1113,8 +1113,11 @@ export function reconcileInlineParts(
 
 /**
  * A self-check failure: the message this call assembled is internally inconsistent. Not a
- * caller error — a caller cannot cause it by supplying bad input, because every input-shaped
- * problem is rejected before assembly. Callers map it to an internal error.
+ * caller error — a caller cannot cause it by supplying bad input, because an input-shaped
+ * problem is settled before assembly either way: a `cid:` reference the caller authored with
+ * nothing to supply it is REJECTED, and a minted part nothing references once the tokens have
+ * expanded is DROPPED and named in the result. Neither reaches this check, so anything that
+ * does is an inconsistency this code produced itself. Callers map it to an internal error.
  */
 export class InlineClosureError extends Error {
   constructor(message: string) {

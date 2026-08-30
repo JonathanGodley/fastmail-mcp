@@ -76,8 +76,9 @@ function requireBodyString(name: string, value: unknown): string | undefined {
 //        disagree, and both outcomes are bad. This server's html-to-text derivation
 //        (htmlparser2) recognizes the section and consumes everything from the opening token
 //        to the next `]]>`, or to the end of the body when unclosed — measured: a CDATA-
-//        wrapped body derives to '', and a CDATA-wrapped REPLY derives to the quoted
-//        original alone, the new message silently gone. A browser instead handles
+//        wrapped body derives to '', and one wrapping only the prose the caller wrote above
+//        a `{{quote}}` derives to the quoted original alone, the new message silently gone
+//        under someone else's words. A browser instead handles
 //        `<![CDATA[` as a bogus comment that ends at the first `>`, so it drops the opening
 //        token and renders the trailing `]]>` as visible text. Mid-body sections do the same
 //        damage, hence "anywhere" rather than "at the start". To show a literal CDATA token

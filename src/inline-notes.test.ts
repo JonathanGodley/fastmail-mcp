@@ -340,21 +340,21 @@ describe('the refusals a call raises', () => {
       rejectUnrecreatableCid('a\x00b'),
       'This draft has an attachment whose embedded-image identifier (Content-ID "ab") ' +
       'this server cannot safely re-create. This server does not edit drafts in that ' +
-      'state. Recreate it — with reply_email or forward_email if it is a reply or forward ' +
-      '(that preserves the conversation threading; read the draft\'s In-Reply-To or ' +
-      'X-Forwarded-Message-Id via get_email, then find the original with search_emails ' +
-      'using the bare id, without angle brackets), otherwise create_draft — then delete ' +
-      'this one; or edit it in the mail client that created it.',
+      'state. Recreate it with draft_email — mode:\'reply\' or mode:\'forward\' if it is a ' +
+      'reply or forward (that preserves the conversation threading; read the draft\'s ' +
+      'In-Reply-To or X-Forwarded-Message-Id via get_email, then find the original with ' +
+      'search_emails using the bare id, without angle brackets), otherwise mode:\'new\' — ' +
+      'then delete this one; or edit it in the mail client that created it.',
     );
   });
 
-  it('routes a reply or forward draft through the tools that keep the threading', () => {
-    // Recreating one with the plain compose tool splits the conversation.
+  it('routes a reply or forward draft through the modes that keep the threading', () => {
+    // Recreating one as a new message splits the conversation.
     for (const message of [
       rejectUnrecreatableCid('x'),
       rejectBrokenDraft(['a@b'], ENABLED),
     ]) {
-      assert.ok(message.includes('reply_email or forward_email'));
+      assert.ok(message.includes("mode:'reply' or mode:'forward'"));
       assert.ok(message.includes('without angle brackets'));
     }
   });
@@ -365,10 +365,10 @@ describe('the refusals a call raises', () => {
       'This draft\'s stored body references image identifier(s) with no matching ' +
       'attachment ("logo@sender.example"). This server won\'t edit its body in that state ' +
       'unless the edit resolves the missing reference(s) — metadata and attachment edits ' +
-      'still work. Recreate it — with reply_email or forward_email if it is a reply or ' +
-      'forward (read the draft\'s In-Reply-To or X-Forwarded-Message-Id via get_email, ' +
-      'then find the original with search_emails using the bare id, without angle ' +
-      'brackets), otherwise create_draft — then delete this one.',
+      'still work. Recreate it with draft_email — mode:\'reply\' or mode:\'forward\' if it ' +
+      'is a reply or forward (read the draft\'s In-Reply-To or X-Forwarded-Message-Id via ' +
+      'get_email, then find the original with search_emails using the bare id, without ' +
+      'angle brackets), otherwise mode:\'new\' — then delete this one.',
     );
   });
 

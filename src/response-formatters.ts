@@ -116,7 +116,7 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
 //
 // ONE LINE EACH, not a space join. The summaries these ride on end in caller-controlled text
 // with no terminator (`Subject: ${subject}`), so a leading space ran the first note straight
-// on from the subject line: "Subject: Re: Lunch appendSignature was requested but…". A
+// on from the subject line: "Subject: Re: Lunch {{signature}} in htmlBody was removed:…". A
 // newline is the same separation convention the rest of the result text uses for a note that
 // is about the call rather than part of its summary.
 export function formatInlineNotes(notes?: string[]): string {
@@ -163,7 +163,8 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
 // and — because the caller never named that original — an explicit note when the draft
 // pointed at a message this server could not pin down, so the skip is actionable rather
 // than invisible. A keyword-write failure after a successful lookup is deliberately not
-// reported, matching reply_email/forward_email on the same failure.
+// reported: the keyword is maintenance on somebody else's message, and losing it changes
+// nothing about what the caller sent.
 export function formatSendDraftResult(result: SendDraftResult): string {
   // The receipt rides on the end of every outcome below, so what the message carried is
   // reported whether or not the thread-state maintenance had anything to say.

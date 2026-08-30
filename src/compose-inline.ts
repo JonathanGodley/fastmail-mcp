@@ -1,11 +1,12 @@
-// The embedded-image (cid:) checks and reporting shared by the three compose tools —
-// create_draft, reply_email and forward_email (#13).
+// The embedded-image (cid:) checks and reporting for the compose path — draft_email, in
+// all three of its modes (#13).
 //
-// Shared rather than written per tool because the three have to agree. All of them let a
-// caller author `<img src="cid:...">` against a file in the same call, all of them have to
-// refuse the same mismatches with the same words, and all of them have to say afterwards
-// whether the file was actually embedded or merely attached — which is the one outcome the
-// caller cannot see from an email id. A copy per tool would drift on all three counts.
+// Its own module rather than inline in the handler because the modes have to agree. Each of
+// them lets a caller author `<img src="cid:...">` against a file in the same call, each has
+// to refuse the same mismatches with the same words, and each has to say afterwards whether
+// the file was actually embedded or merely attached — which is the one outcome the caller
+// cannot see from an email id. Extracting them also keeps the checks testable apart from
+// the orchestration that calls them.
 //
 // Everything here is pure except the confirmation read, which takes the read as an injected
 // function so the compose paths stay unit-testable with a mock client.

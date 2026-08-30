@@ -140,7 +140,7 @@ export interface ComposeDraftEmailResult {
 
 // The minimal client surface this orchestration needs; JmapClient satisfies it structurally.
 // Declared here (rather than importing JmapClient) so the handler stays unit-testable with a
-// mock — the pattern ReplyClient / ForwardClient / ComposeClient already set.
+// mock, and unit-tested against one.
 export interface DraftEmailClient {
   getEmailById(id: string): Promise<any>;
   /** The sending identities. Fetched once per compose, for the signature and the warning. */
@@ -214,10 +214,10 @@ function readMode(value: unknown): DraftEmailMode {
 /**
  * A parameter that belongs to one mode only.
  *
- * `forward_email`'s `required: ['originalEmailId','to']` was schema-enforced and becomes a
- * runtime refusal here, because one schema now serves three modes. That trade is accepted;
- * what it buys is one message shape for every mode-only parameter, so a caller learns the
- * rule once.
+ * One schema serves three modes, so a parameter that only makes sense in one of them cannot
+ * be made `required` in the schema and is refused here instead. That trade is accepted; what
+ * it buys is one message shape for every mode-only parameter, so a caller learns the rule
+ * once.
  */
 function assertModeOnly(
   present: boolean, param: string, allowed: DraftEmailMode, mode: DraftEmailMode,
@@ -570,9 +570,9 @@ export async function composeDraftEmail(
   );
 
   if (mode === 'new') {
-    // Unchanged from create_draft's guard except in one respect: bodies are tested with
-    // isBlank, matching the second copy in createDraft, where the old handler used
-    // truthiness and let a whitespace-only body through to the generic message.
+    // Bodies are tested with isBlank, matching the second copy of this guard in
+    // createDraft. Truthiness would let a whitespace-only body through to the generic
+    // message, which names none of the parameters that would fix it.
     if (!toArg?.length && !subjectOverride && isBlank(textBody) && isBlank(htmlBody)
         && !specs?.length) {
       throw bad('At least one of to, subject, textBody, htmlBody, or attachments must be provided');
@@ -636,8 +636,8 @@ export async function composeDraftEmail(
   }
 
   if (historyPlaced && mode === 'reply') {
-    // No `timezone`: this tool takes no such parameter, exactly as reply_email does not, so
-    // the attribution line is formatted the same way it is today.
+    // No `timezone`: this tool takes no such parameter, so the attribution line is
+    // formatted in the server's local zone, which is what buildQuoteBlocks defaults to.
     const built = buildQuoteBlocks({
       original,
       htmlShips: historyHtmlShips,

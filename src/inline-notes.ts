@@ -387,21 +387,22 @@ export function rejectCidCollisionInCall(count: number, value: string): string {
 // the recreated draft will re-embed the images — with attachments disabled it cannot, and
 // the advice has to stay true either way.
 const RECREATE_RECIPE_WITH_THREADING =
-  'Recreate it — with reply_email or forward_email if it is a reply or forward ' +
-  '(read the draft\'s In-Reply-To or X-Forwarded-Message-Id via get_email, then find the ' +
-  'original with search_emails using the bare id, without angle brackets), otherwise ' +
-  'create_draft — then delete this one.';
+  'Recreate it with draft_email — mode:\'reply\' or mode:\'forward\' if it is a reply or ' +
+  'forward (read the draft\'s In-Reply-To or X-Forwarded-Message-Id via get_email, then ' +
+  'find the original with search_emails using the bare id, without angle brackets), ' +
+  'otherwise mode:\'new\' — then delete this one.';
 
 /** A stored identifier this server cannot reproduce faithfully on a recreated draft. */
 export function rejectUnrecreatableCid(value: string): string {
   return (
     'This draft has an attachment whose embedded-image identifier ' +
     `(Content-ID "${describePart(value)}") this server cannot safely re-create. ` +
-    'This server does not edit drafts in that state. Recreate it — with reply_email or ' +
-    'forward_email if it is a reply or forward (that preserves the conversation threading; ' +
-    "read the draft's In-Reply-To or X-Forwarded-Message-Id via get_email, then find the " +
-    'original with search_emails using the bare id, without angle brackets), otherwise ' +
-    'create_draft — then delete this one; or edit it in the mail client that created it.'
+    'This server does not edit drafts in that state. Recreate it with draft_email — ' +
+    "mode:'reply' or mode:'forward' if it is a reply or forward (that preserves the " +
+    "conversation threading; read the draft's In-Reply-To or X-Forwarded-Message-Id via " +
+    'get_email, then find the original with search_emails using the bare id, without angle ' +
+    "brackets), otherwise mode:'new' — then delete this one; or edit it in the mail client " +
+    'that created it.'
   );
 }
 
@@ -437,13 +438,13 @@ export function rejectBrokenDraft(
 }
 
 // The short recreate recipe the body-shape refusals end with. It names the threading tools
-// for the same reason the longer recipe does — recreating a reply or forward with the plain
-// compose tool splits the conversation — but it needs no header-reading detour: these
+// for the same reason the longer recipe does — recreating a reply or forward as a new
+// message splits the conversation — but it needs no header-reading detour: these
 // refusals fire on the draft's own body shape, which the caller can see in get_email.
 // Unterminated on purpose: one caller ends the sentence, the other appends a pointer first.
 const RECREATE_RECIPE =
-  'Recreate it (reply_email/forward_email for replies and forwards, create_draft ' +
-  'otherwise), then delete this one';
+  'Recreate it with draft_email (mode:\'reply\'/mode:\'forward\' for replies and ' +
+  'forwards, mode:\'new\' otherwise), then delete this one';
 
 /**
  * The draft's body carries a part the recreate cannot reproduce.

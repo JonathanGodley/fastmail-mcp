@@ -78,11 +78,11 @@ export async function editDraft(
 
   // Ordering belt only: updateDraft runs the same check and remains the authoritative
   // seam for this tool. Running it here too means a malformed body is refused before
-  // any attachment is read off disk and pushed to the blob store, matching the other
-  // four compose paths (the guard is a pure, idempotent input check). It stays ABOVE the
-  // attachment coercion, as the compose paths have it: a body defect is the caller's
-  // first problem to fix, and reporting an attachments key ahead of it would make this
-  // tool disagree with create_draft/reply_email/forward_email on identical input.
+  // any attachment is read off disk and pushed to the blob store, matching the compose
+  // path (the guard is a pure, idempotent input check). It stays ABOVE the attachment
+  // coercion, as draft_email has it: a body defect is the caller's first problem to fix,
+  // and reporting an attachments key ahead of it would make this tool disagree with
+  // draft_email on identical input.
   assertBodyInputs(a);
 
   const specs = coerceAttachments(a.attachments);

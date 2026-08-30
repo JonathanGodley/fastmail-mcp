@@ -23,12 +23,13 @@ export interface SimplifiedEmail {
   inReplyTo?: string[];
   isReply?: boolean;
   // The forwarded original's Message-ID (from X-Forwarded-Message-Id, which
-  // forward_email records on both inline and asAttachment forward drafts). VERBOSE-tier:
+  // draft_email records on both inline and asAttachment forward drafts). VERBOSE-tier:
   // present on get_email/verbose reads; list items show forward-ness via
   // isForwarded instead.
   forwardedMessageId?: string[];
   // The JMAP id of the exact stored copy a reply/forward draft was composed from
-  // (from X-Fastmail-MCP-Source-Id, recorded by reply_email/forward_email). This is
+  // (from X-Fastmail-MCP-Source-Id, recorded by draft_email's reply and forward modes).
+  // This is
   // the copy send_draft will mark answered/forwarded, so it's inspectable pre-send.
   // VERBOSE-tier like forwardedMessageId; absent on drafts made by other clients.
   sourceEmailId?: string;

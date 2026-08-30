@@ -3165,7 +3165,7 @@ describe('uploadAttachments', () => {
     });
     // .ics and .eml are the two that change how the mail renders rather than just its
     // icon: a client decides from this header whether to show a calendar invitation or
-    // a forwarded message inline. .eml is also what forward_email's asAttachment writes.
+    // a forwarded message inline. .eml is also what an asAttachment forward writes.
     const names = ['invite.ics', 'original.eml', 'logo.svg', 'notes.md', 'shot.webp', 'old.doc', 'old.xls', 'old.ppt', 'blob.unknownext'];
     const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
     try {
@@ -3731,7 +3731,7 @@ describe('updateDraft embedded images (#13)', () => {
     mockEdit(client, EXOTIC_CID);
     await assert.rejects(
       () => edit({ htmlBody: '<p>new</p>' }),
-      /cannot safely re-create.*Recreate it — with reply_email or forward_email/s,
+      /cannot safely re-create.*Recreate it with draft_email/s,
     );
   });
 
@@ -4014,8 +4014,8 @@ describe('updateDraft embedded images (#13)', () => {
 });
 
 // ---------- source-instance header (X-Fastmail-MCP-Source-Id) ----------
-// The exact stored instance a draft was composed from: stamped by reply_email /
-// forward_email, carried by the edit recreate, consumed by send_draft's keyword
+// The exact stored instance a draft was composed from: stamped by draft_email's reply and
+// forward modes, carried by the edit recreate, consumed by send_draft's keyword
 // maintenance. These tests pin the stamp, the carry, and the drop/re-point rules.
 
 describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {

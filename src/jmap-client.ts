@@ -119,7 +119,7 @@ function rejectWindowsPathEscapes(input: string): void {
 // that fallback is not equally harmless for every type: a receiving client decides from
 // this header whether to render a calendar invitation or a forwarded message inline, so
 // text/calendar and message/rfc822 change how the mail presents, not just its icon.
-// message/rfc822 also covers forward_email's asAttachment output, which is a .eml.
+// message/rfc822 also covers draft_email's asAttachment forward output, which is a .eml.
 const EXT_CONTENT_TYPES: Record<string, string> = {
   pdf: 'application/pdf',
   png: 'image/png',
@@ -322,8 +322,8 @@ export const EMAIL_PROPERTIES_VERBOSE = [
 ] as const;
 
 // The provenance headers a draft carries about the message it was composed from:
-// In-Reply-To (set by reply_email and every other client's reply) and
-// X-Forwarded-Message-Id (set by forward_email and Fastmail's own clients). Both are
+// In-Reply-To (set by draft_email's reply mode and every other client's reply) and
+// X-Forwarded-Message-Id (set by its forward mode and Fastmail's own clients). Both are
 // arrays of BARE Message-IDs — JMAP MessageIds carry no angle brackets.
 export interface SourceReferences {
   inReplyTo: string[];
@@ -381,7 +381,8 @@ export interface SendDraftOutcome {
 // fetched and filtered out.
 const MESSAGE_ID_LOOKUP_LIMIT = 50;
 
-// `disposition`/`cid` are load-bearing for forward_email's inline-image handling:
+// `disposition`/`cid` are load-bearing for draft_email's forward-mode inline-image
+// handling:
 // without them every attachments[] part reads as disposition-less and the
 // true-inline (cid) drop predicate can never fire (#30).
 //
@@ -511,7 +512,8 @@ const TEXT_BODY_TYPES = new Set(['text/plain', 'text/html']);
 
 // The non-text body parts the recreate can reproduce. The media three are what RFC 8621
 // §4.1.4 routes into a body list in the first place; message/rfc822 is there because
-// forward_email writes exactly that part itself (asAttachment), and a server that lists it
+// draft_email writes exactly that part itself (an asAttachment forward), and a server that
+// lists it
 // as body content must not make its own drafts uneditable. Everything else — a calendar
 // part, a signature part, an arbitrary application/* — has no flat-property spelling, so
 // carrying it would change what the message IS.
@@ -2083,7 +2085,7 @@ export class JmapClient {
     const session = await this.getSession();
 
     // No maxBodyValueBytes: verified live (2026-06-24) that Fastmail does NOT truncate body
-    // values by default (a 5 MB body returned whole, isTruncated=false), so reply_email gets
+    // values by default (a 5 MB body returned whole, isTruncated=false), so a reply gets
     // the complete original to quote. (An explicit maxBodyValueBytes:0 is REJECTED by Fastmail
     // with invalidArguments, so we must not send it.) The reply-quote module still appends an
     // elision marker if any bodyValue ever reports isTruncated, as a defensive net.
@@ -2222,14 +2224,15 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
-    // The forwarded original's Message-ID (forward_email). A header SET, unlike every
+    // The forwarded original's Message-ID (draft_email, forward mode). A header SET,
+    // unlike every
     // other header use in this file (which are GETs) — Fastmail accepts it and
     // round-trips it through store/fetch and the edit recreate (probed live
-    // 2026-07-05). The value is pre-vetted by the forward handler; Fastmail itself
+    // 2026-07-05). The value is pre-vetted by the compose handler; Fastmail itself
     // rejects CRLF/non-ASCII, so no injection is possible here.
     if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
-    // The exact stored instance this draft was composed from (reply_email /
-    // forward_email pass the fetched original's own id). Vetted here — the single
+    // The exact stored instance this draft was composed from (draft_email's reply and
+    // forward modes pass the fetched original's own id). Vetted here — the single
     // seam that sets the header — so a malformed value degrades to absent (send_draft
     // falls back to the Message-ID lookup) instead of failing the whole create.
     if (isSettableSourceId(email.sourceEmailId)) emailObject[SOURCE_ID_HEADER] = email.sourceEmailId;
@@ -2997,7 +3000,7 @@ export class JmapClient {
       ...(mergedReplyTo?.length && { replyTo: mergedReplyTo }),
       // Threading: carry inReplyTo/references as JMAP structured properties so the
       // In-Reply-To/References headers regenerate (fixes silent threading loss on reply
-      // drafts this client creates via reply_email, which only ever saves a draft).
+      // drafts this client creates, which are only ever saved and never sent).
       ...(existingEmail.inReplyTo && { inReplyTo: existingEmail.inReplyTo }),
       ...(existingEmail.references && { references: existingEmail.references }),
       // Carry the forward marking unless the caller named forwardedMessageId in clearFields.
