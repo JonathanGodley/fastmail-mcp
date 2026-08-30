@@ -15,6 +15,7 @@ import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
+import { composeDraftEmail } from './draft-email-handler.js';
 import { composeReply } from './reply-handler.js';
 import { composeForward } from './forward-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
@@ -875,8 +876,86 @@ const TOOLS = [
         },
       },
       {
+        name: 'draft_email',
+        description: 'Compose a draft in one of three modes — a new message, a reply, or a forward — placing this server\'s generated blocks YOURSELF with body tokens. It supersedes create_draft, reply_email and forward_email, which are removed in a later release. PUT {{signature}} WHERE THE SIGN-OFF GOES; NOTHING IS ADDED FOR YOU. The same is true of the history: {{quote}} on a reply and {{forward}} on a forward are the only things that place the original, so a reply that omits {{quote}} is stored without the conversation (the result says so). Each mode accepts exactly its own history token and refuses the other one. Tokens are expanded once, at write: the stored draft is the finished message, so get_email and the Fastmail web app both show what will be sent, and a body you read back carries no token to re-expand. THE CANONICAL SHAPE, sign-off above the history with one blank line (text) or one empty block element (HTML) between them — new: htmlBody "<p>Morning Sam,</p><p>Here is the summary.</p><div>{{signature}}</div>"; reply: htmlBody "<p>Agreed, Friday works.</p><div>{{signature}}</div><div><br></div>{{quote}}"; forward: htmlBody "<p>FYI — see below.</p><div>{{signature}}</div><div><br></div>{{forward}}". A block is substituted at the token\'s exact position with nothing added around it, so the spacing at the join is yours. Place tokens at block level, between elements: the scan is a raw string scan, so a token inside an attribute, a comment or a non-text element is honoured THERE and the message displays as that markup makes it. A token in a supplied part but not in the other supplied part is refused, so place each token in both parts or supply one part and let the other be derived. A body that is nothing but tokens whose blocks turn out empty is refused rather than stored. STRIPPED-QUOTE READS DIFFER BY MODE: a forward\'s header block cuts to the end of the message, so prose you place below {{forward}} is invisible to a stripQuoted read, while a reply\'s "> " run ends at its last quoted line, so prose below {{quote}} survives it. TO WRITE THE BRACES AS TEXT, escape them — in JSON that is "\\\\{{" (a literal backslash then two braces; "\\{{" is invalid JSON) — and the backslash is consumed ONLY before one of the three names, so \\{{ item }} keeps its backslash and ships unchanged. This tool always saves a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account, with no send_draft call). On reply and forward, send_draft marks exactly the stored copy given as originalEmailId answered or forwarded. Quoted and forwarded HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE BLOCK and re-sent to this draft\'s recipients — so a reply or forward can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' Omit {{quote}} on a reply and none of the original is re-sent; a forward carries {{forward}} or rides as .eml. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the HTML part is non-blank AND carries the history token — otherwise the block ships as text and the images are dropped, and the result says how many. You can also embed your own image: give an attachments item a cid and reference it from htmlBody as <img src="cid:THE_CID"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mode: {
+              type: 'string',
+              enum: ['new', 'reply', 'forward'],
+              description: 'Which kind of draft to compose. REQUIRED, with no default — a defaulted mode would turn a forgotten parameter into a silently unthreaded new message. "new" composes a fresh message and accepts no history token. "reply" threads against originalEmailId (In-Reply-To/References, "Re: " subject, recipient defaulting to the original sender) and accepts {{quote}}. "forward" starts a new conversation carrying originalEmailId, records it in X-Forwarded-Message-Id, carries the original\'s attachments, requires `to`, and accepts {{forward}} (or asAttachment instead). A value that is not one of the three is refused naming all three; it is not guessed at.',
+            },
+            originalEmailId: {
+              type: 'string',
+              description: 'mode:\'reply\' and mode:\'forward\' only, and REQUIRED on both: the ID of the message being replied to or forwarded. Refused on mode:\'new\'.',
+            },
+            to: {
+              type: ['array', 'string'],
+              items: { type: 'string' },
+              description: 'Recipient email addresses. REQUIRED on mode:\'forward\' — a forward has no default recipient; optional on mode:\'reply\' (defaults to the original sender) and on mode:\'new\'. Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+            },
+            cc: {
+              type: ['array', 'string'],
+              items: { type: 'string' },
+              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+            },
+            bcc: {
+              type: ['array', 'string'],
+              items: { type: 'string' },
+              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+            },
+            from: {
+              type: 'string',
+              description: 'Sender email address (optional, defaults to account primary email). It also picks the identity whose signature {{signature}} expands to.',
+            },
+            replyTo: {
+              type: ['array', 'string'],
+              items: { type: 'string' },
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+            },
+            mailbox: {
+              type: 'string',
+              description: 'mode:\'new\' only. ' + DRAFT_MAILBOX_PARAM_DESC,
+            },
+            subject: {
+              type: 'string',
+              description: 'Subject. Optional in every mode: mode:\'reply\' inherits "Re: <original subject>" and mode:\'forward\' inherits "Fwd: <original subject>", neither double-prefixing one that already has it, and a blank string is treated as omitted. The threading headers are built identically either way, so recipients still thread correctly. NOTE: Fastmail groups messages by subject as well as by those headers, so a changed subject detaches the DRAFT from the original conversation in the Fastmail UI. Display only, and it resolves once the draft is sent.',
+            },
+            textBody: {
+              type: 'string',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Place the same tokens here as in htmlBody — a token in one supplied part but not the other is refused. A text-only reply or forward reproduces the original as plain text, which cannot show the images the original displayed: they are dropped and the result says how many. Must be a plain string: a body wrapped in a CDATA section is rejected.',
+            },
+            htmlBody: {
+              type: 'string',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically from the EXPANDED html whenever one can be derived, so it carries the same blocks. In that derivation an image contributes its alt text; an embedded (cid:) image with no alt contributes "[image]", while a remote image with no alt contributes nothing. Supplying it non-blank AND carrying the history token is what lets the block show the images the original displayed — a blank html part ships no HTML at all. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected; so is any body containing a CDATA section.',
+            },
+            inReplyTo: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId). ' + THREAD_SPLINTER_DESC,
+            },
+            references: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself). ' + THREAD_SPLINTER_DESC,
+            },
+            asAttachment: {
+              type: ['boolean', 'string'],
+              description: lenientBool('mode:\'forward\' only: attach the original whole as a .eml file instead of reproducing it inline (default false). Lossless — the original arrives byte for byte, headers and all. {{forward}} is refused alongside it, because the original is already carried whole and there is no block to place; a forward with neither {{forward}} nor asAttachment is refused, since it would forward nothing while still carrying the original\'s attachments. With no body of your own, a short filler note is written so the draft is readable.'),
+            },
+            includeOriginalAttachments: {
+              type: ['boolean', 'string'],
+              description: lenientBool('mode:\'forward\' only: carry the original\'s regular attachments (default true). Images the forwarded block DISPLAYS are carried regardless, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it.'),
+            },
+            attachments: attachmentsSchemaProperty(false),
+          },
+          required: ['mode'],
+        },
+      },
+      {
         name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. Set appendSignature=true to have the sending identity\'s configured signature added above the quote (off by default). This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and is re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE QUOTE by default, and are re-sent to this reply\'s recipients — so a reply can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' The only way to send none of it is quoteOriginal=false, which omits the whole quote; there is no setting for quote text without its images. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the reply ships an HTML body — a text-only reply drops them, and the result says how many. You can also embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
+        description: 'SUPERSEDED by draft_email (mode:\'reply\'), which is removed from this server in a later release — prefer draft_email, where you place the quote and the sign-off with {{quote}} and {{signature}} instead of this tool inferring them. Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. Set appendSignature=true to have the sending identity\'s configured signature added above the quote (off by default). This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and is re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE QUOTE by default, and are re-sent to this reply\'s recipients — so a reply can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' The only way to send none of it is quoteOriginal=false, which omits the whole quote; there is no setting for quote text without its images. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the reply ships an HTML body — a text-only reply drops them, and the result says how many. You can also embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -935,7 +1014,7 @@ const TOOLS = [
       },
       {
         name: 'forward_email',
-        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default (includeOriginalAttachments). Images the original\'s body DISPLAYED are carried too, and are carried even when includeOriginalAttachments is false, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it. ' + CARRIED_IMAGE_BOUND_DESC + ' Short of not forwarding the message, there is no way to reproduce the body and leave those images behind. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. An image the block cannot display — a text-only forward, or a reference this server could not resolve to exactly one image part — rides as a regular attachment instead (subject to includeOriginalAttachments), and the result says so; asAttachment is the lossless alternative. The subject defaults to \'Fwd: <original subject>\'. Set appendSignature=true to have the sending identity\'s configured signature added above the forwarded-message block (off by default). You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
+        description: 'SUPERSEDED by draft_email (mode:\'forward\'), which is removed from this server in a later release — prefer draft_email, where you place the forwarded block and the sign-off with {{forward}} and {{signature}} instead of this tool inferring them. Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default (includeOriginalAttachments). Images the original\'s body DISPLAYED are carried too, and are carried even when includeOriginalAttachments is false, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it. ' + CARRIED_IMAGE_BOUND_DESC + ' Short of not forwarding the message, there is no way to reproduce the body and leave those images behind. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. An image the block cannot display — a text-only forward, or a reference this server could not resolve to exactly one image part — rides as a regular attachment instead (subject to includeOriginalAttachments), and the result says so; asAttachment is the lossless alternative. The subject defaults to \'Fwd: <original subject>\'. Set appendSignature=true to have the sending identity\'s configured signature added above the forwarded-message block (off by default). You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1003,7 +1082,7 @@ const TOOLS = [
       },
       {
         name: 'create_draft',
-        description: 'Create an email draft without sending it (transmit it later with send_draft, the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message. Set appendSignature=true to have the sending identity\'s configured signature added to the body (off by default). You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; requires FASTMAIL_ATTACH_DIR for a local file, or FASTMAIL_ALLOW_BLOB_ATTACH for content already in the account).',
+        description: 'SUPERSEDED by draft_email (mode:\'new\'), which is removed from this server in a later release — prefer draft_email, where you place the sign-off with {{signature}} instead of this tool appending it. Create an email draft without sending it (transmit it later with send_draft, the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message. Set appendSignature=true to have the sending identity\'s configured signature added to the body (off by default). You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; requires FASTMAIL_ATTACH_DIR for a local file, or FASTMAIL_ALLOW_BLOB_ATTACH for content already in the account).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2213,6 +2292,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case 'draft_email': {
+        // The whole orchestration (mode gating, the token scan and its refusals, block
+        // building, the single expansion pass, attachment carry/upload, create) lives in
+        // composeDraftEmail so it is unit-testable with a mock client; this handler just
+        // maps the result to the response text. The receipt goes out as JSON rather than
+        // prose because it is structured per-part data the caller reads back, not a
+        // sentence — and it must not be able to claim an expansion that did not happen,
+        // which is easier to see when it is the function's return value rendered verbatim.
+        const result = await composeDraftEmail(args, client, getAttachDir(), getAllowBlobAttach());
+
+        const summary = [
+          `Draft saved successfully (Email ID: ${result.emailId}, mode: ${result.mode}). Use send_draft to transmit it.`,
+          result.subject ? `Subject: ${result.subject}` : null,
+          result.to?.length ? `To: ${result.to.join(', ')}` : null,
+          result.cc?.length ? `CC: ${result.cc.join(', ')}` : null,
+        ].filter(Boolean).join(' ') + formatInlineNotes(result.notes);
+
+        const text = result.tokens === undefined
+          ? summary
+          : `${summary}\n\nTokens: ${toolJson(result.tokens)}`;
+        return { content: [{ type: 'text', text }] };
+      }
+
       case 'reply_email': {
         // The orchestration (fetch original, assemble reply, upload + thread attachments,
         // save the draft) lives in composeReply so it is unit-testable with a mock client;
@@ -3017,7 +3119,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           email: {
             available: true,
             functions: [
-              'list_mailboxes', 'create_mailbox', 'list_emails', 'get_email', 'reply_email', 'forward_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
+              'list_mailboxes', 'create_mailbox', 'list_emails', 'get_email', 'draft_email', 'reply_email', 'forward_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
               'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email', 'archive_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',

@@ -933,9 +933,15 @@ export function buildReplyBodies(input: {
   // carried. There is no quote-text-without-images setting: the images ARE the quoted body.
   if (!quoteOriginal) return passthrough();
 
+  // NON-BLANK, not merely supplied — the same test `planSignature` above already applies, and
+  // for the same reason: `buildBodyParts` drops a blank html part, so a whitespace-only
+  // `htmlBody` ships no html at all. It decides whether the quote's embedded images are
+  // MINTED, so it has to agree with the join fifteen lines below that decides whether the part
+  // carrying them ships. Moving one without the other stores a quote whose images have gone
+  // with nothing reporting it.
   const blocks = buildQuoteBlocks({
     original,
-    htmlShips: htmlBody !== undefined,
+    htmlShips: !isBlank(htmlBody),
     timezone,
     cidMap,
     quoteImages,
@@ -946,12 +952,22 @@ export function buildReplyBodies(input: {
   // The joins. Each separator lives HERE, not in the block: the block starts at its
   // attribution line, so placing one somewhere else in a body carries no spacing with it.
   // An absent block leaves the caller's body exactly as it came in.
+  //
+  // The text join stays keyed on "supplied": a blank text part is dropped downstream on its
+  // own, and nothing about the text quote is minted, so there is no pair to keep in step.
+  // Only the html join moves.
   if (textBody !== undefined) {
     out.textBody = blocks.textBlock === undefined
       ? textBody
       : `${textBody}\n\n${blocks.textBlock}`;
   }
-  if (htmlBody !== undefined) {
+  // Keyed on the SAME test as `htmlShips` above. A blank `htmlBody` here would emit
+  // `'   ' + block`, which is non-blank and therefore DOES ship — so leaving this on
+  // "supplied" while the predicate says the message ships no html is what would store the
+  // quote and drop its images. The `passthrough()` above is deliberately not moved: it emits
+  // no block, so it mints nothing and there is nothing to keep in step, and the caller's
+  // blank body is dropped at build exactly as it was before.
+  if (!isBlank(htmlBody)) {
     out.htmlBody = blocks.htmlBlock === undefined
       ? htmlBody
       : `${htmlBody}<div><br></div>${blocks.htmlBlock}`;
@@ -1163,9 +1179,23 @@ export function buildForwardBodies(input: {
     signature,
   );
 
+  // First disjunct: NON-BLANK, not merely supplied, matching buildReplyBodies and
+  // `planSignature` — `buildBodyParts` drops a blank html part, so a whitespace-only note
+  // ships no html and must not mint the block's images.
+  //
+  // Second disjunct: DELIBERATELY NOT FOLDED IN, and deliberately narrowed to the cell it is
+  // really about. It is not answering "does this message ship html" at all — it is the
+  // bare-FYI forward choosing its own FORMAT, and the arm at the bottom of this function that
+  // emits it is keyed on the original being quotable rather than on any caller body. Folding
+  // it into the non-blank test would turn an html-only original's bare forward into a text
+  // one. It is written as "the caller supplied NEITHER part" rather than the old
+  // `textBody === undefined`, because that wider spelling also covered
+  // `htmlBody: '   ', textBody: undefined` — a cell where the message now ships no html, so
+  // `htmlShips: true` would mint images for a block that never gets emitted and report the
+  // loss nowhere. The narrow spelling is exactly the arm below, so the two cannot disagree.
   const blocks = buildForwardBlocks({
     original,
-    htmlShips: htmlBody !== undefined || textBody === undefined,
+    htmlShips: !isBlank(htmlBody) || (htmlBody === undefined && textBody === undefined),
     cidMap,
     quoteImages,
   });
@@ -1191,7 +1221,10 @@ export function buildForwardBodies(input: {
     textBody?: string; htmlBody?: string; quoteImages?: QuoteImageOutcome;
     signatureSkip?: SignatureSkipReason;
   } = {};
-  if (htmlBody !== undefined) out.htmlBody = composeHtml(htmlBody);
+  // Keyed on the same test as `htmlShips` above, for the reason buildReplyBodies' join gives:
+  // a blank note joined to the block is non-blank and WOULD ship, so a join left on "supplied"
+  // while the predicate says otherwise stores the block and loses its images.
+  if (!isBlank(htmlBody)) out.htmlBody = composeHtml(htmlBody);
   if (textBody !== undefined) out.textBody = composeText(textBody);
   if (htmlBody === undefined && textBody === undefined) {
     // No note to append to, but a requested signature still ships: it becomes the whole of

@@ -97,6 +97,7 @@ const SCHEMA_FILE = join(SRC_DIR, 'index.ts');
 const HANDLER_FILES = [
   'index.ts',
   'thread-handler.ts',
+  'draft-email-handler.ts',
   'reply-handler.ts',
   'forward-handler.ts',
   'compose-handler.ts',

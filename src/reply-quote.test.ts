@@ -380,7 +380,10 @@ describe('buildForwardBodies — hostile interpolated fields (re-sent under the 
         h: { value: '<p onclick="x()">hi</p><script>evil()</script><img src="https://x.com/a.png"><img src="cid:img1">' },
       },
     });
-    const { htmlBody } = buildForwardBodies({ original, htmlBody: '' });
+    // A real note, not `htmlBody: ''`. This test is about the SANITISER, and the empty
+    // string was only ever a way to ask for an html part; it now ships no html part at all,
+    // because a blank one is dropped at build and the builder no longer pretends otherwise.
+    const { htmlBody } = buildForwardBodies({ original, htmlBody: '<p>note</p>' });
     assert.doesNotMatch(htmlBody!, /<script|onclick/);
     assert.match(htmlBody!, /<img src="https:\/\/x\.com\/a\.png" \/>/);
     assert.doesNotMatch(htmlBody!, /cid:img1/);
@@ -503,5 +506,116 @@ describe('buildForwardBlocks — a block starts at its header line', () => {
     assert.ok(textBlock.startsWith('----- Original message -----'), textBlock);
     const out = buildForwardBodies({ original: fwdOriginal(), textBody: 'note' });
     assert.equal(out.textBody, `note\n\n\n${textBlock}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Does this message ship html" is NON-BLANK, not merely supplied
+// ---------------------------------------------------------------------------
+//
+// One test decides whether the quote's embedded images are MINTED (`htmlShips` on the block
+// builder) and one decides whether the part carrying them SHIPS (the join). They are now the
+// same test, `!isBlank(...)`, in both builders. These pins hold them together: a regression
+// that moves one and not the other stores a quote whose images have gone, with nothing in the
+// output saying so — which is exactly what these assertions catch.
+
+const CID_ORIGINAL = () => fwdOriginal({
+  textBody: undefined,
+  bodyValues: { h: { value: '<p>rich</p><img src="cid:logo">' } },
+});
+const LOGO_PART = { cid: 'logo', blobId: 'B1', type: 'image/png', name: 'logo.png', size: 100 };
+const FIXED_MINT = `ii-${'0'.repeat(32)}@inline.invalid`;
+const fixedMint = () => () => FIXED_MINT;
+
+describe('buildReplyBodies — a blank htmlBody ships no html, and mints nothing for one', () => {
+  for (const [label, htmlBody] of [['an empty string', ''], ['whitespace only', '   ']] as const) {
+    it(`emits no html part for an htmlBody that is ${label}`, () => {
+      const out = buildReplyBodies({
+        original: CID_ORIGINAL(), htmlBody, quoteOriginal: true,
+        quoteImages: { sourceParts: [LOGO_PART], mint: fixedMint() },
+      });
+      assert.equal(out.htmlBody, undefined);
+      // And the images went with it — reported, not silently absent.
+      assert.equal(out.quoteImages!.htmlQuoteShips, false);
+      assert.deepEqual(out.quoteImages!.minted, []);
+    });
+  }
+
+  it('ships html — and mints — for a body that is blank-looking MARKUP but not blank text', () => {
+    // The test is `isBlank` (what buildBodyParts drops), not "has visible content". A
+    // `<div> </div>` renders as nothing but is a real html part, so it ships, and the quote
+    // it carries is the html one.
+    const out = buildReplyBodies({
+      original: CID_ORIGINAL(), htmlBody: '<div> </div>', quoteOriginal: true,
+      quoteImages: { sourceParts: [LOGO_PART], mint: fixedMint() },
+    });
+    assert.ok(out.htmlBody!.startsWith('<div> </div>'), out.htmlBody);
+    assert.equal(out.quoteImages!.htmlQuoteShips, true);
+    assert.equal(out.quoteImages!.minted.length, 1);
+  });
+
+  it('leaves the quoteOriginal:false passthrough alone: it emits no block, so it mints nothing', () => {
+    // Deliberately still keyed on "supplied". There is no block here to keep in step with,
+    // and the caller's blank part is dropped downstream at build exactly as it was before.
+    const out = buildReplyBodies({
+      original: CID_ORIGINAL(), htmlBody: '   ', quoteOriginal: false,
+      quoteImages: { sourceParts: [LOGO_PART], mint: fixedMint() },
+    });
+    assert.equal(out.htmlBody, '   ');
+    assert.deepEqual(out.quoteImages!.minted, []);
+  });
+});
+
+describe('buildForwardBodies — a blank note ships no html, and mints nothing for one', () => {
+  it('emits no html part for a whitespace-only note beside a real text note', () => {
+    const out = buildForwardBodies({
+      original: CID_ORIGINAL(), htmlBody: '   ', textBody: 'note',
+      quoteImages: { sourceParts: [LOGO_PART], mint: fixedMint() },
+    });
+    assert.equal(out.htmlBody, undefined);
+    assert.equal(out.quoteImages!.htmlQuoteShips, false);
+    assert.deepEqual(out.quoteImages!.minted, []);
+  });
+
+  it('a whitespace-only note with NO text note is not the bare-FYI cell: still no html, still no mint', () => {
+    // The compound predicate's second disjunct is scoped to "the caller supplied NEITHER
+    // part". The wider spelling it replaced (`textBody === undefined`) covered this cell too,
+    // which would mint for a block that never gets emitted and report the loss nowhere.
+    const out = buildForwardBodies({
+      original: CID_ORIGINAL(), htmlBody: '   ',
+      quoteImages: { sourceParts: [LOGO_PART], mint: fixedMint() },
+    });
+    assert.equal(out.htmlBody, undefined);
+    assert.equal(out.quoteImages!.htmlQuoteShips, false);
+    assert.deepEqual(out.quoteImages!.minted, []);
+  });
+
+  it('a bare FYI forward of an html original still mints, and the block references the minted cid', () => {
+    // THE CELL THAT KEEPS TODAY'S ANSWER. Neither part is supplied, so the forward chooses
+    // its own format from the original: an html original forwards as html. That arm is keyed
+    // on the original being quotable rather than on any caller body, which is why folding it
+    // into the non-blank test would turn this into a text forward.
+    const out = buildForwardBodies({
+      original: CID_ORIGINAL(),
+      quoteImages: { sourceParts: [LOGO_PART], mint: fixedMint() },
+    });
+    assert.ok(out.htmlBody, 'a bare forward of an html original ships html');
+    assert.equal(out.quoteImages!.htmlQuoteShips, true);
+    assert.deepEqual(out.quoteImages!.minted, [
+      { blobId: 'B1', type: 'image/png', name: 'logo.png', cid: FIXED_MINT, disposition: 'inline' },
+    ]);
+    // The stored block references the MINTED identifier, not the original's own `cid:logo`.
+    assert.match(out.htmlBody!, new RegExp(`src="cid:${FIXED_MINT}"`));
+    assert.doesNotMatch(out.htmlBody!, /cid:logo"/);
+  });
+
+  it('a bare FYI forward of a TEXT-only original still forwards as text and mints nothing', () => {
+    const out = buildForwardBodies({
+      original: textOnlyOriginal(),
+      quoteImages: { sourceParts: [LOGO_PART], mint: fixedMint() },
+    });
+    assert.equal(out.htmlBody, undefined);
+    assert.ok(out.textBody!.includes('----- Original message -----'), out.textBody);
+    assert.deepEqual(out.quoteImages!.minted, []);
   });
 });
