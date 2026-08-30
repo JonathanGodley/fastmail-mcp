@@ -571,6 +571,37 @@ export function classifyDraftBodyShape(email: any): DraftBodyShape {
   return shape;
 }
 
+/**
+ * The blank body part a send would ship, named by the body field a caller would fix.
+ *
+ * Reads the DEDUPLICATED part set whole rather than selecting one part per format. A
+ * selector has to pick a part, and the pick was deciding the answer: one list holding a
+ * blank part and a real one was refused or shipped depending on which of the two came
+ * first, for the same two parts and the same rendered result. Every part a body list
+ * displays is examined here, so no ordering can hide one.
+ *
+ * "Displays" is `draftTextBodyType`, the same rule the read and the hash use, so a part
+ * that declares no content type counts as the content of the list it sits in — which is
+ * how a recipient's client renders it, and so is what decides whether they see a blank
+ * message.
+ *
+ * A part with no stored value at all is not blank: the draft simply has no body in that
+ * format, which is a message this server sends. Blank means a value that is present and
+ * renders to nothing.
+ *
+ * htmlBody is answered ahead of textBody, the order the two refusals have always been
+ * raised in: an empty text/html part is the worse of the two, because it SHADOWS a real
+ * text/plain alternative (RFC 2046 — clients render the richest one).
+ */
+export function findBlankBodyPart(email: any): 'htmlBody' | 'textBody' | undefined {
+  const blank = collectDraftBodyParts(email).filter(
+    (p) => p.value !== undefined && p.value.trim() === '',
+  );
+  if (blank.some((p) => p.showsInHtml)) return 'htmlBody';
+  if (blank.some((p) => p.showsInText)) return 'textBody';
+  return undefined;
+}
+
 export interface AttachmentRemovalPlan {
   /** Parts this call takes off the draft, in stored order. */
   removed: any[];
@@ -3406,12 +3437,15 @@ export class JmapClient {
     // can carry one — refuse to ship it. Reject, not silent sanitize: recreating to strip the part
     // would change the email id and rewrite the message, against this codebase's loud-reject
     // philosophy. The hardened edit_draft is the fix path.
-    const textVal = this.bodyValueForType(email.textBody, 'text/plain', email.bodyValues || {});
-    const htmlVal = this.bodyValueForType(email.htmlBody, 'text/html', email.bodyValues || {});
-    if (htmlVal !== undefined && htmlVal.trim() === '') {
+    //
+    // The check reads every body part (findBlankBodyPart), not the one a per-format lookup
+    // selects. It has to: the only thing standing between this draft and a recipient is this
+    // line, and a lookup's answer moves with the order of a list.
+    const blankPart = findBlankBodyPart(email);
+    if (blankPart === 'htmlBody') {
       throw new InvalidInputError('This draft has an empty htmlBody that would render blank to recipients. Edit the draft to supply or clear htmlBody before sending.');
     }
-    if (textVal !== undefined && textVal.trim() === '') {
+    if (blankPart === 'textBody') {
       throw new InvalidInputError('This draft has an empty textBody that would render blank for plain-text recipients. Edit the draft to supply or clear textBody before sending.');
     }
 

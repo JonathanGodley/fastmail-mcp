@@ -2,7 +2,7 @@ import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'os';
 import { resolve, join, basename, sep } from 'path';
-import { JmapClient } from './jmap-client.js';
+import { JmapClient, findBlankBodyPart } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
@@ -2179,6 +2179,113 @@ describe('sendDraft', () => {
     });
 
     assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1'); // not rejected — html-only is sendable
+  });
+
+  // A part that declares no content type is displayed by whichever list carries it, so an
+  // empty one renders blank exactly as an empty typed part does. Nothing saw it before,
+  // because the guard selected a part by matching its type.
+  it('rejects a draft whose only body part declares no content type and is blank', async () => {
+    const typelessBlank = {
+      ...SENDABLE_DRAFT,
+      textBody: [{ partId: '1' }],
+      htmlBody: [{ partId: '1' }], // the server aliases the one part into both lists
+      bodyValues: { '1': { value: '   ' } },
+    };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [typelessBlank] }, 'getEmail']],
+    }));
+
+    await assert.rejects(() => client.sendDraft('draft-1'), /empty htmlBody that would render blank/);
+  });
+
+  // The reason the guard reads every part rather than selecting one. These two drafts hold
+  // the SAME parts and render the same way; only the list order differs. A selector answered
+  // them differently, and the one it let through shipped an empty text/html part that shadows
+  // the real body (RFC 2046).
+  it('rejects a blank part whatever its position in the body list', async () => {
+    for (const htmlBody of [
+      [{ partId: '2' }, { partId: '3', type: 'text/html' }],
+      [{ partId: '3', type: 'text/html' }, { partId: '2' }],
+    ]) {
+      const mixed = {
+        ...SENDABLE_DRAFT,
+        textBody: [{ partId: '1', type: 'text/plain' }],
+        htmlBody,
+        bodyValues: { '1': { value: 'Real text' }, '2': { value: '<p>Real html</p>' }, '3': { value: '' } },
+      };
+      stubRequests(client, async () => ({
+        methodResponses: [['Email/get', { list: [mixed] }, 'getEmail']],
+      }));
+
+      await assert.rejects(
+        () => client.sendDraft('draft-1'),
+        /empty htmlBody that would render blank/,
+        JSON.stringify(htmlBody),
+      );
+    }
+  });
+});
+
+describe('findBlankBodyPart', () => {
+  const values = (v: Record<string, string>) =>
+    Object.fromEntries(Object.entries(v).map(([k, value]) => [k, { value }]));
+
+  it('answers undefined for an ordinary draft with real content in both formats', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: 'text', h: '<p>html</p>' }),
+    }), undefined);
+  });
+
+  it('names the body field a blank part sits in, typed or typeless', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: 'text', h: '  ' }),
+    }), 'htmlBody');
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: '', h: '<p>html</p>' }),
+    }), 'textBody');
+  });
+
+  // htmlBody first, the order the two refusals have always been raised in: an empty
+  // text/html part shadows a real text/plain alternative, so it is the worse of the two.
+  it('names htmlBody when both formats are blank', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: '', h: '' }),
+    }), 'htmlBody');
+  });
+
+  // Not blank, and the distinction is the whole reason a draft with one format sends: the
+  // draft has no body in that format at all, rather than one that renders to nothing.
+  it('does not treat a part with no stored value as blank', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: 'text' }),
+    }), undefined);
+  });
+
+  // A part a body list does not display as text renders nothing on its own account, so an
+  // empty value on one says nothing about what the recipient sees.
+  it('ignores a blank part that is not displayed as text', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'i', type: 'image/png', blobId: 'B' }],
+      bodyValues: values({ t: 'text', i: '' }),
+    }), undefined);
+  });
+
+  it('finds a blank part wherever it sits in the list', () => {
+    const parts = [{ partId: 'a', type: 'text/plain' }, { partId: 'b', type: 'text/plain' }];
+    const bodyValues = values({ a: 'real', b: '' });
+    assert.equal(findBlankBodyPart({ textBody: parts, htmlBody: [], bodyValues }), 'textBody');
+    assert.equal(findBlankBodyPart({ textBody: [...parts].reverse(), htmlBody: [], bodyValues }), 'textBody');
   });
 });
 
