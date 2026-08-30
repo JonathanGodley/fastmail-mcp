@@ -2096,3 +2096,288 @@ describe('sanitizeEmlFilename', () => {
     assert.ok([...name].every((c) => !(c.length === 1 && c.charCodeAt(0) >= 0xd800 && c.charCodeAt(0) <= 0xdfff)));
   });
 });
+
+// ---------------------------------------------------------------------------
+// What a quoted or forwarded block may carry INTO THE STORED MESSAGE
+// ---------------------------------------------------------------------------
+//
+// These nine ask one question: can a construct out of a fetched message reach the recipient?
+// That question is about the message this call STORES, so every assertion below reads
+// `calls.draft` — the body handed to createDraft, after the block was built, after the single
+// expansion pass joined it into the caller's own body.
+//
+// They are deliberately not written against buildQuoteBlocks / buildForwardBlocks, which is
+// where the sanitising actually happens and where the same assertion text would compile and
+// pass. A block-level pin answers "is the construct absent from the block", which is strictly
+// narrower — it says nothing about what the join produces, and the difference is invisible in
+// the assertion. The surface has to be the stored one.
+
+describe('draft_email — the quote sanitiser, over the stored body', () => {
+  // A reply whose html part carries the token, so the html quote is the one that ships.
+  const storedHtmlQuoting = async (originalHtml: string) => {
+    const original = makeOriginal({ bodyValues: { t: { value: 'x' }, h: { value: originalHtml } } });
+    const { client, calls } = plainClient(original);
+    await compose({ mode: 'reply', originalEmailId: 'o1', htmlBody: '<p>r</p>{{quote}}' }, client);
+    return calls.draft.htmlBody as string;
+  };
+
+  it('stores a full document as its body content only', async () => {
+    const out = await storedHtmlQuoting(
+      '<!DOCTYPE html><html><head><style>p{color:red}</style></head><body><p>kept</p></body></html>',
+    );
+    assert.match(out, /<p>kept<\/p>/);
+    assert.doesNotMatch(out, /<style>|<head>|DOCTYPE|color:red/i);
+  });
+
+  it('stores no script and no event handler, and keeps the formatting', async () => {
+    const out = await storedHtmlQuoting(
+      '<p onclick="evil()">hi <b>bold</b> <a href="http://x.com">link</a></p><script>steal()</script>',
+    );
+    assert.doesNotMatch(out, /onclick|script|steal/i);
+    assert.match(out, /<b>bold<\/b>/);
+    assert.match(out, /<a href="http:\/\/x\.com">link<\/a>/);
+  });
+
+  it('stores no style attribute on a kept tag (no global "*" allowance)', async () => {
+    const out = await storedHtmlQuoting('<p style="background:url(evil)">x</p>');
+    assert.doesNotMatch(out, /style="background/);
+    assert.match(out, /<p>x<\/p>/);
+  });
+
+  it('stores a real http(s) image but no cid:/data: image (no broken placeholder)', async () => {
+    const out = await storedHtmlQuoting(
+      '<p><img src="https://cdn/x.png" alt="real"> <img src="cid:logo@x"> <img src="data:image/png;base64,AAAA"></p>',
+    );
+    assert.match(out, /<img src="https:\/\/cdn\/x\.png" alt="real"/);
+    assert.doesNotMatch(out, /cid:/);
+    assert.doesNotMatch(out, /data:image/);
+  });
+
+  it('stores a no-<body> fragment intact (no regex extraction)', async () => {
+    assert.match(await storedHtmlQuoting('<p>hi</p>'), /<p>hi<\/p>/);
+  });
+});
+
+describe('draft_email — hostile fields out of a forwarded message, over the stored body', () => {
+  it('stores every header field escaped in the html block (subject + display names)', async () => {
+    const original = makeOriginal({
+      subject: '<img src=x onerror=alert(1)>',
+      from: [{ name: '"><script>alert(2)</script>', email: 'evil@example.com' }],
+    });
+    const { client, calls } = plainClient(original);
+    await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>n</p>{{forward}}' },
+      client,
+    );
+    assert.doesNotMatch(calls.draft.htmlBody, /<img src=x onerror/);
+    assert.doesNotMatch(calls.draft.htmlBody, /<script>/);
+    assert.match(calls.draft.htmlBody, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  });
+
+  it('stores text header fields with line-splitting whitespace collapsed — incl. U+2028/U+2029/U+0085', async () => {
+    // Invisible characters are built from char codes so no raw control char lives in this
+    // source file. NEL is NOT in ECMAScript's \s, so the assertion checks ACTUAL collapse.
+    const nel = String.fromCharCode(0x85);
+    const ls = String.fromCharCode(0x2028);
+    const ps = String.fromCharCode(0x2029);
+    const original = makeOriginal({
+      from: [{ name: 'Fake' + nel + 'To: victim@example.com' + ls + 'X:' + ps + 'Y', email: 'evil@example.com' }],
+      subject: 'line1\r\nline2',
+    });
+    const { client, calls } = plainClient(original);
+    await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], textBody: 'n\n{{forward}}' },
+      client,
+    );
+    const lines = (calls.draft.textBody as string).split('\n');
+    const fromLine = lines.find((l) => l.startsWith('From: '))!;
+    assert.equal(fromLine.includes(nel), false);
+    assert.equal(fromLine.includes(ls), false);
+    assert.equal(fromLine.includes(ps), false);
+    assert.match(fromLine, /^From: Fake To: victim@example\.com X: Y <evil@example\.com>$/);
+    assert.equal(lines.find((l) => l.startsWith('Subject: ')), 'Subject: line1 line2');
+  });
+
+  it('stores the reproduced original html sanitised (script stripped, http img kept, cid img dropped)', async () => {
+    const original = makeOriginal({
+      bodyValues: {
+        t: { value: 'x' },
+        h: { value: '<p onclick="x()">hi</p><script>evil()</script><img src="https://x.com/a.png"><img src="cid:img1">' },
+      },
+    });
+    const { client, calls } = plainClient(original);
+    await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>note</p>{{forward}}' },
+      client,
+    );
+    assert.doesNotMatch(calls.draft.htmlBody, /<script|onclick/);
+    assert.match(calls.draft.htmlBody, /<img src="https:\/\/x\.com\/a\.png" \/>/);
+    assert.doesNotMatch(calls.draft.htmlBody, /cid:img1/);
+  });
+
+  it('stores a forwarded REPLY with the nested cite attribute stripped and its content kept', async () => {
+    // The forwarded original is itself a reply, so its html carries a quote blockquote of its
+    // own. The sanitiser drops the attribute that marks it as quoted history while keeping
+    // what it said — the forwarded block this call writes is the only cited region.
+    const original = makeOriginal({
+      bodyValues: { t: { value: 'x' }, h: { value: '<p>top</p><blockquote type="cite">quoted</blockquote>' } },
+    });
+    const { client, calls } = plainClient(original);
+    await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>n</p>{{forward}}' },
+      client,
+    );
+    assert.match(calls.draft.htmlBody, /<blockquote>quoted<\/blockquote>/);
+    assert.doesNotMatch(calls.draft.htmlBody, /<blockquote type="cite"/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Does this message ship html" is NON-BLANK, not merely supplied
+// ---------------------------------------------------------------------------
+//
+// One test decides whether the quoted images are MINTED (`historyHtmlShips`, which the block
+// builders take as `htmlShips`) and one decides whether the part carrying them SHIPS
+// (`messageShipsHtml`, and buildBodyParts downstream). Both are `!isBlank`. These pins hold
+// them together: a regression that moves one and not the other stores a quote whose images
+// have gone, with nothing in the output saying so.
+//
+// A blank html part beside a token-bearing text part cannot reach any of that, because the
+// symmetry rule refuses the call first — so the first test here pins the REFUSAL for those
+// spellings rather than an outcome no caller can produce. That the blank part is dropped
+// downstream anyway is not an exemption from the rule, and the exemption is the plausible
+// regression: it would store a message whose two parts say different things.
+
+/** A part did not ship when it is absent or blank — buildBodyParts drops both. */
+const isBlankBody = (v: unknown) => v === undefined || (typeof v === 'string' && v.trim() === '');
+
+describe('draft_email — a blank html part ships no html, and mints nothing for one', () => {
+  it('refuses a token-bearing text part beside a blank html part, in either spelling', async () => {
+    for (const htmlBody of ['', '   ']) {
+      const { client, calls } = plainClient(withInlineImage());
+      await assert.rejects(
+        () => compose(
+          { mode: 'reply', originalEmailId: 'o1', htmlBody, textBody: 'r\n{{quote}}' }, client,
+        ),
+        /\{\{quote\}\} is in textBody but not in htmlBody\./,
+        JSON.stringify(htmlBody),
+      );
+      assert.equal(calls.draft, undefined);
+    }
+  });
+
+  it('refuses the same shape on a forward, so neither history token gets the exemption', async () => {
+    const { client, calls } = plainClient(withInlineImage());
+    await assert.rejects(
+      () => compose(
+        {
+          mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+          htmlBody: '   ', textBody: 'note\n{{forward}}',
+        },
+        client,
+      ),
+      /\{\{forward\}\} is in textBody but not in htmlBody\./,
+    );
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('ships no html part, and no minted image, for a reply that supplies only a text part', async () => {
+    // The reachable spelling of "this message ships no html": the part is absent, not blank.
+    const { client, calls } = plainClient(withInlineImage());
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'r\n{{quote}}' }, client,
+    );
+    assert.ok(isBlankBody(calls.draft.htmlBody), String(calls.draft.htmlBody));
+    assert.equal('attachments' in calls.draft, false);
+    // And the images went with it — reported, not silently absent.
+    assert.deepEqual(r.notes, [
+      '1 image(s) from the quoted message were dropped and are not part of this draft.',
+    ]);
+  });
+
+  it('ships html — and mints — for a body that is blank-looking MARKUP but not blank text', async () => {
+    // The test is `isBlank` (what buildBodyParts drops), not "has visible content". A
+    // `<div> </div>` renders as nothing but is a real html part, so it ships, and the quote
+    // it carries is the html one.
+    const { client, calls } = plainClient(withInlineImage());
+    await compose(
+      { mode: 'reply', originalEmailId: 'o1', htmlBody: '<div> </div>{{quote}}' }, client,
+    );
+    assert.ok((calls.draft.htmlBody as string).startsWith('<div> </div>'), calls.draft.htmlBody);
+    const minted = calls.draft.attachments.filter((p: any) => MINTED_CID.test(p.cid));
+    assert.equal(minted.length, 1);
+    assert.ok((calls.draft.htmlBody as string).includes(`src="cid:${minted[0].cid}"`), calls.draft.htmlBody);
+  });
+
+  it('mints nothing for a forward whose note is text only', async () => {
+    const { client, calls } = plainClient(withInlineImage());
+    await compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        textBody: 'note\n{{forward}}',
+      },
+      client,
+    );
+    assert.ok(isBlankBody(calls.draft.htmlBody), String(calls.draft.htmlBody));
+    // The forward still carries the original's image as an ordinary attachment — it is a file
+    // the caller is forwarding — but nothing was minted for a block that ships no html.
+    assert.deepEqual(
+      (calls.draft.attachments ?? []).filter((p: any) => MINTED_CID.test(p.cid ?? '')),
+      [],
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// {{signature}} on the branches that carry no history
+// ---------------------------------------------------------------------------
+
+describe('draft_email — {{signature}} does not depend on the history landing', () => {
+  it('signs a reply that placed no {{quote}} at all', async () => {
+    const { client, calls } = spyClient();
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'r\n{{signature}}' }, client,
+    );
+    assert.equal(calls.draft.textBody, 'r\nKind regards,\nTest User');
+    assert.deepEqual(r.notes, [NOTE_REPLY_UNQUOTED]);
+  });
+
+  it('signs a reply whose {{quote}} found nothing quotable', async () => {
+    // The quote token is removed and reported; the sign-off is a separate expansion and lands.
+    const barren = makeOriginal({ textBody: [], htmlBody: [], bodyValues: {} });
+    const { client, calls } = spyClient(barren);
+    await compose(
+      { mode: 'reply', originalEmailId: 'o1', htmlBody: '<p>r</p>{{quote}}{{signature}}' }, client,
+    );
+    assert.doesNotMatch(calls.draft.htmlBody, /wrote:/);
+    assert.match(calls.draft.htmlBody, /Kind regards,/);
+  });
+
+  it("signs the caller's own note on an asAttachment forward", async () => {
+    const { client, calls } = spyClient();
+    await compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        asAttachment: true, textBody: 'FYI\n{{signature}}',
+      },
+      client,
+    );
+    assert.equal(calls.draft.textBody, 'FYI\nKind regards,\nTest User');
+  });
+
+  it('resolves the identity BEFORE any attachment is uploaded', async () => {
+    // The sign-off has to be in the body the upload plan is read against, so the order is
+    // load-bearing rather than incidental.
+    const order: string[] = [];
+    const { client } = spyClient(makeOriginal(), {
+      getIdentities: async () => { order.push('identities'); return [SIGNED_IDENTITY]; },
+      uploadAttachments: async () => { order.push('upload'); return []; },
+    });
+    await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'hi\n{{signature}}', attachments: [{ path: 'a.pdf' }] },
+      client,
+      '/tmp/attach',
+    );
+    assert.deepEqual(order, ['identities', 'upload']);
+  });
+});

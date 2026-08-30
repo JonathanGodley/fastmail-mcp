@@ -619,3 +619,192 @@ describe('buildForwardBodies — a blank note ships no html, and mints nothing f
     assert.deepEqual(out.quoteImages!.minted, []);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Block CONTENT, pinned on the block builders themselves
+// ---------------------------------------------------------------------------
+//
+// What a quoted or forwarded block SAYS — the attribution line, the "> " prefixing, the
+// header block, the html shapes it wraps the original in — is produced by buildQuoteBlocks /
+// buildForwardBlocks and is a property of the block alone. Whatever joins the block to a body
+// cannot change any of it, so these read the builder's return value directly.
+//
+// Deliberately NOT here, even though the same builders produce it: anything whose subject is
+// what the STORED message contains. The quote sanitiser and the forward header's escaping of
+// hostile fields both answer "can this construct reach a recipient", and asserting them over
+// a block would answer a strictly narrower question in the same words — the block could be
+// clean and the join still ship the construct. Those live over the stored parts, in
+// draft-email-handler.test.ts.
+
+// Late import, beside the suites that use it (same convention as the suites above).
+import { signatureTextBlock } from './reply-quote.js';
+
+// A signature as signatureOf hands it over: either form may be absent.
+const HTML_ONLY_SIG = { html: '<div>Kind regards,</div><div>Test User</div>' };
+// A quote-of-the-day sign-off. html-to-text renders its <blockquote> as '> '-prefixed lines,
+// which is the only derived signature block in this repo that looks like reply quoting.
+const QUOTING_SIG = {
+  text: 'Regards,\nTest User\n> Per aspera ad astra',
+  html: '<div>Kind regards,</div><blockquote>Per aspera ad astra</blockquote><div>Test User</div>',
+};
+
+describe('buildQuoteBlocks — the attribution line', () => {
+  const textBlockFor = (opts: Parameters<typeof makeOriginal>[0]) =>
+    buildQuoteBlocks({ original: makeOriginal(opts), htmlShips: false, timezone: TZ }).textBlock!;
+
+  it('renders the exact captured Fastmail attribution (local time, ASCII-spaced)', () => {
+    const block = textBlockFor({ text: 'orig', name: 'Jonathan Godley', sentAt: '2026-06-15T03:29:02Z' });
+    assert.match(block, /^On Mon, Jun 15, 2026, at 1:29 PM, Jonathan Godley wrote:\n/);
+  });
+
+  it('uses sentAt over receivedAt', () => {
+    const block = textBlockFor({
+      text: 'orig', name: 'Jon', sentAt: '2026-06-15T03:29:02Z', receivedAt: '2026-06-15T09:00:00Z',
+    });
+    assert.match(block, /at 1:29 PM, Jon wrote:/); // 1:29 PM = sentAt, not the 7 PM receivedAt
+  });
+
+  it('falls back to receivedAt when sentAt is absent', () => {
+    const block = textBlockFor({ text: 'orig', name: 'Jon', receivedAt: '2026-06-15T03:29:02Z' });
+    assert.match(block, /^On Mon, Jun 15, 2026, at 1:29 PM, Jon wrote:\n/);
+  });
+
+  it('omits the date entirely (never "Invalid Date") when no timestamp is present', () => {
+    const block = textBlockFor({ text: 'orig', name: 'Jon' }); // no sentAt/receivedAt
+    assert.match(block, /^Jon wrote:\n/);          // exactly "Jon wrote:", no "On "
+    assert.doesNotMatch(block, /Invalid Date/);
+    assert.doesNotMatch(block, /On .*wrote:/);
+  });
+
+  it('collapses a newline in the sender display name', () => {
+    const block = textBlockFor({ text: 'orig', name: 'Jon\nGodley', sentAt: '2026-06-15T03:29:02Z' });
+    assert.match(block, /^On .*, Jon Godley wrote:\n/);
+  });
+
+  it('falls back to the email when there is no display name', () => {
+    const block = textBlockFor({ text: 'orig', email: 'jon@example.com', sentAt: '2026-06-15T03:29:02Z' });
+    assert.match(block, /jon@example\.com wrote:/);
+  });
+
+  it('collapses U+0085 in the display name (NEL is not in ECMAScript backslash-s)', () => {
+    const nel = String.fromCharCode(0x85);
+    const original = fwdOriginal({ from: [{ name: 'Eve' + nel + 'Impostor', email: 'e@x.example' }] });
+    const { textBlock } = buildQuoteBlocks({ original, htmlShips: false });
+    const attribution = textBlock!.split('\n').find((l) => l.includes('wrote:'))!;
+    assert.equal(attribution.includes(nel), false);
+    assert.match(attribution, /Eve Impostor wrote:/);
+  });
+});
+
+describe('buildQuoteBlocks — the text form of the quote', () => {
+  it('prefixes every quoted line (incl. blank lines) with "> "', () => {
+    const original = makeOriginal({ text: 'line one\n\nline three', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const { textBlock } = buildQuoteBlocks({ original, htmlShips: false, timezone: TZ });
+    assert.match(textBlock!, /^On .*wrote:\n> line one\n> \n> line three$/);
+  });
+
+  it('quotes an html-only original via htmlToText when the message ships no html', () => {
+    const original = makeOriginal({ html: '<p>Hello <b>world</b></p>', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const { textBlock } = buildQuoteBlocks({ original, htmlShips: false, timezone: TZ });
+    assert.match(textBlock!, /> Hello world/);
+  });
+});
+
+describe('buildQuoteBlocks — the html form of the quote', () => {
+  it('wraps the quote in a cite blockquote with the portable quote-bar style and escapes the attribution', () => {
+    const original = makeOriginal({ html: '<p>original <b>body</b></p>', name: 'Jon & Co', sentAt: '2026-06-15T03:29:02Z' });
+    const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
+    assert.match(htmlBlock!, /<blockquote type="cite" style="margin:0 0 0 \.8ex;border-left:1px solid #ccc;padding-left:1ex">/);
+    assert.match(htmlBlock!, /Jon &amp; Co wrote:/);           // attribution html-escaped
+    assert.match(htmlBlock!, /<p>original <b>body<\/b><\/p>/); // formatting preserved
+  });
+
+  it('quotes a text-only original via an escaped html block', () => {
+    const original = makeOriginal({ text: 'plain <b>not bold</b>\nsecond', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
+    assert.match(htmlBlock!, /plain &lt;b&gt;not bold&lt;\/b&gt;<br>second/); // escaped + <br>
+  });
+
+  it('quotes each format from its matching original part', () => {
+    const original = makeOriginal({ text: 'orig text', html: '<p>orig html</p>', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const blocks = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
+    assert.match(blocks.textBlock!, /> orig text/);
+    assert.match(blocks.htmlBlock!, /<p>orig html<\/p>/);
+  });
+});
+
+describe('buildQuoteBlocks — what it will and will not read', () => {
+  it('quotes an original body part that has no type (matching extractBody leniency)', () => {
+    // A single-format original whose part is untyped; the reader must still read it.
+    const original = {
+      from: [{ name: 'Jon' }], sentAt: '2026-06-15T03:29:02Z',
+      textBody: [{ partId: 't' }], htmlBody: [{ partId: 't' }],
+      bodyValues: { t: { value: 'untyped body' } },
+    };
+    const { textBlock } = buildQuoteBlocks({ original, htmlShips: false, timezone: TZ });
+    assert.match(textBlock!, /> untyped body/);
+  });
+
+  it('yields no html block for a cid-image-only original (content-based, not string trim)', () => {
+    // No orphan "On … wrote:" over an empty blockquote: the attribution goes with the quote.
+    const original = makeOriginal({ html: '<div><img src="cid:logo@x"></div>', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const blocks = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
+    assert.equal(blocks.htmlBlock, undefined);
+    assert.equal(blocks.textBlock, undefined);
+  });
+});
+
+describe('buildForwardBlocks — the header block (canonical Fastmail shape)', () => {
+  const textBlockFor = (over: any = {}) =>
+    buildForwardBlocks({ original: fwdOriginal(over), htmlShips: false }).textBlock;
+
+  it('emits the dashed marker + From/To/Cc/Subject/Date lines with a verbatim ISO date', () => {
+    assert.match(
+      textBlockFor(),
+      /^----- Original message -----\nFrom: Ada Lovelace <ada@example\.com>\nTo: Bob <bob@example\.com>\nCc: carol@example\.com\nSubject: Original subject\nDate: 2026-07-01T09:14:00-04:00\n\noriginal text/,
+    );
+  });
+
+  it('omits the Cc line when the original has no Cc', () => {
+    assert.doesNotMatch(textBlockFor({ cc: [] }), /\nCc:/);
+  });
+
+  it('omits the whole Date line when sentAt and receivedAt are both absent (line-omission rule)', () => {
+    assert.doesNotMatch(textBlockFor({ sentAt: undefined }), /\nDate:/);
+  });
+
+  it('falls back to receivedAt for the Date line', () => {
+    assert.match(textBlockFor({ sentAt: undefined, receivedAt: '2026-07-02T00:00:00Z' }), /\nDate: 2026-07-02T00:00:00Z/);
+  });
+
+  it('omits the To line for a Bcc-only-received original, and the Subject line when empty', () => {
+    const block = textBlockFor({ to: [], cc: [], subject: '' });
+    assert.doesNotMatch(block, /\nTo:/);
+    assert.doesNotMatch(block, /\nSubject:/);
+  });
+});
+
+describe('signatureTextBlock — the form a sign-off takes in a text part', () => {
+  it('derives text from an html-only identity when no html ships', () => {
+    // The html body it was written for is not shipping, but the WORDS are the user's
+    // sign-off; dropping them would lose a signature they really have.
+    assert.equal(signatureTextBlock(HTML_ONLY_SIG, false), 'Kind regards,\nTest User');
+  });
+
+  it("renders a sign-off's own <blockquote> as '> '-prefixed lines", () => {
+    // Not cosmetic: this is the only derived signature block that looks like reply quoting,
+    // so anything comparing a body's lines against this block has to survive it.
+    const derived = signatureTextBlock(QUOTING_SIG, true)!;
+    assert.match(derived, /^> Per aspera ad astra$/m, derived);
+  });
+
+  it('writes the embedded-image placeholder when the html ships', () => {
+    // The image ships with the html, so "[image]" describes something the message carries.
+    assert.equal(signatureTextBlock({ html: '<img src="cid:logo">' }, true), '[image]');
+  });
+
+  it('derives the alt text of an image signature that has some', () => {
+    const alted = { html: '<img src="cid:logo" alt="Test User, Example Ltd">' };
+    assert.equal(signatureTextBlock(alted, false), 'Test User, Example Ltd');
+  });
+});
