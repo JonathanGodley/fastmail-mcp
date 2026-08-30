@@ -374,10 +374,18 @@ describe('get_email draft body hash through a projection', () => {
     return rawEmail({ keywords: { $draft: true }, ...overrides });
   }
 
-  function readDraft(raw: any, fieldNames?: string[]): Record<string, any> {
+  // The whole read surface, not the corner these tests started in: `verbose` and
+  // `stripQuoted` change what the response shows, which is the only thing the hash decision
+  // reads, so a helper that pinned them to false would leave the composition untested
+  // wherever a caller uses either.
+  function readDraft(
+    raw: any,
+    fieldNames?: string[],
+    options: { verbose?: boolean; stripQuoted?: boolean } = {},
+  ): Record<string, any> {
     const fields = parseEmailFields(fieldNames);
-    const simplified = simplifyEmail(raw, { includeHtml: wantsHtmlBody(fields) });
-    attachDraftBodyHash(raw, simplified, { raw: false, fields, stripQuoted: false });
+    const simplified = simplifyEmail(raw, { includeHtml: !!options.verbose || wantsHtmlBody(fields) });
+    attachDraftBodyHash(raw, simplified, { raw: false, fields, stripQuoted: !!options.stripQuoted });
     return projectEmail(simplified, fields) as Record<string, any>;
   }
 
@@ -399,6 +407,18 @@ describe('get_email draft body hash through a projection', () => {
     const result = readDraft(draft(), ['bodyText', 'bodyHtml', 'bodyHash']);
     assert.match(result.bodyHash, /^bh1-[0-9a-f]{32}$/);
     assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  it('issues the hash on an unprojected verbose read, which shows the whole stored body', () => {
+    const result = readDraft(draft(), undefined, { verbose: true });
+    assert.match(result.bodyHash, /^bh1-[0-9a-f]{32}$/);
+    assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  it('withholds on a stripQuoted read even when every body field is shown', () => {
+    const result = readDraft(draft(), undefined, { verbose: true, stripQuoted: true });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld, /stripped quoted history/);
   });
 
   it('carries neither field through any projection of a non-draft', () => {
