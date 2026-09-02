@@ -570,7 +570,11 @@ than overclaimed:
   the *shape* of the folder tree (which folder nests under which), not just the set of names. That
   is a slightly richer disclosure of the same material, accepted for the same reason: it is what
   makes the error recoverable, and it is the caller's own reachable tree. The real boundary is the
-  token's reach, not "the user's own account" — a delegated/scoped token sees only its slice. `InvalidInputError` messages are run through
+  token's reach, not "the user's own account" — a delegated/scoped token sees only its slice. Every value the message reflects - the caller's
+  input and each mailbox path and role - is rendered through `describeUntrusted`, so a mailbox
+  name carrying a line break cannot forge what reads as a further sentence of server output,
+  and a name long enough to swamp the message is truncated with a visible ellipsis (#131).
+  `InvalidInputError` messages are run through
   `redactBearerTokens` as defense-in-depth (a token can't actually appear in them), but that is
   **not** what makes the oracle acceptable — recoverability (naming valid mailboxes so a caller
   can retry) is, and it's the caller's own reachable tree. Accepted, capped, framed honestly.

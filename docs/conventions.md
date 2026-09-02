@@ -687,8 +687,8 @@ is caller-fixable input there exactly as it is on `get_email`/`get_thread`, whic
 is bad: an unusable reference *form* (a bare `cid:` with no value, a `cid:` value matching
 several parts, a number with junk in it, a part carrying no blob) and a well-formed reference
 that simply *matches nothing* both throw `InvalidInputError` and reach the caller naming what
-to pass instead. Messages quote back only the caller's own input, through `describePart`, so
-a hostile value cannot overrun the sentence.
+to pass instead. Messages quote back only the caller's own input, through `describeUntrusted`, so
+a hostile value cannot overrun the sentence or forge a line inside it.
 
 Naming the failure confirms that a message exists and that a reference does or does not
 resolve, and that is fine here: `get_email_attachments` enumerates a message's parts on
@@ -715,11 +715,14 @@ grep anyone can run instead of a claim that has to be re-argued per error class.
 populates it and it is arbitrary JSON a string-shaped scrubber cannot walk.
 
 Server text that reaches the caller on a *successful* result gets no help from that catch,
-so it redacts at its own render site. `orphanedOldDraftReason` is the one such field today
-(`formatEditDraftResult` in `src/response-formatters.ts`, holding a server or exception
-message when an `edit_draft` replacement could not be moved to Trash). It is redacted where
-it is rendered rather than where it is assigned, because the render site is single and the
-assignment sites are not.
+so it is sanitised at its own render site. `orphanedOldDraftReason` and `bodyHashWithheld`
+are those fields today (`formatEditDraftResult` in `src/response-formatters.ts`, holding a
+server or exception message when an `edit_draft` replacement could not be moved to Trash, or
+when the re-read that would issue a body hash failed). Both go through `describeUntrusted`
+rather than redaction alone: one assignment site for each is a caught exception's own
+message, so the text is arbitrary and can carry a line break that would split the warning
+into what reads as two outcomes. It happens where the value is rendered rather than where it
+is assigned, because the render site is single and the assignment sites are not.
 
 The JMAP set-error reason itself is surfaced (not just the code): every throwing
 `Email/set` failure routes its `SetError` through `describeSetError` in
@@ -727,6 +730,31 @@ The JMAP set-error reason itself is surfaced (not just the code): every throwing
 mutators additionally report success/fail counts and the caller's failing ids grouped by
 reason. The helper concatenates only server-authored text — we add no message body of our
 own.
+
+Both halves of that message are values this server did not write, so both go through
+`describeUntrusted` (see **Untrusted values in prose** below): `describeSetError` renders the
+`type` and the `description` separately, so the ` - ` joining them stays the server's own
+punctuation, and the bulk path renders the failing ids with the same `nameEmailIds` the
+label refusals use rather than a bare join. A description or an id carrying a line break
+would otherwise forge what reads as further outcomes in a report a model acts on (#134).
+
+Two consequences worth knowing before reading a bulk failure:
+
+- **A reason is grouped on the RAW `type`+`description`, and sanitised only when printed.**
+  Grouping on the rendered text would key the map on a string already truncated at 64 code
+  points, so two genuinely different server errors differing only past that point would merge
+  into one group asserting a cause they do not share.
+- **A long description loses its tail**, and unlike the `archive_email` summary there is no
+  JSON payload beside a thrown error to carry the full text. Accepted: the `type` is the part
+  a caller recovers from, it is a short spec enum, it is capped separately so a long
+  description cannot crowd it out, and the ellipsis says the reason was cut rather than that
+  the server said no more.
+
+One cap governs how many caller-supplied ids any error message names (`EMAIL_ID_LIST_CAP`),
+shared by the fail-closed archive read, the label-removal refusals and the bulk set-error
+groups. A capped group ends in its own `…and N more`; the message additionally says the whole
+list is **partial** when a group or the reason count was cut, so a truncated list never reads
+as a complete one.
 
 ### The JMAP set-error split
 
@@ -980,6 +1008,64 @@ Two things outside `src/` stay indented on purpose, because their output is not 
 `scripts/dump-official-surface.mjs` writes a checked-in JSON document, where indentation is
 what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a human
 running it by hand.
+
+## Untrusted values in prose: `describeUntrusted`
+
+The rule, stated so it can be checked rather than argued per site: **any untrusted value
+interpolated into prose a caller reads back — thrown or returned — goes through
+`describeUntrusted` (`src/coerce.ts`), and the server's own sentence around it never does.**
+
+"Untrusted" here is not "attacker-authored", it is **not written by this server**: a
+caller-supplied email id or `attachmentId`, a mailbox name or path or role, a Content-ID, a
+server-authored `SetError` description. All of them reach a model as a report of what the
+server said.
+
+Two hazards, and the order of the two steps is what covers both:
+
+- **Line forging** — the one that matters in practice, and it needs no long value and no
+  credential. A value carrying CR, LF or U+2028 splits one message into what reads as
+  several, and the forged lines read as further sentences from the server. `describePart`
+  strips those, drops bidi overrides, collapses space runs, turns a double quote into a
+  single one so the value cannot close the span it is rendered inside, and caps the length so
+  one hostile value cannot become the whole message.
+- **Credential echo** — narrower, but a leak rather than a style point. Both redaction rules
+  are length-sensitive (`FASTMAIL_TOKEN_PATTERN` needs 20+ characters after the `fmu<n>-`
+  prefix; a registered secret is matched as an exact string), so describing **first**
+  truncates at 64 code points, hands the redactor a string the secret no longer fits in, and
+  the surviving prefix goes out verbatim.
+
+Hence: redact the full value, **then** neutralise and truncate it. The wrong order still reads
+correctly and still passes every line-forging test, which is exactly why the pair lives behind
+one name instead of being respelled at each call site (#131).
+
+**Sanitise the value, never the finished sentence.** `mailboxListHint` builds the shared
+`Valid: …` tail from mailbox paths and roles; the three message builders that append it never
+see those values, only one finished string of the server's own words. Running the helper over
+*that* would neutralise the server's own punctuation and let the 64-code-point cap eat the
+whole list. The same split decides the two ambiguity messages: `formatMailboxAmbiguous`
+receives raw paths and describes each one, while `formatMailboxNameVsPath` receives
+descriptions already composed (and already sanitised) by `describeFlatCandidate` /
+`describeNestedCandidate`, and deliberately does not re-describe them.
+
+**The accepted cost.** A path or id longer than 64 code points is truncated, so it stops being
+pasteable input — a real loss for a hint whose job is to offer input back. It is accepted: the
+ellipsis says the value was cut, the hint already points at `list_mailboxes` for the full
+picture, and the alternative is letting an account-controlled name forge lines in prose an
+agent acts on.
+
+**What is outside the rule, and why it is structure rather than a decision.**
+`inline-images.ts` and `inline-notes.ts` sit *below* `coerce.ts` in the import graph, so they
+cannot reach the helper without a cycle; their cid refusals call `describePart` alone. That
+neutralises line forging, which is the hazard that matters — only the narrow
+redact-before-truncate half is missing, and only for a caller-supplied value over 64 code
+points with a credential straddling the cut.
+
+**That list is exhaustive, and it is the test to apply before adding to it.** A module is
+outside the rule only when importing `coerce.ts` would close a cycle — never because its
+values look harmless. Every other module that renders an untrusted value into prose imports
+`coerce.ts` already, so "it only uses `describePart`" is a site that was missed rather than
+a site that is exempt. Checking it is one grep: `describePart(` outside `inline-images.ts`,
+`inline-notes.ts` and the helper's own body should return nothing.
 
 ## Query-level signals: the result count and `position` paging
 

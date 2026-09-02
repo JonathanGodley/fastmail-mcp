@@ -1,5 +1,5 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import { isAuthorableCid, stripCidSpelling } from './inline-images.js';
+import { describePart, isAuthorableCid, stripCidSpelling } from './inline-images.js';
 import { rejectUnusableCid } from './inline-notes.js';
 
 // Tagged error for filesystem-path access decisions (path confinement and the
@@ -80,6 +80,43 @@ export function redactBearerTokens(input: string): string {
     out = out.replace(new RegExp(escapeRegExp(secret), 'g'), '[REDACTED]');
   }
   return out;
+}
+
+/**
+ * Render an untrusted value into prose: REDACT it, then neutralise and truncate it.
+ *
+ * The criterion this exists to make checkable: **any untrusted value interpolated into a
+ * message a caller reads back — thrown or returned — goes through this, and nothing else.**
+ * "Untrusted" is not "attacker-authored"; it is "not written by this server": a
+ * caller-supplied id, a mailbox name, a Content-ID, a server-authored set-error
+ * description. The server's own sentence around the value is never passed through here —
+ * only the value.
+ *
+ * Two hazards, and they need the two steps in this order:
+ *
+ * 1. LINE FORGING (the reason this matters in practice). A value carrying CR, LF or
+ *    U+2028 splits one message into what reads as several, and the forged lines read to
+ *    an agent as further sentences from the server. `describePart` strips those, collapses
+ *    space runs, drops bidi overrides, and turns a double quote into a single one so the
+ *    value cannot close the quoted span it is rendered inside. It also caps the length, so
+ *    one hostile id cannot become the whole error message.
+ *
+ * 2. CREDENTIAL ECHO (narrow, but a leak rather than a style point). `redactBearerTokens`
+ *    is length-sensitive at both ends — FASTMAIL_TOKEN_PATTERN needs 20+ characters after
+ *    the `fmu<n>-` prefix, and a registered secret is matched as an exact string — so
+ *    running `describePart` FIRST, which truncates at 64 code points, hands the redactor a
+ *    string the secret no longer fits in and the surviving prefix goes out verbatim.
+ *
+ * Hence the order: redact the full value, THEN neutralise and truncate it. Getting it
+ * backwards still reads correctly and still passes every line-forging test, which is
+ * exactly why the two steps live behind one name instead of at each call site (#131).
+ *
+ * Not applicable to a structured result item — see `redactedJson` for why redacting a
+ * finished JSON document eats its delimiters.
+ */
+export function describeUntrusted(value: unknown): string {
+  const source = typeof value === 'string' ? value : value == null ? '' : String(value);
+  return describePart(redactBearerTokens(source));
 }
 
 /**
