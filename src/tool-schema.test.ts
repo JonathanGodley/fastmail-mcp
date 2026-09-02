@@ -157,12 +157,12 @@ describe('lenient-boolean convention', () => {
         // be called `raw`) from matching.
         //
         // THIS IS NARROWER THAN IT LOOKS, AND THE GAP IS NOT ABOUT ANY ONE FILE. Only the
-        // `args`-shaped receivers above are matched, so a handler that aliases its arguments
-        // reads green whatever it does with them: `!!a.expandSignature` in
-        // edit-draft-handler.ts is invisible here, and so are `asAttachment` and
-        // includeOriginalAttachments in draft-email-handler.ts, which aliases too and has
-        // been on the list all along. Adding a file to HANDLER_FILES therefore buys less
-        // than it appears to.
+        // bare name and the `args`-shaped receivers above are matched, so a handler that
+        // aliases its arguments reads green whatever it does with them: a `!!a.someFlag`
+        // sitting behind a `const a = args ?? {}` is invisible here. The reads that were in
+        // that blind spot have been moved onto `args?.` at their own sites, each with a
+        // comment saying why, but nothing stops the next handler from aliasing again.
+        // Adding a file to HANDLER_FILES therefore buys less than it appears to.
         // Do not widen the pattern to any `!!<identifier>.<name>` to close it: that is
         // exactly what re-admits the `raw.hasAttachment` false positive, and exempting
         // `raw` by name would make this a list of blessed identifiers rather than a rule.

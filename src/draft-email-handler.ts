@@ -531,12 +531,16 @@ export async function composeDraftEmail(
 
   // --- 1. Mode, and the parameters that belong to one mode -----------------
   const mode = readMode(a.mode);
-  const asAttachment = coerceBool(a.asAttachment) ?? false;
-  const includeOriginalAttachments = coerceBool(a.includeOriginalAttachments) ?? true;
+  // BOTH FLAGS ARE READ OFF `args?.` RATHER THAN THE `a` ALIAS, and must stay that way. The
+  // lenient-boolean guard in tool-schema.test.ts matches `!!asAttachment` and
+  // `!!args?.asAttachment` but not `!!a.asAttachment`, so tidying these back to the alias
+  // would put any future bare-`!!` read of them outside the only check that looks for one.
+  const asAttachment = coerceBool(args?.asAttachment) ?? false;
+  const includeOriginalAttachments = coerceBool(args?.includeOriginalAttachments) ?? true;
 
-  assertModeOnly(a.asAttachment !== undefined, 'asAttachment', 'forward', mode);
+  assertModeOnly(args?.asAttachment !== undefined, 'asAttachment', 'forward', mode);
   assertModeOnly(
-    a.includeOriginalAttachments !== undefined, 'includeOriginalAttachments', 'forward', mode,
+    args?.includeOriginalAttachments !== undefined, 'includeOriginalAttachments', 'forward', mode,
   );
   assertModeOnly(a.mailbox !== undefined, 'mailbox', 'new', mode);
   assertModeOnly(a.inReplyTo !== undefined, 'inReplyTo', 'new', mode);

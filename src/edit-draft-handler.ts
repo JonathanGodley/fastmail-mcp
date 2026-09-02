@@ -71,7 +71,12 @@ export async function editDraft(
   // undefined and therefore reads as FALSE, which stores the body exactly as written.
   // Guessing the other way would have this server rewrite a body nobody asked it to
   // touch.
-  const expandSignature = coerceBool(a.expandSignature) === true;
+  //
+  // READ OFF `args?.` RATHER THAN THE `a` ALIAS, and leave it that way. The lenient-boolean
+  // guard in tool-schema.test.ts matches `!!expandSignature` and `!!args?.expandSignature`
+  // but not `!!a.expandSignature`, so tidying this back to the alias would put any future
+  // bare-`!!` read of it outside the only check that looks for one.
+  const expandSignature = coerceBool(args?.expandSignature) === true;
   if (!emailId) {
     throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
   }
