@@ -2788,10 +2788,20 @@ export class JmapClient {
     // body may be a foreign one handed back, so a refusal keyed on its text could be planted
     // by the original's author and would recur on every edit.
     //
-    // The `{{signature}}` and escape notes are keyed on an EXACT COMPARISON AGAINST THE
-    // STORED BYTES — a count over a string this server already holds, which is not
-    // recognition of anything in the body — so a spelling the handed-back body already
-    // carried is stored in silence and only one the caller has just added is reported.
+    // EVERY TEXT-KEYED NOTE BELOW IS GATED ON A RISE AGAINST THE STORED SCAN. Not a list of
+    // which ones obey it — the rule is the block's, and a note added here without it is the
+    // defect, not an exception. The gate is an EXACT COMPARISON AGAINST THE STORED BYTES: a
+    // count over a string this server already holds, which is not recognition of anything in
+    // the body. So a spelling the handed-back body already carried is stored in silence, and
+    // only one the caller has just added is reported.
+    //
+    // It is the same reasoning that makes these notes rather than refusals, applied one step
+    // further. A check keyed on the text of a body the caller did not write recurs on every
+    // edit of that draft for as long as it exists, and the text that triggers it was authored
+    // by whoever composed the original — so it is plantable, it says nothing about what THIS
+    // call did, and the caller cannot act on it, because those are not their words to change.
+    // A refusal on that footing would be intolerable; a note on it is merely useless noise
+    // that trains the reader to ignore the ones that matter.
     // Every `{{…}}` this call ADDED that names no token, gathered across both written parts
     // and reported as one sentence. Gathered rather than pushed per site because the count is
     // unbounded by anything the caller had to mean, and one note per site would bury the
@@ -2833,10 +2843,21 @@ export class JmapClient {
           tokenNotes.push(noteEscapedTokenShips(e.text));
         }
       }
-      const history = (['quote', 'forward'] as const).filter((t) => scan.counts[t] > 0);
+      // Count rise per token, the signature note's gate: a `{{quote}}` sitting in the quoted
+      // history is the original author's text and rides along on every edit.
+      const history = (['quote', 'forward'] as const)
+        .filter((t) => scan.counts[t] - storedScan.counts[t] > 0);
       if (history.length > 0) tokenNotes.push(noteHistoryTokenStored([...history]));
+
+      // Per-text budget, the escape note's gate rather than the count one, because a
+      // near-miss is reported BY ITS LITERAL TEXT and two different spellings must not
+      // cancel each other out.
+      const storedMisses = new Map<string, number>();
+      for (const m of storedScan.nearMisses) storedMisses.set(m.text, (storedMisses.get(m.text) ?? 0) + 1);
       const namedMisses = new Set<string>();
       for (const miss of scan.nearMisses) {
+        const budget = storedMisses.get(miss.text) ?? 0;
+        if (budget > 0) { storedMisses.set(miss.text, budget - 1); continue; }
         if (namedMisses.has(miss.text)) continue;
         namedMisses.add(miss.text);
         tokenNotes.push(noteNearMissToken(miss.text, miss.name));

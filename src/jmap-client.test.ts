@@ -1887,6 +1887,60 @@ describe('updateDraft', () => {
     assert.equal((result.notes ?? []).some((n) => /\{\{quote\}\} and \{\{forward\}\} were stored as written/.test(n)), true);
   });
 
+  // The other direction, for both text-keyed notes above. A {{quote}} or a {{Signature}} the
+  // STORED body already carried is text the original's author wrote, handed back on every
+  // edit: reporting it says nothing about what this call did, cannot be acted on (the caller
+  // does not own those words), and is plantable by whoever composed the original.
+
+  it('says nothing about a history token the stored body already carried', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>hi</p><blockquote><p>see {{quote}}</p></blockquote>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>hi, edited</p><blockquote><p>see {{quote}}</p></blockquote>',
+      bodyHash: hashOf(planted),
+    });
+    assert.equal((result.notes ?? []).some((n) => /\{\{quote\}\}/.test(n)), false);
+  });
+
+  it('still reports a history token this edit added beside one the body already had', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p><blockquote>{{quote}}</blockquote></p>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>see {{forward}}</p><blockquote>{{quote}}</blockquote>', bodyHash: hashOf(planted),
+    });
+    const note = (result.notes ?? []).find((n) => /stored as written: those tokens expand/.test(n));
+    assert.ok(note, `expected a history note, got ${JSON.stringify(result.notes)}`);
+    // Only the one this edit introduced is named; the carried-over {{quote}} is not.
+    assert.match(note!, /\{\{forward\}\} was stored as written/);
+  });
+
+  it('says nothing about a near-miss the stored body already carried', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>hi</p><blockquote><p>{{Signature}}</p></blockquote>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>hi, edited</p><blockquote><p>{{Signature}}</p></blockquote>',
+      bodyHash: hashOf(planted),
+    });
+    assert.equal((result.notes ?? []).some((n) => /\{\{Signature\}\}/.test(n)), false);
+  });
+
+  it('still reports a second near-miss this edit added beside one the body already had', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>{{Signature}}</p>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{Signature}}</p><p>{{Signature}}</p>', bodyHash: hashOf(planted),
+    });
+    assert.ok((result.notes ?? []).some((n) => /\{\{Signature\}\}/.test(n)));
+  });
+
   it('leaves a {{quote}} in the body it stores rather than removing it', async () => {
     const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
     const body = '<p>see {{quote}} here</p>';
