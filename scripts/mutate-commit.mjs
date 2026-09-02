@@ -14,11 +14,24 @@
 // src/*.ts as TEXT (index-env.test.ts, readme-inventory.test.ts) sees Stryker's
 // instrumentation in the file and fails the initial run before any mutant is tried.
 //
+// That is ONE of the two ways the initial run can fail, and `--tests` cures only that one.
+// The other announces itself as a MISSING PACKAGE ("Cannot find package '@modelcontextprotocol/sdk'"),
+// which is the sandbox having no node_modules to resolve against - no choice of test files
+// changes it. DEPS_ROOT below is what stops that happening; read its comment if it recurs.
+//
+// Runs from a `git worktree` as well as from the primary checkout. A worktree contributes the
+// FILES to mutate; the primary checkout contributes the installed DEPENDENCIES.
+//
 // Writes the Stryker config, sandbox and report OUTSIDE the repo tree (os.tmpdir by
 // default; override with MUTATE_OUT_DIR). Re-running overwrites; nothing needs deleting.
+//
+// The node_modules link this makes OUTLIVES the run: it sits beside the sandbox rather than
+// inside it, so nothing wipes it between runs. A copy of this script WITHOUT that link step
+// will therefore appear to work in a scratch directory some other copy has already used -
+// point MUTATE_OUT_DIR at a fresh one before trusting a comparison of two versions of it.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -39,6 +52,55 @@ if (!commit || (testsFlag !== -1 && !testsOverride?.length)) {
 }
 
 const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+
+// The checkout whose node_modules the sandboxed tests resolve against. REPO holds the files to
+// mutate; it does NOT necessarily hold the dependencies. `npm install` is run once, in the
+// primary checkout, and a `git worktree` checkout has no node_modules of its own.
+//
+// Stryker links a node_modules into its sandbox only if it finds one by scanning DOWNWARD from
+// its own cwd (findNodeModulesList), and cwd must stay REPO or Stryker would mutate the wrong
+// checkout's files. So from a worktree it links nothing, the sandbox sits outside every tree,
+// and Node's walk-up from a sandboxed src/*.ts reaches no node_modules at all: every test dies
+// on "Cannot find package". Naming the primary checkout here is what closes that gap.
+//
+// `--path-format=absolute` is load-bearing, not decoration: plain `--git-common-dir` answers a
+// RELATIVE ".git" from a primary checkout (it answers an absolute path from a worktree, so the
+// bug hides in exactly the case that looks fine). path.dirname of that is ".", which then reads
+// node_modules relative to whatever cwd the caller happened to have.
+function primaryCheckout() {
+  try {
+    return path.dirname(git('rev-parse', '--path-format=absolute', '--git-common-dir').trim());
+  } catch {
+    return null; // not a repo, or a git too old for --path-format: fall back to REPO alone
+  }
+}
+
+// REPO FIRST, so a primary checkout resolves to itself and runs exactly as it always has - the
+// primary checkout is a fallback, never an override. It also means a worktree someone HAS run
+// `npm install` in uses its own dependencies rather than reaching for another tree's.
+const DEPS_ROOT = [REPO, primaryCheckout()].find((dir) => dir && existsSync(path.join(dir, 'node_modules')));
+if (!DEPS_ROOT) {
+  console.error(`No node_modules in ${REPO}, nor in the primary checkout of its repository.`);
+  console.error('Run `npm install` in the primary checkout; a worktree does not need its own.');
+  process.exit(1);
+}
+
+/**
+ * Point `link` at `target`, replacing it if it already points elsewhere.
+ *
+ * 'junction' is the only directory link Windows creates without elevation; on POSIX Node
+ * ignores the type and writes an ordinary symlink. Removal is unlink-then-rmdir because
+ * neither call follows a link: unlink takes a POSIX symlink, rmdir takes a Windows junction,
+ * and rmdir on a REAL populated directory fails ENOTEMPTY rather than deleting someone's
+ * node_modules. Nothing here is ever recursive.
+ */
+function linkDir(link, target) {
+  try {
+    if (realpathSync(link) === realpathSync(target)) return; // already correct: the re-run case
+  } catch { /* absent or dangling - fall through and (re)create it */ }
+  try { unlinkSync(link); } catch { try { rmdirSync(link); } catch { /* nothing to replace */ } }
+  symlinkSync(target, link, 'junction');
+}
 
 /** Changed line ranges per file, from a zero-context diff of the commit against its parent. */
 function changedRanges(rev) {
@@ -98,6 +160,22 @@ if (testFiles.length === 0) {
 const mutate = sources.flatMap((f) => ranges.get(f).map(([a, b]) => `${f}:${a}-${b}`));
 
 mkdirSync(OUT_DIR, { recursive: true });
+
+// Give every sandbox a node_modules to walk up into. This sits one level ABOVE the sandboxes
+// Stryker creates (tempDirName is OUT_DIR/sandbox, a sandbox is OUT_DIR/sandbox/sandbox-XXXX),
+// so Node resolves through it from any sandboxed file without anyone predicting that random
+// name. It is a SIBLING of tempDirName rather than a child, which is deliberate: `cleanTempDir`
+// wipes tempDirName between runs, and a link inside it would put the real node_modules on the
+// far end of a directory tree Stryker deletes.
+//
+// Stryker's own symlinking is left ON. From the primary checkout it still fires and still wins
+// inside the sandbox, so that path is unchanged; this link is what the worktree case falls back
+// to, and is simply unused when Stryker has already done the job. It is not pure redundancy
+// even there: Stryker's scan keeps only entries whose Dirent isDirectory(), so a node_modules
+// that is ITSELF a link - a checkout set up to share one install - is invisible to it, and this
+// link is then the only one.
+linkDir(path.join(OUT_DIR, 'node_modules'), path.join(DEPS_ROOT, 'node_modules'));
+
 writeFileSync(CONFIG_FILE, JSON.stringify({
   $schema: './node_modules/@stryker-mutator/core/schema/stryker-schema.json',
   packageManager: 'npm',
@@ -122,7 +200,9 @@ writeFileSync(CONFIG_FILE, JSON.stringify({
 console.log(`commit      ${commit}`);
 console.log(`mutating    ${mutate.join('\n            ')}`);
 console.log(`tests       ${testFiles.join(' ')}`);
-console.log(`scratch     ${OUT_DIR}\n`);
+console.log(`scratch     ${OUT_DIR}`);
+console.log(`mutating in ${REPO}`);
+console.log(`deps from   ${DEPS_ROOT}${DEPS_ROOT === REPO ? '' : ' (primary checkout of this worktree)'}\n`);
 
 // Blank the previous report BEFORE the run, so a Stryker that dies without writing one is
 // reported as a failure instead of silently re-reporting the last run's numbers.
@@ -134,7 +214,10 @@ writeFileSync(REPORT_FILE, '');
 // arguments for 'run'". Naming npx.cmd directly instead is not an option either - Node
 // refuses to spawn a .cmd without a shell (EINVAL). So the CLI is resolved here and handed to
 // this same Node binary, which takes its arguments as an array and never re-splits them.
-const strykerPkg = createRequire(path.join(REPO, 'package.json')).resolve('@stryker-mutator/core/package.json');
+// Resolved from DEPS_ROOT, not REPO: from a worktree that is not nested inside the primary
+// checkout, a REPO-based resolve has no node_modules anywhere up its chain and throws here,
+// before Stryker is ever started.
+const strykerPkg = createRequire(path.join(DEPS_ROOT, 'package.json')).resolve('@stryker-mutator/core/package.json');
 const strykerBin = path.join(path.dirname(strykerPkg), JSON.parse(readFileSync(strykerPkg, 'utf8')).bin.stryker);
 
 const run = spawnSync(process.execPath, [strykerBin, 'run', CONFIG_FILE], {
