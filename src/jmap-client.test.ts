@@ -390,6 +390,37 @@ describe('createDraft', () => {
     );
   });
 
+  // The default save target is resolved by EXACT role, the same question send_draft asks
+  // before it will transmit. A substring name match would file the draft into a custom
+  // folder and report success, and the send would then refuse it with no move that repairs
+  // it — a create surface producing a record the send gate can never accept.
+  it('refuses to default-save when no mailbox carries the drafts role, even beside a "Draft notes" folder', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'mb-notes', name: 'Draft notes', role: null },
+    ]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'x' } } }, 'createDraft']],
+    }));
+
+    await assert.rejects(() => client.createDraft({ subject: 'X' }), /drafts.*role/i);
+    // Refused before the write: no draft is left behind in the wrong folder.
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  // Exact but case-INSENSITIVE, so a server spelling the role differently still resolves
+  // by role rather than falling to a name match.
+  it('resolves the drafts role whatever case the server spells it in', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'mb-d', name: 'Entwürfe', role: 'Drafts' },
+    ]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'x' } } }, 'createDraft']],
+    }));
+
+    await client.createDraft({ subject: 'X' });
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].create.draft.mailboxIds['mb-d'], true);
+  });
+
   // 10. HTML body constructed correctly
   it('derives a text/plain fallback for an html-only draft', async () => {
     const makeReq = stubRequests(client, async () => ({

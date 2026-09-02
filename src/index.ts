@@ -517,7 +517,13 @@ const EXCLUDE_MAILBOXES_PARAM_DESC =
 // The mailbox a draft is filed into, shared by nothing else: draft_email's mode:'new' is
 // the only place that picks a save destination without moving anything.
 const DRAFT_MAILBOX_PARAM_DESC =
-  'Mailbox to SAVE the draft into (optional, defaults to Drafts). Does not set From or recipients. ' + MAILBOX_REF_FORMS;
+  'Mailbox to SAVE the draft into (optional, defaults to the Drafts folder, resolved by its drafts ' +
+  'role — an account with no such mailbox is refused rather than guessed at by name). Does not set ' +
+  'From or recipients. ' +
+  'NAMING ANYWHERE BUT DRAFTS MAKES THE DRAFT UNSENDABLE UNTIL IT IS MOVED BACK: the draft is filed ' +
+  'into that mailbox and that mailbox only, and send_draft sends only a draft that is in the Drafts ' +
+  'folder, so it will refuse this one until you move it back with move_email. Use this to file a ' +
+  'draft you are parking, not one you are about to send. ' + MAILBOX_REF_FORMS;
 
 const STATS_MAILBOX_PARAM_DESC =
   'Mailbox to report on (optional, defaults to all mailboxes). ' + MAILBOX_REF_FORMS;

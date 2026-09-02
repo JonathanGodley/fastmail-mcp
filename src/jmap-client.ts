@@ -2230,9 +2230,25 @@ export class JmapClient {
     if (email.mailbox) {
       draftMailboxId = resolveMailbox(mailboxes, email.mailbox).id;
     } else {
-      const draftsMailbox = this.findMailboxByRoleOrName(mailboxes, 'drafts', 'draft');
+      // EXACT role, the same question sendDraft asks before it will transmit — the two
+      // ends of this workflow have to agree about which mailbox "Drafts" is, or the create
+      // surface produces a draft the send gate can never accept.
+      //
+      // findMailboxByRoleOrName is what stood here, and its substring name fallback
+      // ('draft') would file the draft into a user mailbox called "Draft notes" on an
+      // account with no drafts role, then report success. That draft is not merely
+      // misfiled: sendDraft refuses it, and no move repairs it, because the folder the
+      // send wants does not exist. Failing loudly at create is the smaller harm, and it is
+      // strictly better in every case — an exactly-spelled role resolves as before, a
+      // differently-cased one now resolves BY ROLE rather than by a lucky name match, and
+      // the only behaviour that changes is the one that produced the dead end.
+      const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
       if (!draftsMailbox) {
-        throw new Error('Could not find Drafts mailbox');
+        throw new Error(
+          'Could not find a Drafts mailbox (no mailbox in this account carries the "drafts" role). ' +
+          'Pass the mailbox parameter to save this draft somewhere explicitly — but note that ' +
+          'send_draft only sends a draft that is in the Drafts folder.',
+        );
       }
       draftMailboxId = draftsMailbox.id;
     }
