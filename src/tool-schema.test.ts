@@ -155,6 +155,19 @@ describe('lenient-boolean convention', () => {
         // `!!name`, `!!(args as any).name` and `!!args?.name`. The negative lookahead
         // keeps `!!raw.hasAttachment` (a property read off a JMAP object that happens to
         // be called `raw`) from matching.
+        //
+        // THIS IS NARROWER THAN IT LOOKS, AND THE GAP IS NOT ABOUT ANY ONE FILE. Only the
+        // `args`-shaped receivers above are matched, so a handler that aliases its arguments
+        // reads green whatever it does with them: `!!a.expandSignature` in
+        // edit-draft-handler.ts is invisible here, and so are `asAttachment` and
+        // includeOriginalAttachments in draft-email-handler.ts, which aliases too and has
+        // been on the list all along. Adding a file to HANDLER_FILES therefore buys less
+        // than it appears to.
+        // Do not widen the pattern to any `!!<identifier>.<name>` to close it: that is
+        // exactly what re-admits the `raw.hasAttachment` false positive, and exempting
+        // `raw` by name would make this a list of blessed identifiers rather than a rule.
+        // The fix is to derive what to look FOR from the schema instead of guessing at the
+        // shape of the read — new machinery, not a longer regex.
         const patterns = [
           new RegExp(`!!\\s*${name}\\b(?![.\\[])`),
           new RegExp(`!!\\s*\\(\\s*args\\s+as\\s+any\\s*\\)\\.${name}\\b`),
