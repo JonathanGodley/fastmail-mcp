@@ -244,6 +244,69 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 1b. The lenient array parameters advertise the string form they accept
+// ---------------------------------------------------------------------------
+//
+// This server coerces a stringified array (coerceStringArray takes a JSON or comma-separated
+// string), but a client validates the ADVERTISED schema first, so a parameter declared
+// `type: 'array'` has its string form rejected before any handler runs — leniency that
+// cannot be exercised. The two halves have to be checked against each other, and only the
+// advertised schema says what a client will see, which is why this reads tools/list off the
+// real process rather than asserting over the source.
+
+describe('edit_draft advertises the stringified-array form its handler accepts', () => {
+  before(() => assertDistIsCurrent());
+
+  // The advertised inputSchema of one tool, from a server started with no FASTMAIL_* setting
+  // beyond the token, so an ambient value cannot be what the assertion sees.
+  async function toolSchema(name: string): Promise<any> {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+    }
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+
+    const client = createClient({ env });
+    try {
+      await client.init();
+      const result: any = await client.list();
+      return result.tools.find((t: any) => t.name === name).inputSchema;
+    } finally {
+      client.close();
+    }
+  }
+
+  // Both parameters run through coerceStringArray in edit-draft-handler.ts, and
+  // edit-draft-handler.test.ts pins that the handler reads `clearFields: 'cc'` and
+  // `removeAttachments: 'blob-9'`. That coverage is what makes the narrow schema a split
+  // rather than a design: the handler's leniency was unreachable through a real call.
+  for (const param of ['clearFields', 'removeAttachments']) {
+    it(`declares ${param} as array-or-string`, async () => {
+      const schema = await toolSchema('edit_draft');
+      const declared = schema.properties[param];
+      assert.ok(
+        Array.isArray(declared.oneOf),
+        `${param} declares ${JSON.stringify(declared.type)} with no string alternative, so a ` +
+          'validating client rejects the stringified form before coerceStringArray runs',
+      );
+      const branches = declared.oneOf.map((b: any) => b.type);
+      assert.deepEqual(branches.slice().sort(), ['array', 'string']);
+    });
+  }
+
+  // The enum is what turns a bad field name into an error naming the nine valid ones. It
+  // lives on the array branch and is the easiest thing to lose to a widening, which is why
+  // it is asserted separately from the branch shape above.
+  it('keeps the clearFields enum on the array branch', async () => {
+    const schema = await toolSchema('edit_draft');
+    const arrayBranch = schema.properties.clearFields.oneOf.find((b: any) => b.type === 'array');
+    assert.deepEqual(arrayBranch.items.enum, [
+      'to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId',
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 1c. FASTMAIL_TIMEZONE refuses to start the real process (#157 amendment)
 // ---------------------------------------------------------------------------
 //

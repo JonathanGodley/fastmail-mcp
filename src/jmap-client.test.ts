@@ -1695,6 +1695,76 @@ describe('updateDraft', () => {
     assert.ok(result.notes?.some((n) => /textBody carries none/.test(n)));
   });
 
+  // The same shape with NOTHING to expand. The other part carried the token, but the identity
+  // has no sign-off, so the token was removed and no sign-off landed anywhere — saying it
+  // "expanded in htmlBody" beside the note saying it could not would be a receipt for an
+  // event that did not happen, and the two notes would contradict each other.
+  it('does not claim the other part expanded when nothing expanded there', async () => {
+    mock.method(client, 'getIdentities', async () => [{ ...SIGNING_IDENTITY, textSignature: '', htmlSignature: '' }]);
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}', textBody: 'Thanks.',
+      expandSignature: true, bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.ok(result.notes?.some((n) => /has no signature configured/.test(n)));
+    assert.equal(result.notes?.some((n) => /expanded in htmlBody/.test(n)), false);
+  });
+
+  // -- a {{…}} spelling that expands to nothing --
+  // edit_draft stores the body as written, so a mistyped token ships with its braces showing.
+  // The compose tool reports these on its receipt; this tool said nothing, on the tool where
+  // the caller is likelier to mistype one because it is hand-editing an existing body.
+
+  it('reports a {{…}} spelling this edit introduced, which is not a token and ships as written', async () => {
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const body = '<p>Thanks.</p><p>{{sig}}</p>';
+    const result = await client.updateDraft('draft-1', { htmlBody: body, bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, body);
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note naming {{sig}}, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /stored as written/);
+  });
+
+  // The flag expands {{signature}} and nothing else, so a mistyped spelling ships from a
+  // flagged edit exactly as it does from an unflagged one and is reported on both.
+  it('reports the spelling on a flagged edit too', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{signature}}</p><p>{{sig}}</p>',
+      expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.ok(result.notes?.some((n) => /\{\{sig\}\}/.test(n)));
+  });
+
+  // COUNT-RISE, the rule that keeps this from nagging. A spelling already in the stored body
+  // is text someone else wrote, handed back on every edit; reporting it would fire on every
+  // edit of that draft forever and say nothing about what this call did.
+  it('says nothing about a spelling the stored body already carried', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>hi</p><blockquote><p>{{sig}}</p></blockquote>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>hi, edited</p><blockquote><p>{{sig}}</p></blockquote>',
+      bodyHash: hashOf(planted),
+    });
+    assert.equal(result.notes?.some((n) => /\{\{sig\}\}/.test(n)) ?? false, false);
+  });
+
+  // ...and a SECOND copy of that same spelling is this edit's doing, so the count rise is
+  // reported even though the spelling itself is not new.
+  it('reports a second copy of a spelling the stored body carried once', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>{{sig}}</p>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p><p>{{sig}}</p>', bodyHash: hashOf(planted),
+    });
+    assert.ok(result.notes?.some((n) => /\{\{sig\}\}/.test(n)));
+  });
+
   it('refuses the flag when the body carries no {{signature}} to expand', async () => {
     mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
     const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);

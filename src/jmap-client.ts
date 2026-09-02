@@ -18,10 +18,11 @@ import {
 } from './inline-images.js';
 import type { CidPart, UnionPart } from './inline-images.js';
 import {
-  InlineNoteLedger, emitInlineNotes,
+  InlineNoteLedger, describePartNames, emitInlineNotes,
   noteBodyHashUnreadable, noteDiscardedTextPart, noteEmbedMissingAfterSave, noteEmbedUnconfirmed,
   noteEscapedTokenShips, noteHistoryTokenStored, noteNearMissToken, noteSentWithEmbedded,
   noteSignatureExpandedInOnePart, noteSignatureTokenStored, noteTokenEmpty,
+  noteUnexpandedSpelling,
   rejectBrokenDraft, rejectCidCollisionInCall, rejectCidCollisionOnDraft,
   rejectClearAttachmentsDanglingRefs, rejectDanglingCidRef, rejectExpandSignatureWithoutToken,
   rejectInterleavedTextParts, rejectMissingBodyHash,
@@ -2736,6 +2737,11 @@ export class JmapClient {
       // merge rule the guards used, on the pre-expansion bodies — the expansion cannot make
       // a supplied html part appear or disappear.
       const messageShipsHtml = !isBlank(mergeHtml(callerWrittenHtml));
+      // Which parts a sign-off ACTUALLY landed in. Carrying the token is not the same thing:
+      // a flagged edit whose identity has no signature removes the token and puts nothing
+      // there. Recorded per part and read after the loop, because the note about one part is
+      // a statement about the OTHER one, which the loop may not have reached yet.
+      const signatureLanded = new Map<'textBody' | 'htmlBody', boolean>();
       for (const p of writtenParts) {
         const blocks: BodyBlocks = {
           signature: signatureBlock(editSignature, p.part, messageShipsHtml),
@@ -2752,15 +2758,27 @@ export class JmapClient {
         const expansion = expandBodyTokens(p.authored, blocks);
         if (p.part === 'htmlBody') workingHtml = expansion.text;
         else workingText = expansion.text;
+        signatureLanded.set(
+          p.part,
+          expansion.tokens.some((site) => site.name === 'signature' && site.expanded),
+        );
         for (const site of expansion.tokens) {
           if (site.name === 'signature' && !site.expanded && site.cause) {
             tokenNotes.push(noteTokenEmpty('signature', p.part, site.cause));
           }
         }
-        if (scans.get(p.part)!.counts.signature === 0 && writtenParts.length > 1) {
-          const other = writtenParts.find((q) => q.part !== p.part)!;
-          tokenNotes.push(noteSignatureExpandedInOnePart(other.part, p.part));
-        }
+      }
+
+      // The uneven-sign-off note, once every part's outcome is known. It says a sign-off
+      // landed in one part and not the other, so it is owed only when one ACTUALLY landed:
+      // on an identity with no signature the token is removed from the part that carried it
+      // and nothing is written anywhere, and the note would then sit beside the note saying
+      // exactly that and contradict it.
+      for (const p of writtenParts) {
+        if (scans.get(p.part)!.counts.signature !== 0 || writtenParts.length <= 1) continue;
+        const other = writtenParts.find((q) => q.part !== p.part)!;
+        if (!signatureLanded.get(other.part)) continue;
+        tokenNotes.push(noteSignatureExpandedInOnePart(other.part, p.part));
       }
     }
 
@@ -2774,9 +2792,33 @@ export class JmapClient {
     // STORED BYTES — a count over a string this server already holds, which is not
     // recognition of anything in the body — so a spelling the handed-back body already
     // carried is stored in silence and only one the caller has just added is reported.
+    // Every `{{…}}` this call ADDED that names no token, gathered across both written parts
+    // and reported as one sentence. Gathered rather than pushed per site because the count is
+    // unbounded by anything the caller had to mean, and one note per site would bury the
+    // others; the compose receipt bounds the same list the same way.
+    const addedSpellings: string[] = [];
+    let addedSpellingTotal = 0;
+
     for (const p of writtenParts) {
       const scan = scans.get(p.part)!;
       const storedScan = scanBodyTokens(p.stored ?? '');
+
+      // Runs on flagged and unflagged edits alike: the flag expands `{{signature}}` and
+      // nothing else, so a spelling that names no token ships either way. Count-rise against
+      // the stored bytes, the same budget the escape pass below uses — a spelling already in
+      // the body handed back is text someone else wrote, and reporting it would fire on
+      // every edit of that draft forever while saying nothing about what this call did.
+      const storedSpellings = new Map<string, number>();
+      for (const s of storedScan.otherSpellings) {
+        storedSpellings.set(s.text, (storedSpellings.get(s.text) ?? 0) + 1);
+      }
+      for (const s of scan.otherSpellings) {
+        const budget = storedSpellings.get(s.text) ?? 0;
+        if (budget > 0) { storedSpellings.set(s.text, budget - 1); continue; }
+        addedSpellingTotal++;
+        if (!addedSpellings.includes(s.text)) addedSpellings.push(s.text);
+      }
+
       if (!expandSignature) {
         const added = scan.counts.signature - storedScan.counts.signature;
         if (added > 0) tokenNotes.push(noteSignatureTokenStored(p.part, added));
@@ -2799,6 +2841,10 @@ export class JmapClient {
         namedMisses.add(miss.text);
         tokenNotes.push(noteNearMissToken(miss.text, miss.name));
       }
+    }
+
+    if (addedSpellingTotal > 0) {
+      tokenNotes.push(noteUnexpandedSpelling(describePartNames(addedSpellings, addedSpellingTotal), addedSpellingTotal));
     }
 
     // An html-alone edit drops the draft's stored text part and derives a fresh fallback

@@ -589,6 +589,27 @@ export function noteNearMissToken(text: string, token: string): string {
   );
 }
 
+/**
+ * A `{{…}}` spelling this edit introduced that names no token and ships with its braces.
+ *
+ * ONE note for the whole call, not one per site: `listed` is already bounded and quoted by
+ * `describePartNames`, so a body sprinkled with them produces a sentence rather than a wall.
+ * `total` is how many sites there really are, which is not how many are named.
+ *
+ * Separate from `noteNearMissToken` because the two know different things. A near-miss is a
+ * misspelling OF a token, so that note can say which token was meant; this one cannot —
+ * `{{sig}}` matches no token name — so it lists the three instead.
+ */
+export function noteUnexpandedSpelling(listed: string, total: number): string {
+  const one = total === 1;
+  return (
+    `The body you supplied carries ${total} {{…}} spelling${one ? '' : 's'} this edit added ` +
+    `(${listed}). ${one ? 'It names' : 'They name'} no token, so ${one ? 'it was' : 'they were'} ` +
+    'stored as written and will ship with the braces showing. The tokens are exactly ' +
+    '{{signature}}, {{quote}} and {{forward}}.'
+  );
+}
+
 /** An escaped spelling this edit is about to ship with its backslash intact. */
 export function noteEscapedTokenShips(text: string): string {
   return (
