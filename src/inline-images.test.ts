@@ -427,7 +427,10 @@ describe('isRecreatableCid', () => {
   });
 
   it('excludes whitespace of every kind', () => {
-    for (const value of ['a b', 'a\tb', 'a b', ' a', 'a ']) {
+    // `\u00A0` is a non-breaking space, written as the escape because a raw one is
+    // indistinguishable from the plain space in the entry beside it: the two cases would read
+    // as a duplicate, and a re-encode could turn one into the other unnoticed.
+    for (const value of ['a b', 'a\tb', 'a\u00A0b', ' a', 'a ']) {
       assert.equal(isRecreatableCid(value), false, value);
     }
   });
@@ -435,11 +438,13 @@ describe('isRecreatableCid', () => {
   it('excludes a line break, the header-injection shape', () => {
     // The printable-ASCII range is what blocks this: a carriage return in a Content-ID is
     // stored as a genuine extra header and is invisible in a normal read of the message.
+    // Every control character here is an escape, DEL included: a raw one is invisible in the
+    // source too, so an editor or a re-encode could drop it and leave the case testing 'ab'.
     assert.equal(isRecreatableCid('a\r\nX-Injected: yes'), false);
     assert.equal(isRecreatableCid('a\rb'), false);
     assert.equal(isRecreatableCid('a\nb'), false);
     assert.equal(isRecreatableCid('a\x00b'), false);
-    assert.equal(isRecreatableCid('ab'), false);
+    assert.equal(isRecreatableCid('a\x7Fb'), false);
   });
 
   it('excludes non-ASCII', () => {

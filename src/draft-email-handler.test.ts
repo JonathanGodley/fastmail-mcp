@@ -1447,8 +1447,11 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
   });
 
   it('treats a supplied-but-blank or null subject as omitted, on a reply and a forward', async () => {
-    // '​' is a zero-width space: visually empty, so it reads as blank like the rest.
-    for (const blank of ['', '   ', '​', null]) {
+    // '\u200B' is a zero-width space: visually empty, so it reads as blank like the rest.
+    // Written as the escape rather than the character, in the fixture and in this line
+    // alike: a raw one is invisible, so the explanation would be as unreadable as the thing
+    // it explains, and a normalisation pass could eat either with nothing to see.
+    for (const blank of ['', '   ', '\u200B', null]) {
       const reply = plainClient();
       await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x', subject: blank }, reply.client);
       assert.equal(reply.calls.draft.subject, 'Re: Project update', `reply, subject ${JSON.stringify(blank)}`);
