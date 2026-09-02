@@ -3225,6 +3225,46 @@ describe('updateDraft replyTo', () => {
 
 const WILDCARD_IDENTITY = { id: 'id-wild', name: 'Jonathan Godley', email: '*@example.com', mayDelete: true };
 
+// A wildcard identity's `email` is a pattern, not an address, so it must never become the
+// value of a `from` header (#160). The refusal is on the WRITE: it fires only on the arm that
+// would put the identity's own `email` into the message, and never on an arm that writes a
+// concrete address.
+describe('createDraft wildcard identity', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getIdentities', async () => [WILDCARD_IDENTITY]);
+  });
+
+  it('refuses to write the wildcard pattern when the caller passes no from (#160)', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-wild' } } }, 'createDraft']],
+    });
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Hi' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /\*@example\.com/);
+        assert.match(err.message, /from/);
+        return true;
+      },
+    );
+  });
+
+  it('still composes on an explicit concrete from that matches the wildcard (#160)', async () => {
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-wild' } } }, 'createDraft']],
+    }));
+
+    await client.createDraft({ subject: 'Hi', from: 'work@example.com' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
+  });
+});
+
 describe('sendDraft wildcard identity', () => {
   let client: JmapClient;
 
@@ -3234,6 +3274,36 @@ describe('sendDraft wildcard identity', () => {
     mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, SENT_MAILBOX]);
   });
 
+  // A draft whose STORED from is itself the pattern. `matchesIdentity` opens with a plain
+  // equality test, so `*@example.com` matches the wildcard identity `*@example.com` and sails
+  // through the "does not match any sending identity" refusal below — the pattern would reach
+  // the wire. This is the heal path for a draft written before the write guards existed (#160).
+  it('refuses to transmit a draft whose stored from is a wildcard pattern (#160)', async () => {
+    const patternDraft = { ...SENDABLE_DRAFT, from: [{ email: '*@example.com' }] };
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [patternDraft] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /\*@example\.com/);
+        assert.match(err.message, /from/);
+        return true;
+      },
+    );
+
+    // Nothing was submitted: the only request made was the draft read.
+    assert.equal(makeReq.mock.calls.length, 1);
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][0], 'Email/get');
+  });
+
+  // Also the #160 pin for this site: a concrete stored address still sends normally with a
+  // wildcard identity present — the refusal is on the stored value, not on the identity.
   it('matches wildcard identity when draft has concrete from address', async () => {
     const wildcardDraft = { ...SENDABLE_DRAFT, from: [{ email: 'work@example.com' }] };
     const makeReq = stubRequests(client, async (req: any) => {
@@ -3288,6 +3358,64 @@ describe('updateDraft wildcard identity', () => {
 
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
+  });
+
+  // The one updateDraft arm that would write the identity's own email: no `from` in the
+  // edit, and no `from` stored on the draft either (#160).
+  it('refuses to write the wildcard pattern when neither the edit nor the draft carries a from (#160)', async () => {
+    const fromlessDraft = { ...EXISTING_DRAFT, from: undefined };
+    stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [fromlessDraft] }, 'getEmail']] };
+      }
+      return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+    });
+
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'Changed subject only' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /\*@example\.com/);
+        assert.match(err.message, /from/);
+        return true;
+      },
+    );
+  });
+
+  // The fix the refusal above names: an explicit concrete `from` supplies the address the
+  // draft lacks, so the same edit goes through (#160).
+  it('edits a from-less draft when the caller supplies a concrete from (#160)', async () => {
+    const fromlessDraft = { ...EXISTING_DRAFT, from: undefined };
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [fromlessDraft] }, 'getEmail']] };
+      }
+      return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+    });
+
+    await client.updateDraft('draft-1', { from: 'work@example.com' });
+
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
+  });
+
+  // The sharpest case the refusal must NOT touch: the stored address matches no verified
+  // identity at all, so selectedIdentity has fallen back to the wildcard default — and the
+  // address written is still the draft's own concrete one. Refusing here would make a draft
+  // composed under a wildcard identity permanently uneditable (#160).
+  it('edits a draft whose stored from matches no identity, with only a wildcard identity present (#160)', async () => {
+    const foreignFrom = { ...EXISTING_DRAFT, from: [{ email: 'someone@other.test' }] };
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [foreignFrom] }, 'getEmail']] };
+      }
+      return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+    });
+
+    await client.updateDraft('draft-1', { subject: 'Changed subject only' });
+
+    const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: null, email: 'someone@other.test' }]);
   });
 
   // Both fixtures above are nameless drafts, so they stayed green under the old precedence

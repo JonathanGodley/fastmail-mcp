@@ -701,6 +701,40 @@ function htmlCidRefs(html: string | null | undefined): string[] {
   return sanitizeQuoteHtml(html, { mode: 'collect' }).refs;
 }
 
+// ---- Wildcard identities are not addresses (#160) ----
+//
+// A Fastmail account can hold a WILDCARD identity, whose `email` is the pattern `*@domain`
+// rather than an address. `matchesIdentity` (src/identity.ts) honours such an identity for
+// any concrete address in that domain, which is what makes it useful: a message sent from
+// `work@example.com` is verified, and signed, by the `*@example.com` identity.
+//
+// What the pattern is NOT is a value to put in a `from` header. `*@example.com` happens to
+// be a syntactically valid RFC 5321 addr-spec, so nothing downstream rejects it — it is
+// refused here because Fastmail issues these identities as patterns, and a recipient would
+// see a literal asterisk as the sender.
+//
+// The refusals therefore sit on a pattern BEING USED AS AN ADDRESS, in exactly the three
+// places that can happen: the two arms that write a selected identity's own `email` into a
+// new or recreated draft (createDraft, updateDraft), and the send path, which reads an
+// address a draft already stores. Every other arm writes an address the caller or the stored
+// draft supplied, and those stay untouched even when the identity behind them is a wildcard.
+//
+// src/identity.ts is deliberately unchanged. `selectIdentity` there mirrors WHICH identity a
+// compose call resolves to, and a wildcard identity is still the correct selection — it
+// carries the signature a message from a concrete address in its domain must be signed with.
+// These guards are about USING that identity's email as a header VALUE, a step
+// `selectIdentity` never performs, so the two rules still agree on every question either one
+// answers.
+function isWildcardIdentityEmail(email: unknown): boolean {
+  return typeof email === 'string' && email.startsWith('*@');
+}
+
+/** The refusal both draft-WRITE paths raise, so they read as one rule. */
+function rejectWildcardIdentityFrom(identityEmail: string): string {
+  return `The default sending identity is the wildcard pattern "${describeUntrusted(identityEmail)}", not an address. ` +
+    'Pass from with a concrete address in that domain.';
+}
+
 function partCid(part: any): string {
   return typeof part?.cid === 'string' ? part.cid : '';
 }
@@ -2292,6 +2326,14 @@ export class JmapClient {
       selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
     }
 
+    // The second arm below writes the selected identity's OWN `email` into `from`, so a
+    // wildcard default would write the pattern (#160 — see isWildcardIdentityEmail). An
+    // explicit `email.from` is a concrete address, already checked against the identities
+    // above, and is written unchanged whichever identity verified it.
+    if (!email.from && isWildcardIdentityEmail(selectedIdentity.email)) {
+      throw new InvalidInputError(rejectWildcardIdentityFrom(selectedIdentity.email));
+    }
+
     const fromEmail = email.from || selectedIdentity.email;
 
     // Resolve the save target. Fetch the mailbox list unconditionally now (a name/role
@@ -2663,6 +2705,16 @@ export class JmapClient {
     // `from` and the stored one matches no verified identity, selectedIdentity falls back to
     // the account default while the stored address is what gets written. Signing from that
     // fallback would put one identity's sign-off under another identity's address.
+    //
+    // Only the THIRD arm writes the identity's own `email`, so only it can write a wildcard
+    // pattern (#160 — see isWildcardIdentityEmail). The other two write concrete addresses
+    // and are left alone: a stored `from` is written even when it matches no verified
+    // identity and `selectedIdentity` has fallen back to the wildcard default, because
+    // refusing there would make a draft legitimately composed under a wildcard identity —
+    // by this server before this guard, or by the Fastmail client — permanently uneditable.
+    if (!updates.from && !existingEmail.from?.[0]?.email && isWildcardIdentityEmail(selectedIdentity.email)) {
+      throw new InvalidInputError(rejectWildcardIdentityFrom(selectedIdentity.email));
+    }
     const writtenFromAddress: string | undefined =
       updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email;
     const signingIdentity = writtenFromAddress
@@ -3636,6 +3688,26 @@ export class JmapClient {
     const fromEmail = email.from?.[0]?.email;
     if (!fromEmail) {
       throw new InvalidInputError('Draft has no from address. Edit the draft to set a from address before sending.');
+    }
+
+    // A stored `from` that is itself a wildcard PATTERN never goes on the wire (#160). Note
+    // `*@example.com` is a syntactically valid RFC 5321 addr-spec: it is refused not on
+    // syntax but because Fastmail issues `*@` identities as patterns, and a pattern has been
+    // written into a message header.
+    //
+    // This is the HEAL path. createDraft and updateDraft refuse to WRITE a pattern; this
+    // refuses to SEND one already stored — by this server before those guards existed, or by
+    // another client. The identity check just below does not cover it: matchesIdentity opens
+    // with a plain equality test, so a stored `*@example.com` matches the `*@example.com`
+    // identity it came from and passes as verified.
+    //
+    // Placed with the other checks that need no round trip, ahead of getIdentities and well
+    // ahead of the submission, which is the only irreversible step here.
+    if (isWildcardIdentityEmail(fromEmail)) {
+      throw new InvalidInputError(
+        `This draft's from address is the wildcard pattern "${describeUntrusted(fromEmail)}", not an address. ` +
+        'Edit the draft with an explicit from before sending.',
+      );
     }
 
     const identities = await this.getIdentities();
