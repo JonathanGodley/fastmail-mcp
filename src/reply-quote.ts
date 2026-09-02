@@ -215,6 +215,11 @@ const QUOTE_OPEN = '<blockquote type="cite" style="margin:0 0 0 .8ex;border-left
 // where the caller wrote `{{signature}}` and nowhere else — so there is nothing for a marker
 // to protect, and writing an identifying class into every signed body bought a reader
 // nothing while claiming the block was ours to manage.
+//
+// The class name survives in this comment and in docs/email-bodies.md, and nowhere else. It
+// is named here BECAUSE the mechanism is gone: this is the record of why no body carries a
+// marker, which a search for the last occurrences of the name would otherwise delete as the
+// leftovers of the thing it describes.
 
 /**
  * The signature as an html block. Undefined when the identity has none.

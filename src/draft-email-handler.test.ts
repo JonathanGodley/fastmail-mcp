@@ -1786,12 +1786,17 @@ describe("draft_email — mode:'forward' subject, recipients and the recorded so
     assert.equal(absent.calls.draft.sourceEmailId, 'o1');
 
     // Fastmail rejects or mangles each of these on Email/set, so they are treated as absent.
+    // The control character is written as the escape `\x07` rather than as the byte itself:
+    // a raw BEL is invisible on the page, so an editor, a normalisation pass or a re-encode
+    // could eat it and leave this case asserting nothing, with nothing to see in the diff.
+    // The non-ASCII entry in the same list stays a literal character — it is valid UTF-8, visible,
+    // and it survives every UTF-8-correct tool, so escaping it would only cost the reader.
     for (const value of [
       'has space@example.com',
       'angle<bracket@example.com',
       'angle>bracket@example.com',
       'non-ascii-käse@example.com',
-      'ctrlbell@example.com',
+      'ctrl\x07bell@example.com',
       'x'.repeat(999) + '@example.com',
       '',
     ]) {

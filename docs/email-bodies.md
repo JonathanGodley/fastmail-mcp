@@ -257,6 +257,10 @@ and claimed the block was this server's to manage, which it no longer is.
 That also retires a residual worth naming as closed rather than leaving readers to look for
 it: the marker was a `class`, so it existed only in HTML, and a signature on a plain-text
 draft was invisible to every rule keyed on it. The asymmetry is gone because the rules are.
+The class name is written out above, here and in the comment at the top of the signature
+section of `src/reply-quote.ts`, and nowhere else in the tree — those two are the record of
+its removal, not survivals of it, so a sweep hunting the name's last occurrences should read
+them and stop rather than clear them.
 
 **On `edit_draft` the trigger is a flag, never the token's presence.** Part of a body handed
 back to that tool was authored by the original message's sender, so any in-band trigger — a
