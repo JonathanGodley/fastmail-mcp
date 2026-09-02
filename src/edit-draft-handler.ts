@@ -30,9 +30,8 @@ export interface EditDraftClient {
       clearFields?: string[];
       attachments?: AttachmentPart[];
       removeAttachments?: string[];
-      originalEmailId?: string;
-      noQuote?: boolean;
-      appendSignature?: boolean;
+      expandSignature?: boolean;
+      bodyHash?: string;
     },
     options?: { attachmentsEnabled?: boolean },
   ): Promise<UpdateDraftResult>;
@@ -63,29 +62,32 @@ export async function editDraft(
   allowBlobAttach: boolean,
 ): Promise<UpdateDraftResult> {
   const a = args ?? {};
-  const { emailId, from, subject, textBody, htmlBody, originalEmailId } = a;
+  const { emailId, from, subject, textBody, htmlBody, bodyHash } = a;
   const { to, cc, bcc, replyTo } = coerceRecipients(a);
   const clearFields = coerceStringArray(a.clearFields);
   const removeAttachments = coerceStringArray(a.removeAttachments);
-  // Coerce to a real boolean (lenient clients send "true"/"false"); a non-bool like
-  // "garbage" yields undefined, never true — so it can never silently drop the quote.
-  const noQuote = coerceBool(a.noQuote) === true;
-  // Passed through as a TRI-STATE, unlike noQuote above: undefined is a distinct answer here
-  // (preserve whatever the draft already carries), so it must not be flattened to false. A
-  // non-bool like "garbage" coerces to undefined and therefore preserves — the same
-  // fail-safe direction, since the destructive reading is the one that drops a signature.
-  const appendSignature = coerceBool(a.appendSignature);
+  // Coerce to a real boolean (lenient clients send "true"/"false"). The explicit
+  // `=== true` is the fail-closed direction: a non-bool like "garbage" coerces to
+  // undefined and therefore reads as FALSE, which stores the body exactly as written.
+  // Guessing the other way would have this server rewrite a body nobody asked it to
+  // touch.
+  //
+  // READ OFF `args?.` RATHER THAN THE `a` ALIAS, and leave it that way. The lenient-boolean
+  // guard in tool-schema.test.ts matches `!!expandSignature` and `!!args?.expandSignature`
+  // but not `!!a.expandSignature`, so tidying this back to the alias would put any future
+  // bare-`!!` read of it outside the only check that looks for one.
+  const expandSignature = coerceBool(args?.expandSignature) === true;
   if (!emailId) {
     throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
   }
 
   // Ordering belt only: updateDraft runs the same check and remains the authoritative
   // seam for this tool. Running it here too means a malformed body is refused before
-  // any attachment is read off disk and pushed to the blob store, matching the other
-  // four compose paths (the guard is a pure, idempotent input check). It stays ABOVE the
-  // attachment coercion, as the compose paths have it: a body defect is the caller's
-  // first problem to fix, and reporting an attachments key ahead of it would make this
-  // tool disagree with create_draft/reply_email/forward_email on identical input.
+  // any attachment is read off disk and pushed to the blob store, matching the compose
+  // path (the guard is a pure, idempotent input check). It stays ABOVE the attachment
+  // coercion, as draft_email has it: a body defect is the caller's first problem to fix,
+  // and reporting an attachments key ahead of it would make this tool disagree with
+  // draft_email on identical input.
   assertBodyInputs(a);
 
   const specs = coerceAttachments(a.attachments);
@@ -105,9 +107,12 @@ export async function editDraft(
     clearFields,
     attachments,
     removeAttachments,
-    originalEmailId,
-    noQuote,
-    appendSignature,
+    expandSignature,
+    // Passed through UNVALIDATED on purpose: updateDraft is where the hash is required
+    // and checked, so it keeps its place in that method's refusal order — behind the
+    // body-shape coupling guards, which name the shape the caller has to fix before a
+    // stale-read complaint is any use to it. A presence check here would jump the queue.
+    bodyHash,
   }, {
     attachmentsEnabled: !!attachDir || allowBlobAttach,
   });

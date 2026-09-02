@@ -9,6 +9,7 @@
 // then got removed must be reported once, as removed, not twice. The ledger below is what
 // makes that true by construction.
 import { describePart, isAuthorableCid } from './inline-images.js';
+import type { BlockUnavailableCause } from './body-tokens.js';
 
 // ---------------------------------------------------------------------------
 // Sizes
@@ -40,11 +41,33 @@ export function formatSize(bytes: number): string {
 const MAX_NAMED_PARTS = 3;
 
 /**
- * Render a list of part names as quoted data, summarizing beyond the display cap.
+ * Render a list of names as quoted data, summarizing beyond the display cap.
  *
- * `total` is how many parts the sentence is really about, which is not always how many
- * names there are: a part can arrive with no filename at all, and the summary has to
- * account for it rather than quietly shrinking the total the reader was given.
+ * `total` is how many members the sentence is really about, which is not always how many
+ * names there are: a member that arrives with NO NAME AT ALL is still counted, rather than
+ * quietly shrinking the total the reader was given. (Distinct from the display cap below,
+ * which hides names that DO exist.)
+ *
+ * `rest` is `total - shownCount` and `shownCount` comes from `names`, so the subtraction
+ * only means anything when both are counting the same members. THERE ARE TWO CONTRACTS
+ * HERE, because "a member" is a different thing on either side. Find yours before you pass
+ * anything:
+ *
+ *  - FILENAME CALLERS — `noteForwardPooled` and `noteMintedDropped`. A member is a PART, and
+ *    `total` is the part count. Names MAY repeat and must not be collapsed: two forwarded
+ *    parts can genuinely both be called "image001.png", and merging them would report one
+ *    part lost where five were. A part with no filename at all is why `total` is a separate
+ *    argument — it is counted and cannot be named.
+ *  - TOKEN-SPELLING CALLERS — the unexpanded-spelling note in jmap-client.ts's edit path,
+ *    and `buildReceipt` in draft-email-handler.ts. A member is a DISTINCT SPELLING, and
+ *    `total` counts EVERY distinct spelling, the ones past the display cap included. The same
+ *    typo written into two supplied bodies is ONE member here, not two, because it is one
+ *    thing for the caller to fix.
+ *
+ * Mixing them renders wrongly in a way that reads as fact: a per-occurrence total beside a
+ * deduplicated list promises a "…and N more" for members that do not exist, and a
+ * per-occurrence list spends the display cap quoting one member twice while the members it
+ * was meant to summarise go unnamed.
  */
 export function describePartNames(
   names: (string | null | undefined)[],
@@ -105,13 +128,26 @@ export function noteForwardUnresolvedReferences(count: number): string {
   );
 }
 
-/** Media that could not be embedded and rides the forward as a regular attachment. */
-export function noteForwardPooled(count: number, names: (string | null | undefined)[]): string {
+/** The remedy the pooled sentence ends on when the caller names no other one. */
+export const POOLED_REMEDY_RERUN =
+  're-run with asAttachment: true for full fidelity, then delete this draft.';
+
+/**
+ * Media that could not be embedded and rides the forward as a regular attachment.
+ *
+ * The REMEDY is a parameter because it is not the same sentence on every tool. On a tool
+ * where the forward's format is inferred, re-running as .eml is the only lever the caller
+ * has. On one where the caller places the block themselves, the fix is usually to place it
+ * in the html part instead — and telling that caller to "re-run with asAttachment: true"
+ * sends them at a call the token gate would refuse.
+ */
+export function noteForwardPooled(
+  count: number, names: (string | null | undefined)[], remedy: string = POOLED_REMEDY_RERUN,
+): string {
   const listed = describePartNames(names, count);
   return (
     `${count} media part(s) could not be embedded and were attached as regular attachments` +
-    `${listed ? `: ${listed}` : ''} — re-run with asAttachment: true for full fidelity, ` +
-    'then delete this draft.'
+    `${listed ? `: ${listed}` : ''} — ${remedy}`
   );
 }
 
@@ -211,11 +247,6 @@ export function noteDraftEmbeds(count: number, bytes: number): string {
   return `This draft embeds ${count} image(s) (${formatSize(bytes)}).`;
 }
 
-/** An attachment wipe on an edit that also rebuilt the quote. */
-export function noteClearedAndReEmbedded(cleared: number, reEmbedded: number): string {
-  return `Cleared ${cleared} attachment(s); the kept quote re-embedded ${reEmbedded} image(s).`;
-}
-
 /** What a sent message actually carried, reported back on the send. */
 export function noteSentWithEmbedded(count: number, bytes: number): string {
   return `Sent with ${count} embedded image(s) (${formatSize(bytes)}).`;
@@ -296,13 +327,30 @@ export function rejectDanglingCidRef(value: string, availability: AttachmentAvai
     : `${lead} Remove the <img> reference, or recreate the draft without it.`;
 }
 
-/** The body references one of this server's own identifiers, which callers must not author. */
-export function rejectReservedCidRef(value: string): string {
+/**
+ * The body authors a NEW reference to one of this server's own identifiers.
+ *
+ * Scoped to a reference naming no part the draft already carries: a minted identifier is
+ * durable now — it survives an edit for as long as the body keeps referencing it — so an
+ * image-bearing draft read back and handed straight back is full of these references, and
+ * refusing them all would refuse the first edit of every such draft. What stays refused is
+ * AUTHORING one, which names an image the draft does not have.
+ */
+export function rejectReservedCidRef(value: string, surface: 'edit' | 'compose' = 'edit'): string {
+  // The DIAGNOSIS differs by surface; the remedy does not. On an edit there is a draft to
+  // check the reference against, and what is wrong is that it carries no part under that
+  // identifier. On a compose there is no draft at all, so the same clause would describe a
+  // thing that does not exist — what is wrong there is simply that the body authored an
+  // identifier this server assigns itself.
+  const diagnosis = surface === 'edit'
+    ? 'and this draft carries no part under it'
+    : 'and this server assigns them itself — a body never authors one';
   return (
     `htmlBody references cid "${describePart(value)}", a server-managed identifier for ` +
-    'quoted images. These identifiers are reused across edits but regenerated when the ' +
-    'quote is dropped and re-added — never reference them directly. To embed your own ' +
-    'image, add an attachments item with a cid of your choosing.'
+    `quoted images, ${diagnosis}. A minted identifier survives ` +
+    'an edit for as long as your body keeps referencing it, and a reference you drop takes ' +
+    'the part with it — but never author a NEW one. To embed your own image, add an ' +
+    'attachments item with a cid of your choosing.'
   );
 }
 
@@ -312,20 +360,6 @@ export function rejectRemovalDanglingRef(value: string): string {
     `removeAttachments would remove an image the draft's body still references ` +
     `(cid "${describePart(value)}"). Remove the <img> reference in the same call, ` +
     'or keep the attachment.'
-  );
-}
-
-/**
- * A removal targets an image the kept quote supplies.
- *
- * The recovery names a body write on purpose: dropping the quote on an edit that writes no
- * body rewrites nothing, so suggesting the flag alone would steer straight into a second
- * refusal.
- */
-export function rejectRemovalOfQuoteCarriedPart(): string {
-  return (
-    'That attachment is embedded by the kept quote; the rebuilt quote would re-embed it. ' +
-    'Use noQuote with a replacement body to drop the quote and its images instead.'
   );
 }
 
@@ -375,21 +409,22 @@ export function rejectCidCollisionInCall(count: number, value: string): string {
 // the recreated draft will re-embed the images — with attachments disabled it cannot, and
 // the advice has to stay true either way.
 const RECREATE_RECIPE_WITH_THREADING =
-  'Recreate it — with reply_email or forward_email if it is a reply or forward ' +
-  '(read the draft\'s In-Reply-To or X-Forwarded-Message-Id via get_email, then find the ' +
-  'original with search_emails using the bare id, without angle brackets), otherwise ' +
-  'create_draft — then delete this one.';
+  'Recreate it with draft_email — mode:\'reply\' or mode:\'forward\' if it is a reply or ' +
+  'forward (read the draft\'s In-Reply-To or X-Forwarded-Message-Id via get_email, then ' +
+  'find the original with search_emails using the bare id, without angle brackets), ' +
+  'otherwise mode:\'new\' — then delete this one.';
 
 /** A stored identifier this server cannot reproduce faithfully on a recreated draft. */
 export function rejectUnrecreatableCid(value: string): string {
   return (
     'This draft has an attachment whose embedded-image identifier ' +
     `(Content-ID "${describePart(value)}") this server cannot safely re-create. ` +
-    'This server does not edit drafts in that state. Recreate it — with reply_email or ' +
-    'forward_email if it is a reply or forward (that preserves the conversation threading; ' +
-    "read the draft's In-Reply-To or X-Forwarded-Message-Id via get_email, then find the " +
-    'original with search_emails using the bare id, without angle brackets), otherwise ' +
-    'create_draft — then delete this one; or edit it in the mail client that created it.'
+    'This server does not edit drafts in that state. Recreate it with draft_email — ' +
+    "mode:'reply' or mode:'forward' if it is a reply or forward (that preserves the " +
+    "conversation threading; read the draft's In-Reply-To or X-Forwarded-Message-Id via " +
+    'get_email, then find the original with search_emails using the bare id, without angle ' +
+    "brackets), otherwise mode:'new' — then delete this one; or edit it in the mail client " +
+    'that created it.'
   );
 }
 
@@ -425,13 +460,13 @@ export function rejectBrokenDraft(
 }
 
 // The short recreate recipe the body-shape refusals end with. It names the threading tools
-// for the same reason the longer recipe does — recreating a reply or forward with the plain
-// compose tool splits the conversation — but it needs no header-reading detour: these
+// for the same reason the longer recipe does — recreating a reply or forward as a new
+// message splits the conversation — but it needs no header-reading detour: these
 // refusals fire on the draft's own body shape, which the caller can see in get_email.
 // Unterminated on purpose: one caller ends the sentence, the other appends a pointer first.
 const RECREATE_RECIPE =
-  'Recreate it (reply_email/forward_email for replies and forwards, create_draft ' +
-  'otherwise), then delete this one';
+  'Recreate it with draft_email (mode:\'reply\'/mode:\'forward\' for replies and ' +
+  'forwards, mode:\'new\' otherwise), then delete this one';
 
 /**
  * The draft's body carries a part the recreate cannot reproduce.
@@ -464,6 +499,211 @@ export function rejectInterleavedTextParts(): string {
   return (
     "This draft's body interleaves multiple text parts of the same type (a layout this " +
     `server cannot preserve). ${RECREATE_RECIPE} (see issue #85).`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Body tokens, and the read a body edit has to prove
+// ---------------------------------------------------------------------------
+//
+// These sentences serve BOTH compose and edit, which is why they live here rather than in
+// either handler. The two tools treat the same body very differently — draft_email refuses
+// what would ship wrong, because the body is wholly the caller's; edit_draft NOTES it,
+// because the body may be a foreign one handed back and a refusal keyed on its text could
+// be planted by the original's author and would then recur on every edit — so the split
+// between a refusal and a note below is deliberate and is not a wording choice.
+
+/** Why a block had nothing to put at a token's position, as one clause of a sentence. */
+export const CAUSE_SENTENCE: Record<BlockUnavailableCause, string> = {
+  'no-signature': 'the sending identity has no signature configured',
+  'no-text-form': 'the signature has no plain-text form (it is images only)',
+  'nothing-quotable': 'the original has nothing quotable in any format',
+  'nothing-quotable-in-this-form': 'the original has nothing quotable in this part\'s format',
+};
+
+/** A token that was placed and had nothing to expand to. Per part, never merged. */
+export function noteTokenEmpty(token: string, part: string, cause: BlockUnavailableCause): string {
+  return (
+    `{{${token}}} in ${part} was removed: ${CAUSE_SENTENCE[cause]}. ` +
+    'The rest of that part was stored as written.'
+  );
+}
+
+/**
+ * A body edit arrived with no proof that the caller read the body it replaces.
+ *
+ * The sentence explains WHY rather than just naming the parameter, because the reason is
+ * the whole of the rule: this tool stores what it is handed and preserves nothing, so the
+ * hash is the only thing standing between a stale read and a silent overwrite.
+ */
+export function rejectMissingBodyHash(): string {
+  return (
+    'This edit writes the draft\'s body, so it needs bodyHash — proof you have read the body ' +
+    'you are replacing. edit_draft stores the body you supply byte for byte and keeps nothing ' +
+    'of what is there, so an edit written from a stale read overwrites whatever changed in ' +
+    'between. Read the draft with get_email (fields: ["bodyText", "bodyHtml", "bodyHash"]) and ' +
+    'pass the bodyHash it returns. Metadata-only edits need none.'
+  );
+}
+
+/** The hash was current when it was issued and is not current now. */
+export function rejectStaleBodyHash(): string {
+  return (
+    'The bodyHash you passed is not this draft\'s current one, so what it covers changed ' +
+    'after the read that issued it: either the body itself (the web UI, another client, or ' +
+    'an edit you have already made), or the set of parts it is taken over — removing an ' +
+    'embedded image changes that without writing a body. ' +
+    'Nothing was written. Read the draft again with get_email, re-apply your changes to the ' +
+    'body it returns, and pass the bodyHash from that read.'
+  );
+}
+
+/** expandSignature was passed with nothing for it to expand. */
+export function rejectExpandSignatureWithoutToken(wroteAnyBody: boolean): string {
+  return wroteAnyBody
+    ? 'expandSignature: true was passed but the body you supplied carries no {{signature}}, so ' +
+      'there is nothing to expand. Place {{signature}} where the sign-off goes — above any ' +
+      'quoted or forwarded history — or drop the flag and the body is stored as written.'
+    : 'expandSignature: true was passed but this edit writes no body, so there is nothing to ' +
+      'expand it in. Supply textBody or htmlBody carrying {{signature}}, or drop the flag.';
+}
+
+/**
+ * A flagged edit's written part carries more than one `{{signature}}`.
+ *
+ * Refused rather than noted, and that is the one text-keyed refusal on this tool: passing
+ * the flag is the caller claiming the written part as its own, so the compose-style refusal
+ * applies. The escape is named because the extra token is usually one the caller did not
+ * write — a literal `{{signature}}` inside the quoted original it handed back.
+ */
+export function rejectRepeatedSignatureToken(part: string, count: number): string {
+  return (
+    `${part} carries ${count} {{signature}} tokens, and expandSignature would expand every one ` +
+    'of them. Keep the one where the sign-off goes and write the others as \\{{signature}} to ' +
+    'store them as text. A body you read back from a reply can carry one inside the quoted ' +
+    'original; that is the one to escape, and the escape is needed in each expandSignature call.'
+  );
+}
+
+/** The written part carries a `{{signature}}` the stored part did not, and no flag came with it. */
+export function noteSignatureTokenStored(part: string, count: number): string {
+  const plural = count === 1 ? '' : 's';
+  return (
+    `${part} carries ${count} {{signature}} token${plural} the stored body did not, and this ` +
+    'edit stored the body as written. Pass expandSignature: true to expand it.'
+  );
+}
+
+/** `{{quote}}` / `{{forward}}` reached the edit path, where neither expands. */
+export function noteHistoryTokenStored(tokens: string[]): string {
+  const named = tokens.map((t) => `{{${t}}}`).join(' and ');
+  const verb = tokens.length > 1 ? 'were' : 'was';
+  return (
+    `${named} ${verb} stored as written: those tokens expand on draft_email only, where the ` +
+    'block is built from the message being replied to or forwarded. edit_draft stores whatever ' +
+    'history you hand back to it.'
+  );
+}
+
+/** A spelling close enough to a token to be worth naming, stored as the caller wrote it. */
+export function noteNearMissToken(text: string, token: string): string {
+  return (
+    `The body you supplied carries "${describePart(text)}", which is not a token and was stored ` +
+    `as written. The token is exactly {{${token}}}.`
+  );
+}
+
+/**
+ * A `{{…}}` spelling this edit introduced that names no token and ships with its braces.
+ *
+ * ONE note for the whole call, not one per site: `listed` is already bounded and quoted by
+ * `describePartNames`, so a body sprinkled with them produces a sentence rather than a wall.
+ * `total` is how many DISTINCT spellings there are, not how many sites carried them and not
+ * how many are named — the token-spelling contract on `describePartNames`.
+ *
+ * Separate from `noteNearMissToken` because the two know different things. A near-miss is a
+ * misspelling OF a token, so that note can say which token was meant; this one cannot —
+ * `{{sig}}` matches no token name — so it lists the three instead.
+ */
+export function noteUnexpandedSpelling(listed: string, total: number): string {
+  const one = total === 1;
+  return (
+    `The body you supplied carries ${total} {{…}} spelling${one ? '' : 's'} this edit added ` +
+    `(${listed}). ${one ? 'It names' : 'They name'} no token, so ${one ? 'it was' : 'they were'} ` +
+    'stored as written and will ship with the braces showing. The tokens are exactly ' +
+    '{{signature}}, {{quote}} and {{forward}}.'
+  );
+}
+
+/** An escaped spelling this edit is about to ship with its backslash intact. */
+export function noteEscapedTokenShips(text: string): string {
+  return (
+    `The body you supplied carries "${describePart(text)}", an escaped token spelling the stored ` +
+    'body did not. An edit without expandSignature stores the body byte for byte, so the ' +
+    'backslash ships with it; the escape is only needed in an expandSignature call.'
+  );
+}
+
+/** One supplied part took the sign-off and the other carried no token to take it. */
+export function noteSignatureExpandedInOnePart(withToken: string, without: string): string {
+  return (
+    `{{signature}} expanded in ${withToken}; ${without} carries none, so it was stored without a ` +
+    'sign-off and a recipient reading that alternative sees none.'
+  );
+}
+
+/** An html-alone edit drops whatever plain-text part the draft was storing. */
+export function noteDiscardedTextPart(): string {
+  return (
+    'This edit wrote htmlBody alone, so the draft\'s stored plain-text part was discarded and a ' +
+    'fresh fallback derived from your html. If that part was hand-written, supply it as textBody ' +
+    'alongside htmlBody.'
+  );
+}
+
+// Why this edit returns no bodyHash. Each names the caller's way out, because the
+// alternative — omitting the field and saying nothing — is the silent-drop failure: a
+// caller that got a hash from the last edit and none from this one has no way to tell a
+// withheld hash from a forgotten one.
+//
+// The way out is a re-read for every case EXCEPT the ones a re-read cannot answer either —
+// a stored body the server flagged, or one carrying a part no read returns — where the
+// remedy is to recreate the draft. A note that sends the caller to a read that cannot
+// answer is a non-terminating remedy, which is no remedy at all. Those cases are NOT
+// enumerated here: the two below are the reasons this edit path owns, and everything about
+// the saved body is asked of `resolveDraftBodyHash` and reported through
+// `noteBodyHashAfterReRead`, so one rule decides it for both tools.
+//
+// A hash is returned ONLY over a re-read of the stored parts after the write, never over
+// the bytes the call sent: a store may normalise what it stores, and a hash over the sent
+// bytes would refuse the next edit as stale on a draft nobody had touched.
+
+export const NOTE_BODY_HASH_AFTER_EXPANSION =
+  'this edit expanded {{signature}}, so the stored body carries a block you have not read. ' +
+  'Read the draft with get_email to get a bodyHash for the next body edit.';
+
+export const NOTE_BODY_HASH_DERIVED_PART =
+  'this edit left the draft\'s plain-text part standing as its body, and that part is derived ' +
+  'from html rather than written by you. Read the draft with get_email to get a bodyHash for ' +
+  'the next body edit.';
+
+/**
+ * A withheld-hash reason decided by the READ side, said on the edit surface.
+ *
+ * `edit_draft` does not judge the saved body itself: it asks `resolveDraftBodyHash` about
+ * the draft it just re-read, so the two tools cannot disagree about the same stored bytes.
+ * Those reasons are written for a caller that performed a read, and the caller of
+ * `edit_draft` performed none — without this prefix, "this read did not return it whole"
+ * names a read the caller never issued.
+ */
+export function noteBodyHashAfterReRead(reason: string): string {
+  return `the saved draft was re-read to compute one, but ${reason}`;
+}
+
+export function noteBodyHashUnreadable(reason: string): string {
+  return (
+    `re-reading the saved draft to compute one failed (${reason}). Read the draft with ` +
+    'get_email to get a bodyHash.'
   );
 }
 
@@ -630,11 +870,13 @@ export interface InlineNoteContext {
   keepNoun?: string;
   /** False when the caller asked for the original's attachments to be left behind. */
   includeOriginalAttachments?: boolean;
-  /** Set when this call wiped the draft's attachments and rebuilt the quote. */
-  clearedAttachmentCount?: number;
-  reEmbeddedCount?: number;
   /** Set when the body contained reference-shaped text this server could not act on. */
   unparsableCidText?: boolean;
+  /**
+   * How to end the pooled sentence, for a tool whose caller has a better lever than
+   * re-running as .eml. Defaults to POOLED_REMEDY_RERUN. See noteForwardPooled.
+   */
+  pooledRemedy?: string;
 }
 
 /**
@@ -681,7 +923,9 @@ export function emitInlineNotes(tally: NoteTally, context: InlineNoteContext): s
     );
   }
 
-  if (tally.pooled > 0) notes.push(noteForwardPooled(tally.pooled, tally.pooledNames));
+  if (tally.pooled > 0) {
+    notes.push(noteForwardPooled(tally.pooled, tally.pooledNames, context.pooledRemedy));
+  }
 
   if (tally.notIncluded > 0) {
     notes.push(
@@ -701,12 +945,6 @@ export function emitInlineNotes(tally: NoteTally, context: InlineNoteContext): s
 
   if (tally.droppedUnsupportedImages > 0) {
     notes.push(noteDroppedUnsupportedImages(tally.droppedUnsupportedImages));
-  }
-
-  if (context.clearedAttachmentCount) {
-    notes.push(
-      noteClearedAndReEmbedded(context.clearedAttachmentCount, context.reEmbeddedCount ?? 0),
-    );
   }
 
   if (context.unparsableCidText) notes.push(noteUnparsableCidText());

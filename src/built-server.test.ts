@@ -147,10 +147,13 @@ describe('every error path reaching tool output is redacted', () => {
 
   it('redacts the top-level PathAccessError branch', async () => {
     await registerCredential();
-    // create_draft has no local try/catch, so an attachment path rejection travels
-    // to the CallTool catch and is mapped there.
-    const message = await callAndCaptureError('create_draft', {
-      subject: 'redaction probe',
+    // edit_draft has no local try/catch, so an attachment path rejection travels
+    // to the CallTool catch and is mapped there. It is the vehicle because its
+    // attachment upload runs before it touches the network: draft_email resolves the
+    // sending identity first, so with an unusable token that call dies on the session
+    // fetch and never reaches the path guard this test is about.
+    const message = await callAndCaptureError('edit_draft', {
+      emailId: 'e1',
       attachments: [{ path: outsidePath }],
     });
     assertRedacted(message);
@@ -184,7 +187,7 @@ describe('every error path reaching tool output is redacted', () => {
 describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
   before(() => assertDistIsCurrent());
 
-  // The advertised attachments description of create_draft, from a server started with the
+  // The advertised attachments description of draft_email, from a server started with the
   // given flag value. Every FASTMAIL_* name is stripped from the child environment first, so
   // an ambient setting cannot be what the assertion sees.
   async function attachmentsClause(value: string | undefined): Promise<string> {
@@ -199,7 +202,7 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
     try {
       await client.init();
       const result: any = await client.list();
-      const tool = result.tools.find((t: any) => t.name === 'create_draft');
+      const tool = result.tools.find((t: any) => t.name === 'draft_email');
       return String(tool.inputSchema.properties.attachments.description);
     } finally {
       client.close();
@@ -237,6 +240,92 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
         `value ${JSON.stringify(value)} unexpectedly enabled the capability`,
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. The lenient array parameters advertise the string form they accept
+// ---------------------------------------------------------------------------
+//
+// This server coerces a stringified array (coerceStringArray takes a JSON or comma-separated
+// string), but a client validates the ADVERTISED schema first, so a parameter declared
+// `type: 'array'` has its string form rejected before any handler runs — leniency that
+// cannot be exercised. The two halves have to be checked against each other, and only the
+// advertised schema says what a client will see, which is why this reads tools/list off the
+// real process rather than asserting over the source.
+
+describe('edit_draft advertises the stringified-array form its handler accepts', () => {
+  before(() => assertDistIsCurrent());
+
+  // The advertised inputSchema of one tool, from a server started with no FASTMAIL_* setting
+  // beyond the token, so an ambient value cannot be what the assertion sees.
+  async function toolSchema(name: string): Promise<any> {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+    }
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+
+    const client = createClient({ env });
+    try {
+      await client.init();
+      const result: any = await client.list();
+      return result.tools.find((t: any) => t.name === name).inputSchema;
+    } finally {
+      client.close();
+    }
+  }
+
+  // What a client can SEND is the fact under test, not how the schema spells it. A
+  // `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, and
+  // the declarations read here have been written both ways, so the assertions read the
+  // types the declaration admits and the constraint on its array elements, whichever shape
+  // carries them. Pinning one spelling would fail a rewrite into the other while the
+  // client-visible behaviour was unchanged.
+  function admittedTypes(declared: any): string[] {
+    const out = new Set<string>();
+    const add = (t: any) => {
+      for (const one of Array.isArray(t) ? t : (t ? [t] : [])) out.add(one);
+    };
+    add(declared.type);
+    for (const branch of declared.oneOf ?? declared.anyOf ?? []) add(branch.type);
+    return [...out].sort();
+  }
+
+  // The element constraint sits in `items`, which applies to array instances only — so it
+  // reads the same off a type union (property-level `items`) as off the array branch of a
+  // `oneOf`.
+  function arrayItems(declared: any): any {
+    if (declared.items) return declared.items;
+    const branch = (declared.oneOf ?? declared.anyOf ?? []).find((b: any) => b.type === 'array');
+    return branch?.items;
+  }
+
+  // Both parameters run through coerceStringArray in edit-draft-handler.ts, and
+  // edit-draft-handler.test.ts pins that the handler reads `clearFields: 'cc'` and
+  // `removeAttachments: 'blob-9'`.
+  for (const param of ['clearFields', 'removeAttachments']) {
+    it(`declares ${param} as array-or-string`, async () => {
+      const schema = await toolSchema('edit_draft');
+      const declared = schema.properties[param];
+      assert.deepEqual(
+        admittedTypes(declared),
+        ['array', 'string'],
+        `${param} declares ${JSON.stringify(declared.type ?? declared.oneOf ?? declared.anyOf)} ` +
+          'with no string alternative, so a validating client rejects the stringified form ' +
+          'before coerceStringArray runs',
+      );
+    });
+  }
+
+  // The enum is what turns a bad field name into an error naming the nine valid ones. It
+  // constrains the array elements and is the easiest thing to lose to a widening, which is
+  // why it is asserted separately from the admitted types above.
+  it('keeps the clearFields enum on the array elements', async () => {
+    const schema = await toolSchema('edit_draft');
+    assert.deepEqual(arrayItems(schema.properties.clearFields).enum, [
+      'to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId',
+    ]);
   });
 });
 

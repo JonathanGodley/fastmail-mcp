@@ -58,7 +58,7 @@ pair is never split, and a Windows device name gains an underscore on its stem (
 it matches device names, so `CON .png` is defused too. A name that sanitizes to nothing
 becomes `attachment`, so the value is never an empty path segment.
 
-This is deliberately stricter than `forward_email`'s `sanitizeEmlFilename`, which applies
+This is deliberately stricter than the `asAttachment` forward's `sanitizeEmlFilename`, which applies
 a similar character treatment but lets device names through: that helper always appends
 `.eml`, which neutralizes them, and its output is a name a *remote* recipient's client
 saves. This one is a name a local client may write, so the inherited posture does not
@@ -125,7 +125,7 @@ without reading a byte off disk, so no path guard is in play at all:
   image the body it reproduces displays. There is no ceiling on how many, and none on how
   large: the parts are re-referenced by `blobId` rather than uploaded, so
   `MAX_ATTACHMENT_BYTES` — which caps only local reads — never applies (same footing as the
-  `forward_email` carry sizes above). Fastmail's own message-size limit is the only bound,
+  forward carry sizes above). Fastmail's own message-size limit is the only bound,
   and an oversized send fails loudly server-side. Not capped because a cap would silently
   mangle the one thing the feature exists to preserve, and because the caller already chose
   to quote or forward that specific message.
@@ -133,9 +133,11 @@ without reading a byte off disk, so no path guard is in play at all:
   and the body displays is carried into the composed message. SVG is a scriptable document
   format, so this re-sends attacker-authored markup under the user's own From — the quote
   sanitizer governs the *quoting* html this server writes, never the bytes of a part it
-  carries by reference. It is worth stating that reply carry makes this **default-on for
-  every reply to a message that displays an SVG**: no flag turns it on, and only
-  `quoteOriginal: false` turns it off. Accepted because the receiving client, not this
+  carries by reference. It is worth stating what that means for a reply: **every reply whose
+  body places `{{quote}}` carries the SVG**, and nothing about placing the token asks whether
+  the original displays one. Choosing to quote a message is choosing to carry every image
+  that message displays; the only way not to is not to write the token. Accepted because the
+  receiving client, not this
   server, decides whether to render an SVG attachment, and because singling the type out
   would be a content filter this server does not otherwise attempt.
 
@@ -209,7 +211,7 @@ rather than pointing the caller at a parameter that cannot work on this server. 
 being open restores the repair, because either source can supply the image — so the flag
 threaded into the refusal builders is the combination, not the attach directory alone.
 
-### forward_email attachment postures (#30)
+### Forward attachment postures (#30)
 
 - **Carried attachment names are relayed faithfully.** The original's attachment names are
   attacker-chosen, and the inline forward re-sends them verbatim under the user's From.
@@ -292,7 +294,7 @@ boundary the source crosses, not by which tool is calling:
   decides where the API token may be sent, which is not a capability to put behind a checkbox.
 
 **What `emailId` + `attachmentId` actually adds is provenance loss, not reach.** The reach
-is already available with the gate closed: `forward_email` produces a draft carrying the
+is already available with the gate closed: a forward produces a draft carrying the
 original's attachments, and `send_draft` transmits it — so a caller that can forward can
 already put another message's attachment in front of an arbitrary recipient. What changes is
 what the recipient and the account can see afterwards. A forward carries the visible
@@ -305,7 +307,7 @@ not "no new capability".
 to get wrong.** The whole-message `blobId` is in `EMAIL_PROPERTIES_COMPACT`: it is emitted in
 the DEFAULT output of every list, search and get, with no `raw` needed. So with the gate open,
 a caller holding ordinary read output can attach a **complete raw RFC822 message** — the same
-bytes `forward_email`'s `asAttachment` mode produces, with the full transport-header and
+bytes an `asAttachment` forward produces, with the full transport-header and
 Sent-copy-`Bcc` exposure documented above — to a fresh draft that carries none of a forward's
 provenance. It is not true that blobIds only come from attachment reads.
 
@@ -338,8 +340,8 @@ over-match (a real `partId` of `"2"`) and miss.
 
 ## `originalEmailId` is an in-account read-and-embed primitive (accepted residual)
 
-`reply_email`, `forward_email`, and `edit_draft`'s keep path all take an `originalEmailId`
-and fetch that message's body and embed it (sanitized — see the quote sanitizer below) into
+`draft_email`'s reply and forward modes take an `originalEmailId`, fetch that message's body
+and embed it (sanitized — see the quote sanitizer below) into
 a draft the caller may then send. Stated plainly: this lets a caller move one message's
 content into outgoing mail addressed to arbitrary recipients under the user's own `From`. A
 prompt-injected agent could use it to exfiltrate the content of any message in the account by
@@ -352,8 +354,9 @@ from the account's own blob store, so a reply can put binary content in front of
 that the caller never attached and this server never read off disk. `FASTMAIL_ATTACH_DIR`
 does not gate it: that opt-in governs reading local files, and nothing local is read here.
 This is a genuine widening of the primitive above and is called out as its own line rather
-than folded into it. The escape is `quoteOriginal: false`, which drops the whole quote; both
-`reply_email`'s description and its `quoteOriginal` parameter say so.
+than folded into it. The escape is simply not writing `{{quote}}`: nothing is quoted that the
+caller did not place, so a reply whose body omits the token carries no part of the original
+at all, images included.
 
 The id is **trusted and unscoped within the connected account** — it may name *any* message,
 deliberately, so a caller can correct a draft built against the wrong original. It is **never
@@ -361,8 +364,10 @@ re-resolved from the draft's `In-Reply-To`** (an attacker-controllable header), 
 confused-deputy / quote-spoofing surface from that direction, and there is **no cross-account
 reach** (the fetch is scoped to `session.accountId`).
 
-This introduces **no new capability class** versus the already-shipped `reply_email`, which
-quotes any `originalEmailId` the same way; `edit_draft`'s keep path just reuses it. The
+The primitive has exactly **one entry point**, and that is a narrowing worth recording: an
+earlier `edit_draft` could also take an `originalEmailId`, to rebuild a quote it judged an
+edit had dropped. It no longer fetches anything — it stores the body it is handed — so
+`draft_email` is now the only tool that reads one message into another. The
 embedded html is run through the quote sanitizer (script/style/handlers/unscoped attributes
 stripped, schemes pinned) — a safety floor for re-sending under the user's `From`, not a
 privacy control. Documented here as an accepted residual: the mitigation for misuse is the
@@ -376,7 +381,7 @@ when the body it is reproducing references it with a `cid:` image reference AND 
 declares itself `image/*`. That is the entire filter. The content type is *sender-declared*
 metadata, exactly like a filename: nothing is sniffed, nothing verifies the declaration, and
 a sender who labels an arbitrary file `image/png` gets it carried. There is no size bound and
-no count bound (see the residual above for why). On `forward_email` the carry happens even
+no count bound (see the residual above for why). In forward mode the carry happens even
 with `includeOriginalAttachments: false`, because a referenced image is body content rather
 than an attached file, and a forward missing it reproduces a message with a hole in it —
 short of not forwarding the message at all, there is no way to reproduce the body and leave
@@ -431,7 +436,7 @@ Accepted on the same footing as the read-and-embed primitive.
 
 ### `X-Fastmail-MCP-Source-Id` is transmitted to recipients (accepted, deliberate)
 
-The exact-instance header that `reply_email`/`forward_email` stamp on a draft is **not
+The exact-instance header that `draft_email` stamps on a reply or forward draft is **not
 stripped at send** — EmailSubmission transmits stored headers verbatim (probed live
 2026-08-14; see `docs/conventions.md` "Draft provenance" for the probe facts), so the
 recipient's copy carries it. This was considered and consciously declined rather than

@@ -58,6 +58,8 @@ const EMAIL_FIELD_MAP: Record<keyof SimplifiedEmail, true> = {
   quotedBytesStripped: true,
   quotedStripSkipped: true,
   bodyTextUnavailable: true,
+  bodyHash: true,
+  bodyHashWithheld: true,
   blobId: true,
   size: true,
   keywords: true,
@@ -174,6 +176,22 @@ export function wantsHtmlBody(fields: ReadonlySet<string> | undefined): boolean 
  */
 const BODY_TEXT_SIGNALS = ['quotedBytesStripped', 'quotedStripSkipped', 'bodyTextUnavailable'] as const;
 
+// The draft body hash rides along with EITHER body field, for the same reason and by the
+// same rule. It is what edit_draft demands before it will write a body, so a projection
+// that returns the body but drops the hash hands back exactly the thing the caller needs
+// and silently withholds the token that makes it usable. Both halves ride: the hash when
+// one was issued, and bodyHashWithheld when it was not, because "no hash, and here is
+// why" is the promised answer and silence is the failure mode the ride-along exists to
+// prevent.
+//
+// The two are also each other's ride-along, which is what makes `fields: ["bodyHash"]`
+// answerable. That projection names no body field, so the read cannot have shown the body
+// and no hash can be issued honestly — but the answer is the withheld REASON, which names
+// the fields to add, not an empty object. Dropping it would leave the minimal projection a
+// caller reaches for after reading "pass the bodyHash get_email returns" returning `{}`:
+// the silent-drop failure, through exactly the door this ride-along was built to shut.
+const BODY_HASH_SIGNALS = ['bodyHash', 'bodyHashWithheld'] as const;
+
 export function projectEmail(
   email: SimplifiedEmail,
   fields: ReadonlySet<string> | undefined,
@@ -196,6 +214,14 @@ export function projectEmail(
 
   if (fields.has('bodyText')) {
     for (const signal of BODY_TEXT_SIGNALS) {
+      if (!fields.has(signal) && Object.prototype.hasOwnProperty.call(source, signal)) {
+        projected[signal] = source[signal];
+      }
+    }
+  }
+
+  if (fields.has('bodyText') || fields.has('bodyHtml') || BODY_HASH_SIGNALS.some((s) => fields.has(s))) {
+    for (const signal of BODY_HASH_SIGNALS) {
       if (!fields.has(signal) && Object.prototype.hasOwnProperty.call(source, signal)) {
         projected[signal] = source[signal];
       }

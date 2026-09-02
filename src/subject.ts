@@ -1,15 +1,15 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { isBlank } from './body-format.js';
 
-// The `subject` override shared by the two compose paths that derive a subject from an
-// original message: reply_email ("Re: <original>") and forward_email ("Fwd: <original>").
-// One implementation so the two can't drift — they took the same parameter with different
-// postures before (#68).
+// The `subject` override shared by the two draft_email modes that derive a subject from an
+// original message: mode:'reply' ("Re: <original>") and mode:'forward' ("Fwd: <original>").
+// One implementation so the two can't drift — as separate tools they took the same
+// parameter with different postures (#68).
 //
 // Lives in its own module rather than in coerce.ts because the blank test must be the
 // shared, zero-width-aware isBlank predicate: coerce.ts imports no local module today, and
 // reaching for isBlank from there would make body-format.ts and coerce.ts import each
-// other. Both handlers already import this kind of small focused helper.
+// other. The compose handler already imports this kind of small focused helper.
 
 // Validate the optional `subject` override, returning it, or undefined meaning "fall back
 // to the tool's derived default". omittedHint names that default in the reject message, so

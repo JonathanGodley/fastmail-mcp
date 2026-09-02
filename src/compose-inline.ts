@@ -1,11 +1,12 @@
-// The embedded-image (cid:) checks and reporting shared by the three compose tools —
-// create_draft, reply_email and forward_email (#13).
+// The embedded-image (cid:) checks and reporting for the compose path — draft_email, in
+// all three of its modes (#13).
 //
-// Shared rather than written per tool because the three have to agree. All of them let a
-// caller author `<img src="cid:...">` against a file in the same call, all of them have to
-// refuse the same mismatches with the same words, and all of them have to say afterwards
-// whether the file was actually embedded or merely attached — which is the one outcome the
-// caller cannot see from an email id. A copy per tool would drift on all three counts.
+// Its own module rather than inline in the handler because the modes have to agree. Each of
+// them lets a caller author `<img src="cid:...">` against a file in the same call, each has
+// to refuse the same mismatches with the same words, and each has to say afterwards whether
+// the file was actually embedded or merely attached — which is the one outcome the caller
+// cannot see from an email id. Extracting them also keeps the checks testable apart from
+// the orchestration that calls them.
 //
 // Everything here is pure except the confirmation read, which takes the read as an injected
 // function so the compose paths stay unit-testable with a mock client.
@@ -131,9 +132,14 @@ export function planAuthoredInlineImages(input: AuthoredInlineInput): AuthoredIn
   const preciseRefs = sanitizeQuoteHtml(html, { mode: 'collect' }).refs;
   for (const ref of preciseRefs) {
     // Identifiers of the server's own shape are refused outright rather than treated as
-    // dangling: they are regenerated whenever a quote is dropped and re-added, so a message
-    // that references one directly is broken on the next edit even if it works today.
-    if (isReservedCid(ref)) throw new InvalidInputError(rejectReservedCidRef(ref));
+    // dangling, and on THIS surface the reason is not durability. A minted identifier is
+    // durable — it survives an edit for as long as the body keeps referencing it, which is
+    // what lets an image-bearing draft be read and handed straight back. What cannot happen
+    // is a body claiming one in advance: this server assigns them when it carries an image
+    // out of a quoted or forwarded original, and a compose call has no earlier message to
+    // have carried anything out of, so a reference of that shape was authored by the caller
+    // and names nothing that can ever exist.
+    if (isReservedCid(ref)) throw new InvalidInputError(rejectReservedCidRef(ref, 'compose'));
     if (suppliedCids.has(ref)) continue;
     throw new InvalidInputError(
       input.surface === 'note'

@@ -23,12 +23,13 @@ export interface SimplifiedEmail {
   inReplyTo?: string[];
   isReply?: boolean;
   // The forwarded original's Message-ID (from X-Forwarded-Message-Id, which
-  // forward_email records on both inline and asAttachment forward drafts). VERBOSE-tier:
+  // draft_email records on both inline and asAttachment forward drafts). VERBOSE-tier:
   // present on get_email/verbose reads; list items show forward-ness via
   // isForwarded instead.
   forwardedMessageId?: string[];
   // The JMAP id of the exact stored copy a reply/forward draft was composed from
-  // (from X-Fastmail-MCP-Source-Id, recorded by reply_email/forward_email). This is
+  // (from X-Fastmail-MCP-Source-Id, recorded by draft_email's reply and forward modes).
+  // This is
   // the copy send_draft will mark answered/forwarded, so it's inspectable pre-send.
   // VERBOSE-tier like forwardedMessageId; absent on drafts made by other clients.
   sourceEmailId?: string;
@@ -60,6 +61,21 @@ export interface SimplifiedEmail {
   // return (an HTML-only message; thread reads deliberately never carry HTML). Never
   // present without includeBodies.
   bodyTextUnavailable?: true;
+  // The lost-update token edit_draft requires before it will write or clear this draft's
+  // body: proof that the body being replaced is the one the caller read. Issued only by
+  // get_email, only on a draft, and only when the read returned every body part whole —
+  // exactly one of the two fields is present in that case, never neither.
+  //
+  // Set on the READ path (get_email attaches it after simplification), not by
+  // simplifyEmail, because whether a hash can be issued depends on what the READ asked
+  // for: a truncated part, a body field the caller projected away, or a stripQuoted body
+  // all make a hash of what get_email returned a statement about something other than the
+  // stored draft.
+  bodyHash?: string;
+  // Why no hash came back, in a sentence naming the read that would issue one. Never
+  // silence: a draft read with no hash and no reason is indistinguishable from a
+  // non-draft, and the caller would have no way to find out which it was looking at.
+  bodyHashWithheld?: string;
   blobId?: string;
   size?: number;
   keywords?: Record<string, boolean>;

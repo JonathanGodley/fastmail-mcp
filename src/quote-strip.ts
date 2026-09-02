@@ -6,12 +6,11 @@ import { InvalidInputError } from './coerce.js';
 // deeper quote depths, so the quoted tail dominates the tokens while the new information
 // per message stays constant.
 //
-// This is a different job from the marker checks in reply-quote.ts, which is why it lives
-// in its own module: hasQuoteMarker/hasTextQuoteMarker recognise OUR OWN emitted quote on a
-// draft we are about to edit, and only decide whether a guard fires. Here the input is
-// whatever a FOREIGN client produced, and a match DELETES text from the output — so the
-// rules below are deliberately narrower and every match must be one of a small set of
-// conventional, machine-emitted shapes.
+// This is a different job from anything in reply-quote.ts, which is why it lives in its
+// own module: that module WRITES our own quote (buildQuoteBlocks) and so knows exactly what
+// shape it emitted. Here the input is whatever a FOREIGN client produced, and a match
+// DELETES text from the output — so the rules below are deliberately narrower and every
+// match must be one of a small set of conventional, machine-emitted shapes.
 //
 // Posture: recognise confidently or not at all. When no marker matches, the body is
 // returned byte-identical and `quotedBytesStripped` is 0 — an unrecognised shape passes

@@ -1,4 +1,4 @@
-// Authoring live smoke: create_draft with a cid-bearing attachment + html
+// Authoring live smoke: draft_email mode:'new' with a cid-bearing attachment + html
 // referencing it → embed note + isInline read-back; lenient cid spellings;
 // text-only degrade; dangling-ref and bad-cid rejects (JSON-RPC InvalidParams);
 // [image] text derivation for a cid-image-only body. Writes its fixture PNG to
@@ -21,7 +21,7 @@ const trash = [];
 
 try {
   // 1. Embed: html references the cid → inline part, embed note
-  let r = await c.call('create_draft', { to: SELF, subject: 'author probe embed', htmlBody: '<p>logo:</p><img src="cid:logo" alt="green square"><p>end</p>', attachments: [{ path: 'probe-author.png', cid: 'logo' }] });
+  let r = await c.call('draft_email', { mode: 'new', to: SELF, subject: 'author probe embed', htmlBody: '<p>logo:</p><img src="cid:logo" alt="green square"><p>end</p>', attachments: [{ path: 'probe-author.png', cid: 'logo' }] });
   check('embed create succeeded', !r.isError, text(r).slice(0, 250));
   check('embed note emitted', /This draft embeds 1 image/.test(text(r)), text(r).split('\n').filter(l => /image/i.test(l)).join(' | '));
   let id = idOf(text(r));
@@ -31,19 +31,19 @@ try {
   check('read-back: isInline + cid', att?.isInline === true && att?.cid === 'logo', JSON.stringify(att ?? null));
 
   // 2. Lenient spelling: <cid:x> coerces (one <> strip first, then one cid: strip)
-  r = await c.call('create_draft', { to: SELF, subject: 'author probe spelling', htmlBody: '<img src="cid:logo2">', attachments: [{ path: 'probe-author.png', cid: '<cid:logo2>' }] });
+  r = await c.call('draft_email', { mode: 'new', to: SELF, subject: 'author probe spelling', htmlBody: '<img src="cid:logo2">', attachments: [{ path: 'probe-author.png', cid: '<cid:logo2>' }] });
   check('lenient <cid:x> spelling accepted + linked', !r.isError && /This draft embeds 1 image/.test(text(r)), text(r).slice(0, 200));
   id = idOf(text(r)); if (id) trash.push(id);
 
   // 3. Degrade: text-only body + cid spec → regular attachment + truthful note
-  r = await c.call('create_draft', { to: SELF, subject: 'author probe degrade', textBody: 'plain only', attachments: [{ path: 'probe-author.png', cid: 'ghost' }] });
+  r = await c.call('draft_email', { mode: 'new', to: SELF, subject: 'author probe degrade', textBody: 'plain only', attachments: [{ path: 'probe-author.png', cid: 'ghost' }] });
   check('text-only degrade succeeded (no server reject)', !r.isError, text(r).slice(0, 250));
   check('degrade note truthful', /became regular attachments \(nothing in the body displays them\)/.test(text(r)), text(r).split('\n').filter(l => /image|attach/i.test(l)).join(' | ').slice(0, 250));
   id = idOf(text(r)); if (id) trash.push(id);
 
   // 4. Reject: dangling ref, before upload (surfaces as JSON-RPC InvalidParams)
   try {
-    r = await c.call('create_draft', { to: SELF, subject: 'author probe dangle', htmlBody: '<img src="cid:missing">', attachments: [{ path: 'probe-author.png' }] });
+    r = await c.call('draft_email', { mode: 'new', to: SELF, subject: 'author probe dangle', htmlBody: '<img src="cid:missing">', attachments: [{ path: 'probe-author.png' }] });
     check('dangling ref rejected', r.isError === true && /references cid "missing"/.test(text(r)), text(r).slice(0, 200));
   } catch (e) {
     check('dangling ref rejected', /references cid \\?"missing\\?" but no attachment supplies it/.test(String(e)), String(e).slice(0, 200));
@@ -51,14 +51,14 @@ try {
 
   // 5. Reject: unusable cid at coerce, with the real item index
   try {
-    r = await c.call('create_draft', { to: SELF, subject: 'author probe badcid', htmlBody: '<p>x</p>', attachments: [{ path: 'probe-author.png', cid: 'has space' }] });
+    r = await c.call('draft_email', { mode: 'new', to: SELF, subject: 'author probe badcid', htmlBody: '<p>x</p>', attachments: [{ path: 'probe-author.png', cid: 'has space' }] });
     check('bad cid rejected with index', r.isError === true && /attachments\[0\]\.cid/.test(text(r)), text(r).slice(0, 200));
   } catch (e) {
     check('bad cid rejected with index', /attachments\[0\]\.cid/.test(String(e)), String(e).slice(0, 200));
   }
 
   // 6. cid-image-only body composes and derives [image] (no html-only reject)
-  r = await c.call('create_draft', { to: SELF, subject: 'author probe imageonly', htmlBody: '<img src="cid:solo">', attachments: [{ path: 'probe-author.png', cid: 'solo' }] });
+  r = await c.call('draft_email', { mode: 'new', to: SELF, subject: 'author probe imageonly', htmlBody: '<img src="cid:solo">', attachments: [{ path: 'probe-author.png', cid: 'solo' }] });
   check('cid-image-only body composable', !r.isError, text(r).slice(0, 250));
   id = idOf(text(r)); if (id) trash.push(id);
   if (id) {

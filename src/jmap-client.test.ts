@@ -2,10 +2,11 @@ import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'os';
 import { resolve, join, basename, sep } from 'path';
-import { JmapClient } from './jmap-client.js';
+import { JmapClient, findBlankBodyPart } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
+import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
 
 // ---------- helpers ----------
@@ -389,6 +390,37 @@ describe('createDraft', () => {
     );
   });
 
+  // The default save target is resolved by EXACT role, the same question send_draft asks
+  // before it will transmit. A substring name match would file the draft into a custom
+  // folder and report success, and the send would then refuse it with no move that repairs
+  // it — a create surface producing a record the send gate can never accept.
+  it('refuses to default-save when no mailbox carries the drafts role, even beside a "Draft notes" folder', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'mb-notes', name: 'Draft notes', role: null },
+    ]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'x' } } }, 'createDraft']],
+    }));
+
+    await assert.rejects(() => client.createDraft({ subject: 'X' }), /drafts.*role/i);
+    // Refused before the write: no draft is left behind in the wrong folder.
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  // Exact but case-INSENSITIVE, so a server spelling the role differently still resolves
+  // by role rather than falling to a name match.
+  it('resolves the drafts role whatever case the server spells it in', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'mb-d', name: 'Entwürfe', role: 'Drafts' },
+    ]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'x' } } }, 'createDraft']],
+    }));
+
+    await client.createDraft({ subject: 'X' });
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].create.draft.mailboxIds['mb-d'], true);
+  });
+
   // 10. HTML body constructed correctly
   it('derives a text/plain fallback for an html-only draft', async () => {
     const makeReq = stubRequests(client, async () => ({
@@ -464,6 +496,18 @@ function mockUpdate(client: JmapClient, fixture: any, mailboxes: any[] = MAILBOX
     }
     return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
   });
+}
+
+/**
+ * The `bodyHash` `get_email` would issue for a draft fixture — the value a caller reads off
+ * that response and passes back to its next body edit.
+ *
+ * Computed through the same two functions the server uses, deliberately: this is the token's
+ * only contract (the same stored body always produces the same string), and a test that
+ * spelled out the hash by hand would be pinning the digest rather than the guard.
+ */
+function hashOf(fixture: any): string {
+  return bodyHash(collectDraftBodyParts(fixture));
 }
 
 // Pull the recreated draft object out of the create (second overall) call.
@@ -797,11 +841,16 @@ describe('updateDraft', () => {
 
   it('still accepts a body that merely contains escaped markup inside real tags', async () => {
     const makeReq = mockUpdate(client, RICH_DRAFT);
-    await client.updateDraft('draft-1', { htmlBody: '<p>Write <code>&lt;p&gt;</code> like this</p>' });
+    await client.updateDraft('draft-1', { htmlBody: '<p>Write <code>&lt;p&gt;</code> like this</p>', bodyHash: hashOf(RICH_DRAFT) });
     assert.equal(draftFromCall(makeReq).bodyValues.html.value, '<p>Write <code>&lt;p&gt;</code> like this</p>');
   });
 
   // ---- one-sided guard + text-fallback regeneration on html edit ----
+  //
+  // Every body edit below carries `bodyHash: hashOf(<the fixture being served>)`, because a
+  // body edit without one is refused outright. The tests that leave it off do so on purpose:
+  // they are the ones pinning which guard speaks first, and the guards above this comment all
+  // beat the hash check.
 
   it('throws when editing textBody alone on a dual-body draft (html is what recipients see)', async () => {
     mockUpdate(client, RICH_DRAFT);
@@ -818,7 +867,7 @@ describe('updateDraft', () => {
 
   it('regenerates the text fallback when htmlBody is edited alone on a dual-body draft', async () => {
     const makeReq = mockUpdate(client, RICH_DRAFT);
-    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' });
+    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>', bodyHash: hashOf(RICH_DRAFT) });
     const draft = draftFromCall(makeReq);
     // The old "The text" is replaced by the fallback regenerated from the NEW html.
     assert.deepEqual(draft.bodyValues, { text: { value: 'NEW' }, html: { value: '<p>NEW</p>' } });
@@ -826,7 +875,7 @@ describe('updateDraft', () => {
 
   it('writes textBody and drops htmlBody when the partner is named in clearFields', async () => {
     const makeReq = mockUpdate(client, RICH_DRAFT);
-    await client.updateDraft('draft-1', { textBody: 'NEW text', clearFields: ['htmlBody'] });
+    await client.updateDraft('draft-1', { textBody: 'NEW text', clearFields: ['htmlBody'], bodyHash: hashOf(RICH_DRAFT) });
     const draft = draftFromCall(makeReq);
     assert.equal(draft.htmlBody, undefined);
     assert.deepEqual(draft.bodyValues, { text: { value: 'NEW text' } });
@@ -834,7 +883,7 @@ describe('updateDraft', () => {
 
   it('updates both bodies when both are supplied (no throw)', async () => {
     const makeReq = mockUpdate(client, RICH_DRAFT);
-    await client.updateDraft('draft-1', { textBody: 'NEW text', htmlBody: '<p>NEW</p>' });
+    await client.updateDraft('draft-1', { textBody: 'NEW text', htmlBody: '<p>NEW</p>', bodyHash: hashOf(RICH_DRAFT) });
     const draft = draftFromCall(makeReq);
     assert.deepEqual(draft.bodyValues, {
       text: { value: 'NEW text' },
@@ -844,7 +893,7 @@ describe('updateDraft', () => {
 
   it('writes textBody on a text-only draft (no partner, stays text-only, no throw)', async () => {
     const makeReq = mockUpdate(client, EXISTING_DRAFT);
-    await client.updateDraft('draft-1', { textBody: 'NEW text' });
+    await client.updateDraft('draft-1', { textBody: 'NEW text', bodyHash: hashOf(EXISTING_DRAFT) });
     const draft = draftFromCall(makeReq);
     assert.equal(draft.htmlBody, undefined);
     assert.deepEqual(draft.bodyValues, { text: { value: 'NEW text' } });
@@ -852,7 +901,7 @@ describe('updateDraft', () => {
 
   it('regenerates the text fallback when htmlBody is edited alone on a text-only draft', async () => {
     const makeReq = mockUpdate(client, EXISTING_DRAFT);
-    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' });
+    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>', bodyHash: hashOf(EXISTING_DRAFT) });
     const draft = draftFromCall(makeReq);
     // The old "Old body" text is replaced by the fallback regenerated from the new html.
     assert.deepEqual(draft.bodyValues, { text: { value: 'NEW' }, html: { value: '<p>NEW</p>' } });
@@ -878,7 +927,7 @@ describe('updateDraft', () => {
 
   it('saves html-only when an edited htmlBody is image-only (degrade gracefully)', async () => {
     const makeReq = mockUpdate(client, EXISTING_DRAFT);
-    await client.updateDraft('draft-1', { htmlBody: '<div><img src="banner.jpg"></div>' });
+    await client.updateDraft('draft-1', { htmlBody: '<div><img src="banner.jpg"></div>', bodyHash: hashOf(EXISTING_DRAFT) });
     const draft = draftFromCall(makeReq);
     assert.equal(draft.textBody, undefined); // no derivable text → no fallback part
     assert.deepEqual(draft.bodyValues, { html: { value: '<div><img src="banner.jpg"></div>' } });
@@ -887,7 +936,7 @@ describe('updateDraft', () => {
   it('rejects an edited htmlBody that has no visible content (no-body)', async () => {
     mockUpdate(client, EXISTING_DRAFT);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p></p>' }),
+      () => client.updateDraft('draft-1', { htmlBody: '<p></p>', bodyHash: hashOf(EXISTING_DRAFT) }),
       (err: Error) => {
         assert.match(err.message, /no readable body/);
         assert.equal(err.name, 'InvalidInputError');
@@ -899,7 +948,7 @@ describe('updateDraft', () => {
   it('rejects clearing the only body (a draft needs a body)', async () => {
     mockUpdate(client, EXISTING_DRAFT); // text-only draft
     await assert.rejects(
-      () => client.updateDraft('draft-1', { clearFields: ['textBody'] }),
+      () => client.updateDraft('draft-1', { clearFields: ['textBody'], bodyHash: hashOf(EXISTING_DRAFT) }),
       /a draft needs a body/,
     );
   });
@@ -990,7 +1039,7 @@ describe('updateDraft', () => {
 
   it('clears htmlBody via clearFields and preserves textBody', async () => {
     const makeReq = mockUpdate(client, RICH_DRAFT);
-    await client.updateDraft('draft-1', { clearFields: ['htmlBody'] });
+    await client.updateDraft('draft-1', { clearFields: ['htmlBody'], bodyHash: hashOf(RICH_DRAFT) });
     const draft = draftFromCall(makeReq);
     assert.equal(draft.htmlBody, undefined);
     assert.deepEqual(draft.bodyValues, { text: { value: 'The text' } });
@@ -1167,24 +1216,22 @@ describe('updateDraft', () => {
     assert.match(result.orphanedOldDraftReason!, /network down/);
   });
 
-  // ---- reply-quote preservation on body edit (#37, redesigned #42) ----
+  // ---- body edits: stored as written, proved by a hash (#37/#42's guard replaced) ----
   //
-  // The guard decides on the EXISTING (stored) body, so these fixtures use the RAW body shapes
-  // Fastmail returns for reply drafts — captured from a live store/fetch round-trip (2026-06-28)
-  // and trimmed of the bulk quoted body but BYTE-EXACT in the marker region the guard reads.
-  // Only that marker region (the attribution line and the "\n> " / "\n\n> " structure after it)
-  // is byte-exact; the quoted lines themselves carry synthetic content, because the guard never
-  // reads them. Keep it that way — a fixture must not reproduce a real message's contents.
-  // Pinning to Fastmail's re-serialized shape (not our buildReplyBodies output) is the point:
-  // an html-derived text fallback comes back as "wrote:\n\n> " (blank line). The coercion of
-  // noQuote ("true"/"garbage") lives at the index.ts handler seam and is pinned by coerce.test.ts
-  // (coerceBool) + the live harness; updateDraft only ever sees a real boolean, so it is not
-  // re-tested here.
+  // What lived here was a quote-preservation guard: the stored body was scanned for a quote
+  // marker, an edit that would drop one was refused, and a kept quote was rebuilt from the
+  // original message. All of it is gone. This tool now stores the body it is handed byte for
+  // byte — a quote survives an edit because the caller handed it back, and vanishes because
+  // the caller did not, with no challenge either way.
+  //
+  // What replaces it is narrower and mechanical: a body edit must carry the `bodyHash` of
+  // the read it was written against. That proves the caller SAW the body it is replacing; it
+  // never proves the caller kept any of it. So these fixtures keep the raw Fastmail reply
+  // shapes, because "a body with a quote in it is stored with the quote in it, unchanged" is
+  // exactly the property to pin. Captured from a live store/fetch round-trip (2026-06-28)
+  // and trimmed; the quoted lines carry synthetic content, because nothing reads them.
   const RAW_HTML_QUOTE = '<p>my reply</p><div><br></div><div>On Sun, Jun 28, 2026, at 12:46 AM, Example Alerts wrote:</div><blockquote type="cite" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">\n  1 new planning application near 1 Example Street\n</blockquote>';
   const RAW_TEXT_QUOTE = 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Example Alerts wrote:\n> 2/2 Example St Sampleton NSW 2000: Change of Use and Fitout of a Studio\n> \n> Contact us if you have questions.';
-  // Quote-LESS bodies (no marker) — for the asymmetric / oldTextQuoted-precondition cells.
-  const PLAIN_TEXT = 'my reply with no quote at all';
-  const PLAIN_HTML = '<p>my reply with no quote at all</p>';
 
   const REPLY_BASE = {
     id: 'draft-1', subject: 'Re: Hello',
@@ -1197,107 +1244,59 @@ describe('updateDraft', () => {
   const DUAL_REPLY = { ...REPLY_BASE,
     textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
     bodyValues: { t: { value: RAW_TEXT_QUOTE }, h: { value: RAW_HTML_QUOTE } } };
-  // text-only: the ONE text/plain part aliases into BOTH lists (so bodyValueForType('text/html')
-  // is undefined → existingHtmlValue blank). This is the #42 shape.
+  // text-only: the ONE text/plain part aliases into BOTH lists (RFC 8621 §4.1.4), which is
+  // why the hash dedupes by part identity rather than counting list entries.
   const TEXT_ONLY_REPLY = { ...REPLY_BASE,
     textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
     bodyValues: { t: { value: RAW_TEXT_QUOTE } } };
-  // html-only: the ONE text/html part aliases into both lists (a foreign-client shape — an
-  // html-only reply_email is actually stored dual; included to exercise the html-only path).
+  // html-only: the ONE text/html part aliases into both lists (a foreign-client shape).
   const HTML_ONLY_REPLY = { ...REPLY_BASE,
     textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
     bodyValues: { h: { value: RAW_HTML_QUOTE } } };
-  // asymmetric: html present but quote-LESS; the quote lives only in the text.
-  const ASYMMETRIC_REPLY = { ...REPLY_BASE,
+  // A draft whose stored html carries a literal `{{signature}}` inside the quoted original —
+  // text somebody else wrote, handed back on every edit. The security case for the flag.
+  const PLANTED_TOKEN_REPLY = { ...REPLY_BASE,
     textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-    bodyValues: { t: { value: RAW_TEXT_QUOTE }, h: { value: PLAIN_HTML } } };
-  // dual where only the HTML carries the quote; the text is plain (pins the oldTextQuoted
-  // precondition on the plain-text-conversion carve-out).
-  const HTMLQUOTE_ONLY_REPLY = { ...REPLY_BASE,
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-    bodyValues: { t: { value: PLAIN_TEXT }, h: { value: RAW_HTML_QUOTE } } };
-
-  // The message the reply draft replies to (distinct id 'orig-1'; fully body-valued so the
-  // regenerate path produces a real quote we can assert against).
-  const ORIGINAL_FOR_REPLY = {
-    id: 'orig-1',
-    messageId: ['orig-msg@example.com'],
-    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
-    sentAt: '2026-06-15T03:29:02Z',
-    subject: 'Hello',
-    textBody: [{ partId: 'ot', type: 'text/plain' }],
-    htmlBody: [{ partId: 'oh', type: 'text/html' }],
-    bodyValues: { ot: { value: 'ORIGINAL TEXT BODY' }, oh: { value: '<p>ORIGINAL HTML BODY</p>' } },
-  };
-
-  // A non-quotable original (attachment-only: no text/html parts) — buildReplyBodies skips the
-  // quote AND attribution for it, so the keep path can't restore a quote and must reject loudly.
-  const NONQUOTABLE_ORIGINAL = {
-    id: 'orig-empty',
-    messageId: ['orig-msg@example.com'],
-    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
-    sentAt: '2026-06-15T03:29:02Z',
-    subject: 'Hello',
-    textBody: [], htmlBody: [], bodyValues: {},
-  };
-
-  // An original whose whole body is an embedded image. Quotable — because the image can be
-  // carried into the rebuilt quote — but only into an html body; there is no plain-text form
-  // of a picture, so a text-only edit still finds nothing to restore.
-  const IMAGE_ONLY_ORIGINAL = {
-    id: 'orig-image',
-    messageId: ['orig-msg@example.com'],
-    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
-    sentAt: '2026-06-15T03:29:02Z',
-    subject: 'Hello',
-    textBody: [],
-    htmlBody: [{ partId: 'oh', type: 'text/html' }],
-    bodyValues: { oh: { value: '<div><img src="cid:pic-1"></div>' } },
-    attachments: [{ partId: '2', blobId: 'blob-pic', type: 'image/png', size: 90, name: 'pic.png', disposition: 'inline', cid: 'pic-1' }],
-  };
-
-  // An original whose body points two images at paths only its own sender's origin could
-  // resolve. A quote is re-sent from a different message, so those references cannot come
-  // with it — the quote ships without them, and the count is what says so.
-  const RELATIVE_IMAGE_ORIGINAL = {
-    id: 'orig-relative',
-    messageId: ['orig-msg@example.com'],
-    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
-    sentAt: '2026-06-15T03:29:02Z',
-    subject: 'Hello',
-    textBody: [],
-    htmlBody: [{ partId: 'oh', type: 'text/html' }],
     bodyValues: {
-      oh: { value: '<div>ORIGINAL HTML BODY<img src="/logo.png"><img src="//cdn.example.com/a.png"></div>' },
-    },
-    attachments: [],
+      t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Example Alerts wrote:\n> {{signature}}' },
+      h: { value: '<p>my reply</p><blockquote type="cite"><p>{{signature}}</p></blockquote>' },
+    } };
+
+  const SIGNING_IDENTITY = {
+    id: 'id-1', name: 'Test User', email: 'me@example.com', mayDelete: false,
+    textSignature: '-- \nTest User', htmlSignature: '<div>Test User</div>',
   };
 
-  // Dispatch Email/get BY ID — the chosen draft fixture for the draft id, the original fixture
-  // for 'orig-1'. A single-fixture mock would make the regenerate test quote the DRAFT as its
-  // own original and prove nothing, so id-dispatch is mandatory here. 'orig-missing' → notFound
-  // (drives the not-found path). getEmailById issues Email/get + Mailbox/get; we answer only
-  // Email/get (its mailbox read is defensive/optional).
-  function mockReplyUpdate(c: JmapClient, draft: any = DUAL_REPLY) {
+  /**
+   * Serve `fixture` as the draft, and serve the draft the create call ACTUALLY WROTE back as
+   * the re-read of the new id.
+   *
+   * The re-read is what makes the returned hash a statement about stored bytes. A harness
+   * that echoed the caller's arguments instead would let an implementation hashing the sent
+   * bytes pass every test here, so the saved email is reconstructed from the create call and
+   * from nothing else. `savedOverride` replaces it, which is how the provenance test below
+   * makes the two differ on purpose.
+   */
+  function mockBodyEdit(c: JmapClient, fixture: any, savedOverride?: any) {
     mock.method(c, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    let created: any;
     return mock.method(c, 'makeRequest', async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
-        const id = params.ids?.[0];
-        if (id === 'orig-1') return { methodResponses: [['Email/get', { list: [ORIGINAL_FOR_REPLY] }, 'email']] };
-        if (id === 'orig-empty') return { methodResponses: [['Email/get', { list: [NONQUOTABLE_ORIGINAL] }, 'email']] };
-        if (id === 'orig-image') return { methodResponses: [['Email/get', { list: [IMAGE_ONLY_ORIGINAL] }, 'email']] };
-        if (id === 'orig-relative') return { methodResponses: [['Email/get', { list: [RELATIVE_IMAGE_ORIGINAL] }, 'email']] };
-        if (id === 'orig-missing') return { methodResponses: [['Email/get', { list: [], notFound: ['orig-missing'] }, 'email']] };
-        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
+        if (params.ids?.[0] === 'draft-2') {
+          return { methodResponses: [['Email/get', { list: [savedOverride ?? created] }, 'getEmail']] };
+        }
+        return { methodResponses: [['Email/get', { list: [fixture] }, 'getEmail']] };
       }
-      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      if (params.create) {
+        created = params.create.draft;
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
       return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
     });
   }
 
-  // Find the create call by predicate — the regenerate path inserts a second Email/get, so
-  // the create is no longer at a fixed index.
+  /** The replacement draft the create call wrote, found by predicate (indices vary). */
   function createdDraft(makeReq: RequestMock) {
     const [request] = findCallArguments(
       makeReq,
@@ -1307,453 +1306,860 @@ describe('updateDraft', () => {
     return request.methodCalls[0][1].create.draft;
   }
 
-  // -- dual-body reply draft --
+  // -- the body is stored exactly as written --
 
-  it('rejects editing htmlBody on a dual reply draft without a flag', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>just my new reply</p>' }),
-      /would drop the quoted original.*originalEmailId/s,
-    );
-  });
-
-  it('rejects editing htmlBody even when the new html itself has a quote marker (no new-body scan)', async () => {
-    // Under the redesign the decision is on the OLD body, so a caller-supplied quote in the new
-    // html does NOT exempt the edit (the fork.8 #37 behavior — "new html with marker passes" —
-    // is deliberately reversed: it was bypassable).
-    mockReplyUpdate(client, DUAL_REPLY);
-    const html = '<p>my edited reply</p><blockquote type="cite">a different quote</blockquote>';
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: html }),
-      /would drop the quoted original/,
-    );
-  });
-
-  it('rejects a keep whose own text body already carries the quote it would rebuild (#145)', async () => {
-    // The probe's shape: the read-edit-write loop the signature docs prescribe for a plain-text
-    // draft hands the stored text straight back, quote and all. Rebuilding underneath it would
-    // store the attribution and the quoted original twice, so the call is refused and pointed at
-    // noQuote. The refusal must not depend on the original resolving — nothing is fetched.
-    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { textBody: RAW_TEXT_QUOTE, originalEmailId: 'orig-1' }),
-      /noQuote/,
-    );
-    const fetchedOriginal = makeReq.mock.calls.some((c: any) => {
-      const [method, params] = c.arguments[0].methodCalls[0];
-      return method === 'Email/get' && params.ids?.[0] === 'orig-1';
+  it('stores a quote-bearing body back byte for byte, adding and removing nothing', async () => {
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    const html = RAW_HTML_QUOTE.replace('<p>my reply</p>', '<p>my EDITED reply</p>');
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: html, textBody: RAW_TEXT_QUOTE, bodyHash: hashOf(DUAL_REPLY),
     });
-    assert.equal(fetchedOriginal, false, 'the refusal must precede the originalEmailId fetch');
-  });
-
-  it('rejects a keep whose own html body already carries the quoted original (#145)', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: RAW_HTML_QUOTE, originalEmailId: 'orig-1' }),
-      (err: Error) => {
-        assert.match(err.message, /already contains the quote.*carry it twice.*noQuote:true/s);
-        // The false-positive escape route: a caller whose own prose merely resembles the
-        // quote is told to reword it, not steered into noQuote (which would drop the real quote).
-        assert.match(err.message, /merely looks like the quote.*reword/s);
-        // A reply draft has no forward marking, so the forward-only clause must not appear.
-        assert.doesNotMatch(err.message, /forward marking/);
-        return true;
-      },
-    );
-  });
-
-  it('rejects a keep when only the TEXT side of a both-bodies edit carries the quote (#145)', async () => {
-    // Pins the `||`: either written body carrying the block is enough, so the html side being
-    // clean does not license rebuilding underneath a text side that already has it.
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft(
-        'draft-1',
-        { htmlBody: PLAIN_HTML, textBody: RAW_TEXT_QUOTE, originalEmailId: 'orig-1' },
-      ),
-      (err: Error) => {
-        assert.match(err.message, /already contains the quote.*noQuote:true/s);
-        assert.doesNotMatch(err.message, /forward marking/);
-        return true;
-      },
-    );
-  });
-
-  it('still reports the not-both contradiction when the body also carries the quote (#145)', async () => {
-    // Precedence: originalEmailId + noQuote is the more fundamental contradiction and is
-    // answered first, so the duplicate check never gets to reframe it as a body problem.
-    mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await assert.rejects(
-      () => client.updateDraft(
-        'draft-1',
-        { textBody: RAW_TEXT_QUOTE, originalEmailId: 'orig-1', noQuote: true },
-      ),
-      /not both/,
-    );
-  });
-
-  it('stores a quote-bearing body verbatim under noQuote — the refusal\'s advertised recovery (#145)', async () => {
-    // The other half of #145: the way out the refusal names has to actually work, and has to
-    // leave the quote in the draft exactly once, as written.
-    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await client.updateDraft('draft-1', { textBody: RAW_TEXT_QUOTE, noQuote: true });
     const draft = createdDraft(makeReq);
+    assert.equal(draft.bodyValues.html.value, html);
     assert.equal(draft.bodyValues.text.value, RAW_TEXT_QUOTE);
-    // Exactly one attribution line — the defect this guards against is two.
-    assert.equal(draft.bodyValues.text.value.match(/wrote:/g).length, 1);
+    assert.deepEqual(result.notes, undefined);
   });
 
-  it('reads the caller\'s own html, not the signature this server appended (#145)', async () => {
-    // The check is snapshotted before the signature step for this case: an identity whose html
-    // signature contains a cite-blockquote must not make an honest keep look like a duplicate.
-    mock.method(client, 'getIdentities', async () => [{
-      ...IDENTITY,
-      htmlSignature: '<div>Regards,<blockquote type="cite">Sample Co</blockquote></div>',
-    }]);
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft(
-      'draft-1',
-      { htmlBody: PLAIN_HTML, originalEmailId: 'orig-1', appendSignature: true },
-    );
+  // The behaviour the old guard existed to prevent, now allowed on purpose: the caller is
+  // handed the body, so dropping the quote is the caller's edit, not a loss to challenge.
+  it('drops a quote the caller did not hand back, with no challenge and no note', async () => {
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>just my new reply</p>', textBody: 'just my new reply', bodyHash: hashOf(DUAL_REPLY),
+    });
     const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.html.value, /Sample Co/);          // signature landed
-    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/); // quote still rebuilt
+    assert.equal(draft.bodyValues.html.value, '<p>just my new reply</p>');
+    assert.equal(/blockquote/.test(draft.bodyValues.html.value), false);
+    assert.equal(/wrote:/.test(draft.bodyValues.text.value), false);
+    assert.deepEqual(result.notes, undefined);
   });
 
-  it('regenerates and keeps the html quote from originalEmailId (dual)', async () => {
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    // Regenerated html carries the caller's new text AND the ORIGINAL's body (not the draft's).
-    assert.match(draft.bodyValues.html.value, /my edited reply/);
-    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
-    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
-    // A non-empty text fallback regenerates from the combined html (quote-bearing).
-    assert.ok(!isBlankStr(draft.bodyValues.text.value));
-    assert.match(draft.bodyValues.text.value, /ORIGINAL HTML BODY/);
-  });
-
-  it('regenerates the quote into BOTH bodies when both are written + originalEmailId (no silent text-side drop)', async () => {
-    // A caller editing both a new html and a custom text alternative on the keep path must NOT
-    // lose the quote on the text side: the quote is rebuilt into both formats.
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>edited html</p>', textBody: 'edited text', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.html.value, /edited html/);
-    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);          // html quote kept
-    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
-    assert.match(draft.bodyValues.text.value, /edited text/);
-    assert.match(draft.bodyValues.text.value, /> ORIGINAL TEXT BODY/);              // text quote kept too
-  });
-
-  it('drops the quote from BOTH bodies on noQuote:true when both are written', async () => {
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>bare html</p>', textBody: 'bare text', noQuote: true });
-    const draft = createdDraft(makeReq);
-    assert.equal(draft.bodyValues.html.value, '<p>bare html</p>');
-    assert.equal(draft.bodyValues.text.value, 'bare text');
-  });
-
-  it('drops the quote on noQuote:true (no second fetch)', async () => {
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>bare reply</p>', noQuote: true });
-    const draft = createdDraft(makeReq);
-    assert.equal(draft.bodyValues.html.value, '<p>bare reply</p>');
-    // No keep → no second Email/get for an original.
-    const getCalls = makeReq.mock.calls.filter((c: any) => c.arguments[0].methodCalls[0][0] === 'Email/get');
-    assert.equal(getCalls.length, 1);
-  });
-
-  it('throws when originalEmailId and noQuote are both given', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1', noQuote: true }),
-      /not both/,
-    );
-  });
-
-  it('throws an actionable error when originalEmailId is not found', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-missing' }),
-      (err: Error) => {
-        assert.match(err.message, /originalEmailId 'orig-missing' could not be fetched/);
-        // the #37 not-found originalEmailId reject is now InvalidInputError → InvalidParams (#41)
-        assert.equal(err.name, 'InvalidInputError');
-        return true;
-      },
-    );
-  });
-
-  it('rejects a self-inconsistent keep: originalEmailId names a non-quotable original', async () => {
-    // Reachable only by naming a wrong/empty original (a draft naming its own original can't, by
-    // immutability). The keep can't be honored, so fail loudly with an actionable error rather
-    // than store a quote-less body — no caller input is lost either way.
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-empty' }),
-      /has no quotable content.*noQuote/s,
-    );
-  });
-
-  it('keeps the quote of an original whose only content is an embedded image', async () => {
-    // Such a message used to count as having nothing to quote, so this keep was refused. The
-    // image is now carried into the rebuilt quote, which makes it real content.
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-image' });
-    const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
-    assert.match(draft.bodyValues.html.value, /<img src="cid:ii-[0-9a-f]{32}@inline\.invalid"/);
-    // The image itself rides the rebuilt draft under that same identifier.
-    assert.equal(draft.attachments.some((a: any) => a.blobId === 'blob-pic' && a.disposition === 'inline'), true);
-  });
-
-  // A keep names an original this draft may never have quoted before, so the rebuilt quote can
-  // lose an image for the first time here. That loss gets the same sentence a fresh reply gets.
-  it('says how many images the rebuilt quote dropped for a reference form it cannot carry', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
-    const result = await client.updateDraft(
-      'draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-relative' },
-    );
+  // The one thing a quote-dropping edit IS told, and it is about the plain-text part rather
+  // than the quote: html alone discards the stored text part, because that part is a derived
+  // fallback and is re-derived from the new html. Nothing here challenges the drop.
+  it('says the stored plain-text part was discarded when html is written alone', async () => {
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>just my new reply</p>', bodyHash: hashOf(DUAL_REPLY),
+    });
     assert.deepEqual(result.notes, [
-      '2 image(s) in the quoted message used a reference form this server cannot carry into' +
-      ' a quote and were dropped; the rest of the quote was kept.',
+      'This edit wrote htmlBody alone, so the draft\'s stored plain-text part was discarded and a fresh fallback derived from your html. If that part was hand-written, supply it as textBody alongside htmlBody.',
     ]);
+    assert.equal(createdDraft(makeReq).bodyValues.text.value, 'just my new reply');
   });
 
-  it('reports the same loss again on the next edit that rebuilds the same quote', async () => {
-    // Each edit rebuilds the quote from the original, so each edit loses them again. Repeating
-    // the disclosure is correct: the alternative is an edit that drops images and says nothing.
-    mockReplyUpdate(client, DUAL_REPLY);
-    // A FRESH args object per call, because two separate edits is what this test means: each
-    // one is made with the caller's own html, not with the rebuilt (quote-bearing) body the
-    // one before it produced — which the #145 duplicate check would correctly refuse. Building
-    // the arguments per call states that outright instead of leaning on updateDraft leaving
-    // its caller's object alone (#170).
-    const args = () => ({ htmlBody: '<p>edited twice</p>', originalEmailId: 'orig-relative' });
-    const first = await client.updateDraft('draft-1', args());
-    const second = await client.updateDraft('draft-1', args());
-    assert.deepEqual(second.notes, first.notes);
-  });
-
-  it('leaves the caller\'s own updates object untouched when it rebuilds the quote', async () => {
-    // The rebuilt, quote-bearing body is the server's output, and an argument object belongs to
-    // the caller: a call that wrote its output back over the html it was handed would silently
-    // change a value the caller can still read, and would hand any second call made with the
-    // same object the first call's body instead of the caller's.
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    const args = { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-1' };
-    const before = structuredClone(args);
-    await client.updateDraft('draft-1', args);
-    // The rebuild has to have actually run, or there is no rewritten body to write back and
-    // the assertion below would hold for the wrong reason.
-    const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
-    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
-    assert.deepEqual(args, before);
-  });
-
-  it('says nothing of the sort when the rebuilt quote carries every reference it found', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
-    const result = await client.updateDraft(
-      'draft-1', { htmlBody: '<p>my edited reply</p>', originalEmailId: 'orig-image' },
-    );
-    assert.equal(
-      (result.notes ?? []).some((n) => /reference form/.test(n)), false,
-    );
-  });
-
-  it('still refuses a TEXT-only keep of an image-only original — a picture has no plain-text quote', async () => {
-    mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { textBody: 'my edited reply', originalEmailId: 'orig-image' }),
-      /has no quotable content.*images.*plain-text body.*noQuote/s,
-    );
-  });
-
-  // -- text-only reply draft (#42) --
-
-  it('rejects editing textBody on a text-only reply draft without a flag (#42)', async () => {
-    mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { textBody: 'just my new reply' }),
-      /would drop the quoted original.*originalEmailId/s,
-    );
-  });
-
-  it('regenerates the text quote from originalEmailId and stays text-only', async () => {
-    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await client.updateDraft('draft-1', { textBody: 'my edited reply', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.text.value, /my edited reply/);
-    assert.match(draft.bodyValues.text.value, /> ORIGINAL TEXT BODY/); // regenerated "> " text quote
-    assert.equal(draft.htmlBody, undefined);                            // stays text-only
-  });
-
-  it('drops the text quote on noQuote:true (text-only, stays text-only)', async () => {
-    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await client.updateDraft('draft-1', { textBody: 'bare reply', noQuote: true });
+  it('stores a text-only draft\'s body as written and stays text-only', async () => {
+    const makeReq = mockBodyEdit(client, TEXT_ONLY_REPLY);
+    await client.updateDraft('draft-1', { textBody: 'bare reply', bodyHash: hashOf(TEXT_ONLY_REPLY) });
     const draft = createdDraft(makeReq);
     assert.equal(draft.bodyValues.text.value, 'bare reply');
     assert.equal(draft.htmlBody, undefined);
   });
 
-  it('format-flip: htmlBody + originalEmailId on a text-only reply draft becomes dual-body', async () => {
-    const makeReq = mockReplyUpdate(client, TEXT_ONLY_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>now html</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    // Accepted, pinned behavior: the caller chose to add html.
-    assert.match(draft.bodyValues.html.value, /now html/);
-    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
-    assert.ok(!isBlankStr(draft.bodyValues.text.value)); // derived text fallback → dual
+  it('never fetches the message a reply draft answers', async () => {
+    // The rebuild path used to read it on every kept edit. Nothing does now, and a tool that
+    // stores what it is handed has no reason to: the assertion is that no Email/get in the
+    // whole exchange names anything but the draft and its replacement.
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: hashOf(DUAL_REPLY) });
+    for (const call of makeReq.mock.calls) {
+      const [method, params] = call.arguments[0].methodCalls[0];
+      if (method !== 'Email/get') continue;
+      assert.ok(['draft-1', 'draft-2'].includes(params.ids?.[0]), params.ids?.[0]);
+    }
   });
 
-  // -- carve-outs (quote-preserving by construction) --
+  // -- the hash: what it refuses --
 
-  it('carve-out: a subject-only edit on a quoted reply draft preserves both bodies', async () => {
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { subject: 'Re: Hello (edited)' });
+  it('refuses a body write with no bodyHash, naming the read that issues one', async () => {
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>' }),
+      (e: unknown) => e instanceof InvalidInputError && /needs bodyHash.*get_email/s.test((e as Error).message),
+    );
+    // Nothing was written: the refusal is not a partial edit.
+    assert.equal(makeReq.mock.calls.some((c) => c.arguments[0].methodCalls[0][1].create), false);
+  });
+
+  it('refuses a body CLEAR with no bodyHash — a clear replaces the body too', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['htmlBody'] }),
+      /needs bodyHash/,
+    );
+  });
+
+  it('refuses a hash that is not this draft\'s current one, and writes nothing', async () => {
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: hashOf(TEXT_ONLY_REPLY) }),
+      /not this draft's current one.*Nothing was written/s,
+    );
+    assert.equal(makeReq.mock.calls.some((c) => c.arguments[0].methodCalls[0][1].create), false);
+  });
+
+  it('refuses a blank hash the same way as an absent one', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: '   ' }),
+      /needs bodyHash/,
+    );
+  });
+
+  it('accepts a hash with surrounding whitespace (a value copied out of a response)', async () => {
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    await client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: `  ${hashOf(DUAL_REPLY)}  ` });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, '<p>x</p>');
+  });
+
+  it('needs no hash for a metadata-only edit, which is body-invariant', async () => {
+    const makeReq = mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', { subject: 'Re: Hello (edited)' });
     const draft = createdDraft(makeReq);
     assert.equal(draft.bodyValues.text.value, RAW_TEXT_QUOTE);
     assert.equal(draft.bodyValues.html.value, RAW_HTML_QUOTE);
+    // Neither half of the pair: nothing was promised, so there is nothing to withhold.
+    assert.equal(result.bodyHash, undefined);
+    assert.equal(result.bodyHashWithheld, undefined);
   });
 
-  it('carve-out: clearFields:["htmlBody"] on a dual reply draft keeps the "> " text quote', async () => {
-    // The load-bearing carve-out the over-strict regex would have wrongly rejected.
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { clearFields: ['htmlBody'] });
-    const draft = createdDraft(makeReq);
-    assert.equal(draft.htmlBody, undefined);
-    assert.equal(draft.bodyValues.text.value, RAW_TEXT_QUOTE);
+  it('needs no hash for an attachment-only edit either', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', { removeAttachments: [] });
+    assert.equal(result.bodyHash, undefined);
+    assert.equal(result.bodyHashWithheld, undefined);
   });
 
-  // -- guard / coupling-guard interactions --
+  // The compose side issues none, in any mode. createDraft's whole result is the new id —
+  // there is nowhere for a hash to ride, and that is the design: a hash certifies that the
+  // caller SAW the stored body, and a compose result can only ever echo the bytes it just
+  // sent, which proves nothing about what the server stored. The caller reads the draft.
+  it('createDraft hands back an id and nothing else — no compose path issues a hash', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-42' } } }, 'createDraft']],
+    });
+    const result = await client.createDraft({ subject: 'Hello', textBody: 'body' });
+    assert.equal(result, 'email-42');
+    assert.equal(typeof result, 'string');
+  });
 
-  it('rejects clearFields:["htmlBody"] + a quote-free textBody on a dual reply draft', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { clearFields: ['htmlBody'], textBody: 'plain reply, no quote' }),
-      /would drop the quoted original/,
+  // -- the hash: provenance --
+
+  // THE test for the returned hash, and the only one that can tell the two implementations
+  // apart. The saved draft is served back with DIFFERENT bytes from the ones the call sent;
+  // a hash computed over the sent bytes would match hashOf(sent) and pass every other
+  // assertion in this file. The result must carry the re-read's hash.
+  it('returns the hash of the RE-READ, never of the bytes the call sent', async () => {
+    const sentHtml = '<p>what the caller wrote</p>';
+    const saved = { ...REPLY_BASE, id: 'draft-2',
+      textBody: [{ partId: 'text', type: 'text/plain' }],
+      htmlBody: [{ partId: 'html', type: 'text/html' }],
+      bodyValues: { text: { value: 'what the SERVER stored' }, html: { value: '<p>what the SERVER stored</p>' } } };
+    mockBodyEdit(client, HTML_ONLY_REPLY, saved);
+
+    const result = await client.updateDraft('draft-1', { htmlBody: sentHtml, bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(result.bodyHash, hashOf(saved));
+    assert.notEqual(result.bodyHash, hashOf({
+      textBody: [{ partId: 'html', type: 'text/html' }],
+      htmlBody: [{ partId: 'html', type: 'text/html' }],
+      bodyValues: { html: { value: sentHtml } },
+    }));
+  });
+
+  it('the hash it returns is the one the caller\'s next body edit is accepted with', async () => {
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const first = await client.updateDraft('draft-1', { htmlBody: '<p>one</p>', bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.ok(first.bodyHash);
+    // Re-point the harness at the draft the first edit saved, then edit again with the hash
+    // it handed back — the run-of-edits case the return exists for.
+    const savedFirst = createdDraft(makeReq);
+    mockBodyEdit(client, { ...savedFirst, id: 'draft-1', keywords: { $draft: true }, mailboxIds: { 'mb-drafts': true } });
+    const second = await client.updateDraft('draft-1', { htmlBody: '<p>two</p>', bodyHash: first.bodyHash });
+    assert.ok(second.bodyHash);
+  });
+
+  it('withholds the hash with a reason when the re-read fails, never falling back to the sent bytes', async () => {
+    mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        if (params.ids?.[0] === 'draft-2') return { methodResponses: [['Email/get', { list: [] }, 'getEmail']] };
+        return { methodResponses: [['Email/get', { list: [HTML_ONLY_REPLY] }, 'getEmail']] };
+      }
+      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+    });
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /re-reading the saved draft.*failed/s);
+    // The edit itself still landed: a hash that cannot be issued is a degrade, not a failure.
+    assert.equal(result.id, 'draft-2');
+  });
+
+  it('withholds the hash when the re-read comes back truncated', async () => {
+    const truncated = { ...REPLY_BASE, id: 'draft-2',
+      textBody: [{ partId: 'text', type: 'text/plain' }],
+      bodyValues: { text: { value: 'partial', isTruncated: true } } };
+    mockBodyEdit(client, TEXT_ONLY_REPLY, truncated);
+    const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /truncated or as having encoding problems/);
+    assert.match(result.bodyHashWithheld!, /the saved draft was re-read/);
+  });
+
+  // The saved body is judged by the READ side's rule, so a shape get_email refuses to hash
+  // is one edit_draft refuses to hash too. Before, this draft got a hash here and "recreate
+  // the draft" from the very next read of the same saved object.
+  it('withholds the hash when the saved draft carries a body part no read returns', async () => {
+    const mismatched = { ...REPLY_BASE, id: 'draft-2',
+      textBody: [{ partId: 'text', type: 'text/plain' }, { partId: 'stray', type: 'text/html' }],
+      bodyValues: { text: { value: 'x' }, stray: { value: '<p>hidden</p>' } } };
+    mockBodyEdit(client, TEXT_ONLY_REPLY, mismatched);
+    const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /a body part no read returns/);
+    assert.match(result.bodyHashWithheld!, /Recreate the draft/);
+    // The same reason the read side gives for the same saved object, said on this surface.
+    const readSide = resolveDraftBodyHash(mismatched, { bodyText: true, bodyHtml: true, stripQuoted: false })!;
+    assert.ok('bodyHashWithheld' in readSide);
+    assert.ok(result.bodyHashWithheld!.endsWith((readSide as { bodyHashWithheld: string }).bodyHashWithheld));
+  });
+
+  // The other half of the same routing: an empty saved part set is a body, not a degraded
+  // read. get_email hashes it, so this does too — the old predicate reported it as the
+  // server having flagged truncation, which it had not.
+  it('issues the hash when the saved draft comes back with no body parts at all', async () => {
+    const empty = { ...REPLY_BASE, id: 'draft-2', textBody: [], htmlBody: [], bodyValues: {} };
+    mockBodyEdit(client, TEXT_ONLY_REPLY, empty);
+    const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.equal(result.bodyHash, hashOf(empty));
+  });
+
+  // THE pin on the routing, and it is not implied by the shapes above. resolveDraftBodyHash
+  // takes a descriptor of what a read SHOWED, and two of its branches exist only because a
+  // read can be field-scoped or quote-stripped. This path controls its own re-read and so
+  // claims a whole one; passing anything less would make an edit that has no `fields` at all
+  // withhold with a reason about the caller's `fields` selection. This stays meaningful as
+  // the read side grows branches, which is exactly when it would otherwise break in silence.
+  it('never withholds with a reason about the read\'s scope, whatever the saved draft looks like', async () => {
+    const shapes: Record<string, any> = {
+      truncated: { textBody: [{ partId: 't', type: 'text/plain' }],
+        bodyValues: { t: { value: 'partial', isTruncated: true } } },
+      encodingProblem: { textBody: [{ partId: 't', type: 'text/plain' }],
+        bodyValues: { t: { value: 'partial', isEncodingProblem: true } } },
+      unreturnablePart: { textBody: [{ partId: 't', type: 'text/plain' }, { partId: 's', type: 'text/html' }],
+        bodyValues: { t: { value: 'x' }, s: { value: '<p>hidden</p>' } } },
+      emptyPartSet: { textBody: [], htmlBody: [], bodyValues: {} },
+      htmlOnly: { htmlBody: [{ partId: 'h', type: 'text/html' }], bodyValues: { h: { value: '<p>x</p>' } } },
+    };
+    for (const [name, shape] of Object.entries(shapes)) {
+      mockBodyEdit(client, TEXT_ONLY_REPLY, { ...REPLY_BASE, id: 'draft-2', ...shape });
+      const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+      const withheld = result.bodyHashWithheld ?? '';
+      assert.equal(/fields:/.test(withheld), false, name);
+      assert.equal(/stripQuoted/.test(withheld), false, name);
+      assert.equal(/verbose/.test(withheld), false, name);
+      assert.equal(/did not return the draft's stored body whole/.test(withheld), false, name);
+    }
+  });
+
+  // resolveDraftBodyHash answers for drafts and returns nothing for anything else, so a
+  // re-read that does not come back as one would drop the promised field with no trace.
+  it('withholds with a reason when the saved message does not read back as a draft', async () => {
+    const notADraft = { ...REPLY_BASE, id: 'draft-2', keywords: {},
+      textBody: [{ partId: 't', type: 'text/plain' }], bodyValues: { t: { value: 'x' } } };
+    mockBodyEdit(client, TEXT_ONLY_REPLY, notADraft);
+    const result = await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /did not read back as a draft/);
+  });
+
+  it('asks the server for the keywords that decide it, so the re-read can be judged at all', async () => {
+    const makeReq = mockBodyEdit(client, TEXT_ONLY_REPLY);
+    await client.updateDraft('draft-1', { textBody: 'x', bodyHash: hashOf(TEXT_ONLY_REPLY) });
+    const [reRead] = findCallArguments(
+      makeReq,
+      ([req]) => req.methodCalls[0][0] === 'Email/get' && req.methodCalls[0][1].ids?.[0] === 'draft-2',
+      're-reading the saved draft',
+    );
+    assert.ok(reRead.methodCalls[0][1].properties.includes('keywords'));
+  });
+
+  it('withholds the hash when the governing part is one this server derived', async () => {
+    // clearFields:['htmlBody'] with no body supplied leaves the draft's own stored text
+    // standing. The caller did not write those bytes, so it has not read what now governs.
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      clearFields: ['htmlBody'], bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /derived from html rather than written by you/);
+  });
+
+  it('issues the hash on the same clear when the caller supplies the surviving text', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      clearFields: ['htmlBody'], textBody: 'my plain-text reply', bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.ok(result.bodyHash);
+    assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  // A body part carrying no stored VALUE is not a degraded read. It is an embedded image the
+  // server routed into a body list, which the hash covers with a sentinel of its own — and
+  // the read side treats it exactly that way, so counting it as degradation here would make
+  // get_email and edit_draft give different answers about the identical saved draft, under a
+  // note claiming the server flagged truncation when it flagged nothing.
+  it('issues the hash when the saved draft carries a body part with no stored value', async () => {
+    const savedWithImagePart = { ...REPLY_BASE, id: 'draft-2',
+      textBody: [{ partId: 'text', type: 'text/plain' }],
+      htmlBody: [
+        { partId: 'html', type: 'text/html' },
+        { blobId: 'blob-img', type: 'image/png', cid: 'img@example.com', disposition: 'inline' },
+      ],
+      bodyValues: { text: { value: '[image]' }, html: { value: '<p>x</p><img src="cid:img@example.com">' } } };
+    mockBodyEdit(client, HTML_ONLY_REPLY, savedWithImagePart);
+
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>x</p>', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.equal(result.bodyHash, hashOf(savedWithImagePart));
+    // The two sides agree on that draft, which is the property the predicate exists to keep.
+    assert.deepEqual(
+      resolveDraftBodyHash(savedWithImagePart, { bodyText: true, bodyHtml: true, stripQuoted: false }),
+      { bodyHash: result.bodyHash },
     );
   });
 
-  it('regenerates a text-only quote on clearFields:["htmlBody"] + textBody + originalEmailId', async () => {
-    const makeReq = mockReplyUpdate(client, DUAL_REPLY);
-    await client.updateDraft('draft-1', { clearFields: ['htmlBody'], textBody: 'my reply', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    assert.equal(draft.htmlBody, undefined);
-    assert.match(draft.bodyValues.text.value, /> ORIGINAL TEXT BODY/);
+  // Clearing htmlBody on a draft that never HAD html leaves the caller's own stored text
+  // standing — not a part derived from html — and this call proved it read those bytes.
+  it('issues the hash when an html clear leaves the caller\'s own text on a text-only draft', async () => {
+    mockBodyEdit(client, TEXT_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      clearFields: ['htmlBody'], bodyHash: hashOf(TEXT_ONLY_REPLY),
+    });
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.ok(result.bodyHash);
   });
 
-  it('clearFields:["textBody"] on a dual reply draft hits the textBody-coupling guard, not the quote guard', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
+  it('issues the hash on an html-alone edit, whose derived text part is not the governing one', async () => {
+    // The governing part is the html when the message ships one. An html-alone edit derives
+    // a fresh text fallback, but that part is not what a later edit has to hand back.
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: hashOf(DUAL_REPLY) });
+    assert.ok(result.bodyHash);
+    assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  // -- expandSignature --
+
+  it('expands a {{signature}} the caller wrote when the flag is passed', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}', expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    const html = createdDraft(makeReq).bodyValues.html.value;
+    assert.match(html, /Test User/);
+    assert.equal(/\{\{signature\}\}/.test(html), false);
+    // An expansion rewrote the body, so what landed is not what the caller wrote.
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld!, /expanded \{\{signature\}\}/);
+  });
+
+  // A flagged call whose identity has no sign-off REMOVES the token and says why. It is not
+  // a refusal: the flag was honoured, there was simply nothing to put there, and leaving the
+  // braces in a body the caller declared its own would ship them to the recipient.
+  it('removes the token and names the cause when the identity has no signature', async () => {
+    mock.method(client, 'getIdentities', async () => [{ ...SIGNING_IDENTITY, textSignature: '', htmlSignature: '' }]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}', expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, '<p>Thanks.</p>');
+    assert.ok(result.notes?.some((n) => /the sending identity has no signature configured/.test(n)));
+  });
+
+  // Both parts supplied, the token in only one: the other ships unsigned, and a recipient
+  // reading that alternative sees no sign-off. Said out loud, because the body that ships is
+  // the caller's and nothing here will add the missing one.
+  it('says so when one supplied part took the sign-off and the other carried no token', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}', textBody: 'Thanks.',
+      expandSignature: true, bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.ok(result.notes?.some((n) => /textBody carries none/.test(n)));
+  });
+
+  // The same shape with NOTHING to expand. The other part carried the token, but the identity
+  // has no sign-off, so the token was removed and no sign-off landed anywhere — saying it
+  // "expanded in htmlBody" beside the note saying it could not would be a receipt for an
+  // event that did not happen, and the two notes would contradict each other.
+  it('does not claim the other part expanded when nothing expanded there', async () => {
+    mock.method(client, 'getIdentities', async () => [{ ...SIGNING_IDENTITY, textSignature: '', htmlSignature: '' }]);
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}', textBody: 'Thanks.',
+      expandSignature: true, bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.ok(result.notes?.some((n) => /has no signature configured/.test(n)));
+    assert.equal(result.notes?.some((n) => /expanded in htmlBody/.test(n)), false);
+  });
+
+  // -- a {{…}} spelling that expands to nothing --
+  // edit_draft stores the body as written, so a mistyped token ships with its braces showing.
+  // The compose tool reports these on its receipt; this tool said nothing, on the tool where
+  // the caller is likelier to mistype one because it is hand-editing an existing body.
+
+  it('reports a {{…}} spelling this edit introduced, which is not a token and ships as written', async () => {
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const body = '<p>Thanks.</p><p>{{sig}}</p>';
+    const result = await client.updateDraft('draft-1', { htmlBody: body, bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, body);
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note naming {{sig}}, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /stored as written/);
+  });
+
+  // The count in the sentence and the list beside it must count the SAME thing. One typo
+  // written twice is one spelling to fix, and a note saying "2 … ("{{sig}}")" sends the
+  // caller hunting for a second spelling that is not there.
+  it('counts one repeated spelling once, within a single part', async () => {
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p><p>{{sig}}</p>', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /carries 1 \{\{…\}\} spelling this edit added/);
+    assert.equal(/and \d+ more/.test(note!), false, `implied more spellings than exist: ${note}`);
+  });
+
+  // ACROSS the two parts, which is the ordinary path: supplying both bodies means writing the
+  // same typo twice, so this is the common case rather than an unusual one.
+  it('counts one repeated spelling once, across both written parts', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p>', textBody: '{{sig}}', bodyHash: hashOf(DUAL_REPLY),
+    });
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /carries 1 \{\{…\}\} spelling this edit added/);
+    assert.equal(/and \d+ more/.test(note!), false, `implied more spellings than exist: ${note}`);
+  });
+
+  // Two DIFFERENT spellings are two things to fix and must still count as two.
+  it('counts two distinct spellings as two', async () => {
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p><p>{{quotes}}</p>', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /carries 2 \{\{…\}\} spellings this edit added/);
+    assert.match(note!, /\{\{quotes\}\}/);
+  });
+
+  // The flag expands {{signature}} and nothing else, so a mistyped spelling ships from a
+  // flagged edit exactly as it does from an unflagged one and is reported on both.
+  it('reports the spelling on a flagged edit too', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{signature}}</p><p>{{sig}}</p>',
+      expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.ok(result.notes?.some((n) => /\{\{sig\}\}/.test(n)));
+  });
+
+  // COUNT-RISE, the rule that keeps this from nagging. A spelling already in the stored body
+  // is text someone else wrote, handed back on every edit; reporting it would fire on every
+  // edit of that draft forever and say nothing about what this call did.
+  it('says nothing about a spelling the stored body already carried', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>hi</p><blockquote><p>{{sig}}</p></blockquote>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>hi, edited</p><blockquote><p>{{sig}}</p></blockquote>',
+      bodyHash: hashOf(planted),
+    });
+    assert.equal(result.notes?.some((n) => /\{\{sig\}\}/.test(n)) ?? false, false);
+  });
+
+  // ...and a SECOND copy of that same spelling is this edit's doing, so the count rise is
+  // reported even though the spelling itself is not new.
+  it('reports a second copy of a spelling the stored body carried once', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>{{sig}}</p>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p><p>{{sig}}</p>', bodyHash: hashOf(planted),
+    });
+    assert.ok(result.notes?.some((n) => /\{\{sig\}\}/.test(n)));
+  });
+
+  it('refuses the flag when the body carries no {{signature}} to expand', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { clearFields: ['textBody'] }),
+      () => client.updateDraft('draft-1', {
+        htmlBody: '<p>Thanks.</p>', expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+      }),
+      /carries no \{\{signature\}\}/,
+    );
+    // Refused before anything is written, the same as its sibling below: the caller's body
+    // was otherwise perfectly storable, so an implementation that stored it and complained
+    // afterwards would leave a draft rewritten by a call that reported failure.
+    assert.equal(makeReq.mock.calls.some((c) => c.arguments[0].methodCalls[0][1].create), false);
+  });
+
+  // THE PAIR. Same body, same draft, the flag the only difference. A table built only from
+  // flagged inputs would read green on an implementation that refused both.
+  it('UNFLAGGED: two bare {{signature}} the stored body did not have are stored, with a note naming the flag', async () => {
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const body = '<p>{{signature}}</p><p>and again {{signature}}</p>';
+    const result = await client.updateDraft('draft-1', { htmlBody: body, bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, body);
+    assert.deepEqual(result.notes, [
+      'htmlBody carries 2 {{signature}} tokens the stored body did not, and this edit stored ' +
+      'the body as written. Pass expandSignature: true to expand it.',
+    ]);
+  });
+
+  it('FLAGGED: the identical body is refused, naming the count and the escape', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const body = '<p>{{signature}}</p><p>and again {{signature}}</p>';
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: body, expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY) }),
+      (e: unknown) => {
+        const m = (e as Error).message;
+        assert.match(m, /htmlBody carries 2 \{\{signature\}\} tokens/);
+        assert.match(m, /\\\{\{signature\}\}/);
+        return true;
+      },
+    );
+    // Refused BEFORE anything expands: no create call, so nothing was written and no block
+    // was built. An oracle that only asked "was it refused" would miss this.
+    assert.equal(makeReq.mock.calls.some((c) => c.arguments[0].methodCalls[0][1].create), false);
+  });
+
+  // The escape, under the flag: the backslash is consumed and the bare braces are stored.
+  // NO note is emitted for it, and that is what this pins. The escape notes exist to tell an
+  // UNFLAGGED caller that its backslash shipped as literal text, which is not what happened
+  // here — under the flag the escape did exactly what it is for.
+  it('consumes the escape under the flag and stores the bare token, silently', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: String.raw`<p>write \{{signature}} to mean the token</p>{{signature}}`,
+      expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    const html = createdDraft(makeReq).bodyValues.html.value;
+    assert.match(html, /write \{\{signature\}\} to mean the token/);
+    assert.match(html, /Test User/); // the unescaped one still expanded
+    assert.equal(result.notes, undefined); // the escape note is for UNFLAGGED edits
+  });
+
+  // Unflagged, the backslash is not consumed — the body is stored byte for byte, backslash
+  // included — so the caller is told, because it almost certainly meant the braces alone.
+  it('reports an escape the caller added on an UNFLAGGED edit, where the backslash ships', async () => {
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const body = String.raw`<p>write \{{signature}} to mean the token</p>`;
+    const result = await client.updateDraft('draft-1', { htmlBody: body, bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, body);
+    assert.ok(result.notes?.some((n) => /an escaped token spelling the stored body did not/.test(n)));
+  });
+
+  // The converse, and the half the description used to state unconditionally. The escape
+  // notes are keyed on a COUNT RISE against the stored bytes, exactly as the {{signature}}
+  // note is, so an escape the body handed back already carried ships in silence — otherwise
+  // the original author's text would be reported back on every edit of that draft forever.
+  it('says nothing about an escape the body handed back already carried', async () => {
+    const stored = String.raw`<p>they wrote \{{signature}} in the original</p>`;
+    const carriesEscape = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: stored } } };
+    const makeReq = mockBodyEdit(client, carriesEscape);
+    const result = await client.updateDraft('draft-1', { htmlBody: stored, bodyHash: hashOf(carriesEscape) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, stored);
+    assert.equal((result.notes ?? []).some((n) => /an escaped token spelling/.test(n)), false);
+  });
+
+
+  // A near-miss is REPORTED here rather than refused, which is the opposite of draft_email.
+  // The body may be a foreign one handed back, so a refusal keyed on its text could be
+  // planted by the original's author and would recur on every edit of that draft.
+  it('reports a near-miss spelling rather than refusing it', async () => {
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const body = '<p>{{Signature}} goes here</p>';
+    const result = await client.updateDraft('draft-1', { htmlBody: body, bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, body);
+    assert.ok(result.notes?.some((n) => /\{\{Signature\}\}/.test(n)));
+  });
+
+  // The security case for the flag rather than the token: the second token here is one the
+  // ORIGINAL's author wrote, sitting inside the quoted history the caller hands back.
+  it('stores a planted {{signature}} unchanged and in silence on an unflagged edit', async () => {
+    const makeReq = mockBodyEdit(client, PLANTED_TOKEN_REPLY);
+    const stored = PLANTED_TOKEN_REPLY.bodyValues.h.value;
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: stored, textBody: PLANTED_TOKEN_REPLY.bodyValues.t.value,
+      bodyHash: hashOf(PLANTED_TOKEN_REPLY),
+    });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, stored);
+    // No note: the count did not rise, so nothing the caller did is being reported back.
+    assert.deepEqual(result.notes, undefined);
+  });
+
+  it('stores {{quote}} and {{forward}} as literal text and says so — this tool places no history', async () => {
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>see {{quote}} and {{forward}}</p>', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.equal((result.notes ?? []).some((n) => /\{\{quote\}\} and \{\{forward\}\} were stored as written/.test(n)), true);
+  });
+
+  // The other direction, for both text-keyed notes above. A {{quote}} or a {{Signature}} the
+  // STORED body already carried is text the original's author wrote, handed back on every
+  // edit: reporting it says nothing about what this call did, cannot be acted on (the caller
+  // does not own those words), and is plantable by whoever composed the original.
+
+  it('says nothing about a history token the stored body already carried', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>hi</p><blockquote><p>see {{quote}}</p></blockquote>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>hi, edited</p><blockquote><p>see {{quote}}</p></blockquote>',
+      bodyHash: hashOf(planted),
+    });
+    assert.equal((result.notes ?? []).some((n) => /\{\{quote\}\}/.test(n)), false);
+  });
+
+  it('still reports a history token this edit added beside one the body already had', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p><blockquote>{{quote}}</blockquote></p>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>see {{forward}}</p><blockquote>{{quote}}</blockquote>', bodyHash: hashOf(planted),
+    });
+    const note = (result.notes ?? []).find((n) => /stored as written: those tokens expand/.test(n));
+    assert.ok(note, `expected a history note, got ${JSON.stringify(result.notes)}`);
+    // Only the one this edit introduced is named; the carried-over {{quote}} is not.
+    assert.match(note!, /\{\{forward\}\} was stored as written/);
+  });
+
+  it('says nothing about a near-miss the stored body already carried', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>hi</p><blockquote><p>{{Signature}}</p></blockquote>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>hi, edited</p><blockquote><p>{{Signature}}</p></blockquote>',
+      bodyHash: hashOf(planted),
+    });
+    assert.equal((result.notes ?? []).some((n) => /\{\{Signature\}\}/.test(n)), false);
+  });
+
+  it('still reports a second near-miss this edit added beside one the body already had', async () => {
+    const planted = { ...REPLY_BASE,
+      textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: { h: { value: '<p>{{Signature}}</p>' } } };
+    mockBodyEdit(client, planted);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{Signature}}</p><p>{{Signature}}</p>', bodyHash: hashOf(planted),
+    });
+    assert.ok((result.notes ?? []).some((n) => /\{\{Signature\}\}/.test(n)));
+  });
+
+  // -- one note per thing, not one per part --
+  // The escape, near-miss and history notes name a token and never a part, so the same
+  // spelling reaching them from both written bodies is the identical sentence twice, and
+  // nothing downstream deduplicates the notes list.
+
+  const notesMatching = (result: any, re: RegExp): string[] =>
+    (result.notes ?? []).filter((n: string) => re.test(n));
+
+  it('reports an escape written into both parts once', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: String.raw`<p>write \{{signature}} here</p>`,
+      textBody: String.raw`write \{{signature}} here`,
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.equal(notesMatching(result, /an escaped token spelling the stored body did not/).length, 1);
+  });
+
+  it('reports a near-miss written into both parts once', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{Signature}} goes here</p>',
+      textBody: '{{Signature}} goes here',
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.equal(notesMatching(result, /\{\{Signature\}\}/).length, 1);
+  });
+
+  it('reports a history token written into both parts once', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>see {{quote}}</p>',
+      textBody: 'see {{quote}}',
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.equal(notesMatching(result, /stored as written: those tokens expand/).length, 1);
+  });
+
+  // Deduplicating across parts must not silence a token that only ONE part introduced: two
+  // different history tokens, one per body, are two things to say.
+  it('still names a history token that only one of the two parts added', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>see {{quote}}</p>',
+      textBody: 'see {{forward}}',
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    const named = notesMatching(result, /stored as written: those tokens expand/).join(' ');
+    assert.match(named, /\{\{quote\}\}/);
+    assert.match(named, /\{\{forward\}\}/);
+  });
+
+  it('leaves a {{quote}} in the body it stores rather than removing it', async () => {
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const body = '<p>see {{quote}} here</p>';
+    await client.updateDraft('draft-1', { htmlBody: body, bodyHash: hashOf(HTML_ONLY_REPLY) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, body);
+  });
+
+  // -- the refusal order, over inputs that trip more than one guard --
+
+  it('coupling guard beats a stale hash: the caller is told the SHAPE to fix', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { textBody: 'new text', bodyHash: 'bh1-not-this-draft' }),
+      /editing textBody alone won't change what most recipients see/,
+    );
+  });
+
+  it('coupling guard beats a stale hash on a clear, too', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { clearFields: ['textBody'], bodyHash: 'bh1-not-this-draft' }),
       /textBody can't be cleared on its own while htmlBody is present/,
     );
   });
 
-  it('regression: textBody alone on a dual reply draft still hits the textBody-coupling guard', async () => {
-    mockReplyUpdate(client, DUAL_REPLY);
+  it('a stale hash beats the flagged count refusal: re-read first, then worry about tokens', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, HTML_ONLY_REPLY);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { textBody: 'new text' }),
+      () => client.updateDraft('draft-1', {
+        htmlBody: '<p>{{signature}}</p><p>{{signature}}</p>',
+        expandSignature: true, bodyHash: 'bh1-not-this-draft',
+      }),
+      /not this draft's current one/,
+    );
+  });
+
+  it('assertBodyInputs beats the coupling guard: a malformed body is the first thing to fix', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<![CDATA[<p>Hi</p>]]>', clearFields: ['textBody'] }),
+      (e: unknown) => {
+        const m = (e as Error).message;
+        assert.match(m, /htmlBody contains a CDATA section/);
+        assert.doesNotMatch(m, /can't be cleared on its own/);
+        return true;
+      },
+    );
+  });
+
+  it('assertBodyInputs beats the hash check as well', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { htmlBody: '<![CDATA[<p>Hi</p>]]>', bodyHash: 'bh1-not-this-draft' }),
+      (e: unknown) => {
+        const m = (e as Error).message;
+        assert.match(m, /htmlBody contains a CDATA section/);
+        assert.doesNotMatch(m, /bodyHash/);
+        return true;
+      },
+    );
+  });
+
+  it('coupling guard beats the flagged count refusal', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, DUAL_REPLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        textBody: '{{signature}} and {{signature}}',
+        expandSignature: true, bodyHash: hashOf(DUAL_REPLY),
+      }),
       /editing textBody alone won't change what most recipients see/,
     );
   });
 
-  it('precedence: textBody-alone + originalEmailId on a dual draft is owned by the coupling guard (loud reject, no data loss)', async () => {
-    // A text-only edit while html survives can't change what recipients render, so the coupling
-    // guard rejects regardless of originalEmailId — the keep-intent is moot because the whole
-    // edit is rejected (nothing is written). The remedy ("edit htmlBody") then keeps the quote.
-    // Pinned so this precedence is intended, not accidental.
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { textBody: 'new text', originalEmailId: 'orig-1' }),
-      /editing textBody alone won't change what most recipients see/,
-    );
-  });
+  // -- clearFields:['forwardedMessageId'] --
 
-  it('asymmetric draft (quote-less html, quoted text): editing textBody alone → textBody-coupling guard', async () => {
-    // Pins coupledTextEdit case (i) on an asymmetric draft, not just the symmetric one.
-    mockReplyUpdate(client, ASYMMETRIC_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { textBody: 'new text' }),
-      /editing textBody alone won't change what most recipients see/,
-    );
-  });
+  const FORWARD_DRAFT = { ...REPLY_BASE,
+    inReplyTo: null, references: null,
+    'header:X-Forwarded-Message-Id:asMessageIds': ['orig-msg@example.com'],
+    textBody: [{ partId: 't', type: 'text/plain' }],
+    bodyValues: { t: { value: 'FYI\n\n----- Original message -----\nFrom: someone' } } };
 
-  it('clearFields:["htmlBody"] where only the html is quoted falls through to the quote guard', async () => {
-    // Pins the oldTextQuoted precondition on the plain-text-conversion carve-out: the surviving
-    // text is quote-LESS, so this is NOT a clean carve-out → REJECT.
-    mockReplyUpdate(client, HTMLQUOTE_ONLY_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { clearFields: ['htmlBody'] }),
-      /would drop the quoted original/,
-    );
-  });
-
-  it('htmlBody + clearFields:["textBody"] + originalEmailId: quote regenerates, then the textBody-clear coupling guard rejects', async () => {
-    // Odd-but-safe: the quote is preserved into the html, then the pre-existing clearFields-
-    // textBody coupling guard (shipped behavior, independent of this feature) rejects.
-    mockReplyUpdate(client, DUAL_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>x</p>', clearFields: ['textBody'], originalEmailId: 'orig-1' }),
-      /textBody can't be cleared on its own while htmlBody is present/,
-    );
-  });
-
-  it('originalEmailId on a clear-only edit (nothing to regenerate into) rejects loudly', async () => {
-    // dual, quote-less text, clearFields:['htmlBody'] + originalEmailId → no body is being
-    // written, so the keep intent can't be honored: loud reject, NOT a silent no-op.
-    mockReplyUpdate(client, HTMLQUOTE_ONLY_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { clearFields: ['htmlBody'], originalEmailId: 'orig-1' }),
-      /can't regenerate a quote on a body you're not writing/,
-    );
-  });
-
-  // -- html-only reply draft (foreign-client shape) --
-
-  it('rejects editing htmlBody on an html-only reply draft without a flag', async () => {
-    mockReplyUpdate(client, HTML_ONLY_REPLY);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>just my new reply</p>' }),
-      /would drop the quoted original/,
-    );
-  });
-
-  it('regenerates and keeps the quote from originalEmailId on an html-only reply draft', async () => {
-    const makeReq = mockReplyUpdate(client, HTML_ONLY_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>edited html-only</p>', originalEmailId: 'orig-1' });
+  it('de-forwards a draft, dropping the recorded X-Forwarded-Message-Id', async () => {
+    const makeReq = mockBodyEdit(client, FORWARD_DRAFT);
+    await client.updateDraft('draft-1', { clearFields: ['forwardedMessageId'] });
     const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.html.value, /edited html-only/);
-    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
-    assert.match(draft.bodyValues.html.value, /ORIGINAL HTML BODY/);
+    assert.equal(draft['header:X-Forwarded-Message-Id:asMessageIds'], undefined);
   });
 
-  it('drops the quote on noQuote:true on an html-only reply draft', async () => {
-    const makeReq = mockReplyUpdate(client, HTML_ONLY_REPLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>bare html-only</p>', noQuote: true });
+  it('carries the header forward when the clear is not asked for', async () => {
+    const makeReq = mockBodyEdit(client, FORWARD_DRAFT);
+    await client.updateDraft('draft-1', { subject: 'Fwd: Hello (edited)' });
     const draft = createdDraft(makeReq);
-    assert.equal(draft.bodyValues.html.value, '<p>bare html-only</p>');
+    assert.deepEqual(draft['header:X-Forwarded-Message-Id:asMessageIds'], ['orig-msg@example.com']);
+  });
+
+  it('de-forwarding is metadata: it needs no bodyHash and leaves the body alone', async () => {
+    const makeReq = mockBodyEdit(client, FORWARD_DRAFT);
+    const result = await client.updateDraft('draft-1', { clearFields: ['forwardedMessageId'] });
+    assert.equal(createdDraft(makeReq).bodyValues.text.value, FORWARD_DRAFT.bodyValues.t.value);
+    assert.equal(result.bodyHash, undefined);
+    assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  it('de-forwards alongside a body edit, which still needs its hash', async () => {
+    const makeReq = mockBodyEdit(client, FORWARD_DRAFT);
+    await client.updateDraft('draft-1', {
+      clearFields: ['forwardedMessageId'], textBody: 'just my note', bodyHash: hashOf(FORWARD_DRAFT),
+    });
+    const draft = createdDraft(makeReq);
+    assert.equal(draft['header:X-Forwarded-Message-Id:asMessageIds'], undefined);
+    assert.equal(draft.bodyValues.text.value, 'just my note');
   });
 
   // -- non-reply draft --
 
-  it('does not fire the guard on a NON-reply draft (no inReplyTo)', async () => {
-    const makeReq = mockUpdate(client, EXISTING_DRAFT); // no inReplyTo
-    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>' });
-    assert.equal(draftFromCall(makeReq).bodyValues.html.value, '<p>NEW</p>');
+  it('treats a plain (non-reply) draft exactly the same — the hash is not about replies', async () => {
+    const makeReq = mockBodyEdit(client, EXISTING_DRAFT);
+    await client.updateDraft('draft-1', { htmlBody: '<p>NEW</p>', bodyHash: hashOf(EXISTING_DRAFT) });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, '<p>NEW</p>');
   });
 });
 
-// Local non-empty check for the regenerate-fallback assertion.
-function isBlankStr(s: string | undefined): boolean {
-  return !s || s.trim() === '';
-}
-
 // ---------- sendDraft ----------
 
+// In the Drafts folder, because send_draft only sends a draft that is filed there. A
+// fixture without mailboxIds is an under-stubbed read, not a draft the send should accept.
 const SENDABLE_DRAFT = {
   id: 'draft-1',
   from: [{ email: 'me@example.com' }],
@@ -1761,6 +2167,7 @@ const SENDABLE_DRAFT = {
   cc: [{ email: 'cc@example.com' }],
   bcc: [],
   keywords: { $draft: true },
+  mailboxIds: { 'mb-drafts': true },
 };
 
 const SENT_MAILBOX = { id: 'mb-sent', name: 'Sent', role: 'sent' };
@@ -1903,6 +2310,191 @@ describe('sendDraft', () => {
     assert.equal(makeReq.mock.calls.length, 1);
   });
 
+  // ---- a draft is sendable only from the Drafts folder ----
+
+  it('refuses to send a draft that is not in the Drafts folder, and names the repair', async () => {
+    const archived = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-archive': true } };
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [archived] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /not in the Drafts folder/i);
+        assert.match(err.message, /move_email/);
+        return true;
+      },
+    );
+    // Refused before submission: only the Email/get went out.
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // The check needs the property, and nothing else in this method reads it, so a read that
+  // stopped asking for it would make every draft look filed nowhere.
+  it('asks for mailboxIds on the pre-send read', async () => {
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    await client.sendDraft('draft-1');
+    assert.ok(callArguments(makeReq)[0].methodCalls[0][1].properties.includes('mailboxIds'));
+  });
+
+  it('sends a draft that is in Drafts alongside another mailbox', async () => {
+    const alsoLabelled = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-archive': true } };
+    stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [alsoLabelled] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1');
+  });
+
+  it('refuses when no mailbox carries the drafts role', async () => {
+    mock.method(client, 'getMailboxes', async () => [SENT_MAILBOX]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /drafts/i);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // The membership map is parsed from the response and read by a caller-independent id, so
+  // it is read the way this file's other mailboxIds reads are: an own-property test, not an
+  // index. A drafts-role mailbox whose id collides with an Object.prototype key would
+  // otherwise resolve to a truthy function and open the gate for a draft filed anywhere.
+  it('does not treat a prototype key as membership of Drafts', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'constructor', name: 'Drafts', role: 'drafts' },
+      SENT_MAILBOX,
+    ]);
+    const archived = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-archive': true } };
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [archived] }, 'getEmail']],
+    }));
+
+    await assert.rejects(() => client.sendDraft('draft-1'), /not in the Drafts folder/i);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // The locations the refusal names, read out of its parenthetical as a LIST. Object.keys
+  // order is not something this code fixes, so a pattern that matches a name in some
+  // positions and not others passes or fails on where it happened to land rather than on
+  // whether it was named at all.
+  // `mb-archive` has no mailbox in this suite's fixture, so it renders as its own id — which
+  // is also the fallback these assertions pin.
+  const locationsNamed = (message: string): string[] => {
+    const listed = /\(it is in: ([^)]*)\)/.exec(message);
+    return listed ? listed[1].split(',').map((s) => s.trim()) : [];
+  };
+
+  // A `false` value is not a membership, so it must not be reported as one. Refusing because
+  // the draft is not in Drafts and then telling the caller it IS in Drafts is a refusal that
+  // argues against itself.
+  it('does not name a mailbox whose membership value is false', async () => {
+    const notReally = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': false, 'mb-archive': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [notReally] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /not in the Drafts folder/i);
+        assert.deepEqual(locationsNamed(err.message), ['mb-archive']);
+        return true;
+      },
+    );
+  });
+
+  // A filing this server cannot read is its own outcome, not "filed somewhere else".
+  //
+  // The array row is also where `typeof [] === 'object'` is covered. An array read as a map
+  // would be walked by Object.keys into INDICES whose values are the ELEMENTS rather than
+  // `true`, so the listing would drop them all and the refusal would name no location while
+  // still offering a move_email repair; it now cannot reach the sentence that lists
+  // locations at all, so the shape is
+  // pinned HERE rather than by a separate test asserting that an index is absent from a
+  // message which has no location list to put one in.
+  const UNREADABLE_FILINGS: [string, any][] = [
+    ['array-shaped', ['mb-archive']],
+    ['a bare string', 'mb-archive'],
+    ['null', null],
+    ['absent', undefined],
+  ];
+
+  for (const [label, mailboxIds] of UNREADABLE_FILINGS) {
+    it(`refuses with its own message when mailboxIds is ${label}`, async () => {
+      const wrongShape = { ...SENDABLE_DRAFT, mailboxIds };
+      const makeReq = stubRequests(client, async () => ({
+        methodResponses: [['Email/get', { list: [wrongShape] }, 'getEmail']],
+      }));
+
+      await assert.rejects(
+        () => client.sendDraft('draft-1'),
+        (err: Error) => {
+          assert.match(err.message, /no readable mailboxIds/i);
+          // The consumer of this string has no browser, so the remedy must not send it
+          // looking for one — it says plainly that nothing here repairs this.
+          assert.match(err.message, /no tool here can repair it/i);
+          assert.equal(/web interface/i.test(err.message), false, err.message);
+          // Not the ordinary refusal: that one asserts where the draft is and how to fix it,
+          // and neither is known here.
+          assert.equal(/not in the Drafts folder/i.test(err.message), false, err.message);
+          assert.equal(/move_email/.test(err.message), false, err.message);
+          return true;
+        },
+      );
+      // Refused before submission: only the Email/get went out.
+      assert.equal(makeReq.mock.calls.length, 1);
+    });
+  }
+
+  // The gate demands `=== true`, and the sentence that reports where the draft IS has to
+  // apply the same test. Plain truthiness there refuses the draft for not being in Drafts and
+  // names Drafts as somewhere it is, in one sentence.
+  it('does not name a mailbox whose membership value is truthy but not true', async () => {
+    const notReallyEither = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': 1, 'mb-archive': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [notReallyEither] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /not in the Drafts folder/i);
+        assert.deepEqual(locationsNamed(err.message), ['mb-archive']);
+        return true;
+      },
+    );
+  });
+
+  it('does not accept a custom mailbox whose name merely contains "draft"', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'mb-notes', name: 'Draft notes', role: null },
+      SENT_MAILBOX,
+    ]);
+    const filedInNotes = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-notes': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [filedInNotes] }, 'getEmail']],
+    }));
+
+    await assert.rejects(() => client.sendDraft('draft-1'), /drafts/i);
+  });
+
   it('throws when email not found', async () => {
     stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [] }, 'getEmail']],
@@ -2021,6 +2613,113 @@ describe('sendDraft', () => {
     });
 
     assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1'); // not rejected — html-only is sendable
+  });
+
+  // A part that declares no content type is displayed by whichever list carries it, so an
+  // empty one renders blank exactly as an empty typed part does. Nothing saw it before,
+  // because the guard selected a part by matching its type.
+  it('rejects a draft whose only body part declares no content type and is blank', async () => {
+    const typelessBlank = {
+      ...SENDABLE_DRAFT,
+      textBody: [{ partId: '1' }],
+      htmlBody: [{ partId: '1' }], // the server aliases the one part into both lists
+      bodyValues: { '1': { value: '   ' } },
+    };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [typelessBlank] }, 'getEmail']],
+    }));
+
+    await assert.rejects(() => client.sendDraft('draft-1'), /empty htmlBody that would render blank/);
+  });
+
+  // The reason the guard reads every part rather than selecting one. These two drafts hold
+  // the SAME parts and render the same way; only the list order differs. A selector answered
+  // them differently, and the one it let through shipped an empty text/html part that shadows
+  // the real body (RFC 2046).
+  it('rejects a blank part whatever its position in the body list', async () => {
+    for (const htmlBody of [
+      [{ partId: '2' }, { partId: '3', type: 'text/html' }],
+      [{ partId: '3', type: 'text/html' }, { partId: '2' }],
+    ]) {
+      const mixed = {
+        ...SENDABLE_DRAFT,
+        textBody: [{ partId: '1', type: 'text/plain' }],
+        htmlBody,
+        bodyValues: { '1': { value: 'Real text' }, '2': { value: '<p>Real html</p>' }, '3': { value: '' } },
+      };
+      stubRequests(client, async () => ({
+        methodResponses: [['Email/get', { list: [mixed] }, 'getEmail']],
+      }));
+
+      await assert.rejects(
+        () => client.sendDraft('draft-1'),
+        /empty htmlBody that would render blank/,
+        JSON.stringify(htmlBody),
+      );
+    }
+  });
+});
+
+describe('findBlankBodyPart', () => {
+  const values = (v: Record<string, string>) =>
+    Object.fromEntries(Object.entries(v).map(([k, value]) => [k, { value }]));
+
+  it('answers undefined for an ordinary draft with real content in both formats', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: 'text', h: '<p>html</p>' }),
+    }), undefined);
+  });
+
+  it('names the body field a blank part sits in, typed or typeless', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: 'text', h: '  ' }),
+    }), 'htmlBody');
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: '', h: '<p>html</p>' }),
+    }), 'textBody');
+  });
+
+  // htmlBody first, the order the two refusals have always been raised in: an empty
+  // text/html part shadows a real text/plain alternative, so it is the worse of the two.
+  it('names htmlBody when both formats are blank', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: '', h: '' }),
+    }), 'htmlBody');
+  });
+
+  // Not blank, and the distinction is the whole reason a draft with one format sends: the
+  // draft has no body in that format at all, rather than one that renders to nothing.
+  it('does not treat a part with no stored value as blank', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }],
+      bodyValues: values({ t: 'text' }),
+    }), undefined);
+  });
+
+  // A part a body list does not display as text renders nothing on its own account, so an
+  // empty value on one says nothing about what the recipient sees.
+  it('ignores a blank part that is not displayed as text', () => {
+    assert.equal(findBlankBodyPart({
+      textBody: [{ partId: 't', type: 'text/plain' }],
+      htmlBody: [{ partId: 'i', type: 'image/png', blobId: 'B' }],
+      bodyValues: values({ t: 'text', i: '' }),
+    }), undefined);
+  });
+
+  it('finds a blank part wherever it sits in the list', () => {
+    const parts = [{ partId: 'a', type: 'text/plain' }, { partId: 'b', type: 'text/plain' }];
+    const bodyValues = values({ a: 'real', b: '' });
+    assert.equal(findBlankBodyPart({ textBody: parts, htmlBody: [], bodyValues }), 'textBody');
+    assert.equal(findBlankBodyPart({ textBody: [...parts].reverse(), htmlBody: [], bodyValues }), 'textBody');
   });
 });
 
@@ -3007,7 +3706,7 @@ describe('uploadAttachments', () => {
     });
     // .ics and .eml are the two that change how the mail renders rather than just its
     // icon: a client decides from this header whether to show a calendar invitation or
-    // a forwarded message inline. .eml is also what forward_email's asAttachment writes.
+    // a forwarded message inline. .eml is also what an asAttachment forward writes.
     const names = ['invite.ics', 'original.eml', 'logo.svg', 'notes.md', 'shot.webp', 'old.doc', 'old.xls', 'old.ppt', 'blob.unknownext'];
     const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-att-'));
     try {
@@ -3416,7 +4115,7 @@ describe('updateDraft attachments', () => {
   it('still throws the no-body error when the last body is cleared alongside an attachments change', async () => {
     mockUpdate(client, DRAFT_ONE_ATT); // text-only draft with one attachment
     await assert.rejects(
-      () => client.updateDraft('draft-1', { attachments: [NEW_PART], clearFields: ['textBody'] }),
+      () => client.updateDraft('draft-1', { attachments: [NEW_PART], clearFields: ['textBody'], bodyHash: hashOf(DRAFT_ONE_ATT) }),
       /a draft needs a body/,
     );
   });
@@ -3454,7 +4153,9 @@ describe('updateDraft embedded images (#13)', () => {
 
   // Dispatches Email/get by id so the post-edit re-read can return a DIFFERENT draft from the
   // one the edit started with — the whole point of that read is to report on the saved state.
+  let servedDraft: any;
   function mockEdit(c: JmapClient, before: any, saved?: any, opts: { readBackFails?: boolean } = {}) {
+    servedDraft = before;
     mock.method(c, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
     return mock.method(c, 'makeRequest', async (req: any) => {
       const [method, params] = req.methodCalls[0];
@@ -3479,12 +4180,25 @@ describe('updateDraft embedded images (#13)', () => {
     return request.methodCalls[0][1].create.draft;
   }
 
+  /**
+   * An edit of the draft the harness is currently serving, carrying that draft's `bodyHash`.
+   *
+   * The hash is a lost-update guard and is not what these tests are about, so it is supplied
+   * from the fixture rather than written out at every call site — and it is supplied on
+   * metadata-only edits too, where updateDraft ignores it, so no call site has to know which
+   * kind it is. Passing an explicit `bodyHash` in `updates` overrides it, which is how the
+   * few tests that DO care about the guard say so.
+   */
+  function edit(updates: any) {
+    return client.updateDraft('draft-1', { bodyHash: hashOf(servedDraft), ...updates });
+  }
+
   // ---- what the draft carries survives an edit that isn't about it ----
 
   it('carries a body-list-routed image the JMAP attachments array never listed', async () => {
     const draft = htmlDraft('<p>see <img src="cid:pic@x"></p>', [], [imagePart()]);
     const makeReq = mockEdit(client, draft);
-    await client.updateDraft('draft-1', { subject: 'New' });
+    await edit({ subject: 'New' });
     assert.deepEqual(createdDraft(makeReq).attachments, [
       { blobId: 'blob-img', type: 'image/png', name: 'pic.png', disposition: 'inline', cid: 'pic@x' },
     ]);
@@ -3493,7 +4207,7 @@ describe('updateDraft embedded images (#13)', () => {
   it('says nothing about images on an edit that cannot have changed what the body displays', async () => {
     const draft = htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]);
     const makeReq = mockEdit(client, draft);
-    const result = await client.updateDraft('draft-1', { subject: 'New' });
+    const result = await edit({ subject: 'New' });
     assert.equal(result.notes, undefined);
     assert.equal(result.inlineImages, undefined);
     assert.equal(makeReq.mock.calls.length, 3); // no re-read: nothing was attached
@@ -3502,7 +4216,7 @@ describe('updateDraft embedded images (#13)', () => {
   it('resolves a percent-encoded reference to the part that supplies it', async () => {
     const draft = htmlDraft('<p>x</p>', [imagePart()]);
     const makeReq = mockEdit(client, draft, htmlDraft('<p>y</p>', [imagePart()]));
-    await client.updateDraft('draft-1', { htmlBody: '<p>y <img src="cid:pic%40x"></p>' });
+    await edit({ htmlBody: '<p>y <img src="cid:pic%40x"></p>' });
     assert.match(createdDraft(makeReq).bodyValues.html.value, /cid:pic%40x/);
   });
 
@@ -3513,14 +4227,14 @@ describe('updateDraft embedded images (#13)', () => {
   it('refuses a body edit while the stored body references an image nothing supplies', async () => {
     mockEdit(client, BROKEN);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>new</p><img src="cid:gone@x">' }),
+      () => edit({ htmlBody: '<p>new</p><img src="cid:gone@x">' }),
       /stored body references image identifier\(s\) with no matching attachment.*gone@x/s,
     );
   });
 
   it('still runs a metadata edit on such a draft, carrying the broken body verbatim', async () => {
     const makeReq = mockEdit(client, BROKEN);
-    await client.updateDraft('draft-1', { subject: 'Renamed' });
+    await edit({ subject: 'Renamed' });
     const draft = createdDraft(makeReq);
     assert.equal(draft.bodyValues.html.value, '<p>hi</p><img src="cid:gone@x">');
     assert.equal(draft.textBody, undefined); // body-invariant: no text part invented
@@ -3528,7 +4242,7 @@ describe('updateDraft embedded images (#13)', () => {
 
   it('still appends an unrelated attachment to such a draft', async () => {
     const makeReq = mockEdit(client, BROKEN);
-    await client.updateDraft('draft-1', {
+    await edit({
       attachments: [{ blobId: 'b-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' }],
     });
     assert.equal(createdDraft(makeReq).attachments.length, 1);
@@ -3537,7 +4251,7 @@ describe('updateDraft embedded images (#13)', () => {
   it('accepts an attachment that supplies the missing image', async () => {
     const supplied = imagePart({ cid: 'gone@x', blobId: 'b-gone' });
     const makeReq = mockEdit(client, BROKEN, htmlDraft('<p>hi</p><img src="cid:gone@x">', [supplied]));
-    const result = await client.updateDraft('draft-1', {
+    const result = await edit({
       attachments: [{ blobId: 'b-gone', type: 'image/png', name: 'pic.png', cid: 'gone@x', disposition: 'inline' }],
     });
     assert.equal(createdDraft(makeReq).attachments.length, 1);
@@ -3546,7 +4260,7 @@ describe('updateDraft embedded images (#13)', () => {
 
   it('accepts a body edit that replaces the broken body outright', async () => {
     const makeReq = mockEdit(client, BROKEN);
-    await client.updateDraft('draft-1', { htmlBody: '<p>all new</p>' });
+    await edit({ htmlBody: '<p>all new</p>' });
     assert.equal(createdDraft(makeReq).bodyValues.html.value, '<p>all new</p>');
   });
 
@@ -3557,14 +4271,14 @@ describe('updateDraft embedded images (#13)', () => {
   it('refuses a body edit when a stored identifier cannot be re-created faithfully', async () => {
     mockEdit(client, EXOTIC_CID);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p>new</p>' }),
-      /cannot safely re-create.*Recreate it — with reply_email or forward_email/s,
+      () => edit({ htmlBody: '<p>new</p>' }),
+      /cannot safely re-create.*Recreate it with draft_email/s,
     );
   });
 
   it('leaves metadata edits of such a draft alone (the carry reproduces the value verbatim)', async () => {
     const makeReq = mockEdit(client, EXOTIC_CID);
-    await client.updateDraft('draft-1', { subject: 'Renamed' });
+    await edit({ subject: 'Renamed' });
     assert.equal(createdDraft(makeReq).attachments[0].cid, 'has space@x');
   });
 
@@ -3580,7 +4294,7 @@ describe('updateDraft embedded images (#13)', () => {
     };
     mockEdit(client, interleaved);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { subject: 'X' }),
+      () => edit({ subject: 'X' }),
       /interleaves multiple text parts of the same type.*see issue #85/s,
     );
   });
@@ -3595,7 +4309,7 @@ describe('updateDraft embedded images (#13)', () => {
     };
     mockEdit(client, weird);
     await assert.rejects(
-      () => client.updateDraft('draft-1', { removeAttachments: ['no-such-blob'] }),
+      () => edit({ removeAttachments: ['no-such-blob'] }),
       /cannot carry/,
     );
   });
@@ -3605,7 +4319,7 @@ describe('updateDraft embedded images (#13)', () => {
   it('refuses a removal that would leave the surviving body pointing at nothing', async () => {
     mockEdit(client, htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]));
     await assert.rejects(
-      () => client.updateDraft('draft-1', { removeAttachments: ['blob-img'] }),
+      () => edit({ removeAttachments: ['blob-img'] }),
       /removeAttachments would remove an image the draft's body still references/,
     );
   });
@@ -3613,21 +4327,21 @@ describe('updateDraft embedded images (#13)', () => {
   it('refuses an attachment wipe that would leave the surviving body pointing at nothing', async () => {
     mockEdit(client, htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]));
     await assert.rejects(
-      () => client.updateDraft('draft-1', { clearFields: ['attachments'] }),
+      () => edit({ clearFields: ['attachments'] }),
       /would strip image\(s\) the surviving body still references/,
     );
   });
 
   it('wipes the attachments when the surviving body references none of them', async () => {
     const makeReq = mockEdit(client, htmlDraft('<p>no images here</p>', [imagePart()]));
-    await client.updateDraft('draft-1', { clearFields: ['attachments'] });
+    await edit({ clearFields: ['attachments'] });
     assert.equal(createdDraft(makeReq).attachments, undefined);
   });
 
   it('takes a server-managed image off the draft when the rewritten body stops displaying it', async () => {
     const draft = htmlDraft(`<p><img src="cid:${STORED_MINT}"></p>`, [imagePart({ cid: STORED_MINT })]);
     const makeReq = mockEdit(client, draft);
-    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    const result = await edit({ htmlBody: '<p>text only now</p>' });
     assert.equal(createdDraft(makeReq).attachments, undefined);
     assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 0, removed: 1 });
     assert.deepEqual(result.notes, ['Removed 1 image(s) that were embedded in the quote.']);
@@ -3636,7 +4350,7 @@ describe('updateDraft embedded images (#13)', () => {
   it("keeps someone else's image as a regular attachment when the body stops displaying it", async () => {
     const draft = htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]);
     const makeReq = mockEdit(client, draft);
-    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    const result = await edit({ htmlBody: '<p>text only now</p>' });
     assert.deepEqual(createdDraft(makeReq).attachments, [
       { blobId: 'blob-img', type: 'image/png', name: 'pic.png', disposition: 'attachment', cid: 'pic@x' },
     ]);
@@ -3652,7 +4366,7 @@ describe('updateDraft embedded images (#13)', () => {
     ];
     const draft = htmlDraft(`<p><img src="cid:${STORED_MINT}"><img src="cid:${SECOND_MINT}"></p>`, shared);
     const makeReq = mockEdit(client, draft);
-    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    const result = await edit({ htmlBody: '<p>text only now</p>' });
     assert.equal(createdDraft(makeReq).attachments, undefined);
     assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 0, removed: 2 });
     assert.deepEqual(result.notes, ['Removed 2 image(s) that were embedded in the quote.']);
@@ -3665,21 +4379,60 @@ describe('updateDraft embedded images (#13)', () => {
     ];
     const draft = htmlDraft('<p><img src="cid:first@x"><img src="cid:second@x"></p>', shared);
     const makeReq = mockEdit(client, draft);
-    const result = await client.updateDraft('draft-1', { htmlBody: '<p>text only now</p>' });
+    const result = await edit({ htmlBody: '<p>text only now</p>' });
     assert.equal(createdDraft(makeReq).attachments.length, 2);
     assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 2, removed: 0 });
     assert.deepEqual(result.notes, ['2 of your image(s) became regular attachments (nothing in the body displays them).']);
+  });
+
+  // A metadata-only edit writes no body and is not asked for a hash — but taking a part out
+  // of a body list changes the SET the hash is taken over, so a hash the caller was holding
+  // stops matching after an edit that wrote nothing. Nothing is lost: the next body edit is
+  // refused and the caller re-reads, which is the guard working.
+  it('stales a held hash when removeAttachments takes an image out of a body list', async () => {
+    const before = htmlDraft('<p>no image displayed here</p>', [], [imagePart()]);
+    const heldHash = hashOf(before);
+    const after = htmlDraft('<p>no image displayed here</p>');
+
+    mockEdit(client, before, after);
+    const removal = await client.updateDraft('draft-1', { removeAttachments: ['blob-img'] });
+    // Metadata-only: no body written, so no hash is issued for the next edit either.
+    assert.equal(removal.bodyHash, undefined);
+
+    mockEdit(client, after, after);
+    await assert.rejects(
+      () => client.updateDraft('draft-2', { htmlBody: '<p>next</p>', bodyHash: heldHash }),
+      /not this draft's current one/,
+    );
+  });
+
+  // The other half of the same claim, and the reason both descriptions say "a part the
+  // server routed into a body list" rather than "an attachment". collectDraftBodyParts walks
+  // textBody and htmlBody and nothing else, so a part that only ever sat in the attachments
+  // array is not in the hash and taking it off cannot stale one.
+  it('leaves a held hash valid when removeAttachments takes off a part no body list carries', async () => {
+    const attached = {
+      partId: 'p1', blobId: 'blob-att', type: 'application/pdf',
+      name: 'doc.pdf', disposition: 'attachment', size: 10,
+    };
+    const before = htmlDraft('<p>unchanged body</p>', [attached]);
+    const heldHash = hashOf(before);
+    const after = htmlDraft('<p>unchanged body</p>');
+
+    mockEdit(client, before, after);
+    await client.updateDraft('draft-1', { removeAttachments: ['blob-att'] });
+
+    mockEdit(client, after, after);
+    const next = await client.updateDraft('draft-2', { htmlBody: '<p>next</p>', bodyHash: heldHash });
+    assert.ok(next.id, 'the held hash was rejected after a removal the hash does not cover');
   });
 
   it('reports a part the caller removed once, as a removal it asked for', async () => {
     // The explicit removal is the caller's own action and needs no sentence; what must not
     // happen is the same part ALSO being counted as one the edit took off the body.
     const draft = htmlDraft(`<p><img src="cid:${STORED_MINT}"></p>`, [imagePart({ cid: STORED_MINT })]);
-    const result = await client.updateDraft.call(
-      (mockEdit(client, draft), client),
-      'draft-1',
-      { htmlBody: '<p>gone</p>', removeAttachments: ['blob-img'] },
-    );
+    mockEdit(client, draft);
+    const result = await edit({ htmlBody: '<p>gone</p>', removeAttachments: ['blob-img'] });
     assert.equal(result.notes, undefined);
     assert.equal(result.inlineImages, undefined);
   });
@@ -3689,7 +4442,7 @@ describe('updateDraft embedded images (#13)', () => {
   it('refuses two attachments in one call sharing an identifier', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []));
     await assert.rejects(
-      () => client.updateDraft('draft-1', {
+      () => edit({
         htmlBody: '<p>y <img src="cid:dup@me"></p>',
         attachments: [
           { blobId: 'b1', type: 'image/png', cid: 'dup@me', disposition: 'inline' },
@@ -3703,25 +4456,47 @@ describe('updateDraft embedded images (#13)', () => {
   it('refuses an attachment whose identifier is already used on the draft', async () => {
     mockEdit(client, htmlDraft('<p><img src="cid:pic@x"></p>', [imagePart()]));
     await assert.rejects(
-      () => client.updateDraft('draft-1', {
+      () => edit({
         attachments: [{ blobId: 'b-other', type: 'image/png', cid: 'pic@x', disposition: 'inline' }],
       }),
       /already used by another attachment on this draft/,
     );
   });
 
-  it('refuses a caller reference to a server-managed identifier', async () => {
+  // Narrowed to AUTHORING one. A minted identifier is durable now — it survives an edit for
+  // as long as the body keeps referencing it — so the two halves are a matched pair and the
+  // pair is what pins the rule: naming a part the draft does not carry is refused, naming one
+  // it does is the ordinary read-edit-write shape. Refusing both would refuse the first edit
+  // of every image-bearing draft this server made.
+  it('refuses a caller reference AUTHORING a server-managed identifier the draft has no part for', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []));
     await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: `<p><img src="cid:${STORED_MINT}"></p>` }),
-      /a server-managed identifier for quoted images/,
+      () => edit({ htmlBody: `<p><img src="cid:${STORED_MINT}"></p>` }),
+      /a server-managed identifier for quoted images, and this draft carries no part under it/,
     );
+  });
+
+  it('accepts the same reference handed back on a draft that carries the part', async () => {
+    const draft = htmlDraft(`<p>x <img src="cid:${STORED_MINT}"></p>`, [imagePart({ cid: STORED_MINT })]);
+    const makeReq = mockEdit(client, draft);
+    await edit({ htmlBody: `<p>my edited prose <img src="cid:${STORED_MINT}"></p>` });
+    const saved = createdDraft(makeReq);
+    assert.match(saved.bodyValues.html.value, new RegExp(`cid:${STORED_MINT}`));
+    assert.equal(saved.attachments.some((a: any) => a.cid === STORED_MINT), true);
+  });
+
+  it('takes the part off when the caller drops that reference, rather than refusing', async () => {
+    const draft = htmlDraft(`<p>x <img src="cid:${STORED_MINT}"></p>`, [imagePart({ cid: STORED_MINT })]);
+    const makeReq = mockEdit(client, draft);
+    const result = await edit({ htmlBody: '<p>my edited prose</p>' });
+    assert.equal(createdDraft(makeReq).attachments, undefined); // an empty list is omitted, not written
+    assert.equal(result.inlineImages?.removed, 1);
   });
 
   it('refuses a caller reference nothing supplies', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []));
     await assert.rejects(
-      () => client.updateDraft('draft-1', { htmlBody: '<p><img src="cid:mine-logo"></p>' }),
+      () => edit({ htmlBody: '<p><img src="cid:mine-logo"></p>' }),
       /references cid "mine-logo" but no attachment supplies it.*add an attachments item with cid: "mine-logo"/s,
     );
   });
@@ -3731,7 +4506,7 @@ describe('updateDraft embedded images (#13)', () => {
     await assert.rejects(
       () => client.updateDraft(
         'draft-1',
-        { htmlBody: '<p><img src="cid:mine-logo"></p>' },
+        { htmlBody: '<p><img src="cid:mine-logo"></p>', bodyHash: hashOf(servedDraft) },
         { attachmentsEnabled: false },
       ),
       /sending attachments is disabled on this server/,
@@ -3745,7 +4520,7 @@ describe('updateDraft embedded images (#13)', () => {
   // on its own, so the marking has to happen here, against the body this call assembled.
   it('marks an added file inline when the edited body references its cid', async () => {
     const makeReq = mockEdit(client, htmlDraft('<p>x</p>', []));
-    await client.updateDraft('draft-1', {
+    await edit({
       htmlBody: '<p><img src="cid:mine-logo"></p>',
       attachments: [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'mine-logo', disposition: 'attachment' }],
     });
@@ -3756,7 +4531,7 @@ describe('updateDraft embedded images (#13)', () => {
 
   it('leaves an added file with an unreferenced cid as an ordinary attachment, and says so', async () => {
     const makeReq = mockEdit(client, htmlDraft('<p>x</p>', []));
-    const result = await client.updateDraft('draft-1', {
+    const result = await edit({
       htmlBody: '<p>no image here</p>',
       attachments: [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'mine-logo', disposition: 'attachment' }],
     });
@@ -3769,7 +4544,7 @@ describe('updateDraft embedded images (#13)', () => {
   // the same edit left the draft with no html body to display it from.
   it('says an added file was attached when the edit clears the html body', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []));
-    const result = await client.updateDraft('draft-1', {
+    const result = await edit({
       textBody: 'plain text only now',
       clearFields: ['htmlBody'],
       attachments: [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'mine-logo', disposition: 'attachment' }],
@@ -3779,7 +4554,7 @@ describe('updateDraft embedded images (#13)', () => {
 
   it('says nothing about an ordinary added file that asked to embed nothing', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []));
-    const result = await client.updateDraft('draft-1', {
+    const result = await edit({
       subject: 'New subject',
       attachments: [{ blobId: 'b-doc', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment' }],
     });
@@ -3793,26 +4568,26 @@ describe('updateDraft embedded images (#13)', () => {
 
   it('re-reads the saved draft when it attached an embedded image, and reports its size', async () => {
     const makeReq = mockEdit(client, htmlDraft('<p>x</p>', []), WITH_LOGO);
-    const result = await client.updateDraft('draft-1', {
+    const result = await edit({
       htmlBody: '<p><img src="cid:logo@me"></p>',
       attachments: [NEW_INLINE],
     });
-    assert.equal(makeReq.mock.calls.length, 4); // the re-read is the fourth call
+    // get, create, trash, then TWO reads of the saved draft: the inline-image confirm and
+    // the read the returned bodyHash is taken from. They are separate on purpose — the hash
+    // must come from the stored parts, not from the bytes this call sent.
+    assert.equal(makeReq.mock.calls.length, 5);
     assert.deepEqual(result.notes, ['This draft embeds 1 image(s) (2 KB).']);
   });
 
   it('says so when the saved draft comes back without the image it attached', async () => {
-    const result = await client.updateDraft.call(
-      (mockEdit(client, htmlDraft('<p>x</p>', []), htmlDraft('<p>x</p>', [])), client),
-      'draft-1',
-      { htmlBody: '<p><img src="cid:logo@me"></p>', attachments: [NEW_INLINE] },
-    );
+    mockEdit(client, htmlDraft('<p>x</p>', []), htmlDraft('<p>x</p>', []));
+    const result = await edit({ htmlBody: '<p><img src="cid:logo@me"></p>', attachments: [NEW_INLINE] });
     assert.ok(result.notes?.some((n) => /were not found on the saved draft/.test(n)));
   });
 
   it('never fails the edit when the confirming read does', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []), undefined, { readBackFails: true });
-    const result = await client.updateDraft('draft-1', {
+    const result = await edit({
       htmlBody: '<p><img src="cid:logo@me"></p>',
       attachments: [NEW_INLINE],
     });
@@ -3821,677 +4596,9 @@ describe('updateDraft embedded images (#13)', () => {
   });
 });
 
-describe('updateDraft quote rebuild with embedded images (#13)', () => {
-  let client: JmapClient;
-  beforeEach(() => { client = makeClient(); });
-
-  const MINT_SHAPE = /^ii-[0-9a-f]{32}@inline\.invalid$/;
-  const STORED_MINT = 'ii-0123456789abcdef0123456789abcdef@inline.invalid';
-  const SECOND_MINT = 'ii-fedcba9876543210fedcba9876543210@inline.invalid';
-
-  function storedQuotePart(cid: string, blobId = 'blob-one') {
-    return { partId: 'p2', blobId, type: 'image/png', name: 'one.png', cid, disposition: 'inline', size: 2048 };
-  }
-
-  // A reply draft this server made: a note, an attribution, and a cited quote whose image is
-  // supplied by a part already on the draft.
-  function replyDraft(quoteImageCids: string[], parts: any[]) {
-    const imgs = quoteImageCids.map((c) => `<img src="cid:${c}">`).join('');
-    return {
-      id: 'draft-1', subject: 'Re: Hello',
-      from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }], cc: [], bcc: [],
-      mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
-      inReplyTo: ['orig-msg@example.com'], references: ['orig-msg@example.com'],
-      textBody: [{ partId: 't', type: 'text/plain' }],
-      htmlBody: [{ partId: 'h', type: 'text/html' }],
-      bodyValues: {
-        t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Jon wrote:\n> ORIGINAL' },
-        h: { value: `<p>my reply</p><div>On Sun, Jun 28, 2026, at 12:46 AM, Jon wrote:</div><blockquote type="cite">${imgs}<p>ORIGINAL</p></blockquote>` },
-      },
-      attachments: parts,
-    };
-  }
-
-  // The message being replied to. `imageCids` are the references its own html makes, each
-  // supplied by one of `parts`.
-  function originalWith(imageCids: string[], parts: any[]) {
-    const imgs = imageCids.map((c) => `<img src="cid:${c}">`).join('');
-    return {
-      id: 'orig-1',
-      messageId: ['orig-msg@example.com'],
-      from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
-      sentAt: '2026-06-15T03:29:02Z',
-      subject: 'Hello',
-      textBody: [{ partId: 'ot', type: 'text/plain' }],
-      htmlBody: [{ partId: 'oh', type: 'text/html' }],
-      bodyValues: { ot: { value: 'ORIGINAL TEXT' }, oh: { value: `<p>ORIGINAL${imgs}</p>` } },
-      attachments: parts,
-    };
-  }
-
-  const ORIG_ONE_IMAGE = originalWith(['one@orig'], [
-    { partId: 'op', blobId: 'blob-one', type: 'image/png', name: 'one.png', cid: 'one@orig', disposition: 'inline', size: 2048 },
-  ]);
-  const ORIG_NO_IMAGES = originalWith([], []);
-  const ORIG_TEXT_ONLY = {
-    id: 'orig-1', messageId: ['orig-msg@example.com'],
-    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
-    sentAt: '2026-06-15T03:29:02Z', subject: 'Hello',
-    textBody: [{ partId: 'ot', type: 'text/plain' }], htmlBody: [], bodyValues: { ot: { value: 'ORIGINAL TEXT' } },
-    attachments: [],
-  };
-
-  // Echoes the created draft back on a re-read of the saved copy: what the server stores is
-  // what the create sent, which is what makes the confirming read meaningful here (the
-  // freshly minted identifiers aren't knowable in advance).
-  function mockKeep(c: JmapClient, draft: any, original: any) {
-    mock.method(c, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
-    let created: any = null;
-    return mock.method(c, 'makeRequest', async (req: any) => {
-      const [method, params] = req.methodCalls[0];
-      if (method === 'Email/get') {
-        if (params.ids?.[0] === 'orig-1') return { methodResponses: [['Email/get', { list: [original] }, 'email']] };
-        if (params.ids?.[0] === 'draft-2') {
-          return { methodResponses: [['Email/get', { list: [{ id: 'draft-2', attachments: created?.attachments ?? [] }] }, 'getEmail']] };
-        }
-        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
-      }
-      if (params.create) {
-        created = params.create.draft;
-        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
-      }
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
-    });
-  }
-
-  function createdDraft(makeReq: RequestMock) {
-    const [request] = findCallArguments(
-      makeReq,
-      ([req]) => req.methodCalls[0][1].create,
-      'creating the replacement draft',
-    );
-    return request.methodCalls[0][1].create.draft;
-  }
-
-  it('keeps the identifier a stored quote image already has', async () => {
-    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
-    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.html.value, new RegExp(`cid:${STORED_MINT}`));
-    assert.deepEqual(draft.attachments, [
-      { blobId: 'blob-one', type: 'image/png', name: 'one.png', disposition: 'inline', cid: STORED_MINT },
-    ]);
-  });
-
-  it('mints a fresh identifier when the draft carries no part for the quoted image', async () => {
-    const makeReq = mockKeep(client, replyDraft([], []), ORIG_ONE_IMAGE);
-    const result = await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    assert.equal(draft.attachments.length, 1);
-    assert.match(draft.attachments[0].cid, MINT_SHAPE);
-    assert.equal(draft.attachments[0].disposition, 'inline');
-    assert.match(draft.bodyValues.html.value, new RegExp(`cid:${draft.attachments[0].cid.replace(/[.@]/g, '\\$&')}`));
-    assert.deepEqual(result.notes, ['This draft embeds 1 image(s) (2 KB).']);
-  });
-
-  it('mints afresh when the stored part carries a different blob', async () => {
-    const makeReq = mockKeep(
-      client,
-      replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT, 'blob-stale')]),
-      ORIG_ONE_IMAGE,
-    );
-    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    // The stale part is unreferenced by the rebuilt quote and comes off; the minted one rides
-    // its own channel at the end.
-    assert.equal(draft.attachments.length, 1);
-    assert.match(draft.attachments[0].cid, MINT_SHAPE);
-    assert.equal(draft.attachments[0].blobId, 'blob-one');
-  });
-
-  it('claims one survivor per reference when two references share a blob', async () => {
-    const original = originalWith(['one@orig', 'two@orig'], [
-      { partId: 'oa', blobId: 'blob-one', type: 'image/png', name: 'one.png', cid: 'one@orig', disposition: 'inline', size: 2048 },
-      { partId: 'ob', blobId: 'blob-one', type: 'image/png', name: 'one.png', cid: 'two@orig', disposition: 'inline', size: 2048 },
-    ]);
-    const draft = replyDraft([STORED_MINT, SECOND_MINT], [
-      storedQuotePart(STORED_MINT),
-      { ...storedQuotePart(SECOND_MINT), partId: 'p3' },
-    ]);
-    const makeReq = mockKeep(client, draft, original);
-    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
-    const created = createdDraft(makeReq);
-    assert.deepEqual(created.attachments.map((p: any) => p.cid), [STORED_MINT, SECOND_MINT]);
-    assert.match(created.bodyValues.html.value, new RegExp(`cid:${STORED_MINT}`));
-    assert.match(created.bodyValues.html.value, new RegExp(`cid:${SECOND_MINT}`));
-  });
-
-  it('takes a stored quote image off the draft when the rebuilt quote no longer shows it', async () => {
-    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_NO_IMAGES);
-    const result = await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
-    assert.equal(createdDraft(makeReq).attachments, undefined);
-    assert.deepEqual(result.inlineImages, { embedded: 0, degraded: 0, removed: 1 });
-    assert.deepEqual(result.notes, ['Removed 1 image(s) that were embedded in the quote.']);
-  });
-
-  it('re-embeds the quote images after an attachment wipe, and says it did both', async () => {
-    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
-    const result = await client.updateDraft('draft-1', {
-      htmlBody: '<p>edited</p>', originalEmailId: 'orig-1', clearFields: ['attachments'],
-    });
-    const draft = createdDraft(makeReq);
-    assert.equal(draft.attachments.length, 1);
-    assert.match(draft.attachments[0].cid, MINT_SHAPE); // wiped, then re-embedded afresh
-    assert.ok(result.notes?.includes('Cleared 1 attachment(s); the kept quote re-embedded 1 image(s).'));
-  });
-
-  it('refuses to remove an individual image the kept quote supplies', async () => {
-    mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
-    await assert.rejects(
-      () => client.updateDraft('draft-1', {
-        htmlBody: '<p>edited</p>', originalEmailId: 'orig-1', removeAttachments: ['blob-one'],
-      }),
-      /embedded by the kept quote.*Use noQuote with a replacement body/s,
-    );
-  });
-
-  it('drops the quote and its images when noQuote replaces the body', async () => {
-    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
-    const result = await client.updateDraft('draft-1', { htmlBody: '<p>bare</p>', noQuote: true });
-    assert.equal(createdDraft(makeReq).attachments, undefined);
-    assert.deepEqual(result.notes, ['Removed 1 image(s) that were embedded in the quote.']);
-  });
-
-  it('counts a quote image once when the caller also names it for removal', async () => {
-    // Dropping the quote would take the image off anyway. Because the named removal is
-    // applied first, the image is gone exactly once and the result reports the caller's own
-    // removal rather than also claiming the edit took it off the body.
-    const makeReq = mockKeep(client, replyDraft([STORED_MINT], [storedQuotePart(STORED_MINT)]), ORIG_ONE_IMAGE);
-    const result = await client.updateDraft('draft-1', {
-      htmlBody: '<p>bare</p>', noQuote: true, removeAttachments: ['blob-one'],
-    });
-    assert.equal(createdDraft(makeReq).attachments, undefined);
-    assert.equal(result.notes, undefined);
-    assert.equal(result.inlineImages, undefined);
-  });
-
-  it('quotes a text-only original on the keep path', async () => {
-    const makeReq = mockKeep(client, replyDraft([], []), ORIG_TEXT_ONLY);
-    await client.updateDraft('draft-1', { htmlBody: '<p>edited</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    assert.match(draft.bodyValues.html.value, /ORIGINAL TEXT/);
-    assert.match(draft.bodyValues.html.value, /<blockquote type="cite"/);
-  });
-
-  it('leaves a text-only keep with no minted parts (no html body would ship them)', async () => {
-    const textOnlyReply = {
-      ...replyDraft([], []),
-      textBody: [{ partId: 't', type: 'text/plain' }],
-      htmlBody: [{ partId: 't', type: 'text/plain' }],
-      bodyValues: { t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 12:46 AM, Jon wrote:\n> ORIGINAL' } },
-    };
-    const makeReq = mockKeep(client, textOnlyReply, ORIG_ONE_IMAGE);
-    await client.updateDraft('draft-1', { textBody: 'edited', originalEmailId: 'orig-1' });
-    const draft = createdDraft(makeReq);
-    assert.equal(draft.attachments, undefined);
-    assert.match(draft.bodyValues.text.value, /> ORIGINAL/);
-  });
-});
-
-describe('updateDraft — forwarded-block guard (#30, Q6 gating)', () => {
-  let client: JmapClient;
-
-  beforeEach(() => {
-    client = makeClient();
-  });
-
-  const FWD_HEADER_PROP = 'header:X-Forwarded-Message-Id:asMessageIds';
-  // Body shapes as buildForwardBodies emits them (the live store/fetch round-trip is
-  // pinned separately by the release verification's marker round-trip check).
-  const FWD_HTML = '<p>note</p><div><br>----- Original message -----<br>From: Ada Lovelace &lt;ada@example.com&gt;<br>Subject: Hello<br></div><div type="cite"><p>orig body</p></div>';
-  const FWD_TEXT = 'note\n\n\n----- Original message -----\nFrom: Ada Lovelace <ada@example.com>\nSubject: Hello\n\norig text';
-  const PLAIN_FWD_TEXT = 'no marker here at all';
-  const PLAIN_FWD_HTML = '<p>no marker here at all</p>';
-
-  const FORWARD_BASE = {
-    id: 'fdraft-1', subject: 'Fwd: Hello',
-    from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }],
-    cc: [], bcc: [],
-    mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
-    // No inReplyTo/references — a forward starts a new conversation.
-    [FWD_HEADER_PROP]: ['fwd-orig-msg@example.com'],
-  };
-  // dual: both bodies carry the forwarded block (what forward_email stores).
-  const DUAL_FORWARD = { ...FORWARD_BASE,
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-    bodyValues: { t: { value: FWD_TEXT }, h: { value: FWD_HTML } } };
-  // text-only forward (of a text-only original): one aliased text part.
-  const TEXT_ONLY_FORWARD = { ...FORWARD_BASE,
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
-    bodyValues: { t: { value: FWD_TEXT } } };
-  // Q2 cell: marker-bearing bodies but NO header (Message-ID-less original, or pasted content).
-  const { [FWD_HEADER_PROP]: _drop, ...HEADERLESS_BASE } = FORWARD_BASE as any;
-  const HEADERLESS_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-    bodyValues: { t: { value: FWD_TEXT }, h: { value: FWD_HTML } } };
-  // Q6 floor cell: header present, bodies in NO recognizable shape (foreign client).
-  const HEADER_ONLY_FORWARD = { ...FORWARD_BASE,
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-    bodyValues: { t: { value: PLAIN_FWD_TEXT }, h: { value: PLAIN_FWD_HTML } } };
-  // Pathological both-marker draft: inReplyTo + reply markers AND forward header + markers.
-  const BOTH_MARKER_DRAFT = { ...FORWARD_BASE,
-    inReplyTo: ['some-reply-target@example.com'], references: ['some-reply-target@example.com'],
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-    bodyValues: {
-      t: { value: 'top\n\nOn Sun, Jun 28, 2026, at 12:46 AM, X wrote:\n> quoted\n\n' + FWD_TEXT },
-      h: { value: '<p>top</p><blockquote type="cite">quoted</blockquote>' + FWD_HTML },
-    } };
-  // asAttachment forward draft as forward_email now saves it: header recorded (for
-  // send_draft's keyword maintenance), non-marker filler body, .eml attachment.
-  const ASATTACH_FORWARD = { ...FORWARD_BASE, id: 'fdraft-1',
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
-    bodyValues: { t: { value: 'Forwarded message attached.' } },
-    attachments: [{ partId: '2', blobId: 'blob-eml', type: 'message/rfc822', size: 999, name: 'Hello.eml', disposition: 'attachment', cid: null }] };
-  // The same draft saved BEFORE the header was recorded on asAttachment forwards
-  // (or by a client that doesn't set it): still edits freely via no-header + no-marker.
-  const LEGACY_ASATTACH_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
-    bodyValues: { t: { value: 'Forwarded message attached.' } },
-    attachments: [{ partId: '2', blobId: 'blob-eml', type: 'message/rfc822', size: 999, name: 'Hello.eml', disposition: 'attachment', cid: null }] };
-  // A REPLY draft whose quoted content contains a forwarded-message line ("> "-prefixed):
-  // must dispatch to the REPLY variant (the quote-prefix anchor rejects the forward marker).
-  const REPLY_QUOTING_FORWARD = { ...HEADERLESS_BASE, id: 'fdraft-1',
-    inReplyTo: ['r@example.com'], references: ['r@example.com'],
-    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
-    bodyValues: { t: { value: 'my reply\n\nOn Sun, Jun 28, 2026, at 1:00 AM, Y wrote:\n> ----- Original message -----\n> From: someone\n> forwarded stuff' } } };
-
-  // The message the forward draft forwards (id 'orig-1', quotable) and a non-quotable one.
-  const ORIGINAL_FOR_FORWARD = {
-    id: 'orig-1',
-    messageId: ['fwd-orig-msg@example.com'],
-    from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
-    sentAt: '2026-06-15T03:29:02Z',
-    subject: 'Hello',
-    textBody: [{ partId: 'ot', type: 'text/plain' }],
-    htmlBody: [{ partId: 'oh', type: 'text/html' }],
-    bodyValues: { ot: { value: 'ORIGINAL TEXT BODY' }, oh: { value: '<p>ORIGINAL HTML BODY</p>' } },
-  };
-  const NONQUOTABLE_FOR_FORWARD = {
-    id: 'orig-empty',
-    messageId: ['fwd-orig-msg@example.com'],
-    from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
-    subject: 'Hello',
-    textBody: [], htmlBody: [], bodyValues: {},
-  };
-
-  function mockForwardUpdate(c: JmapClient, draft: any = DUAL_FORWARD) {
-    return mock.method(c, 'makeRequest', async (req: any) => {
-      const [method, params] = req.methodCalls[0];
-      if (method === 'Email/get') {
-        const id = params.ids?.[0];
-        if (id === 'orig-1') return { methodResponses: [['Email/get', { list: [ORIGINAL_FOR_FORWARD] }, 'email']] };
-        if (id === 'orig-empty') return { methodResponses: [['Email/get', { list: [NONQUOTABLE_FOR_FORWARD] }, 'email']] };
-        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
-      }
-      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'fdraft-2' } } }, 'createDraft']] };
-      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
-    });
-  }
-
-  function createdDraftObj(makeReq: RequestMock) {
-    const [request] = findCallArguments(
-      makeReq,
-      ([req]) => req.methodCalls[0][1].create,
-      'creating the replacement draft',
-    );
-    return request.methodCalls[0][1].create.draft;
-  }
-
-  it('fetches the forward-marking header with the draft (the guard reads it)', async () => {
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    await client.updateDraft('fdraft-1', { subject: 'X' });
-    const getProps = callArguments(makeReq)[0].methodCalls[0][1].properties;
-    assert.ok(getProps.includes(FWD_HEADER_PROP));
-  });
-
-  it('rejects a body edit on a forward draft without a flag (normal case: runnable recovery recipe)', async () => {
-    mockForwardUpdate(client, DUAL_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>' }),
-      /would drop the forwarded-message block.*forwardedMessageId via get_email.*bare id/s,
-    );
-  });
-
-  it('originalEmailId keep: regenerates the block into the written body and carries the header', async () => {
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraftObj(makeReq);
-    const html = draft.bodyValues[draft.htmlBody[0].partId].value;
-    assert.match(html, /^<p>new note<\/p><div><br>----- Original message -----/);
-    assert.match(html, /ORIGINAL HTML BODY/);
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
-  });
-
-  it('rejects a keep whose own html body already carries the forwarded block (#145)', async () => {
-    // Same defect as the reply side, forward markers: buildForwardBodies appends the block
-    // under the note, so a note that already ends in one would store it twice.
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: FWD_HTML, originalEmailId: 'orig-1' }),
-      (err: Error) => {
-        assert.match(err.message, /already contains the forwarded block.*carry it twice.*noQuote:true/s);
-        // The false-positive escape route, variant-worded for the forward block.
-        assert.match(err.message, /merely looks like the forwarded block.*reword/s);
-        // This draft HAS a recorded source, so noQuote would clear it — and the refusal that
-        // recommends noQuote has to say so.
-        assert.match(err.message, /forward marking/);
-        return true;
-      },
-    );
-    const fetchedOriginal = makeReq.mock.calls.some((c: any) => {
-      const [method, params] = c.arguments[0].methodCalls[0];
-      return method === 'Email/get' && params.ids?.[0] === 'orig-1';
-    });
-    assert.equal(fetchedOriginal, false, 'the refusal must precede the originalEmailId fetch');
-  });
-
-  it('does not claim a forward-marking cost on a draft that has no marking to clear (#145)', async () => {
-    // Marker-only forward draft: a recognizable block but no recorded source, so noQuote has
-    // no header to drop. The refusal still stands (the block would be rebuilt underneath), but
-    // the clause naming what noQuote costs must not appear — it would be untrue here.
-    mockForwardUpdate(client, HEADERLESS_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: FWD_HTML, originalEmailId: 'orig-1' }),
-      (err: Error) => {
-        assert.match(err.message, /already contains the forwarded block.*noQuote:true/s);
-        assert.doesNotMatch(err.message, /forward marking/);
-        return true;
-      },
-    );
-  });
-
-  it('rejects a keep whose own text body already carries the dashed forwarded line (#145)', async () => {
-    mockForwardUpdate(client, TEXT_ONLY_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { textBody: FWD_TEXT, originalEmailId: 'orig-1' }),
-      (err: Error) => {
-        assert.match(err.message, /already contains the forwarded block.*noQuote:true/s);
-        assert.match(err.message, /forward marking/);
-        return true;
-      },
-    );
-  });
-
-  it('originalEmailId keep regenerates BOTH bodies when both are written (custom text side kept)', async () => {
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>h</p>', textBody: 'my custom t', originalEmailId: 'orig-1' });
-    const draft = createdDraftObj(makeReq);
-    const text = draft.bodyValues[draft.textBody[0].partId].value;
-    assert.match(text, /^my custom t\n\n\n----- Original message -----/);
-    assert.match(text, /ORIGINAL TEXT BODY/);
-  });
-
-  it('forward keep with a body-less original still succeeds (block always regenerates; wrong-id asymmetry is intentional)', async () => {
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-empty' });
-    const draft = createdDraftObj(makeReq);
-    const html = draft.bodyValues[draft.htmlBody[0].partId].value;
-    assert.match(html, /----- Original message -----/);
-  });
-
-  it('noQuote drops the block AND clears the forward-marking header on the recreate', async () => {
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>bare note</p>', noQuote: true });
-    const draft = createdDraftObj(makeReq);
-    const html = draft.bodyValues[draft.htmlBody[0].partId].value;
-    assert.equal(html, '<p>bare note</p>');
-    assert.equal(draft[FWD_HEADER_PROP], undefined);
-  });
-
-  it('rejects originalEmailId + noQuote together (forward wording)', async () => {
-    mockForwardUpdate(client, DUAL_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1', noQuote: true }),
-      /either originalEmailId \(keep the forwarded block\) or noQuote/,
-    );
-  });
-
-  it('metadata-only edit is untouched by the guard and CARRIES the header', async () => {
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    const r = await client.updateDraft('fdraft-1', { subject: 'Fwd: renamed' });
-    assert.equal(r.id, 'fdraft-2');
-    const draft = createdDraftObj(makeReq);
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
-  });
-
-  it("plain-text conversion (clearFields:['htmlBody']) keeps the text-side block by construction — no challenge (recompute seam)", async () => {
-    const makeReq = mockForwardUpdate(client, DUAL_FORWARD);
-    const r = await client.updateDraft('fdraft-1', { clearFields: ['htmlBody'] });
-    assert.equal(r.id, 'fdraft-2');
-    const draft = createdDraftObj(makeReq);
-    const text = draft.bodyValues[draft.textBody[0].partId].value;
-    assert.match(text, /----- Original message -----/);
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
-  });
-
-  it('text-only forward draft: editing textBody challenges; originalEmailId keeps text-only', async () => {
-    mockForwardUpdate(client, TEXT_ONLY_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { textBody: 'new note' }),
-      /would drop the forwarded-message block/,
-    );
-    const makeReq = mockForwardUpdate(client, TEXT_ONLY_FORWARD);
-    await client.updateDraft('fdraft-1', { textBody: 'new note', originalEmailId: 'orig-1' });
-    const draft = createdDraftObj(makeReq);
-    const text = draft.bodyValues[draft.textBody[0].partId].value;
-    assert.match(text, /^new note\n\n\n----- Original message -----/);
-    assert.equal(draft.htmlBody, undefined);
-  });
-
-  it('Q2 cell — marker body, NO header: challenge leads with what happened and offers noQuote first', async () => {
-    mockForwardUpdate(client, HEADERLESS_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
-      (err: any) => {
-        assert.match(err.message, /body matches a forwarded-message marker/);
-        assert.match(err.message, /noQuote:true to drop that block/);
-        // The un-runnable get_email step must NOT appear (there is no recorded source).
-        assert.doesNotMatch(err.message, /forwardedMessageId via get_email/);
-        return true;
-      },
-    );
-  });
-
-  it('Q6 floor — header present, unrecognizable body: challenged with the recorded-source wording', async () => {
-    mockForwardUpdate(client, HEADER_ONLY_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
-      (err: any) => {
-        assert.match(err.message, /marked as a forward/);
-        assert.match(err.message, /isn't in a shape this server can regenerate in place/);
-        assert.match(err.message, /forwardedMessageId via get_email/);
-        return true;
-      },
-    );
-  });
-
-  it('Q6 floor — a noQuote resolution clears the header, so the NEXT edit is unchallenged', async () => {
-    const makeReq = mockForwardUpdate(client, HEADER_ONLY_FORWARD);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>rewritten</p>', noQuote: true });
-    const draft = createdDraftObj(makeReq);
-    assert.equal(draft[FWD_HEADER_PROP], undefined);
-    // Simulate the next edit on the recreated (header-less, marker-less) draft: no challenge.
-    const NEXT = { ...HEADER_ONLY_FORWARD, [FWD_HEADER_PROP]: undefined };
-    mockForwardUpdate(client, NEXT);
-    const r = await client.updateDraft('fdraft-1', { htmlBody: '<p>again</p>' });
-    assert.equal(r.id, 'fdraft-2');
-  });
-
-  it('both-marker draft: REPLY variant wins the dispatch (reply challenge wording)', async () => {
-    mockForwardUpdate(client, BOTH_MARKER_DRAFT);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
-      /would drop the quoted original/,
-    );
-  });
-
-  it('both-marker draft: a reply-variant noQuote ALSO clears the forward header in the same step', async () => {
-    const makeReq = mockForwardUpdate(client, BOTH_MARKER_DRAFT);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>bare</p>', noQuote: true });
-    const draft = createdDraftObj(makeReq);
-    assert.equal(draft[FWD_HEADER_PROP], undefined);
-  });
-
-  it('asAttachment draft (header + .eml, filler body): note edits pass with NO challenge, header and .eml both carried', async () => {
-    const makeReq = mockForwardUpdate(client, ASATTACH_FORWARD);
-    const r = await client.updateDraft('fdraft-1', { textBody: 'updated note about the attached message' });
-    assert.equal(r.id, 'fdraft-2');
-    const draft = createdDraftObj(makeReq);
-    // The .eml is an ordinary carried attachment on the recreate, and the recorded
-    // source survives the edit (send_draft resolves it to mark the original).
-    assert.equal(draft.attachments[0].type, 'message/rfc822');
-    assert.equal(draft.attachments[0].blobId, 'blob-eml');
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
-  });
-
-  it('legacy asAttachment draft (no header): note edits still pass with NO challenge', async () => {
-    const makeReq = mockForwardUpdate(client, LEGACY_ASATTACH_FORWARD);
-    const r = await client.updateDraft('fdraft-1', { textBody: 'updated note about the attached message' });
-    assert.equal(r.id, 'fdraft-2');
-    const draft = createdDraftObj(makeReq);
-    assert.equal(draft.attachments[0].blobId, 'blob-eml');
-    assert.equal(draft[FWD_HEADER_PROP], undefined);
-  });
-
-  it('noQuote on an asAttachment draft clears the recorded source (deliberate de-forward)', async () => {
-    const makeReq = mockForwardUpdate(client, ASATTACH_FORWARD);
-    await client.updateDraft('fdraft-1', { textBody: 'bare note', noQuote: true });
-    const draft = createdDraftObj(makeReq);
-    assert.equal(draft[FWD_HEADER_PROP], undefined);
-  });
-
-  it('a body-less noQuote de-forwards without touching the draft\'s parts', async () => {
-    // noQuote on an edit that writes no body has one documented effect — clearing the forward
-    // marking — and must keep everything else exactly as it was, embedded images included:
-    // there is no body change for the parts to be reconciled against.
-    const withImage = {
-      ...DUAL_FORWARD,
-      attachments: [{
-        partId: '2', blobId: 'blob-pic', type: 'image/png', name: 'pic.png',
-        cid: 'ii-0123456789abcdef0123456789abcdef@inline.invalid', disposition: 'inline', size: 2048,
-      }],
-    };
-    const makeReq = mockForwardUpdate(client, withImage);
-    const result = await client.updateDraft('fdraft-1', { subject: 'Renamed', noQuote: true });
-    const draft = createdDraftObj(makeReq);
-    assert.equal(draft[FWD_HEADER_PROP], undefined);
-    assert.equal(draft.bodyValues.html.value, FWD_HTML); // body untouched
-    assert.deepEqual(draft.attachments, [{
-      blobId: 'blob-pic', type: 'image/png', name: 'pic.png', disposition: 'inline',
-      cid: 'ii-0123456789abcdef0123456789abcdef@inline.invalid',
-    }]);
-    assert.equal(result.notes, undefined);
-  });
-
-  it('keeps the guard inert when the attached message is routed into the body list', async () => {
-    // Which list a server puts the .eml in is a MIME-shape accident; the carve-out that keeps
-    // an attached-message forward editable has to hold either way.
-    const bodyRouted = {
-      ...FORWARD_BASE, id: 'fdraft-1',
-      textBody: [{ partId: 't', type: 'text/plain' }],
-      htmlBody: [
-        { partId: 't', type: 'text/plain' },
-        { partId: '2', blobId: 'blob-eml', type: 'message/rfc822', size: 999, name: 'Hello.eml', disposition: 'attachment', cid: null },
-      ],
-      bodyValues: { t: { value: 'Forwarded message attached.' } },
-      attachments: [],
-    };
-    const makeReq = mockForwardUpdate(client, bodyRouted);
-    await client.updateDraft('fdraft-1', { textBody: 'updated note about the attached message' });
-    const draft = createdDraftObj(makeReq);
-    assert.equal(draft.attachments[0].blobId, 'blob-eml');
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
-  });
-
-  it('originalEmailId + noQuote together are rejected even on an unengaged (asAttachment) draft', async () => {
-    mockForwardUpdate(client, ASATTACH_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { textBody: 'note', originalEmailId: 'orig-1', noQuote: true }),
-      /not both/,
-    );
-  });
-
-  it('a reply draft QUOTING a forward dispatches to the REPLY variant (quote-prefixed dashed line is not a forward marker)', async () => {
-    mockForwardUpdate(client, REPLY_QUOTING_FORWARD);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { textBody: 'new text' }),
-      /would drop the quoted original/,
-    );
-  });
-
-  it('keep with a DIFFERENT original re-points the recorded source to that original (no stale recovery pointer)', async () => {
-    // The draft records fwd-orig-msg@…; the caller corrects the source to orig-2. The
-    // recreate must carry orig-2's Message-ID — a stale carry would make the guard's
-    // advertised recovery rebuild the block for the wrong message on a later edit.
-    const ORIG2 = { ...ORIGINAL_FOR_FORWARD, id: 'orig-2', messageId: ['corrected-mid@example.com'] };
-    const makeReq = stubRequests(client, async (req: any) => {
-      const [method, params] = req.methodCalls[0];
-      if (method === 'Email/get') {
-        const id = params.ids?.[0];
-        if (id === 'orig-2') return { methodResponses: [['Email/get', { list: [ORIG2] }, 'email']] };
-        return { methodResponses: [['Email/get', { list: [DUAL_FORWARD] }, 'getEmail']] };
-      }
-      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'fdraft-2' } } }, 'createDraft']] };
-      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
-    });
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-2' });
-    const draft = createdDraftObj(makeReq);
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['corrected-mid@example.com']);
-  });
-
-  it('keep on a header-less (Q2) draft RECORDS the source, upgrading later challenges to the standard recipe', async () => {
-    const makeReq = mockForwardUpdate(client, HEADERLESS_FORWARD);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-1' });
-    const draft = createdDraftObj(makeReq);
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
-  });
-
-  it('keep naming an original with NO settable Message-ID keeps the existing carry (stale beats stripped)', async () => {
-    const ORIG_NOMID = { ...ORIGINAL_FOR_FORWARD, id: 'orig-nomid', messageId: undefined };
-    const makeReq = stubRequests(client, async (req: any) => {
-      const [method, params] = req.methodCalls[0];
-      if (method === 'Email/get') {
-        const id = params.ids?.[0];
-        if (id === 'orig-nomid') return { methodResponses: [['Email/get', { list: [ORIG_NOMID] }, 'email']] };
-        return { methodResponses: [['Email/get', { list: [DUAL_FORWARD] }, 'getEmail']] };
-      }
-      if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'fdraft-2' } } }, 'createDraft']] };
-      return { methodResponses: [['Email/set', { destroyed: params.destroy ?? [] }, 'destroyDraft']] };
-    });
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>', originalEmailId: 'orig-nomid' });
-    const draft = createdDraftObj(makeReq);
-    assert.deepEqual(draft[FWD_HEADER_PROP], ['fwd-orig-msg@example.com']);
-  });
-
-  it('inReplyTo + forward markers but NO reply markers → FORWARD variant engages (no first-match crack on isReply alone)', async () => {
-    // A draft with an In-Reply-To header whose body carries only the forward shape:
-    // replyGuardArmed requires reply MARKERS too, so dispatch must land on the forward
-    // variant — a regression that gated on isReply alone would emit the reply wording.
-    const INREPLYTO_FORWARD_BODY = { ...FORWARD_BASE,
-      inReplyTo: ['some-reply-target@example.com'], references: ['some-reply-target@example.com'],
-      textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-      bodyValues: { t: { value: FWD_TEXT }, h: { value: FWD_HTML } } };
-    mockForwardUpdate(client, INREPLYTO_FORWARD_BODY);
-    await assert.rejects(
-      () => client.updateDraft('fdraft-1', { htmlBody: '<p>x</p>' }),
-      /would drop the forwarded-message block/,
-    );
-  });
-});
-
 // ---------- source-instance header (X-Fastmail-MCP-Source-Id) ----------
-// The exact stored instance a draft was composed from: stamped by reply_email /
-// forward_email, carried by the edit recreate, consumed by send_draft's keyword
+// The exact stored instance a draft was composed from: stamped by draft_email's reply and
+// forward modes, carried by the edit recreate, consumed by send_draft's keyword
 // maintenance. These tests pin the stamp, the carry, and the drop/re-point rules.
 
 describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
@@ -4523,7 +4630,7 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
     from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }], cc: [], bcc: [],
     mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
     [FWD_PROP]: ['fwd-orig-msg@example.com'],
-    [SRC_PROP]: 'stale-src',
+    [SRC_PROP]: 'fwd-src-1',
     textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
     bodyValues: { t: { value: SRC_FWD_TEXT }, h: { value: SRC_FWD_HTML } },
   };
@@ -4576,33 +4683,39 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
     assert.deepEqual(draft.inReplyTo, ['orig-msg@example.com']);
   });
 
-  it('KEEPS the header on a reply-draft noQuote (In-Reply-To survives, so does the instance pointer)', async () => {
+  it('KEEPS the header when a reply draft has its whole body rewritten (In-Reply-To survives, so does the instance pointer)', async () => {
     const makeReq = mockSrcUpdate(client, REPLY_QUOTED);
-    await client.updateDraft('rdraft-1', { htmlBody: '<p>fresh body</p>', noQuote: true });
+    await client.updateDraft('rdraft-1', { htmlBody: '<p>fresh body</p>', bodyHash: hashOf(REPLY_QUOTED) });
     const draft = draftFromCall(makeReq);
     assert.equal(draft[SRC_PROP], 'orig-1');
     assert.deepEqual(draft.inReplyTo, ['orig-msg@example.com']);
   });
 
-  it('DROPS the header with the forward marking on a forward-draft noQuote (a de-forward)', async () => {
+  // De-forwarding is now an explicit act — clearFields:['forwardedMessageId'] — rather than
+  // something a body rewrite inferred. The pointer still follows the marking it refines: a
+  // draft that no longer forwards anything has no instance to name.
+  it('DROPS the header with the forward marking when the caller clears forwardedMessageId (a de-forward)', async () => {
     const makeReq = mockSrcUpdate(client, FORWARD_WITH_SRC);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>fresh body</p>', noQuote: true });
+    await client.updateDraft('fdraft-1', { clearFields: ['forwardedMessageId'] });
     const draft = draftFromCall(makeReq);
     assert.equal(draft[FWD_PROP], undefined);
     assert.equal(draft[SRC_PROP], undefined);
   });
 
-  it('re-points the header alongside the forward keep (both name the fetched original)', async () => {
+  // The pair to the test above: a body rewrite alone is NOT a de-forward. Both markings ride
+  // through unchanged, and nothing re-points them — the draft still forwards the same
+  // instance however its note is reworded, and the original is never fetched to find out.
+  it('carries both markings through a forward-draft body rewrite, and fetches no original', async () => {
     const makeReq = mockSrcUpdate(client, FORWARD_WITH_SRC);
-    await client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>', originalEmailId: 'orig-1' });
-    // The keep path adds an Email/get for the original, shifting the create call —
-    // find it by shape rather than by index.
-    const createCall = makeReq.mock.calls
-      .map((c: any) => c.arguments[0].methodCalls[0][1])
-      .find((p: any) => p.create?.draft);
-    const draft = createCall.create.draft;
+    await client.updateDraft('fdraft-1', { htmlBody: '<p>new note</p>', bodyHash: hashOf(FORWARD_WITH_SRC) });
+    const draft = draftFromCall(makeReq);
     assert.deepEqual(draft[FWD_PROP], ['fwd-orig-msg@example.com']);
-    assert.equal(draft[SRC_PROP], 'orig-1'); // no longer the stale 'stale-src'
+    assert.equal(draft[SRC_PROP], 'fwd-src-1');
+    const fetchedIds = makeReq.mock.calls
+      .map((c: any) => c.arguments[0].methodCalls[0])
+      .filter(([m]: any) => m === 'Email/get')
+      .flatMap(([, p]: any) => p.ids ?? []);
+    assert.equal(fetchedIds.includes('orig-1'), false);
   });
 
   it('a draft that never had the header stays without it', async () => {

@@ -73,11 +73,13 @@ describe('validateFastmailUrl (default policy)', () => {
   });
 
   // The whole IDN-safety argument rests on `new URL()` punycoding the hostname
-  // before the [a-z0-9] region class ever sees it. Pin it: a Cyrillic-'а'
+  // before the [a-z0-9] region class ever sees it. Pin it: a Cyrillic 'a' (U+0430)
   // homograph of api.fastmail.com must reject (it punycodes to xn--...).
+  // The host below spells that 'a' as an escape, because a raw one is indistinguishable
+  // from the ASCII letter and could not be checked by eye.
   it('rejects a homograph/IDN host that looks like an allowed one', () => {
     assert.throws(
-      () => validateFastmailUrl('https://аpi.fastmail.com/jmap/api/', 'baseUrl'),
+      () => validateFastmailUrl('https://\u0430pi.fastmail.com/jmap/api/', 'baseUrl'),
       /not in the Fastmail allowlist/,
     );
   });

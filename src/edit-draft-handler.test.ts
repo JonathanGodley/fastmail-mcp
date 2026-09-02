@@ -39,7 +39,7 @@ describe('editDraft — coercion and delegation', () => {
   it('coerces the caller fields and passes them to updateDraft', async () => {
     const { client, calls } = spyClient();
     const r = await editDraft(
-      { emailId: 'd1', to: 'a@b.example', subject: 'Hi', clearFields: 'cc', removeAttachments: 'blob-9', noQuote: 'true' },
+      { emailId: 'd1', to: 'a@b.example', subject: 'Hi', clearFields: 'cc', removeAttachments: 'blob-9', expandSignature: 'true' },
       client, undefined, false,
     );
     assert.equal(r, RESULT);
@@ -47,16 +47,33 @@ describe('editDraft — coercion and delegation', () => {
     assert.deepEqual(calls.update.updates.to, ['a@b.example']);
     assert.deepEqual(calls.update.updates.clearFields, ['cc']);
     assert.deepEqual(calls.update.updates.removeAttachments, ['blob-9']);
-    // Lenient clients stringify booleans; "true" must mean true here or the quote guard
-    // would never fire the way the caller asked.
-    assert.equal(calls.update.updates.noQuote, true);
+    // Lenient clients stringify booleans; "true" must mean true here or a caller that
+    // asked for its {{signature}} to expand would silently get the braces stored.
+    assert.equal(calls.update.updates.expandSignature, true);
     assert.equal(calls.upload, undefined);
   });
 
-  it('never reads a stringified noQuote as true unless it says true', async () => {
+  it('never reads a stringified expandSignature as true unless it says true', async () => {
     const { client, calls } = spyClient();
-    await editDraft({ emailId: 'd1', subject: 'Hi', noQuote: 'garbage' }, client, undefined, false);
-    assert.equal(calls.update.updates.noQuote, false);
+    await editDraft({ emailId: 'd1', subject: 'Hi', expandSignature: 'garbage' }, client, undefined, false);
+    assert.equal(calls.update.updates.expandSignature, false);
+  });
+
+  // The hash is NOT checked here. updateDraft owns the refusal order — the body-shape
+  // coupling guards name the shape the caller has to fix, and complaining about a stale
+  // read ahead of that would be no use to it. So the handler's job is to hand the value
+  // through untouched, including when it is absent.
+  it('passes bodyHash through to updateDraft without validating it', async () => {
+    const { client, calls } = spyClient();
+    await editDraft({ emailId: 'd1', textBody: 'Hi', bodyHash: 'bh1-deadbeef' }, client, undefined, false);
+    assert.equal(calls.update.updates.bodyHash, 'bh1-deadbeef');
+  });
+
+  it('reaches updateDraft with no bodyHash rather than refusing a body edit itself', async () => {
+    const { client, calls } = spyClient();
+    await editDraft({ emailId: 'd1', textBody: 'Hi' }, client, undefined, false);
+    assert.equal(calls.update.updates.bodyHash, undefined);
+    assert.equal(calls.update.updates.textBody, 'Hi');
   });
 
   it('requires an emailId', async () => {

@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EMAIL_FIELD_NAMES, parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { simplifyEmail } from './email-formatter.js';
+import { attachDraftBodyHash } from './body-hash.js';
 import { InvalidInputError } from './coerce.js';
 
 // A raw JMAP email carrying one value of every field class the simplified shape
@@ -304,6 +305,128 @@ describe('projectEmail', () => {
     const projected = projectEmail(stripped, new Set(['id', 'subject']));
     assert.equal('quotedBytesStripped' in projected, false);
     assert.equal('quotedStripSkipped' in projected, false);
+  });
+
+  // The draft body hash rides along with EITHER body field, for the same reason: it is what
+  // edit_draft demands before it will write a body, so a projection that returns the body and
+  // drops the hash hands back the thing the caller asked for and withholds what makes it
+  // usable. Both halves ride — the hash, and the reason there is none.
+  it('emits bodyHash alongside a projected bodyText, and alongside a projected bodyHtml', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    for (const field of ['bodyText', 'bodyHtml']) {
+      const projected = projectEmail(withHash, new Set([field])) as Record<string, any>;
+      assert.equal(projected.bodyHash, 'bh1-abc', field);
+    }
+  });
+
+  it('emits bodyHashWithheld the same way, because the reason is the promised answer', () => {
+    const withheld = { ...simplifyEmail(rawEmail()), bodyHashWithheld: 'this read stripped quoted history' } as any;
+    const projected = projectEmail(withheld, new Set(['bodyText'])) as Record<string, any>;
+    assert.equal(projected.bodyHashWithheld, 'this read stripped quoted history');
+  });
+
+  it('does not emit either half when no body field was projected', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    const projected = projectEmail(withHash, new Set(['id', 'subject']));
+    assert.equal('bodyHash' in projected, false);
+    assert.equal('bodyHashWithheld' in projected, false);
+  });
+
+  // Both are ordinary projectable names too, so a caller that wants the token and nothing
+  // else can ask for it by name without dragging a body it does not need.
+  it('projects bodyHash on its own when the caller names it', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    assert.deepEqual(projectEmail(withHash, new Set(['bodyHash'])), { bodyHash: 'bh1-abc' });
+  });
+
+  it('emits the ride-along exactly once when the caller also named it', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    const projected = projectEmail(withHash, new Set(['bodyText', 'bodyHash'])) as Record<string, any>;
+    assert.equal(Object.keys(projected).filter((k) => k === 'bodyHash').length, 1);
+    assert.equal(projected.bodyHash, 'bh1-abc');
+  });
+
+  // The two halves ride along with EACH OTHER as well, which is what makes the minimal
+  // projection answerable: `fields:["bodyHash"]` names no body field, so the read cannot
+  // have shown the body and no hash can be honestly issued — but the answer owed is the
+  // withheld REASON naming the fields to add, not an empty object.
+  it('emits the withheld reason when the caller projected bodyHash alone', () => {
+    const withheld = { ...simplifyEmail(rawEmail()), bodyHashWithheld: 'read with fields: ["bodyText", "bodyHash"]' } as any;
+    const projected = projectEmail(withheld, new Set(['bodyHash'])) as Record<string, any>;
+    assert.equal(projected.bodyHashWithheld, 'read with fields: ["bodyText", "bodyHash"]');
+  });
+
+  it('emits the hash when the caller projected bodyHashWithheld alone and one was issued', () => {
+    const withHash = { ...simplifyEmail(rawEmail()), bodyHash: 'bh1-abc' } as any;
+    const projected = projectEmail(withHash, new Set(['bodyHashWithheld'])) as Record<string, any>;
+    assert.equal(projected.bodyHash, 'bh1-abc');
+  });
+});
+
+// ---------- the composition, which is where the silence used to happen ----------
+//
+// Each end read correctly on its own: attachDraftBodyHash always attaches one of the two
+// fields to a draft, and the projection carries a named field through. Composed, the
+// narrowest useful projection returned `{}` — the caller named the token it wanted and got
+// nothing at all. These run both steps in the order get_email runs them.
+describe('get_email draft body hash through a projection', () => {
+  function draft(overrides: Record<string, any> = {}): any {
+    return rawEmail({ keywords: { $draft: true }, ...overrides });
+  }
+
+  // The whole read surface, not the corner these tests started in: `verbose` and
+  // `stripQuoted` change what the response shows, which is the only thing the hash decision
+  // reads, so a helper that pinned them to false would leave the composition untested
+  // wherever a caller uses either.
+  function readDraft(
+    raw: any,
+    fieldNames?: string[],
+    options: { verbose?: boolean; stripQuoted?: boolean } = {},
+  ): Record<string, any> {
+    const fields = parseEmailFields(fieldNames);
+    const simplified = simplifyEmail(raw, { includeHtml: !!options.verbose || wantsHtmlBody(fields) });
+    attachDraftBodyHash(raw, simplified, { raw: false, fields, stripQuoted: !!options.stripQuoted });
+    return projectEmail(simplified, fields) as Record<string, any>;
+  }
+
+  it('answers fields:["bodyHash"] with the reason, naming the read that would issue one', () => {
+    const result = readDraft(draft(), ['bodyHash']);
+    assert.notDeepEqual(result, {});
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld, /bodyText/);
+    assert.match(result.bodyHashWithheld, /bodyHash/);
+  });
+
+  it('answers fields:["bodyHtml"] on a two-part draft with the reason, not silence', () => {
+    const result = readDraft(draft(), ['bodyHtml']);
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld, /bodyText/);
+  });
+
+  it('issues the hash once the projection shows the whole stored body', () => {
+    const result = readDraft(draft(), ['bodyText', 'bodyHtml', 'bodyHash']);
+    assert.match(result.bodyHash, /^bh1-[0-9a-f]{32}$/);
+    assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  it('issues the hash on an unprojected verbose read, which shows the whole stored body', () => {
+    const result = readDraft(draft(), undefined, { verbose: true });
+    assert.match(result.bodyHash, /^bh1-[0-9a-f]{32}$/);
+    assert.equal(result.bodyHashWithheld, undefined);
+  });
+
+  it('withholds on a stripQuoted read even when every body field is shown', () => {
+    const result = readDraft(draft(), undefined, { verbose: true, stripQuoted: true });
+    assert.equal(result.bodyHash, undefined);
+    assert.match(result.bodyHashWithheld, /stripped quoted history/);
+  });
+
+  it('carries neither field through any projection of a non-draft', () => {
+    for (const names of [['bodyHash'], ['bodyText'], ['bodyText', 'bodyHtml']]) {
+      const result = readDraft(rawEmail(), names);
+      assert.equal('bodyHash' in result, false, names.join(','));
+      assert.equal('bodyHashWithheld' in result, false, names.join(','));
+    }
   });
 });
 

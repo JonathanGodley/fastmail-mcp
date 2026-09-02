@@ -6,7 +6,6 @@ import {
   formatSize,
   InlineNoteLedger,
   noteAttachmentsExcluded,
-  noteClearedAndReEmbedded,
   noteDegradedToAttachments,
   noteDraftEmbeds,
   noteDroppedDataImages,
@@ -27,7 +26,6 @@ import {
   rejectDanglingCidRef,
   rejectNoteCidRef,
   rejectRemovalDanglingRef,
-  rejectRemovalOfQuoteCarriedPart,
   rejectReservedCidRef,
   rejectUnrecreatableCid,
 } from './inline-notes.js';
@@ -94,9 +92,12 @@ describe('describePartNames', () => {
   it('renders a hostile name as bounded, quoted data', () => {
     // A filename is sender-controlled, so it can neither close the quoted span it sits in
     // nor smuggle in characters that reorder the sentence around it.
+    // U+202E is a right-to-left override, the character that does that reordering. It is
+    // written as the escape because a raw one reorders THIS LINE in an editor too, so what
+    // a reader sees and what the compiler sees would stop agreeing.
     assert.equal(describePartNames(['a"b']), '"a\'b"');
     assert.equal(describePartNames(['a\nb']), '"ab"');
-    assert.equal(describePartNames(['inv‮fdp.exe']), '"invfdp.exe"');
+    assert.equal(describePartNames(['inv\u202Efdp.exe']), '"invfdp.exe"');
     assert.equal(describePartNames(['z'.repeat(200)]), `"${'z'.repeat(64)}…"`);
   });
 
@@ -158,6 +159,17 @@ describe('the notes a call emits', () => {
     );
   });
 
+  it('takes the remedy from its caller, for a tool whose caller has a better lever', () => {
+    // The default remedy is right where the forward's format is inferred and re-running as
+    // .eml is the only lever. On a tool where the caller places the block themselves it is
+    // not, so the sentence ends where that caller's fix is.
+    assert.equal(
+      noteForwardPooled(1, ['logo.png'], 'put the token in htmlBody.'),
+      '1 media part(s) could not be embedded and were attached as regular attachments: ' +
+      '"logo.png" — put the token in htmlBody.',
+    );
+  });
+
   it('reports attachments the caller asked to leave behind', () => {
     assert.equal(
       noteAttachmentsExcluded(5, 2, false),
@@ -214,13 +226,6 @@ describe('the notes a call emits', () => {
     assert.equal(noteDraftEmbeds(1, KB214), 'This draft embeds 1 image(s) (214 KB).');
   });
 
-  it('reports an attachment wipe alongside the rebuilt quote', () => {
-    assert.equal(
-      noteClearedAndReEmbedded(2, 1),
-      'Cleared 2 attachment(s); the kept quote re-embedded 1 image(s).',
-    );
-  });
-
   it('reports what a sent message actually carried', () => {
     assert.equal(
       noteSentWithEmbedded(2, MB1_4),
@@ -272,19 +277,35 @@ describe('the refusals a call raises', () => {
   });
 
   it('renders a hostile dangling value as bounded, quoted data', () => {
-    const message = rejectDanglingCidRef(`x‮${'y'.repeat(200)}`, ENABLED);
+    // The hostile character is U+202E, a right-to-left override, written as an escape:
+    // raw, it is invisible here and reorders the source line it sits in.
+    const message = rejectDanglingCidRef(`x\u202E${'y'.repeat(200)}`, ENABLED);
     assert.ok(message.includes(`"x${'y'.repeat(63)}…"`));
-    assert.ok(!message.includes('‮'));
+    assert.ok(!message.includes('\u202E'));
   });
 
-  it('refuses a reference to one of this server\'s own identifiers', () => {
+  // Scoped to AUTHORING one: the caller's body names a minted identifier the draft carries
+  // no part under. Handing back a reference to a part the draft actually has is the normal
+  // read-edit-write shape and never reaches this message, so the wording must not tell the
+  // caller to stop referencing them — only to stop inventing them.
+  it('refuses a reference authoring one of this server\'s own identifiers', () => {
     assert.equal(
       rejectReservedCidRef(MINT),
-      `htmlBody references cid "${MINT}", a server-managed identifier for quoted images. ` +
-      'These identifiers are reused across edits but regenerated when the quote is dropped ' +
-      'and re-added — never reference them directly. To embed your own image, add an ' +
-      'attachments item with a cid of your choosing.',
+      `htmlBody references cid "${MINT}", a server-managed identifier for quoted images, ` +
+      'and this draft carries no part under it. A minted identifier survives an edit for as ' +
+      'long as your body keeps referencing it, and a reference you drop takes the part with ' +
+      'it — but never author a NEW one. To embed your own image, add an attachments item ' +
+      'with a cid of your choosing.',
     );
+  });
+
+  // The compose surface has no draft, so the edit wording would describe a thing that does
+  // not exist. The remedy is the same on both; only the diagnosis moves.
+  it('diagnoses the same refusal differently on a compose, where there is no draft', () => {
+    const message = rejectReservedCidRef(MINT, 'compose');
+    assert.ok(!message.includes('this draft'));
+    assert.ok(message.includes('this server assigns them itself — a body never authors one.'));
+    assert.ok(message.includes('add an attachments item with a cid of your choosing.'));
   });
 
   it('refuses a removal the surviving body still references', () => {
@@ -292,14 +313,6 @@ describe('the refusals a call raises', () => {
       rejectRemovalDanglingRef('logo'),
       'removeAttachments would remove an image the draft\'s body still references ' +
       '(cid "logo"). Remove the <img> reference in the same call, or keep the attachment.',
-    );
-  });
-
-  it('refuses to prune an image the kept quote would put straight back', () => {
-    assert.equal(
-      rejectRemovalOfQuoteCarriedPart(),
-      'That attachment is embedded by the kept quote; the rebuilt quote would re-embed it. ' +
-      'Use noQuote with a replacement body to drop the quote and its images instead.',
     );
   });
 
@@ -332,21 +345,21 @@ describe('the refusals a call raises', () => {
       rejectUnrecreatableCid('a\x00b'),
       'This draft has an attachment whose embedded-image identifier (Content-ID "ab") ' +
       'this server cannot safely re-create. This server does not edit drafts in that ' +
-      'state. Recreate it — with reply_email or forward_email if it is a reply or forward ' +
-      '(that preserves the conversation threading; read the draft\'s In-Reply-To or ' +
-      'X-Forwarded-Message-Id via get_email, then find the original with search_emails ' +
-      'using the bare id, without angle brackets), otherwise create_draft — then delete ' +
-      'this one; or edit it in the mail client that created it.',
+      'state. Recreate it with draft_email — mode:\'reply\' or mode:\'forward\' if it is a ' +
+      'reply or forward (that preserves the conversation threading; read the draft\'s ' +
+      'In-Reply-To or X-Forwarded-Message-Id via get_email, then find the original with ' +
+      'search_emails using the bare id, without angle brackets), otherwise mode:\'new\' — ' +
+      'then delete this one; or edit it in the mail client that created it.',
     );
   });
 
-  it('routes a reply or forward draft through the tools that keep the threading', () => {
-    // Recreating one with the plain compose tool splits the conversation.
+  it('routes a reply or forward draft through the modes that keep the threading', () => {
+    // Recreating one as a new message splits the conversation.
     for (const message of [
       rejectUnrecreatableCid('x'),
       rejectBrokenDraft(['a@b'], ENABLED),
     ]) {
-      assert.ok(message.includes('reply_email or forward_email'));
+      assert.ok(message.includes("mode:'reply' or mode:'forward'"));
       assert.ok(message.includes('without angle brackets'));
     }
   });
@@ -357,10 +370,10 @@ describe('the refusals a call raises', () => {
       'This draft\'s stored body references image identifier(s) with no matching ' +
       'attachment ("logo@sender.example"). This server won\'t edit its body in that state ' +
       'unless the edit resolves the missing reference(s) — metadata and attachment edits ' +
-      'still work. Recreate it — with reply_email or forward_email if it is a reply or ' +
-      'forward (read the draft\'s In-Reply-To or X-Forwarded-Message-Id via get_email, ' +
-      'then find the original with search_emails using the bare id, without angle ' +
-      'brackets), otherwise create_draft — then delete this one.',
+      'still work. Recreate it with draft_email — mode:\'reply\' or mode:\'forward\' if it ' +
+      'is a reply or forward (read the draft\'s In-Reply-To or X-Forwarded-Message-Id via ' +
+      'get_email, then find the original with search_emails using the bare id, without ' +
+      'angle brackets), otherwise mode:\'new\' — then delete this one.',
     );
   });
 
@@ -516,6 +529,22 @@ describe('emitInlineNotes', () => {
     ...over,
   });
 
+  it('passes a caller-supplied pooled remedy through to the sentence', () => {
+    assert.deepEqual(
+      emitInlineNotes(
+        tally({ pooled: 1, pooledNames: ['logo.png'] }),
+        { surface: 'forward', pooledRemedy: 'put the token in htmlBody.' },
+      ),
+      ['1 media part(s) could not be embedded and were attached as regular attachments: ' +
+       '"logo.png" — put the token in htmlBody.'],
+    );
+    // Omitted, the shared default stands.
+    assert.match(
+      emitInlineNotes(tally({ pooled: 1, pooledNames: [] }), { surface: 'forward' })[0],
+      /re-run with asAttachment: true for full fidelity, then delete this draft\.$/,
+    );
+  });
+
   it('describes an embed in the words of the tool that did it', () => {
     const t = tally({ embedded: 2, embeddedBytes: KB214 });
     assert.deepEqual(emitInlineNotes(t, { surface: 'reply' }), [
@@ -640,17 +669,6 @@ describe('emitInlineNotes', () => {
     assert.deepEqual(emitInlineNotes(tally({ removed: 1 }), { surface: 'draft' }), [
       'Removed 1 image(s) that were embedded in the quote.',
     ]);
-  });
-
-  it('reports an attachment wipe alongside what the rebuilt quote put back', () => {
-    assert.deepEqual(
-      emitInlineNotes(tally(), {
-        surface: 'draft',
-        clearedAttachmentCount: 2,
-        reEmbeddedCount: 1,
-      }),
-      ['Cleared 2 attachment(s); the kept quote re-embedded 1 image(s).'],
-    );
   });
 
   it('reports reference-shaped text that was left alone', () => {

@@ -116,7 +116,7 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
 //
 // ONE LINE EACH, not a space join. The summaries these ride on end in caller-controlled text
 // with no terminator (`Subject: ${subject}`), so a leading space ran the first note straight
-// on from the subject line: "Subject: Re: Lunch appendSignature was requested but…". A
+// on from the subject line: "Subject: Re: Lunch {{signature}} in htmlBody was removed:…". A
 // newline is the same separation convention the rest of the result text uses for a note that
 // is about the call rather than part of its summary.
 export function formatInlineNotes(notes?: string[]): string {
@@ -141,7 +141,21 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
   const replaced = fingerprint
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
     : '';
-  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${formatInlineNotes(result.notes)}`;
+  // The token the caller's NEXT edit of this draft needs, or the reason there isn't one.
+  // Printed rather than left in the structured result because an unprinted hash is a hash
+  // the caller cannot use, and an unprinted WITHHELD reason reads to it as "the tool forgot"
+  // — it would go looking for a field that is deliberately absent.
+  //
+  // bodyHashWithheld gets the same redaction as orphanedOldDraftReason and for the same
+  // reason: one of its forms interpolates the message from a failed re-read, which is
+  // server/exception text reaching a caller on a RETURNED result, where the CallTool catch
+  // never sees it.
+  const hash = result.bodyHash
+    ? ` Body hash for your next edit of this draft: ${result.bodyHash}`
+    : result.bodyHashWithheld
+      ? ` No body hash was issued: ${redactBearerTokens(result.bodyHashWithheld)}`
+      : '';
+  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}${formatInlineNotes(result.notes)}`;
 }
 
 // The send_draft result text. Reports the submission, then what happened to the message
@@ -149,7 +163,8 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
 // and — because the caller never named that original — an explicit note when the draft
 // pointed at a message this server could not pin down, so the skip is actionable rather
 // than invisible. A keyword-write failure after a successful lookup is deliberately not
-// reported, matching reply_email/forward_email on the same failure.
+// reported: the keyword is maintenance on somebody else's message, and losing it changes
+// nothing about what the caller sent.
 export function formatSendDraftResult(result: SendDraftResult): string {
   // The receipt rides on the end of every outcome below, so what the message carried is
   // reported whether or not the thread-state maintenance had anything to say.

@@ -15,10 +15,9 @@ import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
-import { composeReply } from './reply-handler.js';
-import { composeForward } from './forward-handler.js';
+import { attachDraftBodyHash } from './body-hash.js';
+import { composeDraftEmail } from './draft-email-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
-import { composeDraft } from './compose-handler.js';
 import { editDraft } from './edit-draft-handler.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
@@ -283,8 +282,8 @@ const ATTACHMENT_REF_DESC =
   'The entry-number form is READ-ONLY: entry numbers are positional and shift whenever the listing does, so download_attachment accepts one for a one-off read, while attaching a part to outgoing mail rejects a reference that resolved only that way (the rejection is on how it resolved, not on how the string looks) — pass a partId or blobId there, and prefer one anywhere you will reuse the reference.';
 
 // `leadIn` prepends tool-specific context to the shared description (defaulted to ''
-// so send/reply/create/edit are untouched) — forward_email uses it to state how NEW
-// uploads relate to the original's own carried attachments.
+// so send/edit are untouched) — draft_email uses it to state how NEW uploads relate to
+// the original's own carried attachments on a forward.
 //
 // The item schema is FLAT: all seven keys sit in one `properties` map, with the exactly-one-
 // source rule stated in prose. Item-level `oneOf` branches would hide the key list from a
@@ -295,7 +294,7 @@ const ATTACHMENT_REF_DESC =
 // There is no `required` for the same reason: no single key is required on every item.
 function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
   return {
-    type: 'array',
+    type: ['array', 'string'],
     items: {
       type: 'object',
       properties: {
@@ -308,7 +307,7 @@ function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
         cid: { type: 'string', description: 'Content-ID to embed this file under (optional), referenced from htmlBody as <img src="cid:THE_CID">. A simple token of up to 64 letters, digits, dot, dash or underscore, of your choosing — a spelling copied from HTML ("cid:logo") or a header ("<logo>") is accepted and normalised. Each item needs a distinct one. Omit it for an ordinary attachment; identifiers of the form ii-<hex>@inline.invalid are reserved for images this server embeds on your behalf and cannot be authored.' },
       },
     },
-    description: leadIn + attachmentsDescription(forEdit),
+    description: leadIn + attachmentsDescription(forEdit) + LENIENT_OBJECT_LIST_DESC,
   };
 }
 
@@ -407,25 +406,6 @@ function lenientBool(description: string): string {
   // while "...(default: true)" is not.
   const needsStop = !/[.!?]$/.test(description.trimEnd().replace(/[)\]]+$/, ''));
   return description + (needsStop ? '.' : '') + LENIENT_BOOL_DESC;
-}
-
-// The signature parameter, shared by the three compose tools so they cannot drift on what
-// the flag means (edit_draft's is different in kind — it is a tri-state that preserves what
-// the draft already carries — and is written out separately). `context` names where the
-// signature lands relative to whatever else that tool puts in the body.
-//
-// `noBodyReason` exists because the shared no-body clause is FALSE on forward_email: an
-// INLINE forward with no note at all is signed, the signature becoming the whole of the
-// content above the forwarded-message block, and an asAttachment forward with no note cannot
-// reach no-body at all because it substitutes a filler body and signs that. Only a note that
-// was supplied and blank yields no-body there, so that tool passes its own wording rather
-// than reading a rule that does not apply to it. Every other reason is identical across the
-// three, which is why they share this.
-function appendSignatureDesc(context: string, noBodyReason?: string): string {
-  const noBody = noBodyReason ?? 'the call wrote no body for the sign-off to sit under (a blank body counts as none)';
-  return lenientBool(
-    `Append the sending identity's configured signature — the sign-off set in Fastmail — to the body${context}. Default false: nothing is appended unless you ask, and nothing is said when you do not. The signature is read from the identity this message sends as (the \`from\` address, or the default identity), so it is always the configured one rather than a remembered copy. An HTML body gets the HTML signature, and its plain-text alternative is derived from it; a plain-text-only message gets the identity's plain-text signature, or — if only an HTML signature is configured — a plain-text form derived from that. WHEN YOU ASK AND THE SIGN-OFF DOES NOT LAND EVERYWHERE IT SHOULD, THE RESULT SAYS SO AND WHY — no signature is available for the address this message sends as (none configured, or not one of your verified identities); ${noBody}; the body you passed already carries a signature; the message ships no HTML and the identity's signature has no plain-text form to write instead (an images-only HTML signature — no HTML ships, so no image does either); or the HTML body WAS signed while the message's plain-text alternative could not be, because the signature's only content is a remote image, which derives no readable text. That last one is reported whether you supplied the plain-text alternative yourself or left it to be derived from the HTML — the recipient reading it sees no sign-off either way. The already-carries case is why asking twice does not sign twice: an HTML body carrying a signature block this server wrote is left alone, and a plain-text body already ending in either form of this identity's block — at the end, or above a quoted or forwarded original — is left alone too, so re-sending a body you read back from a draft is safe, including a body read back from a draft that used to be HTML.`,
-  );
 }
 
 // Shared scope-control descriptions for the read tools, defined once so the per-flag
@@ -534,10 +514,16 @@ const EXCLUDE_MAILBOXES_PARAM_DESC =
   'Excluding mailboxes does NOT disable the default Trash/Spam exclusion or its note (unlike mailbox and requiredMailboxes) — except that naming Trash or Spam here takes that role out of the default set, so the note stops prescribing includeTrash/includeSpam, which could not override your own exclusion. ' +
   'May be combined with requiredMailboxes: the query then reads "in every required mailbox, and in at least one mailbox outside the excluded set".';
 
-// The mailbox a draft is filed into, shared by nothing else: create_draft is the only tool
-// that picks a save destination without moving anything.
+// The mailbox a draft is filed into, shared by nothing else: draft_email's mode:'new' is
+// the only place that picks a save destination without moving anything.
 const DRAFT_MAILBOX_PARAM_DESC =
-  'Mailbox to SAVE the draft into (optional, defaults to Drafts). Does not set From or recipients. ' + MAILBOX_REF_FORMS;
+  'Mailbox to SAVE the draft into (optional, defaults to the Drafts folder, resolved by its drafts ' +
+  'role — an account with no such mailbox is refused rather than guessed at by name). Does not set ' +
+  'From or recipients. ' +
+  'NAMING ANYWHERE BUT DRAFTS MAKES THE DRAFT UNSENDABLE UNTIL IT IS MOVED BACK: the draft is filed ' +
+  'into that mailbox and that mailbox only, and send_draft sends only a draft that is in the Drafts ' +
+  'folder, so it will refuse this one until you move it back with move_email. Use this to file a ' +
+  'draft you are parking, not one you are about to send. ' + MAILBOX_REF_FORMS;
 
 const STATS_MAILBOX_PARAM_DESC =
   'Mailbox to report on (optional, defaults to all mailboxes). ' + MAILBOX_REF_FORMS;
@@ -550,11 +536,45 @@ const LIST_PARENT_PARAM_DESC =
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
 
+// The string forms a lenient list parameter accepts, appended to the parameter's own
+// description. The prose earns its place on top of the widened type for the same reason
+// lenientBool's does: `["array", "string"]` says a string is accepted but not WHICH strings,
+// and the two coercers behind these parameters do not read the same set. (#98)
+//
+// coerceStringArray takes all three forms. The OBJECT-item lists (attachments, and the
+// contact entry lists) go through coercers that read a whole-value string ONLY as a
+// JSON-encoded array and reject anything else naming the parameter, so promising those a
+// comma-separated list would advertise a shape that errors.
+//
+// Declared HERE, above the first description that appends it: several of those are plain
+// `const` initialisers evaluated in file order, and one referencing this from further up
+// would read it in its temporal dead zone.
+//
+// EVERY LIST PARAMETER IN THIS FILE NOW DECLARES ITS STRING FORM AND SAYS WHICH STRINGS IT
+// READS. `participants` is the one that says it in its own words rather than by appending a
+// constant, and that is deliberate: its sentence carries a worked JSON example of the object
+// shape, which neither constant can. Do not replace it with one of these for the sake of
+// uniformity.
+//
+// One thing is not done, and it is what #98 stays open for: the drift guard.
+// `tool-schema.test.ts` fails a boolean declared `type: 'boolean'` and has no array-side
+// equivalent, so nothing stops a narrow `type: 'array'` being added tomorrow and quietly
+// making its coercion unreachable again.
+const LENIENT_LIST_DESC =
+  ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
+
+// The denial is spelled out rather than left to be inferred from what this sentence omits: a
+// caller who has just read the comma-separated form on a sibling parameter is exactly the one
+// who will try it here, and the rejection names the parameter without naming the shape to use.
+const LENIENT_OBJECT_LIST_DESC =
+  ' Accepts an array, or a JSON-encoded array as one string; a comma-joined string is NOT accepted.';
+
 // The label arrays, which take the same forms per entry. A function rather than two
 // constants so the add/remove verb is the only thing that differs.
 const labelMailboxIdsDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
-  ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.';
+  ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
+  LENIENT_LIST_DESC;
 
 // Shared by all four label tools (#133). States the namespace the tools operate in, which a
 // caller cannot infer from "label" alone: Fastmail's own label picker offers the Inbox and
@@ -588,14 +608,14 @@ const LOCATION_FIELDS_DESC =
 const PREVIEW_SIZE_DESC =
   '`preview` is a truncated snippet (~256 chars max), NOT the full body. `bodyTextSize` is the full text-body size in bytes (it includes quoted history, so treat it as an upper bound); when it is much larger than the preview, fetch get_email before concluding content is absent. `size` is the whole-message size including attachments and inline images, so it is NOT a body-length proxy.';
 
-// Shared, verbatim across create_draft's inReplyTo and references, so the hand-rolled
+// Shared, verbatim across draft_email's inReplyTo and references, so the hand-rolled
 // threading hazard is stated on whichever one the caller reaches for. Fastmail groups a
 // message into a conversation by subject as well as by the threading headers, so a draft
 // carrying the headers under a different subject lands on a new threadId; observed after
 // that: every later draft replying to the same original was assigned to that splinter
 // thread too, and deleting the offending drafts did not restore the grouping (#68).
 const THREAD_SPLINTER_DESC =
-  'THREADING HAZARD: Fastmail groups a message into an existing conversation by SUBJECT as well as by these headers. A draft that carries them under a subject that does not match the thread\'s base subject is given a NEW threadId, and from then on later drafts replying to that same original message are grouped onto that splinter thread as well — including ones created afterwards with the correct "Re:" subject and full reference chain. Deleting the offending drafts does not undo it. The effect is display-only (the headers are correct, so recipients thread normally and sending resolves it), but the drafts stay detached from the conversation in the Fastmail UI. To reply on an existing thread prefer reply_email, which builds the headers and the matching subject for you and takes a deliberate `subject` override.';
+  'THREADING HAZARD: Fastmail groups a message into an existing conversation by SUBJECT as well as by these headers. A draft that carries them under a subject that does not match the thread\'s base subject is given a NEW threadId, and from then on later drafts replying to that same original message are grouped onto that splinter thread as well — including ones created afterwards with the correct "Re:" subject and full reference chain. Deleting the offending drafts does not undo it. The effect is display-only (the headers are correct, so recipients thread normally and sending resolves it), but the drafts stay detached from the conversation in the Fastmail UI. To reply on an existing thread prefer mode:\'reply\', which builds the headers and the matching subject for you and takes a deliberate `subject` override.';
 
 // The `fields` projection, shared verbatim by every read tool that offers it
 // (get_email, list_emails, search_emails, get_recent_emails, get_thread) so they
@@ -608,15 +628,14 @@ const FIELDS_PARAM_DESC =
   'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId, sourceEmailId) is a valid name on list_emails/search_emails/get_recent_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden. On get_thread, `bodyText` IS populated when includeBodies:true (`bodyHtml` never is), and a projected bodyText keeps its signals (quotedBytesStripped/quotedStripSkipped/bodyTextUnavailable) uninvited — without them a stripped body would read as verbatim.';
 
 // The `fields` parameter, declared identically on every read tool that offers it.
-// The string alternative is advertised because lenient clients stringify arrays
-// (coerceStringArray accepts a JSON or comma-separated string). (#69, #79)
+// The type is widened so a validating client passes a stringified array through instead of
+// rejecting it before coerceStringArray ever runs; LENIENT_LIST_DESC names the strings that
+// coercion reads, which the type alone does not say. (#69, #79)
 function fieldsSchemaProperty() {
   return {
-    oneOf: [
-      { type: 'array', items: { type: 'string' } },
-      { type: 'string' },
-    ],
-    description: FIELDS_PARAM_DESC,
+    type: ['array', 'string'],
+    items: { type: 'string' },
+    description: FIELDS_PARAM_DESC + LENIENT_LIST_DESC,
   };
 }
 
@@ -657,15 +676,17 @@ const INLINE_PAIR_DESC =
 // Shared verbatim by every tool that shows a caller a Content-ID this server manages
 // (get_email and get_email_attachments both emit `cid` values, and a quoted image's is one
 // of these), so the warning cannot appear on one read and be missing from the other. It
-// matters because the value looks perfectly stable in a single response: it survives edits,
-// and only a dropped-and-re-added quote regenerates it. The compose tools reject an authored
-// reference to one outright; this is why. (#13)
+// matters because the value looks perfectly stable in a single response: it survives edits
+// for as long as the stored body keeps referencing it, and a fresh compose of the same
+// quoted message mints a different one. The compose tools reject an authored reference to
+// one outright, and edit_draft rejects one naming a part the draft does not carry; this is
+// why. (#13)
 const MINTED_CID_NONDURABILITY =
-  'Server-managed identifiers for quoted images are reused across edits but regenerated when the quote is dropped and re-added — never author references to them.';
+  'Server-managed identifiers for quoted images belong to one stored message: they survive edits that keep referencing them, but a fresh reply or forward of the same original mints different ones — so pass an identifier back only from the message you just read, and never author one.';
 
-// The bound on what a quoted or forwarded body pulls along with it, shared verbatim by
-// reply_email and forward_email. Stated on both because it is a bytes-out disclosure and
-// the two tools differ only in the escape hatch they offer, never in the bound itself (#13).
+// The bound on what a quoted or forwarded body pulls along with it, stated on draft_email
+// because it is a bytes-out disclosure. Reply and forward differ only in the escape hatch
+// they offer — omit {{quote}}, or ride as .eml — never in the bound itself (#13).
 const CARRIED_IMAGE_BOUND_DESC =
   'What is carried is bounded only by this: a part is carried when the body references it AND the sender declared it an image (image/*). The content type is sender-declared metadata — nothing is sniffed and nothing verifies the claim — and there is no size limit and no count limit, because the parts are re-referenced by blob rather than uploaded.';
 
@@ -699,11 +720,17 @@ const targetMailboxParamDesc = (deleteTool: 'delete_email' | 'bulk_delete') =>
   `The dedicated verbs do not have that fall-through: archive_email and ${deleteTool} resolve by role and nothing else, so they never fall back to a folder of that name. ` +
   'For ARCHIVE there is a second reason: moving to the archive role replaces the whole membership and drops every other label, which is not what archiving means — archive_email patches the Inbox membership away and keeps the rest. Deleting has no such difference: delete_email and bulk_delete replace the whole membership too, exactly as moving to trash does, because that is what Fastmail\'s own Delete does.';
 
-// The membership warning carried by every tool that sets mailboxIds whole-value
-// (move_email, bulk_move). archive_email is deliberately NOT one of them — it patches the
-// Inbox membership away and re-asserts the rest, so it never drops other filing. Written
-// once because the consequence is the
-// same on each: a message filed under several labels keeps only the destination, and the
+// The membership-replacement warning shared by move_email and bulk_move.
+//
+// NOT an inventory of what writes mailboxIds whole-value. delete_email and bulk_delete do
+// too (targetMailboxParamDesc above says so), and so does the send that files a draft into
+// Sent (#123, in send_draft's own description). This constant is the warning for the two
+// tools where the caller NAMES a destination and an additive alternative exists, which is
+// what makes the warning actionable rather than merely true.
+//
+// archive_email is deliberately not among them — it patches the Inbox membership away and
+// re-asserts the rest, so it never drops other filing. Written once because the consequence
+// is the same on both: a message filed under several labels keeps only the destination, and the
 // additive alternative is the one a caller usually wants. The additive tool is a
 // parameter rather than a fixed word — a bulk caller sent to the single-email
 // `add_labels` would find it rejects their `emailIds`, which is a worse outcome than no
@@ -849,7 +876,7 @@ const TOOLS = [
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + MINTED_CID_NONDURABILITY + ' ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit.',
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + MINTED_CID_NONDURABILITY + ' READING A DRAFT ALSO RETURNS bodyHash, the token edit_draft requires before it will write or clear that draft\'s body. This is the only READ that issues one — a successful body edit also hands back the hash for your next edit of the same draft, so a run of edits does not need a read between each pair. When a hash cannot be issued the read returns bodyHashWithheld saying why — never silence. Two of the reasons name the read that would issue one, because the response simply did not show the whole stored body: a projection that dropped a body field, or stripQuoted:true (which returns a shortened body). The other three say to recreate the draft instead, because a hash for it could never be spent: a part the server returned truncated or with an encoding problem, a body part no read returns at all (one whose declared type does not match the body list it sits in), and a body that puts two parts of the same text type in one list — a layout edit_draft refuses every edit of, so the token would have nothing to buy. raw:true returns neither field, and get_thread never issues one, so read the draft here before editing it. ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit. A projection that names a body field, or bodyHash itself, brings bodyHash/bodyHashWithheld along unasked, so a projected body never arrives with the token silently missing. It is the withheld reason that arrives when the projection is too narrow to prove you saw the whole body — a draft this server wrote stores a plain-text fallback alongside its HTML, so fields:["bodyHtml"] on one of those withholds and names fields:["bodyText","bodyHtml","bodyHash"] as the read to make instead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -875,220 +902,107 @@ const TOOLS = [
         },
       },
       {
-        name: 'reply_email',
-        description: 'Reply to an existing email with proper threading headers (In-Reply-To, References). Automatically fetches the original email to build the reply chain. The subject defaults to \'Re: <original subject>\'; pass subject to override it (see that parameter for what a changed subject does to draft grouping). Use this rather than hand-rolling threading headers on create_draft. Set appendSignature=true to have the sending identity\'s configured signature added above the quote (off by default). This tool always saves the reply as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). When send_draft transmits the reply, it marks the original answered and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft), so when several copies of the original exist the right one is marked. The original message is quoted by default (attributed, top-posted, matching the web client with a portable quote-bar); set quoteOriginal=false to omit it. Quoted HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and is re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE QUOTE by default, and are re-sent to this reply\'s recipients — so a reply can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' The only way to send none of it is quoteOriginal=false, which omits the whole quote; there is no setting for quote text without its images. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the reply ships an HTML body — a text-only reply drops them, and the result says how many. You can also embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
+        name: 'draft_email',
+        description: 'Compose a draft in one of three modes — a new message, a reply, or a forward — placing this server\'s generated blocks YOURSELF with body tokens. It is the only tool that composes a message; there is no separate reply or forward tool. PUT {{signature}} WHERE THE SIGN-OFF GOES; NOTHING IS ADDED FOR YOU. The same is true of the history: {{quote}} on a reply and {{forward}} on a forward are the only things that place the original, so a reply that omits {{quote}} is stored without the conversation (the result says so). Each mode accepts exactly its own history token and refuses the other one. Tokens are expanded once, at write: the stored draft is the finished message, so get_email and the Fastmail web app both show what will be sent, and a body you read back carries no token to re-expand. THE CANONICAL SHAPE, sign-off above the history with one blank line (text) or one empty block element (HTML) between them — new: htmlBody "<p>Morning Sam,</p><p>Here is the summary.</p><div>{{signature}}</div>"; reply: htmlBody "<p>Agreed, Friday works.</p><div>{{signature}}</div><div><br></div>{{quote}}"; forward: htmlBody "<p>FYI, see below.</p><div>{{signature}}</div><div><br></div>{{forward}}". A block is substituted at the token\'s exact position with nothing added around it, so the spacing at the join is yours. Place tokens at block level, between elements: the scan is a raw string scan, so a token inside an attribute, a comment or a non-text element is honoured THERE and the message displays as that markup makes it. A token in a supplied part but not in the other supplied part is refused, so place each token in both parts or supply one part and let the other be derived. A body that is nothing but tokens whose blocks turn out empty is refused rather than stored. STRIPPED-QUOTE READS DIFFER BY MODE: a forward\'s header block cuts to the end of the message, so prose you place below {{forward}} is invisible to a stripQuoted read, while a reply\'s "> " run ends at its last quoted line, so prose below {{quote}} survives it. A NEAR-MISS SPELLING IS REFUSED rather than shipped as braces: {{Quote}}, {{{quote}}} and {{quote}} with one brace missing a side are each rejected naming what you wrote. Whitespace inside the braces IS trimmed, so {{ quote }} is the token; a single brace each side ({quote}) is ordinary prose and passes through. The same token twice in one part is refused too — expanding it twice would store the block twice. TO WRITE THE BRACES AS TEXT, escape them — in JSON that is "\\\\{{" (a literal backslash then two braces; "\\{{" is invalid JSON) — and the backslash is consumed ONLY before one of the three names, so \\{{ item }} keeps its backslash and ships unchanged. This tool always saves a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account, with no send_draft call). On reply and forward, send_draft marks exactly the stored copy given as originalEmailId answered or forwarded. Quoted and forwarded HTML is reproduced sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. IMAGES THE ORIGINAL DISPLAYED ARE CARRIED INTO THE BLOCK and re-sent to this draft\'s recipients — so a reply or forward can send image data outward that you never attached. ' + CARRIED_IMAGE_BOUND_DESC + ' Omit {{quote}} on a reply and none of the original is re-sent; a forward carries {{forward}} or rides as .eml. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. A quoted image is only carried when the HTML part is non-blank AND carries the history token — otherwise the block ships as text, and the result says how many images went with it: on a reply they are dropped, on a forward they ride as regular attachments and the result also tells you the original ships HTML and that putting {{forward}} in htmlBody keeps the formatting and the images both. You can also embed your own image: give an attachments item a cid and reference it from htmlBody as <img src="cid:THE_CID"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
         inputSchema: {
           type: 'object',
           properties: {
+            mode: {
+              type: 'string',
+              enum: ['new', 'reply', 'forward'],
+              description: 'Which kind of draft to compose. REQUIRED, with no default — a defaulted mode would turn a forgotten parameter into a silently unthreaded new message. "new" composes a fresh message and accepts no history token. "reply" threads against originalEmailId (In-Reply-To/References, "Re: " subject, recipient defaulting to the original sender) and accepts {{quote}}. "forward" starts a new conversation carrying originalEmailId, records it in X-Forwarded-Message-Id, carries the original\'s attachments, requires `to`, and accepts {{forward}} (or asAttachment instead). A value that is not one of the three is refused naming all three; it is not guessed at.',
+            },
             originalEmailId: {
               type: 'string',
-              description: 'ID of the email to reply to',
+              description: 'mode:\'reply\' and mode:\'forward\' only, and REQUIRED on both: the ID of the message being replied to or forwarded. Refused on mode:\'new\'.',
             },
             to: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Recipient email addresses (optional, defaults to the original sender). Each entry may be "Name <email>" or a bare address.',
+              description: 'Recipient email addresses. REQUIRED on mode:\'forward\' — a forward has no default recipient; optional on mode:\'reply\' (defaults to the original sender) and on mode:\'new\'. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             cc: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             bcc: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             from: {
               type: 'string',
-              description: 'Sender email address (optional, defaults to account primary email)',
-            },
-            subject: {
-              type: 'string',
-              description: 'Override the subject (optional). When omitted the reply inherits "Re: <original subject>", without double-prefixing an existing Re:; a blank string is treated as omitted. The In-Reply-To/References headers are built identically either way, so recipients still thread the reply correctly. NOTE: Fastmail groups messages by subject as well as by those headers, so a changed subject detaches the DRAFT from the original conversation in the Fastmail UI (it is given its own threadId) — and once such a draft exists, later drafts replying to that same original message may be grouped onto the detached thread too. Display only, and it resolves once the reply is sent.',
-            },
-            textBody: {
-              type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. NOTE: a reply with no htmlBody quotes the original as plain text, which cannot show the images the original displayed — they are dropped, and the result says how many. Must be a plain string: a body wrapped in a CDATA section is rejected.',
-            },
-            htmlBody: {
-              type: 'string',
-              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. In that derivation an image contributes its alt text; an embedded (cid:) image with no alt contributes \"[image]\", so a picture-only message still has a readable text part, while a remote image with no alt contributes nothing. Supplying it is also what lets the quote show the images the original displayed. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
-            },
-            quoteOriginal: {
-              type: ['boolean', 'string'],
-              description: lenientBool('Append the original message as an attributed quote (default true). Set false to omit it — the WHOLE quote, its images included. There is no option for quote text without the images the original displayed: those images are the quoted body, and carrying them is what makes the quote show what the sender wrote. So false is also the only way to stop this reply re-sending them to its recipients (see the tool description for what is carried).'),
+              description: 'Sender email address (optional, defaults to account primary email). It also picks the identity whose signature {{signature}} expands to.',
             },
             replyTo: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
-            },
-            appendSignature: {
-              type: ['boolean', 'string'],
-              description: appendSignatureDesc(', above the quoted original'),
-            },
-            attachments: attachmentsSchemaProperty(false),
-          },
-          required: ['originalEmailId'],
-        },
-      },
-      {
-        name: 'forward_email',
-        description: 'Forward an existing email to new recipients. This tool always saves the forward as a DRAFT and never transmits it — review it, then transmit with send_draft (the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). When send_draft transmits the forward, it marks the original forwarded and read — exactly the stored copy this call was given as originalEmailId (recorded on the draft, on both inline and asAttachment forwards). `to` is required — a forward has no default recipient, unlike reply. A note (textBody/htmlBody) is optional: the forwarded message itself is the content. The original is reproduced below a forwarded-message header block (From/To/Cc/Subject/Date), its HTML sanitised (script/style/event handlers stripped; formatting and real http(s) images kept) and re-sent under your From address. The original\'s regular attachments are carried by default (includeOriginalAttachments). Images the original\'s body DISPLAYED are carried too, and are carried even when includeOriginalAttachments is false, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it. ' + CARRIED_IMAGE_BOUND_DESC + ' Short of not forwarding the message, there is no way to reproduce the body and leave those images behind. Carrying needs no FASTMAIL_ATTACH_DIR: the parts are already in the account. An image the block cannot display — a text-only forward, or a reference this server could not resolve to exactly one image part — rides as a regular attachment instead (subject to includeOriginalAttachments), and the result says so; asAttachment is the lossless alternative. The subject defaults to \'Fwd: <original subject>\'. Set appendSignature=true to have the sending identity\'s configured signature added above the forwarded-message block (off by default). You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; that one needs a source you have enabled — FASTMAIL_ATTACH_DIR to attach a local file, FASTMAIL_ALLOW_BLOB_ATTACH to attach content already in the account).',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            originalEmailId: {
-              type: 'string',
-              description: 'ID of the email to forward',
-            },
-            to: {
-              oneOf: [
-                { type: 'array', items: { type: 'string' } },
-                { type: 'string' },
-              ],
-              description: 'Recipient email addresses (array of strings, or a comma-separated string); required — a forward has no default recipient. Each entry may be "Name <email>" or a bare address.',
-            },
-            cc: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
-            },
-            bcc: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
-            },
-            from: {
-              type: 'string',
-              description: 'Sender email address (optional, defaults to account primary email)',
-            },
-            subject: {
-              type: 'string',
-              description: "Override the subject (optional). When omitted: 'Fwd: <original subject>', without double-prefixing an existing Fwd:/Fw:/FW:. A blank string is treated as omitted; a non-string is rejected. (Same posture as reply_email's subject.)",
-            },
-            textBody: {
-              type: 'string',
-              description: 'Optional note placed ABOVE the forwarded-message block, in plain text — the original is reproduced below it automatically; omit for a bare FYI forward. NOTE: a text-only note produces a PLAIN-TEXT forward (the original\'s HTML formatting is reduced to text, and the images its body displayed cannot be shown — they ride as regular attachments instead, or are left behind when includeOriginalAttachments is false) — use htmlBody, or both, to preserve its formatting and its images. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.) Must be a plain string: a note wrapped in a CDATA section is rejected.',
-            },
-            htmlBody: {
-              type: 'string',
-              description: 'Optional note placed ABOVE the forwarded-message block, in HTML (the preferred format; a plain-text alternative is derived automatically, using the alt text of each image, and \"[image]\" for an embedded (cid:) image that has none) — the original is reproduced below it. (When asAttachment is set, this note is the whole body — the original rides as the attached .eml, with no inline block.) Pass REAL markup — an entirely HTML-escaped note (escaped element tags like &lt;p&gt; with no actual elements) is rejected, as is one containing a CDATA section.',
-            },
-            includeOriginalAttachments: {
-              type: ['boolean', 'string'],
-              description: lenientBool("Carry the original message's attached FILES on the forward (default true; all-or-none — for a subset, either trim the saved draft with edit_draft's removeAttachments, or set this false and name the parts you want as attachments items (emailId + attachmentId), which sends them with no forwarded-message block or X-Forwarded-Message-Id to say where they came from). This flag does not govern the images the original's body displayed: those are body content and are carried either way (see the tool description for the bound on that). What it does govern, besides the ordinary files, is an image the forwarded block could not display — that one rides as a regular attachment when this is true, and is left behind when it is false. Ignored when asAttachment is set — the .eml already embeds every original attachment."),
-            },
-            asAttachment: {
-              type: ['boolean', 'string'],
-              description: lenientBool('Instead of reproducing the original inline, attach the entire original as a raw .eml file (message/rfc822): lossless, including embedded inline images; supersedes includeOriginalAttachments. There is no forwarded-message block on this shape — your note (textBody/htmlBody) is the WHOLE body. IF YOU PASS NO NOTE THE DRAFT IS NOT BODY-LESS: it ships the literal plain-text body "Forwarded message attached." so the message reads as something rather than as an empty page with a file on it. Pass your own note to replace it. NOTE: the raw message carries its full transport headers (Received chain, authentication results) and — when forwarding a message from Sent — any Bcc recipients (see docs/security-model.md), which an inline forward would not expose.'),
-            },
-            replyTo: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
-            },
-            appendSignature: {
-              type: ['boolean', 'string'],
-              description: appendSignatureDesc(
-                ', above the forwarded-message block (on an asAttachment forward there is no such block — the note is the whole body, and the signature goes BELOW it)',
-                'the note you passed was blank — note that an INLINE forward with NO note at all IS signed, the signature becoming the whole of the content above the forwarded-message block, and that an asAttachment forward cannot report this at all: with no note it writes the filler body "Forwarded message attached." and signs that',
-              ),
-            },
-            attachments: attachmentsSchemaProperty(false, "NEW attachments to add (the original's own attachments are carried automatically — see includeOriginalAttachments). "),
-          },
-          required: ['originalEmailId', 'to'],
-        },
-      },
-      {
-        name: 'create_draft',
-        description: 'Create an email draft without sending it (transmit it later with send_draft, the only tool that transmits a composed message; naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event). Supports threading headers for replies, but for a reply to an existing message prefer reply_email — hand-rolled inReplyTo/references under a mismatched subject permanently detach the draft from its conversation in the Fastmail UI (see the inReplyTo parameter). IMPORTANT: each call creates a new draft — do not call twice for the same message. Set appendSignature=true to have the sending identity\'s configured signature added to the body (off by default). You can embed your own image in the body: give an attachments item a cid and reference it from htmlBody as <img src=\"cid:THE_CID\"> (see the attachments parameter; requires FASTMAIL_ATTACH_DIR for a local file, or FASTMAIL_ALLOW_BLOB_ATTACH for content already in the account).',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            to: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Recipient email addresses (optional). Each entry may be "Name <email>" or a bare address.',
-            },
-            cc: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
-            },
-            bcc: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
-            },
-            from: {
-              type: 'string',
-              description: 'Sender email address (optional, defaults to account primary email)',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             mailbox: {
               type: 'string',
-              description: DRAFT_MAILBOX_PARAM_DESC,
+              description: 'mode:\'new\' only. ' + DRAFT_MAILBOX_PARAM_DESC,
             },
             subject: {
               type: 'string',
-              description: 'Email subject (optional)',
+              description: 'Subject. Optional in every mode: mode:\'reply\' inherits "Re: <original subject>" and mode:\'forward\' inherits "Fwd: <original subject>", neither double-prefixing one that already has it, and a blank string is treated as omitted. The threading headers are built identically either way, so recipients still thread correctly. NOTE: Fastmail groups messages by subject as well as by those headers, so a changed subject detaches the DRAFT from the original conversation in the Fastmail UI. Display only, and it resolves once the draft is sent.',
             },
             textBody: {
               type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Must be a plain string: a body wrapped in a CDATA section is rejected.',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Place the same tokens here as in htmlBody — a token in one supplied part but not the other is refused. A text-only reply or forward reproduces the original as plain text, which cannot show the images the original displayed: they are dropped and the result says how many. Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically whenever one can be derived from the HTML. In that derivation an image contributes its alt text; an embedded (cid:) image with no alt contributes \"[image]\", so a picture-only message still has a readable text part, while a remote image with no alt contributes nothing. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected, because recipients would see the tags as text; so is any body containing a CDATA section, whose contents are dropped from the derived plain-text alternative.',
+              description: 'HTML body (optional), and the preferred format for outgoing mail. When both bodies are supplied, recipients\' clients render this one. Supplying htmlBody alone is fine: a readable plain-text alternative is generated automatically from the EXPANDED html whenever one can be derived, so it carries the same blocks. In that derivation an image contributes its alt text; an embedded (cid:) image with no alt contributes "[image]", while a remote image with no alt contributes nothing. Supplying it non-blank AND carrying the history token is what lets the block show the images the original displayed — a blank html part ships no HTML at all. Pass REAL markup — a body that is entirely HTML-escaped (escaped element tags like &lt;p&gt; with no actual elements) is rejected; so is any body containing a CDATA section.',
             },
             inReplyTo: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Message-IDs to reply to (optional, for threading). ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
             references: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Message-IDs for References header (optional, for threading). ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
-            replyTo: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
-            },
-            appendSignature: {
+            asAttachment: {
               type: ['boolean', 'string'],
-              description: appendSignatureDesc(''),
+              description: lenientBool('mode:\'forward\' only: attach the original whole as a .eml file instead of reproducing it inline (default false). Lossless — the original arrives byte for byte, headers and all. {{forward}} is refused alongside it, because the original is already carried whole and there is no block to place; a forward with neither {{forward}} nor asAttachment is refused, since it would forward nothing while still carrying the original\'s attachments. With no body of your own, a short filler note is written so the draft is readable.'),
             },
-            attachments: attachmentsSchemaProperty(false),
+            includeOriginalAttachments: {
+              type: ['boolean', 'string'],
+              description: lenientBool('mode:\'forward\' only: carry the original\'s regular attachments (default true). Images the forwarded block DISPLAYS are carried regardless, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it.'),
+            },
+            attachments: attachmentsSchemaProperty(false, "NEW attachments to add (on mode:'forward' the original's own attachments are carried automatically — see includeOriginalAttachments). "),
           },
+          required: ['mode'],
         },
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Editing the body of a reply draft that still carries the quoted original — or of a forward draft that carries the forwarded-message block — requires you to say what happens to it: pass originalEmailId (the id of the message this draft replies to or forwards) to rebuild the body and keep it, or noQuote:true to drop it. Metadata-only edits (subject/recipients/attachments) and plain-text conversion (clearFields:[\'htmlBody\']) keep the quote automatically; each successive body edit that should keep the quote must pass originalEmailId again. Supplying htmlBody to a text-only reply draft converts it to HTML. A draft carrying the sending identity\'s signature keeps it: an edit that writes a body without one re-appends the identity\'s current signature and says so, unless you pass appendSignature:false to drop it (see that parameter). The display name written alongside the From address prefers the name the draft already carries against that address; the identity\'s configured name is only used as a fallback when the draft carries none, so a display name you set yourself is never silently reverted to your account\'s name by an edit that never touched `from` — including a metadata-only edit. A draft whose From matches no identity you can send as keeps its own address and its own display name unchanged. Since JMAP emails are immutable, this creates a replacement draft and moves the old one to Trash (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. The replaced draft is never destroyed: it stays recoverable in Trash until Trash is emptied or auto-purged (Trash retention is a per-account setting), so an edit made from an out-of-date copy of the draft can be undone. The result also reports what the replaced draft contained (subject, recipients, body sizes) — compare it against what you expected to replace, since a draft changed elsewhere (the web UI, another client) in the meantime will have been overwritten. On the rare failure where the replacement is created but the old copy can\'t be moved to Trash, you are left with a duplicate draft rather than none, and the result says so. Drafts with embedded (cid:) images can be edited: an image the edited body still displays keeps its identifier, an image the body no longer displays is taken off the draft if this server put it there and becomes a regular attachment if it came from elsewhere, and the result says what the draft ended up embedding. Two body shapes still can\'t be rebuilt faithfully and are rejected — a body part that is neither text nor a carriable image, audio, video or attached message, and a body that interleaves two parts of the same text type — recreate those drafts instead. If the draft\'s stored body already references an image that isn\'t attached, editing its body is rejected until the edit resolves that (replace the body, or add an attachments item supplying the missing cid); metadata and attachment edits still work on such a draft.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). THE BODY YOU SUPPLY IS STORED EXACTLY AS WRITTEN. Nothing is appended, removed, rebuilt or recognised in it: whatever you hand back is what the draft holds, character for character. So to keep a reply\'s quoted original or a forward\'s forwarded-message block, read the draft and hand the whole body back with your edits made in it — the quoted history is just text in the body, and it survives because you sent it, not because this tool detected it. Conversely, a body you send without the quote drops the quote, with no challenge and no warning. The one exception is opt-in and explicit: expandSignature:true expands a `{{signature}}` placeholder you wrote (see that parameter). ANY EDIT THAT WRITES OR CLEARS A BODY REQUIRES bodyHash — the value get_email returns for this draft — which proves you are replacing the body you actually read; a wrong or missing hash is rejected, re-read the draft and try again. Metadata-only edits (subject/recipients/attachments) need no hash and leave both bodies untouched — but an attachment edit can still stale a hash you are HOLDING, because the hash covers the parts the draft\'s body lists carry: removeAttachments taking off a part the server routed into a body list (an embedded image) changes what the hash is taken over with no body written, while taking off a part that only sat in the attachments list changes nothing. Adding one may do the same if the server routes the new part into a body list — this server always writes attachments to the attachments list and does not decide where a later read surfaces them, so that direction is unconfirmed. Either way nothing is lost: your next body edit is rejected and you re-read. The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had, and says so); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Supplying htmlBody to a text-only reply draft converts it to HTML. A draft marked as a forward stays marked as one through every edit; clearFields:[\'forwardedMessageId\'] is how you de-forward it, which also stops send_draft marking the original forwarded, and drops the recorded sourceEmailId with it on a forward draft (the pointer refines the marking it rides on; on a reply draft it stays, since the draft is still a reply to that instance). The display name written alongside the From address prefers the name the draft already carries against that address; the identity\'s configured name is only used as a fallback when the draft carries none, so a display name you set yourself is never silently reverted to your account\'s name by an edit that never touched `from` — including a metadata-only edit. A draft whose From matches no identity you can send as keeps its own address and its own display name unchanged. Since JMAP emails are immutable, this creates a replacement draft and moves the old one to Trash (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. The replaced draft is never destroyed: it stays recoverable in Trash until Trash is emptied or auto-purged (Trash retention is a per-account setting), so an edit made from an out-of-date copy of the draft can be undone. The result also reports what the replaced draft contained (subject, recipients, body sizes) — compare it against what you expected to replace. A body edit\'s result carries the bodyHash for your NEXT edit of the draft, read back off the saved message, so a run of edits costs one get_email at the start rather than one between each pair; when a hash cannot be issued honestly the result says so: re-read after an edit that expanded the body, one whose surviving body is a text part this server derived from html, or one whose read-back failed — and recreate the draft, rather than re-reading, when the saved body is one no hash could be spent on at all: a part the server flagged as truncated or as having an encoding problem, a body part no read returns (one whose declared type does not match the body list it sits in), or a body that puts two parts of the same text type in one list (every edit of which is refused). The saved draft is judged by exactly the rule get_email applies to any draft, so the two tools never disagree about the same stored body. Drafts with embedded (cid:) images can be edited: an image the edited body still displays keeps its identifier, an image the body no longer displays is taken off the draft if this server put it there and becomes a regular attachment if it came from elsewhere, and the result says what the draft ended up embedding. Two body shapes still can\'t be rebuilt faithfully and are rejected — a body part that is neither text nor a carriable image, audio, video or attached message, and a body that interleaves two parts of the same text type — recreate those drafts instead. If the draft\'s stored body already references an image that isn\'t attached, editing its body is rejected until the edit resolves that (replace the body, or add an attachments item supplying the missing cid); metadata and attachment edits still work on such a draft.',
         inputSchema: {
           type: 'object',
           properties: {
             emailId: {
               type: 'string',
-              description: "The ID of the draft email to edit (this draft's own id). The message it replies to or forwards, needed to regenerate a quote or forwarded block, is a separate param: originalEmailId.",
+              description: "The ID of the draft email to edit (this draft's own id).",
             },
             to: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated recipient email addresses (optional, keeps existing if omitted). Each entry may be "Name <email>" or a bare address.',
+              description: 'Updated recipient email addresses (optional, keeps existing if omitted). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             cc: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+              description: 'Updated CC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             bcc: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+              description: 'Updated BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             from: {
               type: 'string',
@@ -1100,39 +1014,51 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed). For a TEXT-ONLY reply or forward draft, editing textBody is a quote-bearing edit: pass originalEmailId to rebuild and keep the quoted/forwarded original, or noQuote:true to drop it. Must be a plain string: a body wrapped in a CDATA section is rejected.',
+              description: 'Updated plain-text body (optional). Provide it for a genuinely plain message, or alongside htmlBody for a custom plain-text alternative in place of the auto-generated one. Stored exactly as written, so on a TEXT-ONLY reply or forward draft it replaces the quoted or forwarded original unless you include that text yourself. Requires bodyHash. Editing textBody alone while htmlBody is present is rejected (the fallback is auto-managed). Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
-              description: 'Updated HTML body (optional), the preferred format. Editing it alone regenerates the plain-text fallback from the new HTML automatically, using the alt text of each image, and \"[image]\" for an embedded (cid:) image that has none. For a REPLY or FORWARD draft that carries the quoted/forwarded original, editing the body is rejected unless you pass originalEmailId (rebuilds and keeps it) or noQuote:true (drops it). Supplying htmlBody to a text-only reply draft converts it to HTML. Pass REAL markup — an entirely HTML-escaped body (escaped element tags like &lt;p&gt; with no actual elements) is rejected, as is any body containing a CDATA section.',
+              description: 'Updated HTML body (optional), the preferred format. Stored exactly as written: on a REPLY or FORWARD draft it replaces the quoted or forwarded original unless the markup you supply contains it, so hand back the whole body you read. Requires bodyHash. Editing it alone regenerates the plain-text fallback from the new HTML automatically, using the alt text of each image, and \"[image]\" for an embedded (cid:) image that has none. Supplying htmlBody to a text-only reply draft converts it to HTML. Keep any <img src=\"cid:...\"> references the draft already carries if you want those images to keep displaying; a cid: reference this server minted that names no part the draft carries is rejected, so never invent one. Pass REAL markup — an entirely HTML-escaped body (escaped element tags like &lt;p&gt; with no actual elements) is rejected, as is any body containing a CDATA section.',
             },
-            originalEmailId: {
+            bodyHash: {
               type: 'string',
-              description: "When editing the body of a REPLY or FORWARD draft, the id of the message this draft replies to OR forwards (NOT this draft's own id, which is emailId). Pass it to rebuild the body and keep the quoted original / forwarded-message block. Without it, a body edit that would drop them is rejected. Rebuilding APPENDS the quote to the body you supply: if the body you are sending already contains the quoted original — which it does whenever you read the draft, edit the words, and send the whole text back — pass noQuote:true instead; such a call is rejected rather than storing the quote twice.",
-            },
-            noQuote: {
-              type: ['boolean', 'string'],
-              description: lenientBool("Set true to DISCARD the quoted original (reply draft) or the forwarded-message block (forward draft) when editing the body, instead of keeping it via originalEmailId. On a forward draft this also clears the forward marking (the recorded X-Forwarded-Message-Id), so later edits aren't re-challenged and send_draft will not mark the original forwarded — this applies on ANY edit that passes it, including a metadata-only edit or an asAttachment forward's note edit (the deliberate way to de-forward such a draft). Deliberate-discard escape; without it a quote-dropping body edit is rejected. Cannot be combined with originalEmailId."),
+              description: "Proof that you are replacing the body you read: the `bodyHash` value get_email returned for this draft. REQUIRED on every edit that writes textBody/htmlBody or clears one of them; ignored on a metadata-only edit, which leaves both bodies untouched. An absent or stale hash is rejected — re-read the draft with get_email and edit from that. It is a lost-update guard and nothing more: it proves you SAW the body, never that you kept any of it, so the check passes on an edit that replaces the body entirely. A successful body edit hands back the hash for your next edit of the same draft, so a run of edits needs one get_email at the start — except where one cannot be issued honestly, when the result carries the reason instead; this tool's own description lists those cases and what each one asks you to do. Where get_email withholds the hash because this draft's body is one no edit can be made against, there is no value to supply and the edit is refused whatever you pass: recreate the draft.",
             },
             replyTo: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
-            appendSignature: {
+            expandSignature: {
               type: ['boolean', 'string'],
-              description: lenientBool("What happens to the sending identity's configured signature when this edit writes a body. OMIT IT and the signature is preserved: if the draft already carries a signature block this server wrote and the body you supply does not, the identity's CURRENT signature is re-appended (above any quoted or forwarded original) and the result says so — rewriting a body is not read as a request to drop a sign-off that was deliberately added. Pass true to add the signature to a draft that never had one. Pass false to remove it: your new body is stored exactly as written, with nothing appended. An edit that writes no body leaves both bodies untouched, so nothing is appended there either; pass true on such an edit and the result says that plainly rather than ignoring the flag in silence. LIMIT: preservation is detected by an HTML class, so it works on drafts with an HTML body ONLY. A PLAIN-TEXT draft carries no marker, so an edit that rewrites its text loses the sign-off even if this server put it there — pass appendSignature:true on that edit to keep it, which is safe to repeat because a text body already carrying EITHER form of this identity's block (the HTML-derived one or the configured plain-text one) is left alone rather than signed twice — whether the block ends the body or sits above a quoted or forwarded original, which is the shape a reply or forward draft you read back will actually have. That covers converting an HTML draft to plain text with clearFields:['htmlBody'] and handing back the text the draft gave you. A signature typed by hand is invisible to this everywhere. WHEN THE SIGN-OFF DOES NOT LAND, THE RESULT SAYS SO AND WHY, and which cases are reported depends on who asked. WITH true, all four: no signature is available for the address this edit sends as (none configured, or not one of your verified identities); the body you supplied already carries one; this edit wrote no body; or the identity's signature is images-only HTML and this edit leaves the draft as plain text (or supplies a plain-text alternative) that has nothing to carry it. WITH THE FLAG OMITTED only the two that LOSE something are reported — no signature available, and the images-only case — because the other two mean the sign-off is still there: a body you supplied that already carries it is what preservation wanted, and an edit that writes no body carries both bodies through untouched. So on the omitted path, silence does not mean all four checks passed."),
+              description: lenientBool("Set true to expand a `{{signature}}` placeholder in the body this edit writes into the sending identity's configured sign-off. OFF BY DEFAULT, and off is what makes this tool's core promise hold: with the flag absent your body is stored character for character, `{{signature}}` included, and nothing this server recognises in a body can make it rewrite one. That matters because part of a draft body you hand back was written by someone else (a quoted original, a forwarded message), so a placeholder found in it could have been planted there. With true, put {{signature}} where the sign-off goes — the canonical shape is above the quoted history with one blank line (text) or one empty block element (HTML) between them, e.g. htmlBody \"<p>Agreed, Friday works.</p><div>{{signature}}</div><div><br></div>\" followed by the quoted original you read off the draft. The block is substituted at the token's exact position with nothing added around it, so the spacing at the join is yours. Passing true with no {{signature}} in the body is rejected, as is the same token twice in one part (it would store the sign-off twice); write it in both parts if you supply both, or supply one part and let the other be derived. {{quote}} and {{forward}} do NOT expand here and are stored as the literal text you typed — this tool never places history for you, you hand it back yourself. A near-miss spelling ({{Signature}}, {{{signature}}}) is stored as written and reported in the result rather than refused, since it may be text the original's author wrote. A {{…}} naming no token at all ({{sig}}) is reported the same way, and on an UNFLAGGED edit too: this tool stores what you wrote, so a mistyped token ships with its braces showing. EVERY ONE OF THESE NOTES IS COUNT-RISE: a {{signature}}, a near-miss, a {{quote}}/{{forward}}, an escaped spelling or a {{…}} naming no token that the draft's stored body ALREADY carried passes in silence, and only what THIS edit added is named. A note that names a spelling rather than a part is said ONCE for the whole edit, however many times you wrote it and whether it went into one supplied body or both. That is what keeps a token planted in a quoted original from being reported back to you on every edit of that draft forever, when the words are not yours to change. TO STORE THE BRACES AS TEXT under this flag, escape them — in JSON that is \"\\\\{{\" (a literal backslash then two braces). The backslash is consumed and the bare {{signature}} is stored, so it will not expand again unless a later edit passes this flag too. (Escaping on an UNFLAGGED edit is not needed and does nothing: that body is stored byte for byte, backslash included. The result says so only when THIS edit added an escape the draft's stored body did not already carry.) A body edit that expands anything gets NO bodyHash back, because what landed is not what you wrote: re-read the draft before your next edit."),
             },
             attachments: attachmentsSchemaProperty(true),
             removeAttachments: {
-              type: 'array',
+              // Declared array-OR-string for the same reason `fields` is (#69, #79): the
+              // handler runs these through coerceStringArray, which accepts a JSON or
+              // comma-separated string, and a validating client rejects that form against a
+              // narrow `type: 'array'` before the coercion is ever reached — leniency that
+              // cannot be exercised is not leniency.
+              // Spelled as a type union rather than a `oneOf`, matching `to`/`cc`/`bcc` on
+              // draft_email and the rest of the lenient list parameters: it is the form most
+              // of this file already uses, and the one a simple validator is likeliest to
+              // read, which is the entire point of declaring the string form at all.
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: "Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: remove its <img> reference in the same call, or keep the attachment. Removing an image supplied by a quote you are keeping (originalEmailId) is also rejected, because rebuilding the quote re-embeds it — use noQuote with a replacement body to drop the quote and its images instead. To remove every attachment, use clearFields:['attachments'] instead.",
+              description: "Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string. Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: drop its <img> reference from the body you supply in the same call, or keep the attachment. To remove every attachment, use clearFields:['attachments'] instead.",
             },
             clearFields: {
-              type: 'array',
-              items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments'] },
-              description: "Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). On an edit that also keeps a quote via originalEmailId, the rebuilt quote re-embeds the images it supplies and the result says how many.",
+              // Array-OR-string, as removeAttachments above. The `enum` stays in `items` and
+              // is not lifted onto the property: it is what produces the rejection naming the
+              // valid field names, and widening the property without it would trade a named
+              // error for a generic one. `items` constrains ARRAY instances only, so it goes
+              // on constraining the array form exactly as before while leaving the string
+              // form through to the server, where validateClearFields raises the same named
+              // rejection over the coerced array.
+              type: ['array', 'string'],
+              items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId'] },
+              description: "Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string. Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments, forwardedMessageId. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). Clearing textBody or htmlBody requires bodyHash. clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). clearFields:['forwardedMessageId'] de-forwards the draft: it drops the recorded X-Forwarded-Message-Id so send_draft will not mark the original forwarded, and on a forward draft it drops the recorded sourceEmailId with it (that pointer names the instance the marking is about; on a reply draft it is kept). That is metadata, so it works on a body edit and a metadata-only edit alike, and it does NOT touch the body — a forwarded-message block already in the body stays there until you replace the body yourself. The converse holds too: deleting that block from the body does not de-forward the draft, so send_draft still marks the original forwarded until you clear this field.",
             },
           },
           required: ['emailId'],
@@ -1140,7 +1066,7 @@ const TOOLS = [
       },
       {
         name: 'send_draft',
-        description: 'Send an existing draft email. This is the ONLY tool that transmits a composed message: every compose tool (create_draft, reply_email, forward_email) saves a draft as stored, inspectable bytes, and this tool submits it. Naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event. The draft must have recipients (to/cc/bcc) and a from address. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content sends as-is: that is a draft whose html yields no derivable text at all, e.g. one showing a remote image with no alt text (a draft displaying an embedded (cid:) image is not in that group — it derives \"[image]\" and carries a text part). Only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by forward_email) marks it forwarded and read. Drafts made by reply_email/forward_email also record WHICH stored copy they were composed from, so when several copies of the original exist (e.g. a self-addressed message filed in two folders) exactly that copy is marked. Best-effort — on a draft without that record the original is found from the Message-ID; when the mark succeeds the result says so, and when the message cannot be identified (no match, or several copies and no record of which) the result says it was not marked and why. A draft that records neither header marks nothing (an ordinary compose). The result also reports how many embedded (cid:) images the message carried out, read off the draft as submitted — a receipt on what was sent, not a check: this tool never refuses a draft over its images.',
+        description: 'Send an existing draft email. This is the ONLY tool that transmits a composed message: draft_email saves a draft as stored, inspectable bytes, and this tool submits it. Naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event. The draft must have recipients (to/cc/bcc) and a from address. IT MUST ALSO BE IN THE DRAFTS FOLDER: a draft that has been moved to Archive, to Trash or to any other folder is refused, and the refusal says where it is now — move it back to Drafts with move_email and send it again. Being in Drafts is what says the message is still meant to go out; filed anywhere else, it has since been made something other than outbound mail, and this is the only tool that transmits. A draft that is in Drafts AND carries another label is still in Drafts and sends normally — but the send FILES the message into Sent as a whole-value write, so that other label is dropped and the Sent copy cannot show you what it was (issue #123). Add the label back after sending if you need it. If no mailbox in the account carries the "drafts" role, this tool refuses rather than sending unchecked. It also refuses, with a different message, when the server returns the draft with no readable filing at all: nothing is sent and no move is suggested, because where the draft sits is unknown rather than known to be wrong. After sending, the email is moved to the Sent folder and the draft keyword is removed. An HTML-only draft with real content sends as-is: that is a draft whose html yields no derivable text at all, e.g. one showing a remote image with no alt text (a draft displaying an embedded (cid:) image is not in that group — it derives \"[image]\" and carries a text part). Only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. EVERY body part is checked, so a blank one is rejected wherever it sits in the draft\'s body list and whether or not it declares a content type: a part that declares none counts as the body of whichever list carries it, which is how a recipient\'s client renders it. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by draft_email\'s mode:\'forward\') marks it forwarded and read. Drafts made by draft_email\'s reply and forward modes also record WHICH stored copy they were composed from, so when several copies of the original exist (e.g. a self-addressed message filed in two folders) exactly that copy is marked. Best-effort — on a draft without that record the original is found from the Message-ID; when the mark succeeds the result says so, and when the message cannot be identified (no match, or several copies and no record of which) the result says it was not marked and why. A draft that records neither header marks nothing (an ordinary compose). The result also reports how many embedded (cid:) images the message carried out, read off the draft as submitted — a receipt on what was sent, not a check: this tool never refuses a draft over its images.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1207,15 +1133,21 @@ const TOOLS = [
               type: 'string',
               description: SEARCH_MAILBOX_PARAM_DESC,
             },
+            // Widened like every other lenient list, and SAFE here specifically because
+            // these two already read through coerceStringArrayStrict: a value that is
+            // present but uncoercible is an error naming the parameter, never a silent
+            // undefined. On an argument that narrows what a call touches, the plain
+            // coercer's silent drop would widen the search the argument was passed to
+            // restrict - which is why the strict half was written first (#98).
             requiredMailboxes: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: REQUIRED_MAILBOXES_PARAM_DESC,
+              description: REQUIRED_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
             },
             excludeMailboxes: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: EXCLUDE_MAILBOXES_PARAM_DESC,
+              description: EXCLUDE_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
             },
             after: {
               type: 'string',
@@ -1342,7 +1274,7 @@ const TOOLS = [
               },
             },
             emails: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1350,10 +1282,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] is rejected — omit the field instead.',
+              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1361,10 +1293,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] is rejected — omit the field instead.',
+              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: 'object',
                 properties: {
@@ -1372,7 +1304,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] is rejected — omit the field instead.',
+              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',
@@ -1416,7 +1348,7 @@ const TOOLS = [
               },
             },
             emails: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1424,10 +1356,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] is rejected — use clearFields.',
+              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1435,10 +1367,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] is rejected — use clearFields.',
+              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: 'object',
                 properties: {
@@ -1446,16 +1378,16 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] is rejected — use clearFields.',
+              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',
               description: 'Replacement note text. An empty string is rejected — use clearFields:[\'notes\'].',
             },
             clearFields: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string', enum: ['emails', 'phones', 'addresses', 'notes'] },
-              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected.',
+              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected.' + LENIENT_LIST_DESC,
             },
             allowEntryReplace: {
               type: ['boolean', 'string'],
@@ -1647,9 +1579,9 @@ const TOOLS = [
               `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
             ),
             clearFields: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string', enum: ['description', 'location'] },
-              description: 'Property names to delete from the event. Allowed: description, location. Cannot also pass the same field as a value.',
+              description: 'Property names to delete from the event. Allowed: description, location. Cannot also pass the same field as a value.' + LENIENT_LIST_DESC,
             },
           },
           required: ['eventId'],
@@ -1675,7 +1607,7 @@ const TOOLS = [
       },
       {
         name: 'list_identities',
-        description: "List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo, and the identity's configured signature as textSignature/htmlSignature when it has one; a blank signature is omitted). JMAP does not append the signature server-side, so signing is a choice each compose call makes: pass appendSignature:true to create_draft/reply_email/forward_email and the identity's own signature is placed in the body for you (above the quoted history on a reply), or read the field from here and write it into the body yourself. Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.",
+        description: "List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo, and the identity's configured signature as textSignature/htmlSignature when it has one; a blank signature is omitted). JMAP does not append the signature server-side, so signing is a choice each compose call makes: put {{signature}} where the sign-off goes in a draft_email body (or in an edit_draft body with expandSignature:true) and the identity's own signature is written at exactly that point, or read the field from here and write it into the body yourself. Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -1823,7 +1755,7 @@ const TOOLS = [
               // stringified form before the lenient coercion runs (#98).
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'IDs of the emails to archive — message ids, NOT thread ids. Pass an array even for a single message; duplicates are collapsed. To archive a whole conversation, pass every message id in the thread.',
+              description: 'IDs of the emails to archive — message ids, NOT thread ids. Pass an array even for a single message; duplicates are collapsed. To archive a whole conversation, pass every message id in the thread.' + LENIENT_LIST_DESC,
             },
           },
           required: ['emailIds'],
@@ -1840,7 +1772,7 @@ const TOOLS = [
               description: 'ID of the email to add labels to',
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('add'),
             },
@@ -1859,7 +1791,7 @@ const TOOLS = [
               description: 'ID of the email to remove labels from',
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('remove'),
             },
@@ -1966,9 +1898,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to mark',
+              description: 'Array of email IDs to mark.' + LENIENT_LIST_DESC,
             },
             read: {
               type: ['boolean', 'string'],
@@ -1986,9 +1918,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to pin/unpin',
+              description: 'Array of email IDs to pin/unpin.' + LENIENT_LIST_DESC,
             },
             pinned: {
               type: ['boolean', 'string'],
@@ -2006,9 +1938,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to move',
+              description: 'Array of email IDs to move.' + LENIENT_LIST_DESC,
             },
             targetMailbox: {
               type: 'string',
@@ -2025,9 +1957,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to delete',
+              description: 'Array of email IDs to delete.' + LENIENT_LIST_DESC,
             },
           },
           required: ['emailIds'],
@@ -2040,12 +1972,12 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to add labels to',
+              description: 'Array of email IDs to add labels to.' + LENIENT_LIST_DESC,
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('add'),
             },
@@ -2060,12 +1992,12 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to remove labels from',
+              description: 'Array of email IDs to remove labels from.' + LENIENT_LIST_DESC,
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('remove'),
             },
@@ -2203,6 +2135,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         assertStripQuotedNotRaw(strip, raw);
         const email = await client.getEmailById(emailId);
         const simplified = simplifyEmail(email, { includeHtml: verbose || wantsHtmlBody(fields), stripQuoted: strip });
+        // The draft body hash, attached HERE rather than inside simplifyEmail: whether one
+        // can be issued honestly depends on what THIS READ returns, not on the message. The
+        // rules (and the reason each one is a rule) are in attachDraftBodyHash, which is
+        // where they can be unit-tested; this is the only tool that calls it.
+        attachDraftBodyHash(email, simplified, { raw, fields, stripQuoted: strip });
         return {
           content: [
             {
@@ -2213,46 +2150,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case 'reply_email': {
-        // The orchestration (fetch original, assemble reply, upload + thread attachments,
-        // save the draft) lives in composeReply so it is unit-testable with a mock client;
-        // this handler just maps the result to the response text.
-        const result = await composeReply(args, client, getAttachDir(), getAllowBlobAttach());
-        const text = `Reply draft saved successfully (Email ID: ${result.emailId}). Use send_draft to transmit it. Subject: ${result.subject}${formatInlineNotes(result.notes)}`;
-        return { content: [{ type: 'text', text }] };
-      }
-
-      case 'forward_email': {
-        // The orchestration (fetch original, assemble the forwarded-message block,
-        // carry/.eml attachments, upload new ones, save the draft) lives in
-        // composeForward so it is unit-testable with a mock client; this handler just
-        // maps the result to the response text.
-        const result = await composeForward(args, client, getAttachDir(), getAllowBlobAttach());
-        const text = `Forward draft saved successfully (Email ID: ${result.emailId}). Use send_draft to transmit it. Subject: ${result.subject}${formatInlineNotes(result.notes)}`;
-        return { content: [{ type: 'text', text }] };
-      }
-
-      case 'create_draft': {
-        // The orchestration (body validation, recipient coercion, the contentless-draft
-        // guard, attachment upload, create) lives in composeDraft so it is unit-testable
-        // with a mock client; this handler just maps the result to the response text.
-        const { emailId, subject, to, cc, notes } = await composeDraft(args, client, getAttachDir(), getAllowBlobAttach());
+      case 'draft_email': {
+        // The whole orchestration (mode gating, the token scan and its refusals, block
+        // building, the single expansion pass, attachment carry/upload, create) lives in
+        // composeDraftEmail so it is unit-testable with a mock client; this handler just
+        // maps the result to the response text. The receipt goes out as JSON rather than
+        // prose because it is structured per-part data the caller reads back, not a
+        // sentence — and it must not be able to claim an expansion that did not happen,
+        // which is easier to see when it is the function's return value rendered verbatim.
+        const result = await composeDraftEmail(args, client, getAttachDir(), getAllowBlobAttach());
 
         const summary = [
-          `Draft created successfully (Email ID: ${emailId}).`,
-          subject ? `Subject: ${subject}` : null,
-          to?.length ? `To: ${to.join(', ')}` : null,
-          cc?.length ? `CC: ${cc.join(', ')}` : null,
-        ].filter(Boolean).join(' ') + formatInlineNotes(notes);
+          `Draft saved successfully (Email ID: ${result.emailId}, mode: ${result.mode}). Use send_draft to transmit it.`,
+          result.subject ? `Subject: ${result.subject}` : null,
+          result.to?.length ? `To: ${result.to.join(', ')}` : null,
+          result.cc?.length ? `CC: ${result.cc.join(', ')}` : null,
+        ].filter(Boolean).join(' ') + formatInlineNotes(result.notes);
 
-        return {
-          content: [
-            {
-              type: 'text',
-              text: summary,
-            },
-          ],
-        };
+        const text = result.tokens === undefined
+          ? summary
+          : `${summary}\n\nTokens: ${toolJson(result.tokens)}`;
+        return { content: [{ type: 'text', text }] };
       }
 
       case 'edit_draft': {
@@ -3017,7 +2935,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           email: {
             available: true,
             functions: [
-              'list_mailboxes', 'create_mailbox', 'list_emails', 'get_email', 'reply_email', 'forward_email', 'create_draft', 'edit_draft', 'send_draft', 'search_emails',
+              'list_mailboxes', 'create_mailbox', 'list_emails', 'get_email', 'draft_email', 'edit_draft', 'send_draft', 'search_emails',
               'get_recent_emails', 'mark_email_read', 'pin_email', 'delete_email', 'move_email', 'archive_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
@@ -3211,7 +3129,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       error.message = redactBearerTokens(error.message);
       throw error;
     }
-    // The four compose handlers (reply_email/forward_email/create_draft/edit_draft) have no
+    // The two compose handlers (draft_email/edit_draft) have no
     // local try/catch, so an attachment opt-in/path/contentType rejection thrown as a
     // PathAccessError surfaces here. Map it to InvalidParams (actionable) rather than the
     // generic InternalError wrap below. (download_attachment maps its own PathAccessError

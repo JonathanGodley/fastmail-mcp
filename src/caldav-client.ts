@@ -2548,7 +2548,8 @@ function assertDavOk(resp: unknown, action: string): void {
 // handler that calls them lives) because index.ts's CallTool switch has no test harness and
 // the module itself runs `server.connect()` as a load-time side effect, which makes it unsafe
 // to `import` from a unit test — CLAUDE.md's "Handler logic must be unit-testable" pattern
-// (composeReply/reply-handler.ts) is to extract into a safely-importable module instead. This
+// (composeDraftEmail/draft-email-handler.ts) is to extract into a safely-importable module
+// instead. This
 // one is co-located with the types it formats rather than a third file, since it has no
 // dependency of its own beyond them.
 export interface CalendarZoneWriteInfo {

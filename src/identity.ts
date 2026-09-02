@@ -53,10 +53,10 @@ export function selectIdentity(identities: any[] | undefined | null, from?: stri
  *
  * Both halves are optional because a server is free to store either alone. Which one a
  * message uses is decided by the body it ships, not by which was configured — see
- * applySignature in src/reply-quote.ts, and the signature section of docs/email-bodies.md.
+ * signatureBlock in src/reply-quote.ts, and the signature section of docs/email-bodies.md.
  */
 export interface ResolvedSignature {
-  /** The identity's `htmlSignature`, unwrapped (the marker div is added at insertion time). */
+  /** The identity's `htmlSignature`, unwrapped; `signatureHtmlBlock` wraps it in a plain div. */
   html?: string;
   /** The identity's `textSignature`, used for a body that ships no HTML at all. */
   text?: string;
@@ -64,9 +64,11 @@ export interface ResolvedSignature {
 
 /**
  * Read the sign-off off one identity. Undefined when it has none configured — an identity
- * with a blank signature is signature-less. A call that asked for one then gets nothing
- * appended AND is told so: undefined here becomes the `no-signature` skip reason, which
- * every compose path and edit_draft report (see SignatureSkipReason in src/reply-quote.ts).
+ * with a blank signature is signature-less. A caller who placed `{{signature}}` then gets
+ * nothing in its place AND is told so: undefined here becomes the `no-signature` cause on
+ * the block `signatureBlock` returns (src/reply-quote.ts), which both `draft_email` and
+ * `edit_draft` report against the token the caller wrote — one sentence, because in both
+ * tools the caller placed the token itself.
  */
 export function signatureOf(identity: any): ResolvedSignature | undefined {
   const html = typeof identity?.htmlSignature === 'string' && !isBlank(identity.htmlSignature)
@@ -79,6 +81,7 @@ export function signatureOf(identity: any): ResolvedSignature | undefined {
 
 // There is deliberately no `resolveSignature(identities, from)` convenience wrapper here.
 // Every caller needs the identity OBJECT as well as its sign-off — the note that reports an
-// empty append names the address the message sends as — so all three compose handlers call
-// selectIdentity and signatureOf separately. A wrapper that returned only the signature was
-// used by nothing but its own tests.
+// empty expansion names the address the message sends as — so draft_email's handler calls
+// selectIdentity and signatureOf separately, and updateDraft's edit path resolves its
+// identity with matchesIdentity before reading the sign-off off it. A wrapper that returned
+// only the signature was used by nothing but its own tests.

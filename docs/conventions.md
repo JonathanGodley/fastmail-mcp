@@ -160,22 +160,43 @@ exists to catch.
 `tsc` does not rewrite string literals, so the source and the shipped schema cannot
 disagree here.
 
-The same reasoning applies to the array coercions. `participants` on the calendar write
-tools now declares `type: ['array', 'string']` alongside `coerceParticipants`, but the rest
-are still narrow (`type: 'array'` on `clearFields`, `emailIds`, `mailboxIds`, `attachments`
-and the recipient lists) even though `coerceStringArray` / `coerceAttachments` run behind
-them. That is unfinished work rather than a decision, and no guard covers it — tracked as
-fork issue #98.
+The same reasoning applies to the array coercions, and every list parameter now declares
+its lenient shape: `type: ['array', 'string']` with `items` kept (JSON Schema applies
+`items` to array instances only, so the union is well-formed). The accepted string forms
+are NOT one set, which is why `src/index.ts` carries two description constants rather than
+one: `coerceStringArray` takes a single bare value, a comma-separated list or a
+JSON-encoded array, while the OBJECT-item lists behind `coerceAttachments` and the contact
+entry coercers read a whole-value string **only** as a JSON-encoded array and reject
+anything else naming the parameter — promising those a comma-separated form would
+advertise a shape that errors, so the object-list constant denies the comma-joined form in
+so many words rather than leaving a caller to infer it from an omission. Every list
+parameter carries the sentence matching its own coercer. `participants` is the exception to
+the *mechanism* and not to the rule: it states the same contract in its own words, with a
+worked JSON example of the object shape that neither constant can carry, so replacing it
+with a constant would say less.
+
+Two of them are narrowing arguments, and they are safe to widen for a reason worth stating:
+`search_emails`' `requiredMailboxes` and `excludeMailboxes` already read through
+`coerceStringArrayStrict`, so a present-but-uncoercible value is an error naming the
+parameter rather than a silent `undefined` that would widen the search the argument was
+passed to restrict. Widening the schema makes that strict half reachable; it does not
+create a new lenient path.
+
+What is still missing is the guard. `src/tool-schema.test.ts` fails a boolean declared
+`type: 'boolean'` and has no array-side equivalent, so a narrow `type: 'array'` added
+tomorrow would make its coercion unreachable again with nothing to catch it — the part of
+fork issue #98 that remains open.
 
 ### Verifying coercion
 
 The normal MCP tool harness validates the declared `inputSchema` before the call
 reaches the handler, so it will reject the malformed inputs these coercions are meant to
-accept. That now holds only for the parameters whose schema has *not* been widened: a
-compliant client can send a stringified boolean, because every boolean declares
-`['boolean', 'string']`. For the rest you must drive a raw JSON-RPC request against the
-built server (`dist/index.js`) with `FASTMAIL_API_TOKEN` set, bypassing the
-schema-validating harness. `scripts/mcp-harness.mjs` is that client; its `list()` (also
+accept. Every boolean and every list parameter now declares its lenient shape, so a
+compliant client can send a stringified boolean or a stringified list through the ordinary
+harness. What that harness still cannot exercise is anything the schema does not admit at
+all — a coercion's behaviour on a number, an object or a malformed element — and for those
+you must drive a raw JSON-RPC request against the built server (`dist/index.js`) with
+`FASTMAIL_API_TOKEN` set, bypassing the schema-validating harness. `scripts/mcp-harness.mjs` is that client; its `list()` (also
 `node scripts/mcp-harness.mjs --list`) dumps the advertised schemas and needs no
 credentials. (See the `verify-lenient-client-coercion` note in project memory.)
 
@@ -741,7 +762,7 @@ Every throwing set-error site routes through the classifier — `Email/set` `not
 `notCreated` throws (`createDraft`, the `edit_draft` recreate, and the `EmailSubmission/set`
 in `send_draft`). Those last three built their message from `describeSetError` directly for
 a while and stayed a plain `Error` whatever the type, which meant `create_contact` failing
-on `invalidProperties` reported a caller-fixable error while `create_draft` failing the same
+on `invalidProperties` reported a caller-fixable error while `draft_email` failing the same
 way reported a server bug. Route new set-error sites through `throwSingleSetError`; reaching
 for `describeSetError` alone is how that inconsistency reappears.
 
@@ -1188,20 +1209,21 @@ trap the `parseInt` reversal above closed, met from the other side.
 
 A draft composed from an existing message records which message that was — in headers,
 so the record rides the draft itself and survives everything a draft survives (a new
-session, an edit, another client). Four surfaces read that record (`reply_email`,
-`forward_email`, `send_draft`, and `edit_draft`'s quote guard), so the model belongs here
-rather than in any one of them. The record has two tiers: **which message** (by
+session, an edit, another client). Three surfaces read or write that record
+(`draft_email`'s reply and forward modes, `send_draft`, and `edit_draft`'s recreate), so
+the model belongs here rather than in any one of them. The record has two tiers: **which message** (by
 Message-ID, interoperable, set by other clients too) and **which stored copy of it**
 (by JMAP id, this server's own header).
 
-- **The two kind headers.** `In-Reply-To` marks a reply (set by `reply_email` and by every
-  other client's reply); `X-Forwarded-Message-Id` marks a forward (set by `forward_email`,
-  and by Fastmail's own clients — see `docs/email-bodies.md` for the forward-threading
+- **The two kind headers.** `In-Reply-To` marks a reply (set by `draft_email` in reply mode
+  and by every other client's reply); `X-Forwarded-Message-Id` marks a forward (set by
+  `draft_email` in forward mode, and by Fastmail's own clients — see `docs/email-bodies.md` for the forward-threading
   rationale and the value-validation rules). Both are JMAP `MessageIds`, i.e. **bare** ids
   with no angle brackets.
 - **Reply wins when a draft carries both.** Dispatch is mutually exclusive and
-  reply-first, in `edit_draft`'s guard variant and in `send_draft`'s keyword maintenance
-  alike. This server never writes both; a foreign draft that does is treated as a reply.
+  reply-first, in `send_draft`'s keyword maintenance and in the noun `edit_draft` uses for
+  the block a draft carries alike. This server never writes both; a foreign draft that does
+  is treated as a reply.
 - **Absent provenance is a real state, not a failure.** An ordinary compose records
   neither header; anything keyed on provenance is inert on such a draft — `send_draft`
   marks nothing. Both forward shapes DO record the header, including `asAttachment`
@@ -1209,15 +1231,15 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
   source — reversed under draft-first, #32/#66, because the `.eml` is not
   machine-resolvable as provenance and `send_draft` is the only transmit path left, so
   a header-less asAttachment forward's original could never be marked forwarded).
-  `edit_draft`'s guard does not arm on the bare header when the draft carries a
-  `message/rfc822` attachment: the forwarded content lives in the `.eml`, which body
-  edits can't drop and the recreate preserves alongside the header.
+  An `asAttachment` forward is a forward for the marking and not for the body: its content
+  lives in the attached `.eml`, which no body edit can drop and the recreate preserves
+  alongside the header.
 - **The exact-instance header: `X-Fastmail-MCP-Source-Id`.** A Message-ID names a
   *message*; an account can hold several stored copies of one message (a duplicate
   delivery, or a self-addressed copy the user filed into another folder), and only the
-  compose call knows which copy the caller actually had in hand. So `reply_email` and
-  `forward_email` (both shapes, including `asAttachment`) also record the JMAP id of the
-  fetched original in this header. That id is what lets `send_draft` mark exactly the
+  compose call knows which copy the caller actually had in hand. So `draft_email`, in reply
+  mode and in either forward shape (`asAttachment` included), also records the JMAP id of
+  the fetched original in this header. That id is what lets `send_draft` mark exactly the
   copy the caller composed from — matching Fastmail's own client, which marks the
   instance replied to and leaves other copies of the same Message-ID untouched
   (observed live, 2026-08-14: replying to the Archive copy of a self-addressed message
@@ -1233,10 +1255,9 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
   stamped, and anything else degrades to absent — the fallback covers a draft without
   the header, so a malformed value is never worth an error.
 - **`edit_draft` carries the exact id like the kind headers.** The immutable-email
-  recreate copies it verbatim; the forward keep path (`originalEmailId`) re-points it at
-  the newly-named original alongside the Message-ID re-point; `noQuote` on a forward
-  draft drops it together with `X-Forwarded-Message-Id` (the draft stops being a
-  forward), while a reply draft keeps it under `noQuote` just as it keeps `In-Reply-To`.
+  recreate copies it verbatim; `clearFields: ['forwardedMessageId']` on a forward draft
+  drops it together with `X-Forwarded-Message-Id` (the draft stops being a forward), while
+  a reply draft keeps it under that same clear, just as it keeps `In-Reply-To`.
 - **Message-ID to JMAP id is a lookup, and it is two steps.** Every write path needs a
   JMAP id, so the header value has to be resolved: a full-text `Email/query` on the
   **bare** id is the recall step (the bracketed form matches nothing — the platform fact
@@ -2032,8 +2053,8 @@ Date rendering for humans (`toLocalIso` and `formatReplyDate` in
 
 ## Re-sending sanitised content: the two-pass quote sanitiser
 
-`reply_email` re-sends the original message's HTML as a quote under the user's own
-`From`, so the quoted HTML is active content we originate, not passive display. The
+`draft_email` re-sends the original message's HTML as a quote or a forwarded block under
+the user's own `From`, so that HTML is active content we originate, not passive display. The
 `sanitizeQuoteHtml` choices in `src/inline-images.ts` are load-bearing security, not
 incidental config:
 

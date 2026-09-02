@@ -3,22 +3,32 @@ import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
-import { buildReplyBodies, hasQuoteMarker, hasTextQuoteMarker, buildForwardBodies, hasForwardMarker, hasTextForwardMarker, readQuotableHtml, applySignature, hasSignatureMarker, NOTE_SIGNATURE_REAPPENDED, noteSignatureNotAppended, noteSignatureUnavailableOnEdit, signatureSkipReason } from './reply-quote.js';
+import { signatureBlock } from './reply-quote.js';
 import { matchesIdentity, signatureOf } from './identity.js';
-import { isSettableMessageId } from './forward-handler.js';
+import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
+import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
+import {
+  bodyHash, classifyPartType, collectDraftBodyParts, draftInterleavedTextType, draftPartKey,
+  isTextBodyType, resolveDraftBodyHash,
+} from './body-hash.js';
 import {
   buildUnionParts, cidKey, describePart, sanitizeDownloadFilename,
-  buildCidMap, checkInlineClosure, isRecreatableCid, isReservedCid, reconcileInlineParts,
+  checkInlineClosure, isRecreatableCid, isReservedCid, reconcileInlineParts,
   sanitizeQuoteHtml,
 } from './inline-images.js';
-import type { CidMapping, CidPart, MintedInlinePart, UnionPart } from './inline-images.js';
+import type { CidPart, UnionPart } from './inline-images.js';
 import {
-  InlineNoteLedger, emitInlineNotes,
-  noteEmbedMissingAfterSave, noteEmbedUnconfirmed, noteSentWithEmbedded,
+  InlineNoteLedger, describePartNames, emitInlineNotes,
+  noteBodyHashUnreadable, noteDiscardedTextPart, noteEmbedMissingAfterSave, noteEmbedUnconfirmed,
+  noteEscapedTokenShips, noteHistoryTokenStored, noteNearMissToken, noteSentWithEmbedded,
+  noteSignatureExpandedInOnePart, noteSignatureTokenStored, noteTokenEmpty,
+  noteUnexpandedSpelling,
   rejectBrokenDraft, rejectCidCollisionInCall, rejectCidCollisionOnDraft,
-  rejectClearAttachmentsDanglingRefs, rejectDanglingCidRef, rejectInterleavedTextParts,
-  rejectRemovalDanglingRef, rejectRemovalOfQuoteCarriedPart, rejectReservedCidRef,
-  rejectUncarriableBodyPart, rejectUnrecreatableCid,
+  rejectClearAttachmentsDanglingRefs, rejectDanglingCidRef, rejectExpandSignatureWithoutToken,
+  rejectInterleavedTextParts, rejectMissingBodyHash,
+  rejectRemovalDanglingRef, rejectRepeatedSignatureToken, rejectReservedCidRef,
+  rejectStaleBodyHash, rejectUncarriableBodyPart, rejectUnrecreatableCid,
+  NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DERIVED_PART, noteBodyHashAfterReRead,
 } from './inline-notes.js';
 import type { AttachmentAvailability } from './inline-notes.js';
 // unlink is a security control, not a convenience: the exclusive-create download
@@ -113,7 +123,7 @@ function rejectWindowsPathEscapes(input: string): void {
 // that fallback is not equally harmless for every type: a receiving client decides from
 // this header whether to render a calendar invitation or a forwarded message inline, so
 // text/calendar and message/rfc822 change how the mail presents, not just its icon.
-// message/rfc822 also covers forward_email's asAttachment output, which is a .eml.
+// message/rfc822 also covers draft_email's asAttachment forward output, which is a .eml.
 const EXT_CONTENT_TYPES: Record<string, string> = {
   pdf: 'application/pdf',
   png: 'image/png',
@@ -299,9 +309,10 @@ export const EMAIL_PROPERTIES_COMPACT = [
 // The two provenance headers this server records on drafts are deliberately
 // VERBOSE-tier, not COMPACT: list items already show forward-ness via the isForwarded
 // keyword flag, and the header VALUES are needed only when operating on a specific
-// draft — the edit guard's recovery (X-Forwarded-Message-Id) and inspecting which
-// stored copy send_draft will mark (X-Fastmail-MCP-Source-Id, see SOURCE_ID_HEADER
-// below) — both get_email contexts.
+// draft — de-forwarding one (X-Forwarded-Message-Id, which edit_draft carries through
+// or drops on clearFields, and which send_draft reads to decide what to mark) and
+// inspecting which stored copy send_draft will mark (X-Fastmail-MCP-Source-Id, see
+// SOURCE_ID_HEADER below) — both get_email contexts.
 // Corollary, not a gap: getThread uses EMAIL_PROPERTIES_COMPACT by default, so an
 // ordinary thread read (including raw:true) doesn't surface forwardedMessageId or
 // sourceEmailId — consistent with this decision. getThread's includeBodies mode (#74)
@@ -315,8 +326,8 @@ export const EMAIL_PROPERTIES_VERBOSE = [
 ] as const;
 
 // The provenance headers a draft carries about the message it was composed from:
-// In-Reply-To (set by reply_email and every other client's reply) and
-// X-Forwarded-Message-Id (set by forward_email and Fastmail's own clients). Both are
+// In-Reply-To (set by draft_email's reply mode and every other client's reply) and
+// X-Forwarded-Message-Id (set by its forward mode and Fastmail's own clients). Both are
 // arrays of BARE Message-IDs — JMAP MessageIds carry no angle brackets.
 export interface SourceReferences {
   inReplyTo: string[];
@@ -374,7 +385,8 @@ export interface SendDraftOutcome {
 // fetched and filtered out.
 const MESSAGE_ID_LOOKUP_LIMIT = 50;
 
-// `disposition`/`cid` are load-bearing for forward_email's inline-image handling:
+// `disposition`/`cid` are load-bearing for draft_email's forward-mode inline-image
+// handling:
 // without them every attachments[] part reads as disposition-less and the
 // true-inline (cid) drop predicate can never fire (#30).
 //
@@ -487,29 +499,19 @@ function resolveAttachmentRef(parts: any[], attachmentId: string): { part: any; 
 // The draft-edit part model: body shape, removals, carry (#13)
 // ---------------------------------------------------------------------------
 
-// The identity a part is deduped by across the three lists — the same rule the part union
-// uses, so a part counted once there is counted once here. RFC 8621 §4.1.4 puts one
-// displayed part into BOTH body lists, and a single-format draft aliases its one text part
-// into both, so counting raw array entries would double every part in the message.
-function draftPartKey(part: any, fallback: number): string {
-  if (typeof part?.partId === 'string' && part.partId) return `p:${part.partId}`;
-  if (typeof part?.blobId === 'string' && part.blobId) return `b:${part.blobId}`;
-  return `i:${fallback}`;
-}
+// The part-identity rule this file dedupes by (`draftPartKey`) lives in body-hash.ts, next
+// to the hash that is computed over the same deduplicated set — a body-shape check and the
+// hash a caller proves its read with have to agree on what counts as one part, or a draft
+// this file calls single-format would hash as two.
 
-// Content type without its parameters, lowercased. For CLASSIFYING only — the value stored
-// or sent for a part is always the server's own string (RFC 2045 §5.1).
-function classifyPartType(type: unknown): string {
-  if (typeof type !== 'string') return '';
-  const semicolon = type.indexOf(';');
-  return (semicolon === -1 ? type : type.slice(0, semicolon)).trim().toLowerCase();
-}
-
-const TEXT_BODY_TYPES = new Set(['text/plain', 'text/html']);
+// `classifyPartType` and `isTextBodyType` come from body-hash.ts, alongside the rest of the
+// rule about what a body list carries — see the block comment there for why the rule lives
+// at that layer rather than this one.
 
 // The non-text body parts the recreate can reproduce. The media three are what RFC 8621
 // §4.1.4 routes into a body list in the first place; message/rfc822 is there because
-// forward_email writes exactly that part itself (asAttachment), and a server that lists it
+// draft_email writes exactly that part itself (an asAttachment forward), and a server that
+// lists it
 // as body content must not make its own drafts uneditable. Everything else — a calendar
 // part, a signature part, an arbitrary application/* — has no flat-property spelling, so
 // carrying it would change what the message IS.
@@ -529,6 +531,11 @@ export interface DraftBodyShape {
 /**
  * Decide whether a draft's body is a shape the immutable-email recreate can rebuild.
  *
+ * The interleaved half is `draftInterleavedTextType` in body-hash.ts, so the read that
+ * issues a `bodyHash` and this guard answer that question with ONE expression rather than
+ * two kept in step. What stays here is the half that shapes a MESSAGE — the offending part
+ * and whether it is media, so the refusal can name what it found.
+ *
  * Deduping FIRST is load-bearing, not an optimization: a single-format draft lists its one
  * text part under both textBody and htmlBody, so a raw count would see two text/plain parts
  * on an ordinary plain-text draft and refuse to edit it. A typeless part is left alone —
@@ -538,9 +545,11 @@ export interface DraftBodyShape {
 export function classifyDraftBodyShape(email: any): DraftBodyShape {
   const lists = [email?.textBody, email?.htmlBody].filter(Array.isArray) as any[][];
   const seen = new Set<string>();
-  const textTypeCounts = new Map<string, number>();
   const shape: DraftBodyShape = {};
   let index = 0;
+
+  const interleaved = draftInterleavedTextType(email);
+  if (interleaved) shape.interleavedTextType = interleaved;
 
   for (const list of lists) {
     for (const part of list) {
@@ -550,13 +559,7 @@ export function classifyDraftBodyShape(email: any): DraftBodyShape {
       seen.add(key);
 
       const type = classifyPartType(part.type);
-      if (!type || TEXT_BODY_TYPES.has(type)) {
-        if (!type) continue;
-        const count = (textTypeCounts.get(type) ?? 0) + 1;
-        textTypeCounts.set(type, count);
-        if (count > 1 && !shape.interleavedTextType) shape.interleavedTextType = type;
-        continue;
-      }
+      if (!type || isTextBodyType(type)) continue;
 
       const carriable = isCarriableBodyType(type)
         && typeof part.blobId === 'string' && part.blobId !== '';
@@ -569,6 +572,37 @@ export function classifyDraftBodyShape(email: any): DraftBodyShape {
   return shape;
 }
 
+/**
+ * The blank body part a send would ship, named by the body field a caller would fix.
+ *
+ * Reads the DEDUPLICATED part set whole rather than selecting one part per format. A
+ * selector has to pick a part, and the pick was deciding the answer: one list holding a
+ * blank part and a real one was refused or shipped depending on which of the two came
+ * first, for the same two parts and the same rendered result. Every part a body list
+ * displays is examined here, so no ordering can hide one.
+ *
+ * "Displays" is `draftTextBodyType`, the same rule the read and the hash use, so a part
+ * that declares no content type counts as the content of the list it sits in — which is
+ * how a recipient's client renders it, and so is what decides whether they see a blank
+ * message.
+ *
+ * A part with no stored value at all is not blank: the draft simply has no body in that
+ * format, which is a message this server sends. Blank means a value that is present and
+ * renders to nothing.
+ *
+ * htmlBody is answered ahead of textBody, the order the two refusals have always been
+ * raised in: an empty text/html part is the worse of the two, because it SHADOWS a real
+ * text/plain alternative (RFC 2046 — clients render the richest one).
+ */
+export function findBlankBodyPart(email: any): 'htmlBody' | 'textBody' | undefined {
+  const blank = collectDraftBodyParts(email).filter(
+    (p) => p.value !== undefined && p.value.trim() === '',
+  );
+  if (blank.some((p) => p.showsInHtml)) return 'htmlBody';
+  if (blank.some((p) => p.showsInText)) return 'textBody';
+  return undefined;
+}
+
 export interface AttachmentRemovalPlan {
   /** Parts this call takes off the draft, in stored order. */
   removed: any[];
@@ -577,9 +611,12 @@ export interface AttachmentRemovalPlan {
   /**
    * The refusal a bad ref earned, held rather than thrown.
    *
-   * Resolution runs EARLY (the rebuilt quote has to know which parts survive it) but the
-   * body-shape guards must keep raising first, so this is raised at the point in the order
-   * the removal loop always occupied. Resolution itself performs no I/O and throws nothing.
+   * Resolution runs EARLY, alongside the other signals read off the stored draft, and it is
+   * pure: no I/O, and it throws nothing. Holding the refusal is what makes that placement
+   * free. The body-shape guards, and the hash check behind them, must still be the first
+   * thing a caller hears about — a removal complaint on a call that is going to be refused
+   * for its body shape sends the caller to fix the wrong argument — so this is raised at the
+   * point in the order the removal loop always occupied.
    */
   error?: PathAccessError;
 }
@@ -703,6 +740,14 @@ export interface UpdateDraftResult {
   // What the edit did to the draft's embedded images (#13). Present only when it did
   // something: an edit that neither embeds, demotes nor removes one omits both fields.
   inlineImages?: { embedded: number; degraded: number; removed: number };
+  // The hash the caller's NEXT edit of this draft has to pass, computed from a RE-READ of
+  // the saved draft and never from the bytes the call sent. Exactly one of these two is
+  // present on any edit that wrote or cleared a body, and neither on a metadata-only edit
+  // (which is body-invariant, so a hash the caller already holds is still current).
+  bodyHash?: string;
+  // Why no hash came back — the expansion rewrote the body, the governing part is one this
+  // server derived, or the re-read could not be made. Never silence.
+  bodyHashWithheld?: string;
   // The sentences describing those outcomes, composed once from the final state. Rendered
   // by the handler — a count nobody prints is not a disclosure.
   notes?: string[];
@@ -2070,7 +2115,7 @@ export class JmapClient {
     const session = await this.getSession();
 
     // No maxBodyValueBytes: verified live (2026-06-24) that Fastmail does NOT truncate body
-    // values by default (a 5 MB body returned whole, isTruncated=false), so reply_email gets
+    // values by default (a 5 MB body returned whole, isTruncated=false), so a reply gets
     // the complete original to quote. (An explicit maxBodyValueBytes:0 is REJECTED by Fastmail
     // with invalidArguments, so we must not send it.) The reply-quote module still appends an
     // elision marker if any bodyValue ever reports isTruncated, as a defensive net.
@@ -2186,9 +2231,22 @@ export class JmapClient {
     if (email.mailbox) {
       draftMailboxId = resolveMailbox(mailboxes, email.mailbox).id;
     } else {
-      const draftsMailbox = this.findMailboxByRoleOrName(mailboxes, 'drafts', 'draft');
+      // EXACT role, the same question sendDraft asks before it will transmit — the two
+      // ends of this workflow have to agree about which mailbox "Drafts" is, or the create
+      // surface produces a draft the send gate can never accept.
+      //
+      // findMailboxByRoleOrName is what stood here, and its substring name fallback
+      // ('draft') would file the draft into a user mailbox called "Draft notes" on an
+      // account with no drafts role, then report success. That draft is not merely
+      // misfiled: sendDraft refuses it, and no move repairs it, because the folder the
+      // send wants does not exist. The rule is stated in full at that gate.
+      const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
       if (!draftsMailbox) {
-        throw new Error('Could not find Drafts mailbox');
+        throw new Error(
+          'Could not find a Drafts mailbox (no mailbox in this account carries the "drafts" role). ' +
+          'Pass the mailbox parameter to save this draft somewhere explicitly — but note that ' +
+          'send_draft only sends a draft that is in the Drafts folder.',
+        );
       }
       draftMailboxId = draftsMailbox.id;
     }
@@ -2209,14 +2267,15 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
-    // The forwarded original's Message-ID (forward_email). A header SET, unlike every
+    // The forwarded original's Message-ID (draft_email, forward mode). A header SET,
+    // unlike every
     // other header use in this file (which are GETs) — Fastmail accepts it and
     // round-trips it through store/fetch and the edit recreate (probed live
-    // 2026-07-05). The value is pre-vetted by the forward handler; Fastmail itself
+    // 2026-07-05). The value is pre-vetted by the compose handler; Fastmail itself
     // rejects CRLF/non-ASCII, so no injection is possible here.
     if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
-    // The exact stored instance this draft was composed from (reply_email /
-    // forward_email pass the fetched original's own id). Vetted here — the single
+    // The exact stored instance this draft was composed from (draft_email's reply and
+    // forward modes pass the fetched original's own id). Vetted here — the single
     // seam that sets the header — so a malformed value degrades to absent (send_draft
     // falls back to the Message-ID lookup) instead of failing the whole create.
     if (isSettableSourceId(email.sourceEmailId)) emailObject[SOURCE_ID_HEADER] = email.sourceEmailId;
@@ -2268,6 +2327,15 @@ export class JmapClient {
   //    and synthesise a phantom text/html part on recreate.
   //  - JMAP body properties are immutable (RFC 8621 §4.1), which is why updateDraft
   //    rebuilds and re-sends the bodies via a recreate rather than patching.
+  // THE MATCH IS EXACT ON PURPOSE, and it does not follow the read's rule that a part with
+  // no declared type is the content of whichever list carries it (draftTextBodyType). This
+  // selector runs once per format over lists a single-format draft aliases into BOTH, so a
+  // part matching whichever format asks for it is a part that answers both: the recreate
+  // then writes one value into the text/plain slot and the same value into the text/html
+  // one, and a body containing "<" ships as markup with its newlines gone. That lands on
+  // the metadata-only path too, which promises to leave the body untouched, and it lands
+  // in silence — nothing here compares the two slots and no hash is required of a caller
+  // who only renamed the subject (#179).
   // Takes the first part of the given type (drafts here carry at most one per type). If a
   // value were ever elided from bodyValues, that format reads as undefined rather than a
   // partial body (callers fetch full values, so this won't occur in practice).
@@ -2303,18 +2371,15 @@ export class JmapClient {
     clearFields?: string[];
     attachments?: AttachmentPart[];
     removeAttachments?: string[];
-    // Reply-quote preservation on body edit (#37, redesigned #42). If a reply draft already
-    // carries the quoted original (detected on its EXISTING body, which this server generated)
-    // and the edit would touch the body in a way that could drop the quote, the caller must
-    // say what to do: originalEmailId = regenerate and keep the quote from that (caller-named)
-    // message; noQuote = deliberately drop it. Absent both, the edit is rejected (no silent loss).
-    originalEmailId?: string;
-    noQuote?: boolean;
-    // What happens to the sending identity's signature when this edit writes a body (#33).
-    // TRI-STATE, and the omitted case is the interesting one: true adds the signature,
-    // false takes it off, and undefined PRESERVES — re-appending only when the stored body
-    // already carried one. See the signature step below for why omission cannot mean "no".
-    appendSignature?: boolean;
+    // Expand `{{signature}}` in the bodies this call writes. BOOLEAN, not tri-state, and
+    // absent means false: a body handed to this tool is stored exactly as written unless the
+    // caller opts in. See the token step below for why the trigger has to be a flag rather
+    // than the token's presence.
+    expandSignature?: boolean;
+    // Proof the caller read the body this edit replaces: the `bodyHash` a `get_email` of
+    // this draft returned. Required by every edit that writes or clears a body, ignored by
+    // one that does not.
+    bodyHash?: string;
   }, options: {
     // Whether this server can attach anything at all — a local file (FASTMAIL_ATTACH_DIR) or
     // content already in the account (FASTMAIL_ALLOW_BLOB_ATTACH). It changes only which
@@ -2421,7 +2486,10 @@ export class JmapClient {
     // loud error (it's almost always an accidental clobber); deliberately blanking
     // a field is done by naming it in clearFields. Every field is clearable EXCEPT
     // `from` (identity-resolved; a draft always has a sender, matching the Fastmail UI).
-    const CLEARABLE = new Set(['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments']); // NOT 'from'
+    // `forwardedMessageId` is clearable and is not a SETTABLE field: de-forwarding a draft is
+    // the one thing a caller can do to the marking, and it is metadata, so it works on a
+    // body edit and a metadata-only edit alike.
+    const CLEARABLE = new Set(['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId']); // NOT 'from'
     const SETTABLE = ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'from'] as const;
     const provided = new Set<string>(SETTABLE.filter(f => (updates as any)[f] !== undefined));
     // `attachments` isn't a string SETTABLE field, so add it to `provided` explicitly
@@ -2448,125 +2516,76 @@ export class JmapClient {
     // Body requireNonEmpty calls above are GUARDS ONLY — their trimmed return is
     // discarded so stored bodies keep their exact (untrimmed) value below.
 
-    // ---- Quoted-original / forwarded-block preservation guard (#37, redesigned #42,
-    // extended to forward drafts #30) ----
-    // A reply draft keeps the quoted original in its body (buildReplyBodies appends a cited
-    // <blockquote> to html and a "> "-quoted block to text); a forward draft keeps the
-    // forwarded-message block (buildForwardBodies). An edit that rewrites or clears that
-    // body would silently drop it. We decide on the EXISTING (stored) body — which THIS
-    // server generated, so its shape is reliable — never on the caller's NEW body
-    // (untrusted: it can't tell a real quote from any quote-shaped content, and prose can
-    // false-positive). When the draft is protected and the edit touches the body in a way
-    // that isn't preserving by construction, force the caller to choose: regenerate+keep
-    // from a caller-named originalEmailId, or deliberately noQuote. Supersedes the fork.8
-    // new-body-scan (bypassable + html-only); see docs/email-bodies.md, #42, #30.
-    // The new body is consulted in exactly ONE place — the keep path below (#145), where a
-    // body that already carries the block originalEmailId would rebuild is REFUSED. That
-    // does not reopen the bypass this redesign closed, because it can only ever make a call
-    // fail: no new-body content exempts an edit from the challenge, it can only earn a
-    // second, narrower one.
-    const isReply = !!existingEmail.inReplyTo?.length;
-    const oldHtmlQuoted = hasQuoteMarker(existingHtmlValue);
-    const oldTextQuoted = hasTextQuoteMarker(existingTextValue);
-
-    // Forward gating: the X-Forwarded-Message-Id header — set by this server's
-    // forward_email AND by Fastmail's own clients — is a challenge FLOOR (protects a
-    // draft whose block shape isn't recognizable: foreign header-setting clients, or a
-    // marker lost to re-serialization), while the body markers ALSO gate on their own
-    // (protects forwards of a Message-ID-less original, where no header could be set).
-    // Markers additionally decide the challenge wording (recognizable = regenerable).
-    // The bare header does NOT arm when the draft carries a message/rfc822 attachment:
-    // that is an asAttachment forward (which records the header for send_draft's
-    // keyword maintenance), whose forwarded content lives in the attached .eml — a
-    // body edit can't drop it, and the recreate carries both the attachment and the
-    // header. Residual: a foreign draft with BOTH an unrecognizable inline block and
-    // an .eml attachment loses the block's challenge, but the .eml still preserves
-    // the forwarded content in full, so nothing is unrecoverable.
-    // Read off the part UNION, not the attachments array: which list a server routes the
-    // .eml into is a MIME-shape accident, and the carve-out has to hold either way.
-    const forwardHeader: string[] = existingEmail['header:X-Forwarded-Message-Id:asMessageIds'] || [];
-    const emlAttached = storedParts.some((p: any) => classifyPartType(p?.type) === 'message/rfc822');
-    const isForward = forwardHeader.length > 0 && !emlAttached;
-    const oldHtmlForwarded = hasForwardMarker(existingHtmlValue);
-    const oldTextForwarded = hasTextForwardMarker(existingTextValue);
-    const forwardMarkers = oldHtmlForwarded || oldTextForwarded;
-
-    // Mutually exclusive dispatch: compute both, run at most ONE variant — the keep path
-    // REPLACES the working bodies below and falls through, so two sequential blocks would
-    // rebuild the body twice. Both engaged → reply wins: on a pathological both-marker
-    // draft an originalEmailId keep regenerates the REPLY shape — loud, no silent loss,
-    // but a tie-break, not a claim of correctness. (A forward OF a reply carries
-    // "wrote:\n> " in its reproduced text but has no inReplyTo, so isReply stays false
-    // and it correctly dispatches to the forward variant; asAttachment forwards record
-    // the header for send_draft's keyword maintenance but keep a deliberately
-    // non-marker filler body, and the .eml carve-out above keeps the guard inert on
-    // them — their .eml is an ordinary carried attachment the recreate preserves,
-    // and the recreate carries the header too.)
-    const replyGuardArmed = isReply && (oldHtmlQuoted || oldTextQuoted);
-    const forwardGuardArmed = isForward || forwardMarkers;
-    const guardVariant: 'reply' | 'forward' | null =
-      replyGuardArmed ? 'reply' : (forwardGuardArmed ? 'forward' : null);
-
-    // Pre-merge signals: what the edit does to each body. existingHtmlValue/existingTextValue
-    // were fetched above; these are the same inputs the coupling guards below use.
+    // ---- What this edit does to each body ----
+    // Pre-merge signals, read off the caller's own input. Everything below is ordered
+    // against them: the coupling guards, the hash, the token refusals, then the merge.
     const wroteHtml = updates.htmlBody !== undefined;
     const wroteText = updates.textBody !== undefined;
     const clearedHtml = clear.has('htmlBody');
     const clearedText = clear.has('textBody');
-    const touchesBody = wroteHtml || wroteText || clearedHtml || clearedText;
+    const wroteAnyBody = wroteText || wroteHtml;
+    const clearedAnyBody = clearedText || clearedHtml;
+    const touchesBody = wroteAnyBody || clearedAnyBody;
 
-    // The caller's OWN bodies, held apart from the working bodies below — which the signature
-    // step and the keep path replace with this server's own rewritten text. The checks that
-    // must not see this server's own output — an authored reference to a server-managed
-    // identifier is an error, while the rebuilt quote is full of them by design — read these,
-    // never workingHtml/workingText. Held apart BEFORE the signature step below for the same
-    // reason: the signature is this server's markup, not the caller's. That matters to the
-    // keep-path duplicate check (#145) as well as to the identifier scan: an identity whose
-    // html signature contains a cite-blockquote would otherwise trip that check on this
-    // server's own appended block.
+    // The caller's OWN html, held apart from the working bodies below, which the
+    // `{{signature}}` expansion replaces with its own output. The checks that must not see
+    // this server's text — an authored reference to a server-managed identifier is an error,
+    // while an expanded html signature may legitimately carry one — read this, never
+    // workingHtml.
     const callerWrittenHtml = updates.htmlBody;
-    const callerWrittenText = updates.textBody;
 
-    // The bodies as this method rewrites them: seeded from what the caller wrote, then replaced
-    // by the signature append and again by the quote rebuild. Every later read of "the body"
-    // reads these, so nothing writes back into the caller's own `updates` object (#170) — over
-    // MCP each request parses fresh arguments, but an in-process caller (a test, the probe
-    // harness) can reuse one object across calls and must not be handed this call's output as
-    // the next call's input.
-    //
-    // Two sequential locals rather than one copy of `updates` taken at the top, on purpose:
-    // the readers below are ORDERED, and each must see the body as it stands at ITS point in
-    // the sequence — the quote rebuild takes the post-signature body as its input, which a
-    // single snapshot made before the signature step could not supply. Do not "simplify" this
-    // into a spread copy.
+    // The bodies as this method rewrites them: seeded from what the caller wrote and
+    // replaced only by the expansion below. Nothing writes back into the caller's own
+    // `updates` object — over MCP each request parses fresh arguments, but an in-process
+    // caller (a test, a probe harness) can reuse one object across calls and must not be
+    // handed this call's output as the next call's input.
     let workingHtml = updates.htmlBody;
     let workingText = updates.textBody;
 
-    // ---- The sending identity's signature (#33) ----
-    // Positioned here for two reasons. It must run BEFORE the quote rebuild further down,
-    // which replaces workingHtml with the quote-appended body — appending after that would
-    // put the sign-off underneath the quoted history. And it must run AFTER callerWrittenHtml
-    // is taken above, so the reserved-identifier scan judges only what the caller wrote.
-    //
-    // The trigger is deliberately NOT the flag alone. A draft that already carries a
-    // signature block was signed because somebody asked for it; a later edit that rewrites
-    // the body and says nothing about signatures has not un-asked, it has just written a
-    // body — and the merge rule below drops the unwritten partner, so an htmlBody-alone edit
-    // (the common one) would otherwise lose the signature silently. So an omitted flag
-    // PRESERVES: re-append when the stored body carried the marker and the new one does not.
-    // appendSignature:false is the deliberate way to take a signature off a draft.
-    //
-    // Because that re-append is the one signature outcome nobody asked for in the same call,
-    // it is the one the result announces (NOTE_SIGNATURE_REAPPENDED below).
-    //
-    // Note what this preservation is NOT: `hasSignatureMarker` reads a CLASS, so a draft
-    // with no html body carries no marker whatever wrote its signature. A text-only draft
-    // therefore loses its sign-off on a body-writing edit that omits the flag — a signature
-    // THIS SERVER appended is as invisible here as a hand-typed one. That residual is
-    // documented on the parameter and in docs/email-bodies.md; the recovery is
-    // appendSignature:true, which cannot stack because applySignature declines to append a
-    // block the body already ends with.
-    const storedSignature = hasSignatureMarker(existingHtmlValue);
+    // ---- The draft's provenance, carried or cleared ----
+    // A reply draft's In-Reply-To survives every edit: it is threading, not body content.
+    // The forward marking is cleared only when the caller names `forwardedMessageId` in
+    // clearFields, which is the one way to de-forward a draft — and it is a metadata act, so
+    // it works on a body edit and on a metadata-only edit alike.
+    const isReply = !!existingEmail.inReplyTo?.length;
+    const carriedForwardHeader: string[] = existingEmail['header:X-Forwarded-Message-Id:asMessageIds'] || [];
+    const dropForwardHeader = clear.has('forwardedMessageId');
+    // An asAttachment forward records the header but carries its content in an attached
+    // .eml, so it is a forward for the marking and not for the noun below. Read off the part
+    // UNION, not the attachments array: which list a server routes the .eml into is a
+    // MIME-shape accident.
+    const emlAttached = storedParts.some((p: any) => classifyPartType(p?.type) === 'message/rfc822');
+    // The recorded source INSTANCE (the exact JMAP id send_draft marks) rides with the
+    // forward marking: dropped when a clear de-forwards a FORWARD draft, kept on a reply
+    // draft, which is still a reply to that same instance however its body is edited.
+    const storedSourceId = existingEmail[SOURCE_ID_HEADER];
+    const carriedSourceId: string | undefined =
+      typeof storedSourceId === 'string' && storedSourceId.trim() !== '' ? storedSourceId.trim() : undefined;
+
+    // How the inline-image notes name the block this draft carries, decided from the HEADERS
+    // ALONE. Nothing here reads the body's markup: the body is the caller's, and a foreign
+    // reply draft whose quote this server would not recognise still gets the reply noun. A
+    // draft carrying both markings gets the reply noun.
+    const keepNoun = !isReply && carriedForwardHeader.length > 0 && !emlAttached
+      ? 'the forwarded block'
+      : 'the quote';
+
+    // Which parts this call takes off the draft. Resolution is pure and holds its refusal
+    // (see AttachmentRemovalPlan.error) so the body-shape guards keep raising first; the
+    // removal is APPLIED at the point in the order it always was.
+    const removalPlan = resolveAttachmentRemovals(
+      storedParts,
+      updates.removeAttachments,
+      clear.has('attachments'),
+    );
+
+    // Embedded-image references the STORED body already makes with nothing to supply them.
+    // A draft in that state is broken however it got that way, and the refusal it earns is
+    // scoped to edits that write its body — see the check further down.
+    const storedPartCids = new Set(storedParts.map(partCid).filter((c) => c !== ''));
+    const storedDanglingRefs = htmlCidRefs(existingHtmlValue).filter((r) => !storedPartCids.has(r));
+
+    // ---- The sending identity ----
     // The address this edit will write into `from` (see the emailObject build below, which
     // must keep using the same expression). The sign-off is resolved against THAT rather
     // than against `selectedIdentity`, because the two can differ: when the edit writes no
@@ -2610,334 +2629,253 @@ export class JmapClient {
     // pre-existing, unrelated cosmetic gap, not something this change introduces or fixes.
     const writtenFromName: string | null = storedFromNameIfPresent ?? signingIdentity?.name ?? null;
     const editSignature = signatureOf(signingIdentity);
-    let reAppendedSignature = false;
-    // Armed by the stored draft (preserve) or by the flag (add), and dropped when neither.
-    const signatureWanted =
-      updates.appendSignature === true || (updates.appendSignature === undefined && storedSignature);
-    // Only bodies this edit actually WRITES are signed. An unwritten body is either
-    // preserved verbatim (a metadata-only edit) or dropped as the unwritten partner, and in
-    // neither case is there caller text to sign.
-    const writtenBodies = {
-      ...(wroteText && { textBody: workingText }),
-      ...(wroteHtml && { htmlBody: workingHtml }),
-    };
-    // Why the sign-off did not land, read off the bodies as the caller WROTE them — taken
-    // before the append below replaces the working bodies, because the reason is only
-    // legible against their own text. This runs the same plan the append does rather than
-    // restating any part of it, which is what makes it total: every reason the compose
-    // paths can report is reachable here, including the one this used to miss. An identity
-    // whose signature is images-only HTML is not signature-LESS, so the old
-    // `editSignature === undefined` gate armed nothing for it — and an edit leaving that
-    // draft as plain text then appended nothing and said nothing, silently dropping a
-    // sign-off the draft was carrying.
-    const signatureSkip = signatureWanted
-      ? signatureSkipReason(writtenBodies, editSignature)
-      : undefined;
-    if (signatureWanted) {
-      const before = { textBody: workingText, htmlBody: workingHtml };
-      const signed = applySignature(writtenBodies, editSignature);
-      if (wroteHtml && signed.htmlBody !== undefined) workingHtml = signed.htmlBody;
-      if (wroteText && signed.textBody !== undefined) workingText = signed.textBody;
-      reAppendedSignature = updates.appendSignature === undefined
-        && (workingHtml !== before.htmlBody || workingText !== before.textBody);
-    }
-    // What the result says when it did not land. Two framings, because two different things
-    // asked for it:
+
+    // ---- The merge rule, written once and applied twice ----
+    // The coupling guards below need the merged html, and they have to run BEFORE the
+    // expansion (see their own note), while the merge that ships runs after it. One helper,
+    // called with the pre-expansion body for the guard and the post-expansion body for the
+    // real merge, is what keeps the value a guard judges and the value that ships from
+    // drifting apart. A written body drops the unwritten partner (single-format intent); a
+    // no-body edit preserves both; clearFields force the body absent.
+    const mergeHtml = (html: string | undefined): string | undefined =>
+      clearedHtml ? undefined : (html !== undefined ? html : (wroteAnyBody ? undefined : existingHtmlValue));
+    const mergeText = (text: string | undefined): string | undefined =>
+      clearedText ? undefined : (text !== undefined ? text : (wroteAnyBody ? undefined : existingTextValue));
+
+    // ---- Body-shape coupling guards ----
+    // The text part is a DERIVED fallback when html is present. So:
+    //  - editing htmlBody alone REGENERATES the text fallback from the new html (no throw);
+    //  - editing textBody alone (while a non-empty html survives) is rejected — it won't
+    //    change what most recipients render (the html), and the fallback is auto-managed;
+    //  - a metadata-only edit (no body written) stays body-invariant (both bodies kept).
     //
-    //  - `appendSignature:true` is a request made in THIS call, so it gets exactly the note
-    //    the compose tools give, for EVERY reason — including "the body already ends with
-    //    one" and "this edit wrote no body". A flag the caller cannot verify without
-    //    re-reading the draft must not report on the three compose surfaces and stay silent
-    //    on this one.
-    //  - an OMITTED flag is the stored draft's earlier decision being preserved, so a
-    //    failure there is a loss rather than a declined request and gets the loss wording.
-    //    Two outcomes are not losses on that path and stay silent: a body the caller supplied
-    //    that already carries the sign-off (which is what preservation wanted), and an edit
-    //    that writes no body at all (both bodies, signature included, are carried verbatim).
-    //    `no-body` cannot arise WITH a written body — requireNonEmpty above rejects a blank
-    //    one — so the body gate covers that reason on this path completely.
-    const signatureUnavailable = !signatureSkip
-      ? undefined
-      : updates.appendSignature === true
-        ? noteSignatureNotAppended(signatureSkip, writtenFromAddress)
-        : (signatureSkip === 'already-signed' || !(wroteHtml || wroteText))
-          ? undefined
-          : noteSignatureUnavailableOnEdit(writtenFromAddress, signatureSkip);
+    // These two run AHEAD OF THE HASH CHECK, and that order is the ruling, not an accident:
+    // they name the SHAPE the caller has to fix, where a hash failure on the same call would
+    // send it back to re-read for a hash the read would issue against a request that is
+    // going to be refused anyway. They therefore also run ahead of the merge, which is where
+    // the second one used to read its value from; it reads the same rule through mergeHtml
+    // instead, so the two expressions cannot drift.
+    if (wroteText && !wroteHtml && !clearedHtml && !isBlank(existingHtmlValue)) {
+      throw new InvalidInputError('editing textBody alone won\'t change what most recipients see (they render htmlBody). To change the message, edit htmlBody (the text fallback regenerates automatically); to save a custom plain-text alternative, supply htmlBody alongside it; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
+    }
+    // This one judges the PRE-expansion html on purpose. An html body that survives
+    // expansion non-blank is present either way, and one that expands to nothing is refused
+    // downstream by the no-readable-body check; there is no input for which the two answers
+    // differ in what the caller must do.
+    if (clearedText && !clearedHtml && !isBlank(mergeHtml(callerWrittenHtml))) {
+      throw new InvalidInputError('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
+    }
 
-    // Which parts this call takes off the draft, resolved HERE because the quote rebuild
-    // below has to know what survives it: a surviving part supplies its own embedded image,
-    // and a removed one has to be re-attached under a fresh identifier. Resolution is pure
-    // and holds its refusal (see AttachmentRemovalPlan.error) so the body-shape guards keep
-    // raising first; the removal is APPLIED at the point in the order it always was.
-    const removalPlan = resolveAttachmentRemovals(
-      storedParts,
-      updates.removeAttachments,
-      clear.has('attachments'),
-    );
-
-    // Embedded-image references the STORED body already makes with nothing to supply them.
-    // A draft in that state is broken however it got that way, and the refusal it earns is
-    // scoped to edits that write its body — see the check below.
-    const storedPartCids = new Set(storedParts.map(partCid).filter((c) => c !== ''));
-    const storedDanglingRefs = htmlCidRefs(existingHtmlValue).filter((r) => !storedPartCids.has(r));
-
-    // The quote survives WITHOUT inspecting any new content in exactly two shapes:
-    //  - a metadata-only edit (no body written or cleared) leaves both bodies untouched;
-    //  - a plain-text conversion (clearFields:['htmlBody'] alone) keeps the old text, but only
-    //    counts as quote-preserving when that surviving text actually carries the variant's
-    //    own text marker ("> " quote for replies, the dashed forwarded-message line for
-    //    forwards — always true for drafts this server made). Checking the OTHER variant's
-    //    marker here would misfire a plain-text conversion of a forward draft. If the
-    //    surviving text has no marker, this is NOT a clean carve-out and the edit correctly
-    //    falls through to the guard below.
-    const oldTextMarked = guardVariant === 'forward' ? oldTextForwarded : oldTextQuoted;
-    const quoteKeptByConstruction =
-         !touchesBody
-      || (clearedHtml && !wroteHtml && !wroteText && !clearedText && oldTextMarked);
-
-    // Text-side edits while a non-empty html survives are owned by the two coupling guards
-    // further down (textBody-alone; clearFields:['textBody']-while-html), which emit the
-    // correct remedy and (for guard ii) need the post-merge mergedHtmlRaw, so they can't move
-    // up here. Exclude those cases so this pre-merge guard doesn't pre-empt them. On a text-
-    // only draft existingHtmlValue is blank, so this is false → a text edit there correctly
-    // falls through to the guard (exactly the #42 case this guard exists to catch).
-    const coupledTextEdit =
-      !wroteHtml && !clearedHtml && !isBlank(existingHtmlValue) && (wroteText || clearedText);
-
-    // Set when a noQuote drop resolves the challenge: a deliberate de-quote is also a
-    // de-forward, so the recreate below skips the X-Forwarded-Message-Id carry
-    // REGARDLESS of which variant handled it — otherwise a reply-variant noQuote on a
-    // pathological both-marker draft would strand the header and the NEXT body edit
-    // would be re-challenged by the header floor. One step must fully de-arm.
-    let dropForwardHeader = false;
-    // The embedded images a rebuilt quote will display. Filled only on the keep path: the
-    // pure builders see the ORIGINAL but not this draft's surviving parts, so the decision
-    // of which surviving part supplies which reference is made here and the finished map is
-    // handed to them. They rewrite; they never mint.
-    let mintedParts: MintedInlinePart[] = [];
-    let quoteImageMappings: CidMapping[] = [];
-    // Images the rebuilt quote had to drop because of HOW the original referenced them (a
-    // relative or protocol-relative src, which resolves against an origin this draft does not
-    // have). Only the builder's rewriting pass can see them, so it reports the count back and
-    // this carries it to the note ledger below — a first-time keep of a DIFFERENT original is
-    // a first-time loss, and it would otherwise happen in silence.
-    let droppedUnsupportedQuoteImages = 0;
-    let rebuiltQuote = false;
-    // How the surrounding refusal or note names the block being kept or dropped.
-    let keepNoun = 'the quote';
-    // The recorded source the recreate carries. A forward-variant keep RE-POINTS this
-    // to the fetched original's own Message-ID (when settable): the caller may name a
-    // DIFFERENT original than the recorded one (the blessed correcting-a-wrong-original
-    // case), and carrying the stale id would leave the guard's advertised recovery
-    // pointer rebuilding the block for the wrong message on a later edit.
-    let carriedForwardHeader: string[] = forwardHeader;
-    // The recorded source INSTANCE (X-Fastmail-MCP-Source-Id, the exact JMAP id
-    // send_draft marks) rides the same carry: re-pointed with the forward header on a
-    // keep, dropped with it on a de-forwarding noQuote. On a REPLY draft a noQuote
-    // drops only the quote text — In-Reply-To survives, the draft is still a reply to
-    // that same instance — so the instance pointer survives with it.
-    const storedSourceId = existingEmail[SOURCE_ID_HEADER];
-    let carriedSourceId: string | undefined =
-      typeof storedSourceId === 'string' && storedSourceId.trim() !== '' ? storedSourceId.trim() : undefined;
-    if (guardVariant && touchesBody && !quoteKeptByConstruction && !coupledTextEdit) {
-      keepNoun = guardVariant === 'reply' ? 'the quote' : 'the forwarded block';
-      if (updates.originalEmailId && updates.noQuote === true) {
-        throw new InvalidInputError(`Pass either originalEmailId (keep ${keepNoun}) or noQuote (discard it), not both.`);
-      } else if (updates.originalEmailId) {
-        // The ONE place this guard consults the caller's NEW body (#145) — and it can only
-        // ever make the call FAIL, never pass, so it does not reopen the bypassable new-body
-        // scan the #42 redesign closed above: an edit still cannot exempt itself by supplying
-        // quote-shaped content. A keep rebuilds the variant's block UNDERNEATH the body
-        // supplied, so a body that ALREADY carries that block stores it twice — and the
-        // plain-text read-edit-write loop the signature docs prescribe (read the draft, edit
-        // the words, hand the whole text back) hands back exactly such a body.
-        //
-        // Read as the caller WROTE them: the signature step above has already replaced the
-        // working bodies with this server's own markup. Variant-matched like
-        // oldTextMarked above — a forward of a reply legitimately reproduces "wrote:\n> " in
-        // its text, so checking the other variant's marker would misfire there.
-        //
-        // REJECT, not skip-the-rebuild. Skipping was the alternative and lost: the caller's
-        // new body is untrusted and prose can false-positive a marker, so a silent skip on a
-        // false positive DROPS the quote — the #37 data-loss class this guard exists to
-        // prevent — while a refusal costs one round trip and the body is then stored verbatim
-        // under noQuote. Do not "improve" this into a skip.
-        //
-        // The && wroteHtml / && wroteText terms make this false when the edit writes neither
-        // body, so a clear-only keep still falls through to the "can't regenerate on a body
-        // you're not writing" refusal below rather than being answered here.
-        const keepHtmlMarked = guardVariant === 'reply' ? hasQuoteMarker : hasForwardMarker;
-        const keepTextMarked = guardVariant === 'reply' ? hasTextQuoteMarker : hasTextForwardMarker;
-        if ((wroteHtml && keepHtmlMarked(callerWrittenHtml)) || (wroteText && keepTextMarked(callerWrittenText))) {
-          // What noQuote costs, said where the caller decides rather than only in the README.
-          // "with nothing rebuilt" is load-bearing on a FALSE POSITIVE (prose ending in
-          // "wrote:" above a "> " line, or a pasted cite-blockquote): taking this way out
-          // stores that body and does NOT restore the draft's real quote. Rejecting rather
-          // than skipping exists to let the caller choose, so the choice has to be informed.
-          // The final clause addresses that false-positive caller directly: reword the
-          // quote-shaped passage and keep originalEmailId, because for them noQuote is the
-          // lossy way out (the body they wrote holds no real quote to carry). The noQuote
-          // sentence itself still hangs off "read back" and does not nudge toward noQuote.
-          // The forward clause is the noQuote de-forwarding below (dropForwardHeader), which
-          // drops X-Forwarded-Message-Id; the recorded source instance rides with it unless the
-          // draft is also a reply (see the carry at the recreate) — invisible until send_draft
-          // fails to mark the original. Gated on the marking EXISTING, not just on the variant:
-          // a marker-only forward draft (recognizable block, no recorded source) has nothing to
-          // clear, and the sentence has to be true. Deliberately silent on the inverse: a
-          // both-marker draft dispatches to 'reply', so no clause is emitted even though
-          // noQuote there does de-arm the header (one step must fully de-arm, above) — a
-          // vanishingly rare shape we are leaving, not an oversight.
-          const noQuoteCost = guardVariant === 'forward' && carriedForwardHeader.length > 0
-            ? ", and the draft's forward marking cleared"
-            : '';
-          throw new InvalidInputError(`The body you supplied already contains ${keepNoun}, and originalEmailId would rebuild it underneath, so the draft would carry it twice. If this body is the draft's own text read back, pass noQuote:true instead of originalEmailId: the body is stored exactly as written, with nothing rebuilt${noQuoteCost}. If you meant to write a fresh body, send it without ${keepNoun} and keep originalEmailId — and if your text merely looks like ${keepNoun}, reword the passage that resembles it, because noQuote would store this body without the draft's real ${keepNoun}.`);
-        }
-        // Regenerate from the caller-named original — never re-resolved from the draft's
-        // In-Reply-To / X-Forwarded-Message-Id (attacker-controllable), so there's no spoof
-        // surface. The id is trusted, not validated against the draft's headers (that check
-        // would false-reject legitimate cases, e.g. correcting a wrong original).
-        // getEmailById throws on not-found; rethrow with a message naming the param so the
-        // caller can fix it (it surfaces via index's error wrap like the other guards).
-        let original: any;
-        try {
-          original = await this.getEmailById(updates.originalEmailId);
-        } catch {
-          const relation = guardVariant === 'reply' ? 'replies to' : 'forwards';
-          throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' could not be fetched (no such message, or not accessible). Pass the id of the message this draft ${relation}.`);
-        }
-        // Regenerate the quote/block into EVERY body the edit is writing — both, when the
-        // caller supplies both (a new html + a custom text alternative), so neither side
-        // silently loses it on the keep path. The builders emit into exactly the formats
-        // passed. A clear-only edit writes neither body, so there's nowhere to regenerate
-        // into — reject loudly rather than silently no-op the keep intent. This pre-empts
-        // the downstream no-body reject for a clear-the-last-body edit (the caller sees the
-        // regenerate message, not the no-body one); both are loud and lose no data.
-        if (wroteHtml || wroteText) {
-          // Resolve the rebuilt quote's embedded images BEFORE building it, but ONLY when
-          // this edit writes an html body: an embedded image needs an html body to display
-          // it (the mail server refuses an inline part without one), so a text-only keep
-          // mints nothing and quotes exactly as it always did. Each reference the original's
-          // html makes is matched to one of the original's parts; a part already on this
-          // draft that survived the removals above and carries an identifier of this
-          // server's own shape supplies it under that SAME identifier, so an ordinary edit
-          // does not renumber images a client has already rendered. Anything unmatched is
-          // carried under a fresh identifier and attached as its own assembly step.
-          let quoteCidMap: Map<string, string> | undefined;
-          if (wroteHtml) {
-            const resolvedQuoteImages = buildCidMap({
-              refs: htmlCidRefs(readQuotableHtml(original)),
-              sourceParts: buildUnionParts(original).map((u: UnionPart) => u.part),
-              // Every surviving part is offered; buildCidMap keeps only the ones carrying an
-              // identifier of this server's own shape.
-              survivors: removalPlan.survivors as CidPart[],
-            });
-            quoteCidMap = resolvedQuoteImages.cidMap;
-            mintedParts = resolvedQuoteImages.minted;
-            quoteImageMappings = resolvedQuoteImages.mappings;
-          }
-          rebuiltQuote = true;
-          const rebuilt = guardVariant === 'reply'
-            ? buildReplyBodies({
-                original,
-                ...(wroteHtml && { htmlBody: workingHtml }),
-                ...(wroteText && { textBody: workingText }),
-                quoteOriginal: true,
-                ...(quoteCidMap && { cidMap: quoteCidMap }),
-              })
-            : buildForwardBodies({
-                original,
-                ...(wroteHtml && { htmlBody: workingHtml }),
-                ...(wroteText && { textBody: workingText }),
-                ...(quoteCidMap && { cidMap: quoteCidMap }),
-              });
-          if (wroteHtml) workingHtml = rebuilt.htmlBody;
-          if (wroteText) workingText = rebuilt.textBody;
-          droppedUnsupportedQuoteImages = rebuilt.quoteImages?.droppedUnsupportedImages ?? 0;
-          if (guardVariant === 'reply') {
-            // Loud-fail a keep request that produced no quote: the caller asked to KEEP via
-            // originalEmailId, but nothing quotable reached any body this edit wrote, so the
-            // builder passed the body through unquoted. Two routes reach it. The named message
-            // may have no quotable content at all — attachment-only, calendar-only, or a body
-            // of embedded images this draft no longer carries the parts for (a message whose
-            // content IS its images is quotable while the images can be shown, and stops being
-            // so when they cannot). Or the edit wrote only a plain-text body for an original
-            // whose content is images: an image has no plain-text form, so there is nothing to
-            // quote there even when the html quote would have carried it. It loses no caller
-            // input (the new body is kept); it just turns a confusing quote-less result into an
-            // actionable error instead of a silent one. The `||` accepts the edit if ANY
-            // written format kept a marker, so a partially-quotable original still keeps.
-            const restored = (wroteHtml && hasQuoteMarker(workingHtml))
-              || (wroteText && hasTextQuoteMarker(workingText));
-            if (!restored) {
-              throw new InvalidInputError(`originalEmailId '${updates.originalEmailId}' has no quotable content for the body/bodies this edit wrote, so the quote can't be restored. Either the message has nothing to quote (an attachment-only or calendar-only message), or its content is images and this edit wrote only a plain-text body — images cannot be quoted as text. Check the id, write htmlBody as well, or use noQuote to drop the quote deliberately.`);
-            }
-          }
-          // Forward variant: no restored-check — buildForwardBodies always emits at least
-          // the header block into every written body, so the check would be tautological.
-          // Flip side (intentional asymmetry, inherent to forwarding): a WRONG
-          // originalEmailId here produces a valid-looking block for the wrong message with
-          // no loud fail — any original yields a block — unlike the reply path's restored
-          // catch. No caller data is lost either way.
-          if (guardVariant === 'forward') {
-            // Re-point the recorded source at the original the block was just rebuilt
-            // from (the same pre-vet forward_email applies; a malformed/absent id keeps
-            // the existing carry — stale beats stripped, since the header is also the
-            // guard's challenge floor). This also records the source on a marker-only
-            // draft that had no header, upgrading its later challenges to the runnable
-            // standard recipe.
-            const repointedId = original?.messageId?.[0];
-            if (isSettableMessageId(repointedId)) carriedForwardHeader = [repointedId];
-            // Keep the instance pointer consistent with the Message-ID it just
-            // re-pointed: both now name the fetched original. (The reply variant
-            // deliberately re-points neither — its In-Reply-To stays as stored, and
-            // the instance pointer stays consistent with THAT.)
-            if (isSettableSourceId(original?.id)) carriedSourceId = original.id;
-          }
-        } else {
-          const regenNoun = guardVariant === 'reply' ? 'a quote' : 'the forwarded block';
-          throw new InvalidInputError(`originalEmailId can't regenerate ${regenNoun} on a body you're not writing — edit the body (htmlBody or textBody) to keep ${keepNoun}, or use noQuote to drop it.`);
-        }
-      } else if (updates.noQuote === true) {
-        // Proceed: the quote/block is dropped on explicit request.
-        dropForwardHeader = true;
-      } else if (guardVariant === 'reply') {
-        // Error names ONLY the data-preserving keep path; noQuote is deliberately omitted so
-        // the model is never nudged toward discarding the quote (it stays in the schema).
-        throw new InvalidInputError("Editing this reply draft's body would drop the quoted original. Pass originalEmailId (the message it replies to) to keep the quote. If you only have the draft, resolve the original from its In-Reply-To Message-ID via search_emails first.");
-      } else if (isForward && forwardMarkers) {
-        // The normal forward case: recorded source + recognizable block. Recipe mirrors the
-        // reply guard's (resolve the id, then keep). The recovery deliberately says plain
-        // get_email — forwardedMessageId is always returned by it, not gated behind a
-        // verbose knob. Search the BARE id: Fastmail's full-text lookup matches the
-        // Message-ID without its angle brackets (verified live 2026-07-05).
-        throw new InvalidInputError("Editing this forward draft's body would drop the forwarded-message block. Pass originalEmailId (the message it forwards) to keep the block. If you only have the draft, read its forwardedMessageId via get_email, then find that message with search_emails (search the bare id, without angle brackets).");
-      } else if (forwardMarkers) {
-        // Marker only, no recorded source (a forward of a Message-ID-less original, or
-        // pasted forwarded-looking content — an accepted false-positive cost; see
-        // docs/email-bodies.md). Leads with what happened, readable by a caller that never
-        // forwarded anything, and offers noQuote first: there may be nothing to rebuild.
-        throw new InvalidInputError("This draft's body matches a forwarded-message marker. Pass noQuote:true to drop that block and proceed with your edit, or originalEmailId (the message it forwards) to rebuild the block.");
-      } else {
-        // Header floor: the source IS recorded but the block isn't in a shape this server
-        // can regenerate in place (a foreign client's forward, or our marker lost to
-        // re-serialization). The standard recipe IS runnable; noQuote also clears the
-        // forward marking so later edits aren't re-challenged.
-        throw new InvalidInputError("This draft is marked as a forward (it records the forwarded message's id), but its forwarded block isn't in a shape this server can regenerate in place. Pass originalEmailId to rebuild the block from that message (read the draft's forwardedMessageId via get_email, then find it with search_emails using the bare id, without angle brackets), or noQuote:true to drop the block and the forward marking (later edits won't be re-challenged).");
+    // ---- Proof that the caller read the body it is replacing ----
+    // This tool stores the body it is handed byte for byte and keeps nothing of what was
+    // there, so an edit written from a stale read silently overwrites whatever changed in
+    // between. `bodyHash` is what makes that loud, and it is a LOST-UPDATE GUARD and nothing
+    // else: it proves the caller saw the body, never that it kept any of it.
+    //
+    // Recomputed here from the draft as just fetched, over the same deduplicated part set
+    // `get_email` hashes, so a hash issued by a read and one recomputed at edit time are
+    // comparable by construction. The window between this recompute and the write is
+    // accepted; there is no `ifInState` on the Email/set below.
+    //
+    // Gated on `touchesBody`: a metadata edit writes no body, so it neither needs a hash nor
+    // returns one. What the gate does NOT rest on is body-invariance — the metadata path AIMS
+    // at leaving both stored bodies alone and cannot promise it; the comment on the hand-back
+    // below names the two shapes where it fails and why the hash is not the lever for either.
+    // A body edit that carries no hash is refused rather than let through, because the whole
+    // point is that the caller cannot tell a stale body from a fresh one.
+    if (touchesBody) {
+      if (typeof updates.bodyHash !== 'string' || updates.bodyHash.trim() === '') {
+        throw new InvalidInputError(rejectMissingBodyHash());
+      }
+      if (updates.bodyHash.trim() !== bodyHash(collectDraftBodyParts(existingEmail))) {
+        throw new InvalidInputError(rejectStaleBodyHash());
       }
     }
-    // Honor an explicit noQuote even when the guard never armed — an asAttachment
-    // forward (guard inert via the .eml carve-out) still carries a recorded source,
-    // and noQuote's documented meaning includes clearing the forward marking; leaving
-    // the header would have send_draft mark the original against the caller's stated
-    // intent. This also covers metadata-only edits (documented on the noQuote param).
-    // Redundant (same assignment) when the armed guard already handled it. The
-    // keep-vs-drop exclusivity is enforced here too: the armed guard's identical
-    // check is unreachable on an unengaged draft, and silently obeying half of a
-    // contradictory request would be worse than either behavior.
-    if (updates.noQuote === true && updates.originalEmailId) {
-      throw new InvalidInputError('Pass either originalEmailId (keep the quoted or forwarded content) or noQuote (discard it), not both.');
+
+    // ---- Body tokens ----
+    // The ONE thing this tool does to a body it is handed, and it is opt-in. An unflagged
+    // edit expands nothing and stores the body byte for byte; `expandSignature: true`
+    // expands `{{signature}}` on the caller-written parts, before the merge.
+    //
+    // WHY THE TRIGGER IS A FLAG AND NOT THE TOKEN'S PRESENCE: part of a body handed back to
+    // this tool was authored by the original message's sender, so any in-band trigger — a
+    // token, a spelling, an escape convention — can be planted by them. A flag cannot.
+    // Consequence, and it is the intended one: a stored `{{signature}}`, planted or escaped
+    // at compose time, is stable under every unflagged edit, with no rule for the caller to
+    // re-apply and no way for a stranger's text to make this server rewrite a body.
+    const expandSignature = updates.expandSignature === true;
+    const writtenParts: { part: 'textBody' | 'htmlBody'; authored: string; stored?: string }[] = [];
+    if (wroteText) writtenParts.push({ part: 'textBody', authored: updates.textBody!, ...(existingTextValue !== undefined && { stored: existingTextValue }) });
+    if (wroteHtml) writtenParts.push({ part: 'htmlBody', authored: updates.htmlBody!, ...(existingHtmlValue !== undefined && { stored: existingHtmlValue }) });
+    const scans = new Map<'textBody' | 'htmlBody', BodyTokenScan>(
+      writtenParts.map((p) => [p.part, scanBodyTokens(p.authored)] as const),
+    );
+    const tokenNotes: string[] = [];
+
+    if (expandSignature) {
+      // The count refusal, and the only text-keyed refusal on this tool: passing the flag is
+      // the caller claiming the written part as its own, so the compose-style refusal
+      // applies to it. It runs AFTER the hash check, so a caller working from a stale draft
+      // is told to re-read rather than told it wrote two tokens.
+      const placed = writtenParts.reduce((n, p) => n + scans.get(p.part)!.counts.signature, 0);
+      if (placed === 0) throw new InvalidInputError(rejectExpandSignatureWithoutToken(wroteAnyBody));
+      for (const p of writtenParts) {
+        const n = scans.get(p.part)!.counts.signature;
+        if (n > 1) throw new InvalidInputError(rejectRepeatedSignatureToken(p.part, n));
+      }
+
+      // The message question, not the part question: which text form the sign-off takes
+      // depends on whether this message ships an html part at all. Read through the same
+      // merge rule the guards used, on the pre-expansion bodies — the expansion cannot make
+      // a supplied html part appear or disappear.
+      const messageShipsHtml = !isBlank(mergeHtml(callerWrittenHtml));
+      // Which parts a sign-off ACTUALLY landed in. Carrying the token is not the same thing:
+      // a flagged edit whose identity has no signature removes the token and puts nothing
+      // there. Recorded per part and read after the loop, because the note about one part is
+      // a statement about the OTHER one, which the loop may not have reached yet.
+      const signatureLanded = new Map<'textBody' | 'htmlBody', boolean>();
+      for (const p of writtenParts) {
+        const blocks: BodyBlocks = {
+          signature: signatureBlock(editSignature, p.part, messageShipsHtml),
+          // Neither history token expands here, and neither may be REMOVED either: a
+          // `{{quote}}` in a body handed back to this tool is text the caller is storing,
+          // not an instruction, so it survives the pass exactly as typed and is noted below.
+          quote: { available: 'as-written' },
+          forward: { available: 'as-written' },
+        };
+        // THE single pass, over the caller's OWN string and nothing this server built. It
+        // runs on every written part, including one carrying no `{{signature}}`, because the
+        // escape is per flagged call: a `\{{signature}}` in this call stores the bare token,
+        // which every later unflagged edit then leaves alone.
+        const expansion = expandBodyTokens(p.authored, blocks);
+        if (p.part === 'htmlBody') workingHtml = expansion.text;
+        else workingText = expansion.text;
+        signatureLanded.set(
+          p.part,
+          expansion.tokens.some((site) => site.name === 'signature' && site.expanded),
+        );
+        for (const site of expansion.tokens) {
+          if (site.name === 'signature' && !site.expanded && site.cause) {
+            tokenNotes.push(noteTokenEmpty('signature', p.part, site.cause));
+          }
+        }
+      }
+
+      // The uneven-sign-off note, once every part's outcome is known. It says a sign-off
+      // landed in one part and not the other, so it is owed only when one ACTUALLY landed:
+      // on an identity with no signature the token is removed from the part that carried it
+      // and nothing is written anywhere, and the note would then sit beside the note saying
+      // exactly that and contradict it.
+      for (const p of writtenParts) {
+        if (scans.get(p.part)!.counts.signature !== 0 || writtenParts.length <= 1) continue;
+        const other = writtenParts.find((q) => q.part !== p.part)!;
+        if (!signatureLanded.get(other.part)) continue;
+        tokenNotes.push(noteSignatureExpandedInOnePart(other.part, p.part));
+      }
     }
-    if (updates.noQuote === true) dropForwardHeader = true;
+
+    // The notes an edit owes the caller about what it stored as written. These are NOTES and
+    // never refusals, and that is the rule separating the two tools: on `draft_email` the
+    // body is wholly the caller's, so anything that would ship wrong is refused; here the
+    // body may be a foreign one handed back, so a refusal keyed on its text could be planted
+    // by the original's author and would recur on every edit.
+    //
+    // EVERY TEXT-KEYED NOTE BELOW IS GATED ON A RISE AGAINST THE STORED SCAN. Not a list of
+    // which ones obey it — the rule is the block's, and a note added here without it is the
+    // defect, not an exception. The gate is an EXACT COMPARISON AGAINST THE STORED BYTES: a
+    // count over a string this server already holds, which is not recognition of anything in
+    // the body. So a spelling the handed-back body already carried is stored in silence, and
+    // only one the caller has just added is reported.
+    // Every DISTINCT `{{…}}` this call ADDED that names no token, gathered across both written
+    // parts and reported as one sentence. Gathered rather than pushed per site because one
+    // note per site would bury the others.
+    //
+    // DISTINCT is the unit the whole note is counted in, list and number alike — that is the
+    // invariant `describePartNames` needs from every caller, and the reason its `total` is a
+    // separate argument is to let a caller count things its list cannot name, not to let the
+    // two disagree. Supplying both bodies means writing the same typo twice, so a per-site
+    // count beside a deduplicated list said "2 … ("{{sig}}")" on the ordinary path and sent
+    // the caller looking for a second spelling that was not there. One typo is one thing to
+    // fix however many times it was written.
+    const addedSpellings: string[] = [];
+
+    // WHAT A NOTE IS ABOUT DECIDES WHERE ITS ACCUMULATOR LIVES, and the rule is readable off
+    // the note's own signature. `noteSignatureTokenStored` takes a part name, so it is a
+    // per-part fact and its counter belongs inside the loop. The escape, near-miss and
+    // history notes take only the token text: they say nothing about which body carried it,
+    // so the same text reported from two parts is the identical sentence twice, and
+    // formatInlineNotes does not deduplicate. These three dedupe ACROSS the edit; only the
+    // count-rise budgets below stay per part, because the stored bytes they compare against
+    // are per part.
+
+    const reportedEscapes = new Set<string>();
+    const namedMisses = new Set<string>();
+    const notedHistory = new Set<string>();
+
+    for (const p of writtenParts) {
+      const scan = scans.get(p.part)!;
+      const storedScan = scanBodyTokens(p.stored ?? '');
+
+      // Runs on flagged and unflagged edits alike: the flag expands `{{signature}}` and
+      // nothing else, so a spelling that names no token ships either way. Count-rise against
+      // the stored bytes, the same budget the escape pass below uses.
+      const storedSpellings = new Map<string, number>();
+      for (const s of storedScan.otherSpellings) {
+        storedSpellings.set(s.text, (storedSpellings.get(s.text) ?? 0) + 1);
+      }
+      for (const s of scan.otherSpellings) {
+        const budget = storedSpellings.get(s.text) ?? 0;
+        if (budget > 0) { storedSpellings.set(s.text, budget - 1); continue; }
+        if (!addedSpellings.includes(s.text)) addedSpellings.push(s.text);
+      }
+
+      if (!expandSignature) {
+        const added = scan.counts.signature - storedScan.counts.signature;
+        if (added > 0) tokenNotes.push(noteSignatureTokenStored(p.part, added));
+        const storedEscapes = new Map<string, number>();
+        for (const e of storedScan.escapes) storedEscapes.set(e.text, (storedEscapes.get(e.text) ?? 0) + 1);
+        for (const e of scan.escapes) {
+          const budget = storedEscapes.get(e.text) ?? 0;
+          if (budget > 0) { storedEscapes.set(e.text, budget - 1); continue; }
+          if (reportedEscapes.has(e.text)) continue;
+          reportedEscapes.add(e.text);
+          tokenNotes.push(noteEscapedTokenShips(e.text));
+        }
+      }
+      // Count rise per token, the signature note's gate: a `{{quote}}` sitting in the quoted
+      // history is the original author's text and rides along on every edit.
+      const history = (['quote', 'forward'] as const)
+        .filter((t) => scan.counts[t] - storedScan.counts[t] > 0)
+        .filter((t) => !notedHistory.has(t));
+      for (const t of history) notedHistory.add(t);
+      if (history.length > 0) tokenNotes.push(noteHistoryTokenStored([...history]));
+
+      // Per-text budget, the escape note's gate rather than the count one, because a
+      // near-miss is reported BY ITS LITERAL TEXT and two different spellings must not
+      // cancel each other out.
+      const storedMisses = new Map<string, number>();
+      for (const m of storedScan.nearMisses) storedMisses.set(m.text, (storedMisses.get(m.text) ?? 0) + 1);
+      for (const miss of scan.nearMisses) {
+        const budget = storedMisses.get(miss.text) ?? 0;
+        if (budget > 0) { storedMisses.set(miss.text, budget - 1); continue; }
+        if (namedMisses.has(miss.text)) continue;
+        namedMisses.add(miss.text);
+        tokenNotes.push(noteNearMissToken(miss.text, miss.name));
+      }
+    }
+
+    if (addedSpellings.length > 0) {
+      tokenNotes.push(
+        noteUnexpandedSpelling(describePartNames(addedSpellings), addedSpellings.length),
+      );
+    }
+
+    // An html-alone edit drops the draft's stored text part and derives a fresh fallback
+    // from the new html. That part may have been hand-written, and until now it went in
+    // silence.
+    if (wroteHtml && !wroteText && !clearedText && !isBlank(existingTextValue)) {
+      tokenNotes.push(noteDiscardedTextPart());
+    }
 
     // Merge non-body fields: updates override existing; clearFields force the empty value.
     const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));
@@ -2946,39 +2884,11 @@ export class JmapClient {
     const mergedBcc     = clear.has('bcc')     ? [] : (updates.bcc     !== undefined ? updates.bcc.map(parseAddress)     : (existingEmail.bcc || []));
     const mergedReplyTo = clear.has('replyTo') ? [] : (updates.replyTo !== undefined ? updates.replyTo.map(parseAddress) : (existingEmail.replyTo || null));
 
-    // ---- Body pipeline: one-sided guard + text-fallback generation ----
-    // The text part is a DERIVED fallback when html is present. So:
-    //  - editing htmlBody alone REGENERATES the text fallback from the new html (no throw);
-    //  - editing textBody alone (while a non-empty html survives) is rejected — it won't
-    //    change what most recipients render (the html), and the fallback is auto-managed;
-    //  - a metadata-only edit (no body written) stays body-invariant (both bodies kept).
-    // wroteText/wroteHtml are computed once at the reply-quote guard above (same values; the
-    // originalEmailId path only ever replaces an already-written body with another, so their
-    // truth doesn't change). Reuse them here.
-    const wroteAnyBody = wroteText || wroteHtml;
-
-    // Raw merge: a written body drops the unwritten partner (single-format intent);
-    // a no-body edit preserves both; clearFields force the body absent.
-    const mergedTextRaw = clear.has('textBody') ? undefined
-      : (workingText !== undefined ? workingText
-      : (wroteAnyBody ? undefined : existingTextValue));
-    const mergedHtmlRaw = clear.has('htmlBody') ? undefined
-      : (workingHtml !== undefined ? workingHtml
-      : (wroteAnyBody ? undefined : existingHtmlValue));
-
-    // Guard: editing textBody alone while a non-empty htmlBody survives (checked against
-    // the EXISTING html, since the raw merge has already dropped the unwritten partner).
-    if (wroteText && !wroteHtml && !clear.has('htmlBody') && !isBlank(existingHtmlValue)) {
-      throw new InvalidInputError('editing textBody alone won\'t change what most recipients see (they render htmlBody). To change the message, edit htmlBody (the text fallback regenerates automatically); to save a custom plain-text alternative, supply htmlBody alongside it; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
-    }
-
-    // Guard: clearFields:['textBody'] while htmlBody survives — the text fallback is
-    // managed automatically (regenerated from html, or html-only if none is derivable), so
-    // clearing it on its own is rejected. Evaluated against the MERGED html and BEFORE the
-    // fallback step runs (else that step would silently refill it). Allowed when html is also cleared.
-    if (clear.has('textBody') && !clear.has('htmlBody') && !isBlank(mergedHtmlRaw)) {
-      throw new InvalidInputError('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
-    }
+    // ---- The bodies that ship ----
+    // The same merge rule the coupling guards were judged against, now applied to the bodies
+    // as the expansion left them.
+    const mergedTextRaw = mergeText(workingText);
+    const mergedHtmlRaw = mergeHtml(workingHtml);
 
     // Generate the text fallback, but ONLY when a body was actually written — a
     // metadata-only edit must stay body-invariant (it must NOT inject a text part into an
@@ -2999,14 +2909,12 @@ export class JmapClient {
     // Reject a body-less RESULT, but only when this edit actually touched the body —
     // a written body that came out empty, or a cleared body. An attachment-only (or
     // any metadata-only) edit must NOT trip this: it stays body-invariant and may run
-    // against a draft that legitimately has no body yet. Gating on
-    // `wroteAnyBody || clearedAnyBody` (not `wroteAnyBody` alone) keeps the throw firing
-    // when the last body is cleared — incl. alongside an attachments change — so a
-    // caller can't silently strip a draft down to no body. A draft keeps >=1 body.
-    // Distinct from the clear-text-while-html guard (which only fires when merged html IS
-    // present), so the two can't both match.
-    const clearedAnyBody = clear.has('textBody') || clear.has('htmlBody');
-    if ((wroteAnyBody || clearedAnyBody) && isBlank(textBodyValue) && isBlank(htmlBodyValue)) {
+    // against a draft that legitimately has no body yet. Gating on `touchesBody` (not
+    // `wroteAnyBody` alone) keeps the throw firing when the last body is cleared — incl.
+    // alongside an attachments change — so a caller can't silently strip a draft down to no
+    // body. A draft keeps >=1 body. Distinct from the clear-text-while-html guard (which
+    // only fires when merged html IS present), so the two can't both match.
+    if (touchesBody && isBlank(textBodyValue) && isBlank(htmlBodyValue)) {
       throw new InvalidInputError('a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
     }
 
@@ -3014,11 +2922,10 @@ export class JmapClient {
     // parts still do for the body that actually ships, then append (#13) ----
 
     // The removal refusal is raised HERE, at the position the removal loop always occupied,
-    // so a body-shape error keeps its precedence over an attachment one. Resolution happened
-    // before the quote rebuild because the rebuild needs to know what survives it.
+    // so a body-shape error keeps its precedence over an attachment one. Resolution happens
+    // up with the other pre-merge signals so those guards can raise ahead of it.
     if (removalPlan.error) throw removalPlan.error;
 
-    const bodyTouching = wroteAnyBody || clearedAnyBody;
     const finalHtmlRefs = htmlCidRefs(htmlBodyValue);
 
     // A stored Content-ID this server cannot reproduce faithfully is a refusal rather than a
@@ -3027,7 +2934,7 @@ export class JmapClient {
     // carry copies such a value through verbatim (measured round-tripping exactly against
     // Fastmail, 2026-08-14), so metadata and attachment edits are already safe and refusing
     // them would cost the caller their only in-place repair.
-    if (bodyTouching) {
+    if (touchesBody) {
       for (const part of removalPlan.survivors) {
         const cid = partCid(part);
         if (cid && !isRecreatableCid(cid)) throw new InvalidInputError(rejectUnrecreatableCid(cid));
@@ -3041,7 +2948,7 @@ export class JmapClient {
     // dropped, because those bytes are not this server's to discard. Runs only when this
     // call wrote or cleared a body — a metadata or attachment edit is body-invariant by
     // design, so nothing about the parts' relationship to the body can have changed.
-    const reconciled = bodyTouching
+    const reconciled = touchesBody
       ? reconcileInlineParts({
           storedParts: removalPlan.survivors as CidPart[],
           referencedCids: finalHtmlRefs,
@@ -3050,7 +2957,6 @@ export class JmapClient {
       : null;
 
     const ledger = new InlineNoteLedger();
-    ledger.countRefs('droppedUnsupportedImages', droppedUnsupportedQuoteImages);
     const carriedParts: AttachmentPart[] = [];
     if (reconciled) {
       reconciled.parts.forEach(({ part, action }, index) => {
@@ -3073,9 +2979,9 @@ export class JmapClient {
       for (const part of removalPlan.survivors) carriedParts.push(carriedPartFrom(part));
     }
 
-    // Assembly order: what survived, then the caller's own additions, then the parts minted
-    // for the rebuilt quote. Minted parts ride their own channel to the very end so they
-    // stay distinguishable from anything carried or supplied.
+    // Assembly order: what survived, then the caller's own additions. This method mints no
+    // parts of its own — the body it saves is the caller's, so every part on the result was
+    // either already on the draft or handed to this call.
     let finalAttachments: AttachmentPart[] = carriedParts.slice();
     if (updates.attachments?.length) {
       // A file the caller supplied with a Content-ID is marked inline exactly when the
@@ -3104,7 +3010,6 @@ export class JmapClient {
         }),
       );
     }
-    if (mintedParts.length) finalAttachments = finalAttachments.concat(mintedParts);
 
     // ---- Checks over the assembled state, in the order a caller can act on ----
 
@@ -3112,20 +3017,6 @@ export class JmapClient {
       finalAttachments.map((p) => (typeof p.cid === 'string' ? p.cid : '')).filter((c) => c !== ''),
     );
     const danglingRefs = finalHtmlRefs.filter((r) => !finalPartCids.has(r));
-
-    // Removing an image the kept quote supplies cannot be honoured at all: the rebuild would
-    // put it straight back under a fresh identifier, and a removal that silently does nothing
-    // is worse than a refusal. Pruning individual quote images is not a thing this server can
-    // do — dropping the quote with a replacement body is the way out, which the message says.
-    // Scoped to a NAMED removal. Wiping the attachments wholesale alongside a kept quote is
-    // coherent and supported: the stored quote parts go, the rebuild re-embeds under fresh
-    // identifiers, and the result says both happened.
-    if (rebuiltQuote && !clear.has('attachments') && removalPlan.removed.length > 0) {
-      const reEmbeddedBlobs = new Set(mintedParts.map((p) => p.blobId));
-      if (removalPlan.removed.some((p) => reEmbeddedBlobs.has(p.blobId))) {
-        throw new InvalidInputError(rejectRemovalOfQuoteCarriedPart());
-      }
-    }
 
     // A reference left pointing at nothing BY THIS CALL'S REMOVAL, named as such. This is a
     // diff, not a body scan: a reference that was already broken before the call is not
@@ -3140,7 +3031,7 @@ export class JmapClient {
       );
     }
 
-    if (bodyTouching) {
+    if (touchesBody) {
       // The draft's own stored body already referenced images nothing supplies. The draft's
       // state dominates: this wording wins over anything the caller's html got wrong in the
       // same call, because recreating the draft is the repair either way. Checked POST-MERGE
@@ -3149,11 +3040,19 @@ export class JmapClient {
       const stillBroken = danglingRefs.filter((r) => storedDanglingRefs.includes(r));
       if (stillBroken.length > 0) throw new InvalidInputError(rejectBrokenDraft(stillBroken, availability));
 
-      // Scoped to the caller's OWN html: the rebuilt quote references server-managed
-      // identifiers by construction, so scanning the merged body here would refuse every
-      // keep-edit of a draft that carries quoted images.
+      // An authored reference to one of this server's own identifiers, narrowed to the case
+      // that is actually an error: a reserved identifier naming NO part this draft carries.
+      // Since this tool stores the body it is handed, a caller editing a draft that already
+      // embeds an image legitimately hands back the html that references it — under exactly
+      // such an identifier — and refusing that would make every prose edit of an
+      // image-carrying draft impossible. What stays refused is inventing one: a reserved
+      // identifier that resolves to nothing is a reference the caller minted itself, which
+      // no later call can ever supply. Scoped to the caller's OWN html, so the check reads
+      // only text this call authored.
       for (const ref of htmlCidRefs(callerWrittenHtml)) {
-        if (isReservedCid(ref)) throw new InvalidInputError(rejectReservedCidRef(ref));
+        if (isReservedCid(ref) && !finalPartCids.has(ref)) {
+          throw new InvalidInputError(rejectReservedCidRef(ref));
+        }
       }
 
       if (danglingRefs.length > 0) {
@@ -3178,20 +3077,19 @@ export class JmapClient {
     }
 
     // Self-check, not a caller-facing rule: every reference in a body this call produced
-    // resolves to a part the message carries, and every part it minted is referenced by one
-    // of those bodies. Nothing above can be true and this false, so a failure means the
-    // assembly itself is wrong.
+    // resolves to a part the message carries. The minted-part half of the closure is
+    // vacuous here — this method mints nothing — but the call passes an empty list rather
+    // than skipping, so the check keeps its one meaning across every caller.
     checkInlineClosure({
-      htmlBodies: bodyTouching ? [htmlBodyValue] : [],
+      htmlBodies: touchesBody ? [htmlBodyValue] : [],
       finalPartCids: finalAttachments.map((p) => p.cid),
-      attachedMintedCids: mintedParts.map((p) => p.cid),
-      skip: !bodyTouching && mintedParts.length === 0,
+      attachedMintedCids: [],
+      skip: !touchesBody,
     });
 
     // What the shipping body displays, counted once per part whatever supplied it: a part
-    // already on the draft, one the caller just added, or one minted for the rebuilt quote.
-    // The identifier IS the key, so a part that is both reused and re-referenced is one
-    // record, never two.
+    // already on the draft, or one the caller just added. The identifier IS the key, so a
+    // part that is both reused and re-referenced is one record, never two.
     //
     // Reported only when this call could have CHANGED what the body displays — it wrote or
     // cleared a body, or it supplied parts. An edit that touches neither is body-invariant by
@@ -3205,12 +3103,11 @@ export class JmapClient {
     // answer there because every part is one this call just uploaded and dispositioned. They
     // diverge only for a part already ON the draft as a plain attachment that the edited body
     // starts referencing — a shape compose cannot reach, and one this basis gets right.
-    const reportsEmbeds = bodyTouching || !!updates.attachments?.length;
+    const reportsEmbeds = touchesBody || !!updates.attachments?.length;
     const bytesByCid = new Map<string, number>();
     for (const part of storedParts) {
       if (partCid(part)) bytesByCid.set(partCid(part), partBytes(part));
     }
-    for (const mapping of quoteImageMappings) bytesByCid.set(mapping.cid, partBytes(mapping.source));
     const embeddedNow = reportsEmbeds
       ? finalAttachments.filter(
           (p) => typeof p.cid === 'string' && p.cid !== '' && finalHtmlRefs.includes(p.cid),
@@ -3231,20 +3128,18 @@ export class JmapClient {
       ...(mergedReplyTo?.length && { replyTo: mergedReplyTo }),
       // Threading: carry inReplyTo/references as JMAP structured properties so the
       // In-Reply-To/References headers regenerate (fixes silent threading loss on reply
-      // drafts this client creates via reply_email, which only ever saves a draft).
+      // drafts this client creates, which are only ever saved and never sent).
       ...(existingEmail.inReplyTo && { inReplyTo: existingEmail.inReplyTo }),
       ...(existingEmail.references && { references: existingEmail.references }),
-      // Carry the forward marking (the recorded source AND the guard's challenge floor)
-      // unless a noQuote drop deliberately cleared it; a forward-variant keep may have
-      // re-pointed or newly recorded it above. A foreign stored value that fails
-      // Fastmail's header-SET validation fails the CREATE loudly with the old draft
-      // intact (create-first order below) — recoverable in one step via noQuote, never
-      // a silent drop.
+      // Carry the forward marking unless the caller named forwardedMessageId in clearFields.
+      // A foreign stored value that fails Fastmail's header-SET validation fails the CREATE
+      // loudly with the old draft intact (create-first order below) — recoverable in one
+      // step by clearing the marking, never a silent drop.
       ...(carriedForwardHeader.length > 0 && !dropForwardHeader && { 'header:X-Forwarded-Message-Id:asMessageIds': carriedForwardHeader }),
-      // The exact-instance pointer follows the provenance it refines: dropped when a
-      // noQuote de-forwards a FORWARD draft (the forward header above goes with it),
-      // kept on a reply draft (noQuote drops the quote text, but In-Reply-To — and so
-      // the reply itself, and the instance it replies to — survives).
+      // The exact-instance pointer follows the provenance it refines: dropped when the clear
+      // de-forwards a FORWARD draft (the forward header above goes with it), kept on a reply
+      // draft (which is still a reply to that same instance — In-Reply-To, and so the reply
+      // itself, survives every edit).
       ...(carriedSourceId !== undefined && !(dropForwardHeader && !isReply) && { [SOURCE_ID_HEADER]: carriedSourceId }),
       ...(finalAttachments.length && { attachments: finalAttachments }),
     };
@@ -3376,7 +3271,7 @@ export class JmapClient {
     const followUpNotes: string[] = [];
     const attachedInlineCids = embeddedNow
       .map((p) => p.cid as string)
-      .filter((cid) => mintedParts.some((m) => m.cid === cid) || appendedCidCounts.has(cid));
+      .filter((cid) => appendedCidCounts.has(cid));
     if (attachedInlineCids.length > 0) {
       try {
         const savedParts = await this.readDraftParts(newEmailId);
@@ -3405,22 +3300,115 @@ export class JmapClient {
       });
     }
 
+    // ---- The hash the caller's NEXT edit will need ----
+    // Handing one back is what stops a chain of edits from costing a `get_email` between
+    // every pair of them. It is issued only where it can be issued honestly, and the rules
+    // are all one rule: the caller may carry a hash forward only when it already knows,
+    // byte for byte, what the saved draft's governing body part says.
+    //
+    //  - A metadata-only edit writes no body, so it neither needs a hash nor issues one. What
+    //    it does with the body is COPY it: the recreate puts the stored parts back as it found
+    //    them, and on an ordinary draft both bodies come back byte for byte, so a hash the
+    //    caller was already holding is still good afterwards.
+    //    That carry-across is what the path AIMS at, and whether it holds is a property of the
+    //    DRAFT, not of the edit — a copy can only carry the parts it picks up and identifies.
+    //    Two draft shapes are not carried that way.
+    //    A body part that declares no content type is one: the body written on the way back
+    //    out is selected by declared type, and such a part answers to neither format, so it is
+    //    not among the parts the copy picks up, and its content is not something a rewrite of
+    //    this kind preserves. That shape cannot arise from this deployment, for the reasons
+    //    set out on the skip in `draftInterleavedTextType` (body-hash.ts).
+    //    A draft with an image sitting inside a body list is the other: re-filing that image
+    //    out of the list changes the deduplicated part SET the hash is taken over, so a hash
+    //    the caller is holding can stop matching after an edit that wrote no body at all. That
+    //    one costs a re-read on the caller's next body edit, which is the hash doing its job.
+    //  - A flagged edit expands `{{signature}}` INTO the stored body, so what landed is not
+    //    what the caller wrote. No hash; the note says to re-read.
+    //  - An edit whose governing part is one this server DERIVED (an html clear on a draft
+    //    that HAD html, leaving the fallback generated from it; a text fallback generated
+    //    from new html) is the same case, and the test is SEEN-NESS, not authorship: those
+    //    bytes were generated during this very call, so nothing the caller holds has shown
+    //    them to it. Not even the hash it just passed — on a dual draft that hash may itself
+    //    have come from an html-alone edit rather than a read, in which case the derived text
+    //    part it covers was never displayed to the caller either. The governing part is the
+    //    html when the message ships one and the text otherwise, because that is the part a
+    //    later edit has to hand back.
+    //    "Derived" is the test, not "not supplied by this call": clearing htmlBody on a
+    //    draft that never had one leaves the draft's EXISTING stored text standing —
+    //    unchanged, and shown to the caller by whatever read produced the hash this call
+    //    passed — so that edit issues a hash. Who wrote those bytes is beside the point; a
+    //    foreign draft's text qualifies exactly as the caller's own does. Withholding there
+    //    would send the caller to a re-read for bytes a read had already shown it, under a
+    //    reason ("derived from html") that is false of the draft.
+    //
+    // PROVENANCE, and it is the whole point: a hash that is returned is computed from a
+    // RE-READ of the saved draft, never from the bytes this call sent. Hashing the sent
+    // bytes would hand back a value asserting what the server stored on the strength of what
+    // the client asked for — precisely the assumption the lost-update guard exists to
+    // remove — and it would pass any test that only checks a hash came back. When the
+    // re-read fails or comes back truncated there is NO fallback to the sent bytes: the
+    // result carries no hash and says why.
+    const governingSupplied = !isBlank(htmlBodyValue)
+      ? wroteHtml
+      : wroteText || (isBlank(existingHtmlValue) && textBodyValue === existingTextValue);
+    let issuedBodyHash: string | undefined;
+    let bodyHashWithheld: string | undefined;
+    if (touchesBody) {
+      if (expandSignature) {
+        bodyHashWithheld = NOTE_BODY_HASH_AFTER_EXPANSION;
+      } else if (!governingSupplied) {
+        bodyHashWithheld = NOTE_BODY_HASH_DERIVED_PART;
+      } else {
+        try {
+          const saved = await this.readDraftBody(newEmailId);
+          // WHETHER THE SAVED BODY CAN BE HASHED HONESTLY IS THE READ SIDE'S RULE, ASKED
+          // RATHER THAN RE-STATED. `resolveDraftBodyHash` already decides it for `get_email`
+          // — a part the server flagged as truncated or as an encoding problem, a part no
+          // read returns because its declared type does not match the list it sits in — and
+          // it has more branches than any hand-written test here ever had. Asking it is what
+          // makes the hash this call hands back and the hash a later `get_email` issues agree
+          // about the same saved draft BY CONSTRUCTION, instead of by two expressions someone
+          // has to keep in step. They had already drifted: the same saved object could get a
+          // hash from here and "recreate the draft" from the very next read.
+          //
+          // THE DESCRIPTOR IS A CLAIM, NOT A SET OF DEFAULTS. `resolveDraftBodyHash` asks
+          // what the response SHOWED, and two of its branches exist only because a read can
+          // be field-scoped or quote-stripped. Neither can happen here: `readDraftBody` is
+          // ours, unconditional, and fetches both body lists whole. Passing anything less
+          // than a whole read would make this path withhold with a reason about a `fields`
+          // selection on a call that has no `fields` — a false note of exactly the kind this
+          // guard exists to avoid. A post-write withhold must never carry a read-scope
+          // reason; there is a test that asserts only that.
+          const outcome = resolveDraftBodyHash(saved, {
+            bodyText: true,
+            bodyHtml: true,
+            stripQuoted: false,
+          });
+          if (!outcome) {
+            // It answers for drafts and returns nothing for anything else. What this call
+            // just created and re-read is a draft, so an absent outcome is not a body
+            // problem at all — the re-read did not come back as the draft we wrote. Raising
+            // it lands on the read-failure note below, which is the honest description, and
+            // stops the promised field vanishing with no trace.
+            throw new Error(`the saved draft '${newEmailId}' did not read back as a draft`);
+          }
+          if ('bodyHash' in outcome) {
+            issuedBodyHash = outcome.bodyHash;
+          } else {
+            bodyHashWithheld = noteBodyHashAfterReRead(outcome.bodyHashWithheld);
+          }
+        } catch (err) {
+          bodyHashWithheld = noteBodyHashUnreadable(err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+
     const tally = ledger.tally();
     const notes = [
-      ...emitInlineNotes(tally, {
-        surface: 'draft',
-        keepNoun,
-        ...(clear.has('attachments') && rebuiltQuote && {
-          clearedAttachmentCount: removalPlan.removed.length,
-          reEmbeddedCount: quoteImageMappings.length,
-        }),
-      }),
-      // Announced because nothing in THIS call asked for it — see the signature step above.
-      // An explicitly requested append says nothing: the caller already knows.
-      ...(reAppendedSignature ? [NOTE_SIGNATURE_REAPPENDED] : []),
-      // …and the other side of the same rule: a signature that was meant to survive the
-      // edit, or was explicitly asked for, and could not be produced.
-      ...(signatureUnavailable ? [signatureUnavailable] : []),
+      ...emitInlineNotes(tally, { surface: 'draft', keepNoun }),
+      // What this call stored as written, and what it expanded — see the token step above
+      // for why these are notes and never refusals.
+      ...tokenNotes,
       ...followUpNotes,
     ];
     const touchedInlineImages = tally.embedded > 0 || tally.degraded > 0 || tally.removed > 0;
@@ -3430,11 +3418,47 @@ export class JmapClient {
       replacedDraft,
       ...(trashedOldDraftId && { trashedOldDraftId }),
       ...(orphanedOldDraftId && { orphanedOldDraftId, orphanedOldDraftReason }),
+      ...(issuedBodyHash !== undefined && { bodyHash: issuedBodyHash }),
+      ...(bodyHashWithheld !== undefined && { bodyHashWithheld }),
       ...(touchedInlineImages && {
         inlineImages: { embedded: tally.embedded, degraded: tally.degraded, removed: tally.removed },
       }),
       ...(notes.length > 0 && { notes }),
     };
+  }
+
+  /**
+   * Re-read a just-saved draft's body parts and their values, for computing the hash the
+   * result hands back.
+   *
+   * Separate from readDraftParts (which asks for a part LISTING and no values) because this
+   * one exists to answer a different question: not "did the parts land" but "what exactly do
+   * they say". Its `fetchTextBodyValues`/`fetchHTMLBodyValues` are what make the returned
+   * hash a statement about the STORED bytes rather than about the request.
+   *
+   * `keywords` is fetched for one reason: the caller hands this straight to
+   * `resolveDraftBodyHash`, which answers for drafts and returns nothing at all for anything
+   * else. Without it the saved message reads as a non-draft and the hash would go missing
+   * with no reason attached — the silent drop, arriving through an omitted property.
+   */
+  private async readDraftBody(emailId: string): Promise<any> {
+    const session = await this.getSession();
+    const response = await this.makeRequest({
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Email/get', {
+          accountId: session.accountId,
+          ids: [emailId],
+          properties: ['id', 'keywords', 'textBody', 'htmlBody', 'bodyValues'],
+          bodyProperties: [...EMAIL_BODY_PROPERTIES],
+          fetchTextBodyValues: true,
+          fetchHTMLBodyValues: true,
+        }, 'getEmail']
+      ]
+    });
+    const email = this.getListResult(response, 0)[0];
+    if (!email) throw new Error(`the saved draft '${emailId}' could not be read back`);
+    return email;
   }
 
   /**
@@ -3478,16 +3502,17 @@ export class JmapClient {
           accountId: session.accountId,
           ids: [emailId],
           properties: [
-            'id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'textBody', 'htmlBody', 'bodyValues',
+            'id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'mailboxIds',
+            'textBody', 'htmlBody', 'bodyValues',
             'attachments',
             'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds', SOURCE_ID_HEADER,
           ],
           // `attachments` above and disposition/cid/name here are for the RECEIPT ONLY —
-          // the sentence below that reports what the sent message carried. They are never a
-          // send-time vet: this method submits the stored draft by reference, exactly as it
-          // is, and adds no check that could refuse a message the caller already approved.
-          // Anything that would refuse a draft belongs on the edit path, which can offer a
-          // repair; a refusal here would only strand a finished message.
+          // the sentence below that reports what the sent message carried. They vet nothing;
+          // the draft is submitted by reference, exactly as it is stored.
+          //
+          // `mailboxIds` is the one property fetched to be CHECKED: the Drafts gate below
+          // reads it, and states the rule it applies.
           bodyProperties: ['partId', 'blobId', 'type', 'size', 'disposition', 'cid', 'name'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
@@ -3513,12 +3538,15 @@ export class JmapClient {
     // can carry one — refuse to ship it. Reject, not silent sanitize: recreating to strip the part
     // would change the email id and rewrite the message, against this codebase's loud-reject
     // philosophy. The hardened edit_draft is the fix path.
-    const textVal = this.bodyValueForType(email.textBody, 'text/plain', email.bodyValues || {});
-    const htmlVal = this.bodyValueForType(email.htmlBody, 'text/html', email.bodyValues || {});
-    if (htmlVal !== undefined && htmlVal.trim() === '') {
+    //
+    // The check reads every body part (findBlankBodyPart), not the one a per-format lookup
+    // selects. It has to: the only thing standing between this draft and a recipient is this
+    // line, and a lookup's answer moves with the order of a list.
+    const blankPart = findBlankBodyPart(email);
+    if (blankPart === 'htmlBody') {
       throw new InvalidInputError('This draft has an empty htmlBody that would render blank to recipients. Edit the draft to supply or clear htmlBody before sending.');
     }
-    if (textVal !== undefined && textVal.trim() === '') {
+    if (blankPart === 'textBody') {
       throw new InvalidInputError('This draft has an empty textBody that would render blank for plain-text recipients. Edit the draft to supply or clear textBody before sending.');
     }
 
@@ -3545,8 +3573,97 @@ export class JmapClient {
       throw new InvalidInputError('From address on draft does not match any sending identity. Edit the draft to set a from address matching one of your verified identities before sending.');
     }
 
-    // Find the Sent mailbox
+    // One mailbox fetch serves both the Drafts gate below and the Sent target further down.
     const mailboxes = await this.getMailboxes();
+
+    // A DRAFT IS SENDABLE ONLY FROM THE DRAFTS FOLDER. Being in Drafts is what says the
+    // message is still meant to go out; filed anywhere else, someone has since made it
+    // something other than outbound mail, and this is the only tool that transmits.
+    //
+    // MEMBERSHIP, NOT EXCLUSIVITY: a draft in Drafts that also carries another label is in
+    // Drafts and sends. The test is "is in Drafts", never "is solely in Drafts" — a label
+    // beside it is not a move.
+    //
+    // Deliberately stronger than "not solely in Trash": a draft that was moved to Archive,
+    // or filed into a custom folder by hand, is refused too.
+    // Placed after the checks that need no round trip, and before the submission, which is
+    // the only irreversible step here.
+    //
+    // Resolved by EXACT role, case-insensitive, never findMailboxByRoleOrName: its
+    // substring name fallback would let a user mailbox called "Draft notes" satisfy this,
+    // and in front of an irreversible send that failure PERMITS — precisely the send the
+    // gate exists to stop. The default Trash/Spam exclusion is held to the same rule for
+    // the same reason (see computeExclusion's comment, "NEVER findMailboxByRoleOrName").
+    // findByExactRole also requires a usable id, so a role record with no id refuses here
+    // rather than being compared against as the string "undefined".
+    //
+    // Both arms refuse. An account with no drafts-role mailbox is reachable precisely
+    // because the resolution is exact, and it must not fall through to a permit: a gate
+    // that cannot be satisfied is not a gate that opens.
+    const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
+    if (!draftsMailbox) {
+      throw new Error(
+        'Could not find a Drafts mailbox (no mailbox in this account carries the "drafts" role), ' +
+        'so this draft cannot be confirmed to be in Drafts. send_draft only sends a draft that is ' +
+        'in the Drafts folder.',
+      );
+    }
+    // The membership map is READ THE WAY THIS FILE'S OTHER mailboxIds READS ARE, and for the
+    // same three reasons they are (see setErrorFor and the archive sweep's filing read):
+    //
+    //  - hasOwnProperty rather than an index. `mailboxIds` is parsed from the response, so
+    //    Object.prototype sits behind it, and a mailbox id of "constructor" or "toString"
+    //    indexes through to a truthy function. Here that opens the gate — a draft filed
+    //    anywhere would send — which is the one direction this check must never fail in.
+    //  - The VALUE must be true, not merely present. `{"mb-drafts": false}` is not a
+    //    membership, and reading presence alone would both open the gate and, below, name
+    //    Drafts as somewhere the draft is while refusing it for not being there.
+    //  - The shape is tested by `isPlainResponseMap`, whose docblock carries the
+    //    Array.isArray reasoning (`typeof [] === 'object'`). What belongs HERE is what that
+    //    shape would do to this refusal if it got through. `Object.keys` of an array yields
+    //    INDICES, and the value at each is the ELEMENT rather than `true`, so the listing
+    //    below drops every one of them: the refusal names no location while still handing
+    //    back a move_email repair — the "filed nowhere worth naming" outcome described a few
+    //    lines down, reached by a second route. (It would read "is in: 0" only for an array
+    //    whose elements are literally `true`, which is not a shape worth designing around.)
+    //
+    // Nothing on Fastmail produces these shapes — its mailbox ids are opaque tokens and
+    // Cyrus emits `{id: true}`. The reason to read it this way is that the two siblings
+    // already do, and the check standing in front of the only irreversible action here
+    // should not be the least careful of the three.
+    //
+    // AN UNREADABLE MAP GETS ITS OWN REFUSAL rather than being substituted with `{}`. That
+    // substitution refused the send correctly and then described it wrongly: `filedIn` came
+    // out empty, so the message read as "not in Drafts, filed nowhere worth naming" and
+    // handed back a move_email repair for a draft that may already be in Drafts. A
+    // degradation is said out loud here, never folded into a neighbouring outcome, which is
+    // the same rule the archive sweep's filing read follows with its own `unreadableFiling`
+    // sentence.
+    const filing = email.mailboxIds;
+    if (!isPlainResponseMap(filing)) {
+      throw new Error(
+        'The server returned this draft with no readable mailboxIds, so this server cannot ' +
+        'tell whether it is in the Drafts folder and will not send it. Nothing was sent. ' +
+        'This is a fault in the response rather than in the call, and no tool here can ' +
+        'repair it: report it rather than retrying.',
+      );
+    }
+    const inMailbox = (id: string) =>
+      Object.prototype.hasOwnProperty.call(filing, id) && filing[id] === true;
+
+    if (!inMailbox(draftsMailbox.id)) {
+      // `=== true`, the same test the gate itself applies.
+      const filedIn = Object.keys(filing)
+        .filter(id => filing[id] === true)
+        .map(id => mailboxes.find(mb => mb?.id === id)?.name || id);
+      throw new InvalidInputError(
+        'This draft is not in the Drafts folder, so it will not be sent' +
+        (filedIn.length > 0 ? ` (it is in: ${filedIn.join(', ')})` : '') +
+        '. Move it back to Drafts with move_email and send it again.',
+      );
+    }
+
+    // Find the Sent mailbox
     const sentMailbox = this.findMailboxByRoleOrName(mailboxes, 'sent', 'sent');
     if (!sentMailbox) {
       throw new Error('Could not find Sent mailbox');
@@ -4088,14 +4205,15 @@ export class JmapClient {
       // do" — a confident success statement about filing this server never saw. Fail closed
       // on the id instead.
       //
-      // Array.isArray, because `typeof [] === 'object'`: an array-shaped mailboxIds would
-      // otherwise pass this guard and Object.keys would turn it into the INDICES ["0","1"],
-      // which contain no Inbox and no refusing role — landing the message in `notInInbox`
-      // and producing the exact false "already archived" this guard was written to stop, by
-      // the one shape it did not test. A non-compliant server is this guard's entire
-      // audience, so the shape it emits is not out of scope.
+      // The shape test is `isPlainResponseMap`, whose docblock carries the Array.isArray
+      // reasoning. What is specific to HERE is what an array would do if it got through:
+      // Object.keys turns it into the INDICES ["0","1"], which contain no Inbox and no
+      // refusing role — landing the message in `notInInbox` and producing the exact false
+      // "already archived" this guard was written to stop, by the one shape it did not test.
+      // A non-compliant server is this guard's entire audience, so the shape it emits is not
+      // out of scope.
       const filing = email.mailboxIds;
-      if (!filing || typeof filing !== 'object' || Array.isArray(filing)) {
+      if (!isPlainResponseMap(filing)) {
         unreadableFiling.set(id, 'The server returned this message with no readable mailboxIds object, so its current filing is unknown. Nothing was written for it.');
         continue;
       }
@@ -4562,11 +4680,12 @@ export class JmapClient {
       }
 
       // Fail closed rather than guess. A message whose filing could not be read is exactly
-      // the message a bare removal would destroy. Array.isArray because typeof [] ===
-      // 'object': an array would turn into the INDICES under Object.keys and read as a
-      // membership the message never had.
+      // the message a bare removal would destroy. The shape test is `isPlainResponseMap`
+      // (its docblock carries the Array.isArray reasoning); what would go wrong HERE is that
+      // an array turns into the INDICES under Object.keys and reads as a membership the
+      // message never had.
       const filing = email.mailboxIds;
-      if (!filing || typeof filing !== 'object' || Array.isArray(filing)) {
+      if (!isPlainResponseMap(filing)) {
         unknownFiling.push(id);
         continue;
       }

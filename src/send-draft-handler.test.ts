@@ -33,8 +33,8 @@ function spyClient(over: Partial<SendDraftClient> = {}) {
   return { client, calls };
 }
 
-// A sendDraft override whose draft records the exact source instance (what
-// reply_email/forward_email now stamp as X-Fastmail-MCP-Source-Id).
+// A sendDraft override whose draft records the exact source instance (what draft_email's
+// reply and forward modes stamp as X-Fastmail-MCP-Source-Id).
 const sendWithRecordedInstance = (kind: 'reply' | 'forward') => async () => ({
   submissionId: 'sub-1',
   sourceReferences: {
