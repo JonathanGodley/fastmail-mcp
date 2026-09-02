@@ -3311,21 +3311,21 @@ export class JmapClient {
     // are all one rule: the caller may carry a hash forward only when it already knows,
     // byte for byte, what the saved draft's governing body part says.
     //
-    //  - A metadata-only edit writes no body, so it neither needs a hash nor issues one, and
-    //    on an ordinary draft it leaves both stored bodies exactly as they were.
-    //    BODY-INVARIANCE IS WHAT THAT PATH AIMS AT, NOT A PROPERTY IT CAN PROMISE, and two
-    //    known shapes break it. A draft carrying a body part that declares no content type
-    //    at all comes out of the recreate with an EMPTY body — nothing selects that part —
-    //    so a metadata edit destroys the one thing it was meant not to touch. And a recreate
-    //    that re-files an image out of a body list changes the deduplicated part SET the
-    //    hash covers, with no body written, so a hash the caller is holding can go stale
-    //    under an edit that wrote none.
-    //    The hash is not the lever for either, and must not be bent into one. It is demanded
-    //    only on an edit that TOUCHES the body (the guard above sits inside `touchesBody`),
-    //    so it never reaches the metadata path where the loss happens; withholding it would
-    //    take away the body edit — the one operation that cannot lose the body, since the
-    //    caller supplies it — and leave the destructive path exactly as it was. The second
-    //    case costs the caller a re-read on its next body edit, which is the guard working.
+    //  - A metadata-only edit writes no body, so it neither needs a hash nor issues one. What
+    //    it does with the body is COPY it: the recreate puts the stored parts back as it found
+    //    them, and on an ordinary draft both bodies come back byte for byte, so a hash the
+    //    caller was already holding is still good afterwards.
+    //    That carry-across is what the path AIMS at, and whether it holds is a property of the
+    //    DRAFT, not of the edit — a copy can only carry the parts it picks up and identifies.
+    //    Two draft shapes are not carried that way.
+    //    A body part that declares no content type is one: the body written on the way back
+    //    out is selected by declared type, and such a part answers to neither format, so it is
+    //    not among the parts the copy picks up, and its content is not something a rewrite of
+    //    this kind preserves.
+    //    A draft with an image sitting inside a body list is the other: re-filing that image
+    //    out of the list changes the deduplicated part SET the hash is taken over, so a hash
+    //    the caller is holding can stop matching after an edit that wrote no body at all. That
+    //    one costs a re-read on the caller's next body edit, which is the hash doing its job.
     //  - A flagged edit expands `{{signature}}` INTO the stored body, so what landed is not
     //    what the caller wrote. No hash; the note says to re-read.
     //  - An edit whose governing part is one this server DERIVED (an html clear on a draft
