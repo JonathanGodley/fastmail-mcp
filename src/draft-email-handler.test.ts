@@ -4,6 +4,7 @@ import { composeDraftEmail, sanitizeEmlFilename } from './draft-email-handler.js
 import type { DraftEmailClient } from './draft-email-handler.js';
 import { InvalidInputError } from './coerce.js';
 import { EMAIL_BODY_PROPERTIES } from './jmap-client.js';
+import { normalizeBodies } from './body-format.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -2182,6 +2183,89 @@ describe('draft_email — the quote sanitiser, over the stored body', () => {
   it('stores a no-<body> fragment intact (no regex extraction)', async () => {
     assert.match(await storedHtmlQuoting('<p>hi</p>'), /<p>hi<\/p>/);
   });
+});
+
+// A construct that swallows the REST OF THE DOCUMENT is a different question from the ones
+// above, and none of them can ask it: every case up there puts `{{quote}}` last, and a
+// construct that eats everything after itself eats nothing when there is nothing after it.
+// Here the token sits ABOVE the caller's prose, so a swallower surviving the sanitiser has
+// the caller's own words in its mouth — the message would ship with the prose invisible in
+// a recipient's client, and nothing in the stored body would look wrong.
+//
+// This is the property the quote design rests on: the sanitiser's ALLOWLIST, not a
+// blocklist. None of these six tags is in QUOTE_ALLOWED_TAGS (src/inline-images.ts), and
+// these cases exist so that stays true — a future widening that admits one of them turns
+// red here rather than in someone's inbox.
+//
+// The construct comes out of the FETCHED ORIGINAL, never the caller's body. The caller's
+// text is checked by assertBodyInputs, which rejects several of these outright; the fetched
+// original is deliberately not put through that gate, so the sanitiser is the only thing
+// standing between it and the recipient.
+
+describe('draft_email — a swallowing construct out of a fetched original cannot eat the caller\'s prose', () => {
+  // Both parts are supplied, and the token leads each of them, so the stored draft carries a
+  // text part to assert on as well as an html one. `compose` refuses a token placed in one
+  // supplied part and not the other, and it derives no text part when only html is given.
+  const storedWithQuoteAbovePros = async (originalHtml: string) => {
+    const original = makeOriginal({
+      bodyValues: { t: { value: 'original text' }, h: { value: originalHtml } },
+    });
+    const { client, calls } = plainClient(original);
+    await compose(
+      {
+        mode: 'reply',
+        originalEmailId: 'o1',
+        htmlBody: '{{quote}}<p>PROSE-KEPT</p>',
+        textBody: '{{quote}}\nPROSE-KEPT',
+      },
+      client,
+    );
+    return { html: calls.draft.htmlBody as string, text: calls.draft.textBody as string };
+  };
+
+  // Each is left UNCLOSED where the construct has a closing form, because that is the shape
+  // that swallows: a well-formed pair only eats its own contents.
+  const SWALLOWERS: [name: string, originalHtml: string, absent: RegExp][] = [
+    ['a CDATA section', '<p>quoted</p><![CDATA[', /CDATA/i],
+    ['an unclosed <style>', '<p>quoted</p><style>body{}', /<\/?style/i],
+    ['an unclosed comment', '<p>quoted</p><!-- still going', /<!--/],
+    ['a <script>', '<p>quoted</p><script>steal()', /<\/?script|steal/i],
+    ['a <textarea>', '<p>quoted</p><textarea>', /<\/?textarea/i],
+    ['an <xmp>', '<p>quoted</p><xmp>', /<\/?xmp/i],
+  ];
+
+  for (const [name, originalHtml, absent] of SWALLOWERS) {
+    it(`drops ${name} and keeps the prose below the quote`, async () => {
+      const { html, text } = await storedWithQuoteAbovePros(originalHtml);
+      // The original's body really did reach the stored draft. Without this the case passes
+      // when the quote never lands at all — the construct is absent and the prose is intact
+      // because nothing was quoted, which is the vacuous version of this test.
+      assert.match(html, /quoted/, `the quote block never reached the stored body: ${html}`);
+      // Both halves, because either alone passes for the wrong reason: a construct that
+      // vanishes while taking the prose with it satisfies the first, and prose that survives
+      // beside a surviving swallower satisfies the second.
+      assert.doesNotMatch(html, absent, `swallowing construct survived: ${html}`);
+      assert.match(html, /PROSE-KEPT/, `the caller's prose was lost: ${html}`);
+      assert.match(text, /PROSE-KEPT/, `the caller's prose was lost from the text part: ${text}`);
+
+      // THE DERIVED TEXT PART, which is where a surviving swallower would do its damage: the
+      // html→text conversion is the step that would read one and eat everything after it.
+      // The supplied part above cannot answer this — it never passes through the converter.
+      //
+      // Through `normalizeBodies`, the seam createDraft uses (shapeBodies at
+      // jmap-client.ts:2354 calls it, and createDraft calls that), so the conversion mode is
+      // production's rather than this test's — `htmlToText` takes a mode argument, and
+      // calling it directly here would let the test pick behaviour the shipping path does
+      // not use. Html alone, because that is the shape that derives: given both parts
+      // normalizeBodies passes them straight through and converts nothing.
+      const derived = normalizeBodies({ htmlBody: html });
+      assert.match(
+        derived.textBody ?? '',
+        /PROSE-KEPT/,
+        `the derived text part lost the caller's prose: ${JSON.stringify(derived)}`,
+      );
+    });
+  }
 });
 
 describe('draft_email — hostile fields out of a forwarded message, over the stored body', () => {
