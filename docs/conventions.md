@@ -1060,6 +1060,13 @@ neutralises line forging, which is the hazard that matters — only the narrow
 redact-before-truncate half is missing, and only for a caller-supplied value over 64 code
 points with a credential straddling the cut.
 
+**That list is exhaustive, and it is the test to apply before adding to it.** A module is
+outside the rule only when importing `coerce.ts` would close a cycle — never because its
+values look harmless. Every other module that renders an untrusted value into prose imports
+`coerce.ts` already, so "it only uses `describePart`" is a site that was missed rather than
+a site that is exempt. Checking it is one grep: `describePart(` outside `inline-images.ts`,
+`inline-notes.ts` and the helper's own body should return nothing.
+
 ## Query-level signals: the result count and `position` paging
 
 `total` and `nextPosition` are properties of the *query*, not of a message, and that

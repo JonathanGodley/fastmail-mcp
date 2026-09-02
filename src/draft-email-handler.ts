@@ -1,5 +1,5 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
@@ -19,7 +19,7 @@ import {
 } from './compose-inline.js';
 import type { AuthoredInlinePlan } from './compose-inline.js';
 import {
-  buildUnionParts, checkInlineClosure, describePart, isImageType, sanitizeQuoteHtml,
+  buildUnionParts, checkInlineClosure, isImageType, sanitizeQuoteHtml,
 } from './inline-images.js';
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
@@ -206,7 +206,7 @@ function readMode(value: unknown): DraftEmailMode {
   }
   throw bad(
     `mode is required and must be exactly one of "new", "reply" or "forward" ` +
-    `(got ${value === undefined ? 'nothing' : `"${describePart(value)}"`}). ` +
+    `(got ${value === undefined ? 'nothing' : `"${describeUntrusted(value)}"`}). ` +
     'It is not defaulted: a forgotten mode would store an unthreaded new message.',
   );
 }
@@ -288,7 +288,7 @@ function assertTokensAcceptable(
     const miss = scan.nearMisses[0];
     if (miss) {
       throw bad(
-        `${partWord(part)} carries "${describePart(miss.text)}", which is not a token: ` +
+        `${partWord(part)} carries "${describeUntrusted(miss.text)}", which is not a token: ` +
         `on mode:'${mode}' ${acceptedSpellings(mode)}, lower case, with two braces each side. ` +
         ESCAPE_HINT,
       );
@@ -397,7 +397,7 @@ function quoteBlock(content: string | undefined, anyForm: boolean): BodyBlock {
  */
 function noteSignatureNotPlaced(identityEmail: string | undefined): string {
   return (
-    `Identity ${identityEmail ? `${describePart(identityEmail)} ` : ''}has a signature; ` +
+    `Identity ${identityEmail ? `${describeUntrusted(identityEmail)} ` : ''}has a signature; ` +
     'this body has no {{signature}}, so it was stored as written. To add one on edit_draft, ' +
     'place the token and pass expandSignature: true.'
   );
