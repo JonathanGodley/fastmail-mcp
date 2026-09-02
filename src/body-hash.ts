@@ -136,8 +136,10 @@ export function draftInterleavedTextType(email: any): string | undefined {
       // mandatory on a body part, and Cyrus — the server Fastmail runs — enforces that on
       // the way out: `Email/get` fills a missing Content-Type in with `text/plain` (or
       // `multipart/related`, or `message/rfc822`), lowercased and stripped of parameters,
-      // before it ever reaches a client. Every `bodyProperties` request in this file asks
-      // for `type`, so no read here can drop it either, and a message appended over IMAP
+      // before it ever reaches a client. This module issues no `Email/get` of its own — it
+      // is handed parts that `jmap-client.ts` fetched — and every `bodyProperties` request
+      // there asks for `type` (it is in `EMAIL_BODY_PROPERTIES`, and in the one hand-written
+      // list beside it), so no read feeding this can drop it either, and a message appended over IMAP
       // with no Content-Type gets RFC 2045's `text/plain` default, which is the same value.
       //
       // And it costs something to widen. Counting a typeless part as its list would pair a
