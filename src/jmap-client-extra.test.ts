@@ -5142,8 +5142,10 @@ describe('downloadAttachment — every bad reference is reported as caller-fixab
   });
 
   it('renders a hostile cid as bounded quoted data', async () => {
+    // The hostile character is U+202E, a right-to-left override, written as an escape here
+    // and in the assertion below: raw, it is invisible and reorders the line around it.
     const client = makeDownloadClient();
-    const hostile = `${'a'.repeat(200)}‮"`;
+    const hostile = `${'a'.repeat(200)}\u202E"`;
     stubEmail(client, {
       id: 'e1',
       attachments: [
@@ -5156,7 +5158,7 @@ describe('downloadAttachment — every bad reference is reported as caller-fixab
       (error: unknown) => {
         const message = (error as Error).message;
         assert.ok(message.length < 300);
-        assert.equal(message.includes('‮'), false);
+        assert.equal(message.includes('\u202E'), false);
         return true;
       },
     );
@@ -5168,17 +5170,19 @@ describe('downloadAttachment — every bad reference is reported as caller-fixab
     // on instructions found in a message. Same bounded echo as the ambiguity message.
     const client = makeDownloadClient();
     stubEmail(client, mixedShapeEmail());
+    // The bidi override is U+202E, written as an escape rather than raw: raw, it is
+    // invisible in the source and reorders the line it sits in for anyone reading it.
     // The quote and the bidi override sit inside the first DESCRIBE_PART_MAX code points,
     // so neither is removed by the length cap — the neutralisation has to be what handles
     // them. A hostile value long enough to need truncating as well follows behind.
-    const hostile = `a"b‮c${'d'.repeat(200)}`;
+    const hostile = `a"b\u202Ec${'d'.repeat(200)}`;
     await assert.rejects(
       () => client.downloadAttachment('e1', hostile),
       (error: unknown) => {
         const message = (error as Error).message;
         assert.ok(error instanceof InvalidInputError);
         assert.ok(message.length < 300, `unbounded echo: ${message.length} chars`);
-        assert.equal(message.includes('‮'), false);
+        assert.equal(message.includes('\u202E'), false);
         // The echo is wrapped in double quotes, so an unneutralised one would close the
         // quoted span early and let the rest of the value read as sentence text.
         assert.ok(message.includes("a'b"), `quote not neutralised in: ${message}`);
@@ -5250,10 +5254,12 @@ describe('downloadAttachment — every bad reference is reported as caller-fixab
 
 describe('downloadAttachment — declared filename', () => {
   it('sanitizes the sender-supplied name without appending .eml', async () => {
+    // The name carries U+202E, a right-to-left override, as an escape rather than the raw
+    // character: raw, the fixture is unreadable and reorders the source line around it.
     const client = makeDownloadClient();
     stubEmail(client, {
       id: 'e1',
-      attachments: [{ partId: 'p1', type: 'image/png', size: 5, blobId: 'b1', name: 'lo‮go.png' }],
+      attachments: [{ partId: 'p1', type: 'image/png', size: 5, blobId: 'b1', name: 'lo\u202Ego.png' }],
     });
     const url = await client.downloadAttachment('e1', 'p1');
     assert.match(url, /name=logo\.png$/);

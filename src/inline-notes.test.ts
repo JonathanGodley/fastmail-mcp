@@ -92,9 +92,12 @@ describe('describePartNames', () => {
   it('renders a hostile name as bounded, quoted data', () => {
     // A filename is sender-controlled, so it can neither close the quoted span it sits in
     // nor smuggle in characters that reorder the sentence around it.
+    // U+202E is a right-to-left override, the character that does that reordering. It is
+    // written as the escape because a raw one reorders THIS LINE in an editor too, so what
+    // a reader sees and what the compiler sees would stop agreeing.
     assert.equal(describePartNames(['a"b']), '"a\'b"');
     assert.equal(describePartNames(['a\nb']), '"ab"');
-    assert.equal(describePartNames(['inv‮fdp.exe']), '"invfdp.exe"');
+    assert.equal(describePartNames(['inv\u202Efdp.exe']), '"invfdp.exe"');
     assert.equal(describePartNames(['z'.repeat(200)]), `"${'z'.repeat(64)}…"`);
   });
 
@@ -274,9 +277,11 @@ describe('the refusals a call raises', () => {
   });
 
   it('renders a hostile dangling value as bounded, quoted data', () => {
-    const message = rejectDanglingCidRef(`x‮${'y'.repeat(200)}`, ENABLED);
+    // The hostile character is U+202E, a right-to-left override, written as an escape:
+    // raw, it is invisible here and reorders the source line it sits in.
+    const message = rejectDanglingCidRef(`x\u202E${'y'.repeat(200)}`, ENABLED);
     assert.ok(message.includes(`"x${'y'.repeat(63)}…"`));
-    assert.ok(!message.includes('‮'));
+    assert.ok(!message.includes('\u202E'));
   });
 
   // Scoped to AUTHORING one: the caller's body names a minted identifier the draft carries
