@@ -137,8 +137,14 @@ try {
     /\{\{signature\}\} is in htmlBody but not in textBody/);
 
   // ---- 4. The bodyHash gate on edit_draft ---------------------------------------------
-  check('bodyHash: the read that shows every stored byte issues one', typeof stored.hash === 'string' && stored.hash.length > 0,
-    stored.withheld ?? '(neither a hash nor a withheld reason came back)');
+  // The detail is conditional, like the cleanup check at the end: `check` prints `extra` on a
+  // PASS as well as a FAIL, so a fixed fallback about a MISSING hash would print beside PASS
+  // and read as the check contradicting itself. Nothing is printed on the pass - the hash is
+  // a digest rather than content, but an empty detail keeps this probe's output free of
+  // account data by construction rather than by an argument about what a digest reveals.
+  const issuedHash = typeof stored.hash === 'string' && stored.hash.length > 0;
+  check('bodyHash: the read that shows every stored byte issues one', issuedHash,
+    issuedHash ? '' : (stored.withheld ?? '(neither a hash nor a withheld reason came back)'));
 
   await mustRefuse('bodyHash: a body edit carrying none is refused', 'edit_draft',
     { emailId: d1, htmlBody: '<p>no hash</p>' },
