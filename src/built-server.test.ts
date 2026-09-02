@@ -303,8 +303,7 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
 
   // Both parameters run through coerceStringArray in edit-draft-handler.ts, and
   // edit-draft-handler.test.ts pins that the handler reads `clearFields: 'cc'` and
-  // `removeAttachments: 'blob-9'`. That coverage is what makes the narrow schema a split
-  // rather than a design: the handler's leniency was unreachable through a real call.
+  // `removeAttachments: 'blob-9'`.
   for (const param of ['clearFields', 'removeAttachments']) {
     it(`declares ${param} as array-or-string`, async () => {
       const schema = await toolSchema('edit_draft');

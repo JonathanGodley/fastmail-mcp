@@ -80,12 +80,8 @@ export function isTextBodyType(type: unknown): type is DraftTextType {
  *
  * SCOPE: THIS ANSWERS WHAT A READ DISPLAYS, AND ONLY THAT. It is the rule the body reader
  * and the hash over what it read share, so the hash covers exactly the bytes the caller was
- * shown. The edit side does NOT widen to match: the selector that picks a part to rebuild a
- * draft from matches the declared type exactly, because a typeless part matching whichever
- * list asks for it makes a one-part draft's single part answer BOTH formats, and the
- * recreate then writes the same bytes into a `text/plain` and a `text/html` part — plain
- * text rendered as markup, silently, on the metadata-only path that promises to leave the
- * body alone (#179). Its own comment carries the rest of the reasoning.
+ * shown. The edit side does NOT widen to match: `bodyValueForType` in jmap-client.ts
+ * matches the declared type exactly, and the comment above it says why (#179).
  */
 export function draftTextBodyType(type: unknown, listType: DraftTextType): DraftTextType | undefined {
   if (type === undefined || type === null || type === '') return listType;

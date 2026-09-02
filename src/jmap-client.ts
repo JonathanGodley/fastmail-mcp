@@ -2239,10 +2239,7 @@ export class JmapClient {
       // ('draft') would file the draft into a user mailbox called "Draft notes" on an
       // account with no drafts role, then report success. That draft is not merely
       // misfiled: sendDraft refuses it, and no move repairs it, because the folder the
-      // send wants does not exist. Failing loudly at create is the smaller harm, and it is
-      // strictly better in every case — an exactly-spelled role resolves as before, a
-      // differently-cased one now resolves BY ROLE rather than by a lucky name match, and
-      // the only behaviour that changes is the one that produced the dead end.
+      // send wants does not exist. The rule is stated in full at that gate.
       const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
       if (!draftsMailbox) {
         throw new Error(
@@ -2338,12 +2335,7 @@ export class JmapClient {
   // one, and a body containing "<" ships as markup with its newlines gone. That lands on
   // the metadata-only path too, which promises to leave the body untouched, and it lands
   // in silence — nothing here compares the two slots and no hash is required of a caller
-  // who only renamed the subject.
-  // Widening it bought nothing against that, because the shape cannot reach us: RFC 8621
-  // §4.1.4 makes `type` mandatory on a body part and Cyrus, the server Fastmail runs,
-  // defaults a missing Content-Type to text/plain in Email/get before any client sees it.
-  // Every bodyProperties request in this file asks for `type`, so no read here drops one
-  // either (#179).
+  // who only renamed the subject (#179).
   // Takes the first part of the given type (drafts here carry at most one per type). If a
   // value were ever elided from bodyValues, that format reads as undefined rather than a
   // partial body (callers fetch full values, so this won't occur in practice).
@@ -2794,14 +2786,6 @@ export class JmapClient {
     // count over a string this server already holds, which is not recognition of anything in
     // the body. So a spelling the handed-back body already carried is stored in silence, and
     // only one the caller has just added is reported.
-    //
-    // It is the same reasoning that makes these notes rather than refusals, applied one step
-    // further. A check keyed on the text of a body the caller did not write recurs on every
-    // edit of that draft for as long as it exists, and the text that triggers it was authored
-    // by whoever composed the original — so it is plantable, it says nothing about what THIS
-    // call did, and the caller cannot act on it, because those are not their words to change.
-    // A refusal on that footing would be intolerable; a note on it is merely useless noise
-    // that trains the reader to ignore the ones that matter.
     // Every DISTINCT `{{…}}` this call ADDED that names no token, gathered across both written
     // parts and reported as one sentence. Gathered rather than pushed per site because one
     // note per site would bury the others.
@@ -2821,9 +2805,7 @@ export class JmapClient {
 
       // Runs on flagged and unflagged edits alike: the flag expands `{{signature}}` and
       // nothing else, so a spelling that names no token ships either way. Count-rise against
-      // the stored bytes, the same budget the escape pass below uses — a spelling already in
-      // the body handed back is text someone else wrote, and reporting it would fire on
-      // every edit of that draft forever while saying nothing about what this call did.
+      // the stored bytes, the same budget the escape pass below uses.
       const storedSpellings = new Map<string, number>();
       for (const s of storedScan.otherSpellings) {
         storedSpellings.set(s.text, (storedSpellings.get(s.text) ?? 0) + 1);
@@ -3515,14 +3497,8 @@ export class JmapClient {
           // the sentence below that reports what the sent message carried. They vet nothing;
           // the draft is submitted by reference, exactly as it is stored.
           //
-          // `mailboxIds` is the one property fetched to be CHECKED, and it reverses a
-          // position that stood here: that no refusal belonged on this path at all, because
-          // "a refusal here would only strand a finished message". That argument holds for
-          // CONTENT — anything wrong with what the message says belongs on the edit path,
-          // which can offer a repair. It does not hold for where the draft SITS. A draft
-          // outside the Drafts folder is not a finished message the caller approved; it is
-          // one that was moved, and shipping it is the outcome nobody asked for. The refusal
-          // names the move that puts it back, so it strands nothing.
+          // `mailboxIds` is the one property fetched to be CHECKED: the Drafts gate below
+          // reads it, and states the rule it applies.
           bodyProperties: ['partId', 'blobId', 'type', 'size', 'disposition', 'cid', 'name'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
@@ -3589,9 +3565,7 @@ export class JmapClient {
     // A DRAFT IS SENDABLE ONLY FROM THE DRAFTS FOLDER.
     //
     // Deliberately stronger than "not solely in Trash": a draft that was moved to Archive,
-    // or filed into a custom folder by hand, is refused too. Being in Drafts is what says
-    // the message is still queued to go out — anywhere else, someone has since decided it
-    // is something other than outbound mail, and this is the only tool that can transmit.
+    // or filed into a custom folder by hand, is refused too.
     // Placed after the checks that need no round trip, and before the submission, which is
     // the only irreversible step here.
     //

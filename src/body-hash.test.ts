@@ -140,10 +140,8 @@ describe('draftInterleavedTextType', () => {
   });
 
   // A part that declares no type is not counted as either format here, and so never pairs
-  // with anything. That is the whole rule: the shape cannot reach us (RFC 8621 §4.1.4 makes
-  // `type` mandatory and Cyrus defaults a missing one to text/plain in Email/get), so
-  // counting it as its list would only invent a refusal and, on the edit-side selector,
-  // send the same bytes into a text/plain and a text/html part at once (#179).
+  // with anything. Why — the platform facts and both costs of widening — is on the skip
+  // itself, in draftInterleavedTextType (#179).
   it('does not count a part that declares no content type', () => {
     assert.equal(draftInterleavedTextType(draft({
       textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'b' }],

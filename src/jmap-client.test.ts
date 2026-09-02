@@ -2259,9 +2259,6 @@ describe('sendDraft', () => {
   });
 
   // ---- a draft is sendable only from the Drafts folder ----
-  // send_draft is the only path that transmits, and transmitting is irreversible. A draft
-  // that is not in Drafts was MOVED there by someone, so sending it is not the act the
-  // caller's earlier approval covered. Both arms refuse; neither warns and proceeds.
 
   it('refuses to send a draft that is not in the Drafts folder, and names the repair', async () => {
     const archived = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-archive': true } };
@@ -2295,8 +2292,6 @@ describe('sendDraft', () => {
     assert.ok(callArguments(makeReq)[0].methodCalls[0][1].properties.includes('mailboxIds'));
   });
 
-  // A draft filed in Drafts AND somewhere else is still in Drafts, so it sends. The rule is
-  // "is in Drafts", not "is solely in Drafts" — a label alongside it is not a move.
   it('sends a draft that is in Drafts alongside another mailbox', async () => {
     const alsoLabelled = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-archive': true } };
     stubRequests(client, async (req: any) => {
@@ -2309,9 +2304,6 @@ describe('sendDraft', () => {
     assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1');
   });
 
-  // Resolution is by EXACT role, so an account with no drafts-role mailbox reaches this arm
-  // rather than falling through to a permit. It must refuse: the gate cannot be satisfied,
-  // and an unsatisfiable gate that lets the send through is not a gate.
   it('refuses when no mailbox carries the drafts role', async () => {
     mock.method(client, 'getMailboxes', async () => [SENT_MAILBOX]);
     const makeReq = stubRequests(client, async () => ({
@@ -2383,9 +2375,6 @@ describe('sendDraft', () => {
     );
   });
 
-  // The substring name fallback would accept a user mailbox merely CONTAINING "draft", and
-  // in front of an irreversible send that fails the dangerous way: it permits. Exact role
-  // only — the same rule the default Trash/Spam exclusion is held to, for the same reason.
   it('does not accept a custom mailbox whose name merely contains "draft"', async () => {
     mock.method(client, 'getMailboxes', async () => [
       { id: 'mb-notes', name: 'Draft notes', role: null },
