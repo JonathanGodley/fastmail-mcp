@@ -3416,16 +3416,23 @@ export class JmapClient {
           accountId: session.accountId,
           ids: [emailId],
           properties: [
-            'id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'textBody', 'htmlBody', 'bodyValues',
+            'id', 'from', 'to', 'cc', 'bcc', 'replyTo', 'keywords', 'mailboxIds',
+            'textBody', 'htmlBody', 'bodyValues',
             'attachments',
             'inReplyTo', 'header:X-Forwarded-Message-Id:asMessageIds', SOURCE_ID_HEADER,
           ],
           // `attachments` above and disposition/cid/name here are for the RECEIPT ONLY —
-          // the sentence below that reports what the sent message carried. They are never a
-          // send-time vet: this method submits the stored draft by reference, exactly as it
-          // is, and adds no check that could refuse a message the caller already approved.
-          // Anything that would refuse a draft belongs on the edit path, which can offer a
-          // repair; a refusal here would only strand a finished message.
+          // the sentence below that reports what the sent message carried. They vet nothing;
+          // the draft is submitted by reference, exactly as it is stored.
+          //
+          // `mailboxIds` is the one property fetched to be CHECKED, and it reverses a
+          // position that stood here: that no refusal belonged on this path at all, because
+          // "a refusal here would only strand a finished message". That argument holds for
+          // CONTENT — anything wrong with what the message says belongs on the edit path,
+          // which can offer a repair. It does not hold for where the draft SITS. A draft
+          // outside the Drafts folder is not a finished message the caller approved; it is
+          // one that was moved, and shipping it is the outcome nobody asked for. The refusal
+          // names the move that puts it back, so it strands nothing.
           bodyProperties: ['partId', 'blobId', 'type', 'size', 'disposition', 'cid', 'name'],
           fetchTextBodyValues: true,
           fetchHTMLBodyValues: true,
@@ -3486,8 +3493,48 @@ export class JmapClient {
       throw new InvalidInputError('From address on draft does not match any sending identity. Edit the draft to set a from address matching one of your verified identities before sending.');
     }
 
-    // Find the Sent mailbox
+    // One mailbox fetch serves both the Drafts gate below and the Sent target further down.
     const mailboxes = await this.getMailboxes();
+
+    // A DRAFT IS SENDABLE ONLY FROM THE DRAFTS FOLDER.
+    //
+    // Deliberately stronger than "not solely in Trash": a draft that was moved to Archive,
+    // or filed into a custom folder by hand, is refused too. Being in Drafts is what says
+    // the message is still queued to go out — anywhere else, someone has since decided it
+    // is something other than outbound mail, and this is the only tool that can transmit.
+    // Placed after the checks that need no round trip, and before the submission, which is
+    // the only irreversible step here.
+    //
+    // Resolved by EXACT role, case-insensitive, never findMailboxByRoleOrName: its
+    // substring name fallback would let a user mailbox called "Draft notes" satisfy this,
+    // and in front of an irreversible send that failure PERMITS — precisely the send the
+    // gate exists to stop. The default Trash/Spam exclusion is held to the same rule for
+    // the same reason (see computeExclusion's comment, "NEVER findMailboxByRoleOrName").
+    // findByExactRole also requires a usable id, so a role record with no id refuses here
+    // rather than being compared against as the string "undefined".
+    //
+    // Both arms refuse. An account with no drafts-role mailbox is reachable precisely
+    // because the resolution is exact, and it must not fall through to a permit: a gate
+    // that cannot be satisfied is not a gate that opens.
+    const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
+    if (!draftsMailbox) {
+      throw new Error(
+        'Could not find a Drafts mailbox (no mailbox in this account carries the "drafts" role), ' +
+        'so this draft cannot be confirmed to be in Drafts. send_draft only sends a draft that is ' +
+        'in the Drafts folder.',
+      );
+    }
+    if (!email.mailboxIds?.[draftsMailbox.id]) {
+      const filedIn = Object.keys(email.mailboxIds || {})
+        .map(id => mailboxes.find(mb => mb?.id === id)?.name || id);
+      throw new InvalidInputError(
+        'This draft is not in the Drafts folder, so it will not be sent' +
+        (filedIn.length > 0 ? ` (it is in: ${filedIn.join(', ')})` : '') +
+        '. Move it back to Drafts with move_email and send it again.',
+      );
+    }
+
+    // Find the Sent mailbox
     const sentMailbox = this.findMailboxByRoleOrName(mailboxes, 'sent', 'sent');
     if (!sentMailbox) {
       throw new Error('Could not find Sent mailbox');

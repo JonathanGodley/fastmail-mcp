@@ -1912,6 +1912,8 @@ describe('updateDraft', () => {
 
 // ---------- sendDraft ----------
 
+// In the Drafts folder, because send_draft only sends a draft that is filed there. A
+// fixture without mailboxIds is an under-stubbed read, not a draft the send should accept.
 const SENDABLE_DRAFT = {
   id: 'draft-1',
   from: [{ email: 'me@example.com' }],
@@ -1919,6 +1921,7 @@ const SENDABLE_DRAFT = {
   cc: [{ email: 'cc@example.com' }],
   bcc: [],
   keywords: { $draft: true },
+  mailboxIds: { 'mb-drafts': true },
 };
 
 const SENT_MAILBOX = { id: 'mb-sent', name: 'Sent', role: 'sent' };
@@ -2059,6 +2062,92 @@ describe('sendDraft', () => {
 
     // The reject fires before submission: only the Email/get call was made.
     assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // ---- a draft is sendable only from the Drafts folder ----
+  // send_draft is the only path that transmits, and transmitting is irreversible. A draft
+  // that is not in Drafts was MOVED there by someone, so sending it is not the act the
+  // caller's earlier approval covered. Both arms refuse; neither warns and proceeds.
+
+  it('refuses to send a draft that is not in the Drafts folder, and names the repair', async () => {
+    const archived = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-archive': true } };
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [archived] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /not in the Drafts folder/i);
+        assert.match(err.message, /move_email/);
+        return true;
+      },
+    );
+    // Refused before submission: only the Email/get went out.
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // The check needs the property, and nothing else in this method reads it, so a read that
+  // stopped asking for it would make every draft look filed nowhere.
+  it('asks for mailboxIds on the pre-send read', async () => {
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    await client.sendDraft('draft-1');
+    assert.ok(callArguments(makeReq)[0].methodCalls[0][1].properties.includes('mailboxIds'));
+  });
+
+  // A draft filed in Drafts AND somewhere else is still in Drafts, so it sends. The rule is
+  // "is in Drafts", not "is solely in Drafts" — a label alongside it is not a move.
+  it('sends a draft that is in Drafts alongside another mailbox', async () => {
+    const alsoLabelled = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-archive': true } };
+    stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [alsoLabelled] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+
+    assert.equal((await client.sendDraft('draft-1')).submissionId, 'sub-1');
+  });
+
+  // Resolution is by EXACT role, so an account with no drafts-role mailbox reaches this arm
+  // rather than falling through to a permit. It must refuse: the gate cannot be satisfied,
+  // and an unsatisfiable gate that lets the send through is not a gate.
+  it('refuses when no mailbox carries the drafts role', async () => {
+    mock.method(client, 'getMailboxes', async () => [SENT_MAILBOX]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [SENDABLE_DRAFT] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /drafts/i);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // The substring name fallback would accept a user mailbox merely CONTAINING "draft", and
+  // in front of an irreversible send that fails the dangerous way: it permits. Exact role
+  // only — the same rule the default Trash/Spam exclusion is held to, for the same reason.
+  it('does not accept a custom mailbox whose name merely contains "draft"', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'mb-notes', name: 'Draft notes', role: null },
+      SENT_MAILBOX,
+    ]);
+    const filedInNotes = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-notes': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [filedInNotes] }, 'getEmail']],
+    }));
+
+    await assert.rejects(() => client.sendDraft('draft-1'), /drafts/i);
   });
 
   it('throws when email not found', async () => {
