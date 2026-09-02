@@ -1028,8 +1028,6 @@ This server uses the JMAP (JSON Meta Application Protocol) API provided by Fastm
 
 Many features in this MCP server are inspired by the official [Fastmail JMAP-Samples](https://github.com/fastmail/JMAP-Samples) repository, including:
 - Recent emails retrieval (based on top-ten example)
-- Email management operations
-- Efficient chained JMAP method calls
 
 ### Authentication
 The server uses bearer token authentication with Fastmail's API. API tokens provide secure access without exposing your main account password.
