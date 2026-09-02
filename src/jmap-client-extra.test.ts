@@ -5170,8 +5170,6 @@ describe('downloadAttachment — every bad reference is reported as caller-fixab
     // on instructions found in a message. Same bounded echo as the ambiguity message.
     const client = makeDownloadClient();
     stubEmail(client, mixedShapeEmail());
-    // The bidi override is U+202E, written as an escape rather than raw: raw, it is
-    // invisible in the source and reorders the line it sits in for anyone reading it.
     // The quote and the bidi override sit inside the first DESCRIBE_PART_MAX code points,
     // so neither is removed by the length cap — the neutralisation has to be what handles
     // them. A hostile value long enough to need truncating as well follows behind.

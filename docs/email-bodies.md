@@ -694,13 +694,11 @@ sits).
 
 **The rebuild matches the declared type exactly, and has to.** `bodyValueForType` runs once
 per format over lists that a single-format draft aliases into *both*, so a part that
-answered whichever format asked for it would answer both: the recreate would write one
-value into the `text/plain` slot and the same value into the `text/html` one, and a body
-containing `<` would ship as markup with its newlines gone. That reaches the metadata-only
-path too — the one that promises to leave the body untouched — and it reaches it in
-silence, because nothing compares the two slots and no hash is asked of a caller who only
-renamed the subject. Widening this side for symmetry with the read was tried and taken back
-out for exactly that reason (#179): corrupting a body is the worse trade.
+answered whichever format asked for it would answer both, and the corruption that follows
+reaches the metadata-only path along with the rest. The comment above that function spells
+out what lands in which slot, and why nothing catches it when it does. Widening this side
+for symmetry with the read was tried and taken back out for exactly that reason (#179):
+corrupting a body is the worse trade.
 
 A third consumer, `draftInterleavedTextType` (`src/body-hash.ts`), counts a typeless part as
 neither format — the one place in that module that does not fall back to the list. It is
