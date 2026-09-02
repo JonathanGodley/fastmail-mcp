@@ -3303,7 +3303,8 @@ export class JmapClient {
     //    A body part that declares no content type is one: the body written on the way back
     //    out is selected by declared type, and such a part answers to neither format, so it is
     //    not among the parts the copy picks up, and its content is not something a rewrite of
-    //    this kind preserves.
+    //    this kind preserves. That shape cannot arise from this deployment, for the reasons
+    //    set out on the skip in `draftInterleavedTextType` (body-hash.ts).
     //    A draft with an image sitting inside a body list is the other: re-filing that image
     //    out of the list changes the deduplicated part SET the hash is taken over, so a hash
     //    the caller is holding can stop matching after an edit that wrote no body at all. That
