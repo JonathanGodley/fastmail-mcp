@@ -741,7 +741,7 @@ Every throwing set-error site routes through the classifier — `Email/set` `not
 `notCreated` throws (`createDraft`, the `edit_draft` recreate, and the `EmailSubmission/set`
 in `send_draft`). Those last three built their message from `describeSetError` directly for
 a while and stayed a plain `Error` whatever the type, which meant `create_contact` failing
-on `invalidProperties` reported a caller-fixable error while `create_draft` failing the same
+on `invalidProperties` reported a caller-fixable error while `draft_email` failing the same
 way reported a server bug. Route new set-error sites through `throwSingleSetError`; reaching
 for `describeSetError` alone is how that inconsistency reappears.
 
@@ -1188,20 +1188,21 @@ trap the `parseInt` reversal above closed, met from the other side.
 
 A draft composed from an existing message records which message that was — in headers,
 so the record rides the draft itself and survives everything a draft survives (a new
-session, an edit, another client). Four surfaces read that record (`reply_email`,
-`forward_email`, `send_draft`, and `edit_draft`'s quote guard), so the model belongs here
-rather than in any one of them. The record has two tiers: **which message** (by
+session, an edit, another client). Three surfaces read or write that record
+(`draft_email`'s reply and forward modes, `send_draft`, and `edit_draft`'s recreate), so
+the model belongs here rather than in any one of them. The record has two tiers: **which message** (by
 Message-ID, interoperable, set by other clients too) and **which stored copy of it**
 (by JMAP id, this server's own header).
 
-- **The two kind headers.** `In-Reply-To` marks a reply (set by `reply_email` and by every
-  other client's reply); `X-Forwarded-Message-Id` marks a forward (set by `forward_email`,
-  and by Fastmail's own clients — see `docs/email-bodies.md` for the forward-threading
+- **The two kind headers.** `In-Reply-To` marks a reply (set by `draft_email` in reply mode
+  and by every other client's reply); `X-Forwarded-Message-Id` marks a forward (set by
+  `draft_email` in forward mode, and by Fastmail's own clients — see `docs/email-bodies.md` for the forward-threading
   rationale and the value-validation rules). Both are JMAP `MessageIds`, i.e. **bare** ids
   with no angle brackets.
 - **Reply wins when a draft carries both.** Dispatch is mutually exclusive and
-  reply-first, in `edit_draft`'s guard variant and in `send_draft`'s keyword maintenance
-  alike. This server never writes both; a foreign draft that does is treated as a reply.
+  reply-first, in `send_draft`'s keyword maintenance and in the noun `edit_draft` uses for
+  the block a draft carries alike. This server never writes both; a foreign draft that does
+  is treated as a reply.
 - **Absent provenance is a real state, not a failure.** An ordinary compose records
   neither header; anything keyed on provenance is inert on such a draft — `send_draft`
   marks nothing. Both forward shapes DO record the header, including `asAttachment`
@@ -1209,15 +1210,15 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
   source — reversed under draft-first, #32/#66, because the `.eml` is not
   machine-resolvable as provenance and `send_draft` is the only transmit path left, so
   a header-less asAttachment forward's original could never be marked forwarded).
-  `edit_draft`'s guard does not arm on the bare header when the draft carries a
-  `message/rfc822` attachment: the forwarded content lives in the `.eml`, which body
-  edits can't drop and the recreate preserves alongside the header.
+  An `asAttachment` forward is a forward for the marking and not for the body: its content
+  lives in the attached `.eml`, which no body edit can drop and the recreate preserves
+  alongside the header.
 - **The exact-instance header: `X-Fastmail-MCP-Source-Id`.** A Message-ID names a
   *message*; an account can hold several stored copies of one message (a duplicate
   delivery, or a self-addressed copy the user filed into another folder), and only the
-  compose call knows which copy the caller actually had in hand. So `reply_email` and
-  `forward_email` (both shapes, including `asAttachment`) also record the JMAP id of the
-  fetched original in this header. That id is what lets `send_draft` mark exactly the
+  compose call knows which copy the caller actually had in hand. So `draft_email`, in reply
+  mode and in either forward shape (`asAttachment` included), also records the JMAP id of
+  the fetched original in this header. That id is what lets `send_draft` mark exactly the
   copy the caller composed from — matching Fastmail's own client, which marks the
   instance replied to and leaves other copies of the same Message-ID untouched
   (observed live, 2026-08-14: replying to the Archive copy of a self-addressed message
@@ -1233,10 +1234,9 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
   stamped, and anything else degrades to absent — the fallback covers a draft without
   the header, so a malformed value is never worth an error.
 - **`edit_draft` carries the exact id like the kind headers.** The immutable-email
-  recreate copies it verbatim; the forward keep path (`originalEmailId`) re-points it at
-  the newly-named original alongside the Message-ID re-point; `noQuote` on a forward
-  draft drops it together with `X-Forwarded-Message-Id` (the draft stops being a
-  forward), while a reply draft keeps it under `noQuote` just as it keeps `In-Reply-To`.
+  recreate copies it verbatim; `clearFields: ['forwardedMessageId']` on a forward draft
+  drops it together with `X-Forwarded-Message-Id` (the draft stops being a forward), while
+  a reply draft keeps it under that same clear, just as it keeps `In-Reply-To`.
 - **Message-ID to JMAP id is a lookup, and it is two steps.** Every write path needs a
   JMAP id, so the header value has to be resolved: a full-text `Email/query` on the
   **bare** id is the recall step (the bracketed form matches nothing — the platform fact
@@ -2032,8 +2032,8 @@ Date rendering for humans (`toLocalIso` and `formatReplyDate` in
 
 ## Re-sending sanitised content: the two-pass quote sanitiser
 
-`reply_email` re-sends the original message's HTML as a quote under the user's own
-`From`, so the quoted HTML is active content we originate, not passive display. The
+`draft_email` re-sends the original message's HTML as a quote or a forwarded block under
+the user's own `From`, so that HTML is active content we originate, not passive display. The
 `sanitizeQuoteHtml` choices in `src/inline-images.ts` are load-bearing security, not
 incidental config:
 

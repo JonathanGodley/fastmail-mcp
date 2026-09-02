@@ -1,11 +1,11 @@
 # Email body handling
 
 How this server composes, edits, reads, and reasons about the `text/plain` and `text/html`
-parts of an email. This spans every authoring path (`create_draft`, `reply_email`,
-`forward_email`, `edit_draft`, `send_draft`) and the read paths that undo
-their quoting again (`get_email`, `get_thread`), so it lives here rather than in any one
-tool's issue. The per-tool behaviour rationale lives in the closed GitHub issues
-(#4, #7, #15, #16, #33, #73, #74); this file is the shared model they all depend on.
+parts of an email. This spans every authoring path (`draft_email`, `edit_draft`,
+`send_draft`) and the read paths that undo their quoting again (`get_email`, `get_thread`),
+so it lives here rather than in any one tool's issue. The per-tool behaviour rationale lives
+in the closed GitHub issues (#4, #7, #15, #16, #33, #73, #74); this file is the shared model
+they all depend on.
 
 ## The body-format model
 
@@ -123,33 +123,35 @@ visible to a human who opens the draft or to the recipient.
     text and passes through the text derivation intact, so rejecting it would block ordinary
     prose and code snippets to prevent nothing.
 
-**Where the gate sits, and why.** It runs on the CALLER's own body, at the seam of each of
-the four compose paths, *before* a reply quote or forwarded-message block is merged in:
-`buildReplyParams` (`src/reply-handler.ts`), `buildForwardParams`
-(`src/forward-handler.ts`), `composeDraft` (`src/compose-handler.ts`), and
-the top of `updateDraft` (`src/jmap-client.ts`, edit_draft's only caller — which is why the
-guard sits in the client method there, alongside the rest of the edit-body rules).
+**Where the gate sits, and why.** It runs on the CALLER's own body, at two seams, and at
+both of them it runs *before* this server's own blocks are put into that body:
+`composeDraftEmail` (`src/draft-email-handler.ts`, which is all three of `draft_email`'s
+modes) and the top of `updateDraft` (`src/jmap-client.ts`, edit_draft's only caller — which
+is why the guard sits in the client method there, alongside the rest of the edit-body
+rules).
 
 `editDraft` (`src/edit-draft-handler.ts`) runs the same check ahead of its attachment
 coercion and upload. That is an ordering belt, not a fifth seam: `updateDraft` stays
 authoritative, and because the guard is a pure idempotent check on the caller's own input,
 running it earlier refuses nothing new — it only stops a body that was always going to be
 rejected from orphaning freshly uploaded blobs first. Its position above the attachment
-coercion matters as much as its presence: the compose paths report a body defect ahead of
-an attachments-item defect, and edit_draft agrees with them on identical input.
+coercion matters as much as its presence: the compose path reports a body defect ahead of
+an attachments-item defect, and edit_draft agrees with it on identical input.
 
-Two constraints pin that placement:
+Two constraints pin that placement, and both are about the same moment — the point where a
+`{{quote}}` or `{{forward}}` token is replaced by the block built from the original:
 
-- **The merge masks the defect.** `jmap-client.ts`'s existing no-readable-body reject
+- **An expanded body masks the defect.** `jmap-client.ts`'s existing no-readable-body reject
   (`normalized.htmlOnly && !htmlHasVisibleContent`) would catch a bare CDATA-wrapped body,
   but a reply escapes it: the quoted original supplies the visible content the gate looks
   for, so `htmlOnly` is never set and the malformed new message rides through with its text
   part reduced to the quote alone. Same for a forward. The escaped-HTML test is masked the
-  same way (the quote contributes the real tags the test looks for).
-- **A merged body is not caller input.** `createDraft` cannot host this guard, because the
-  reply and forward paths reach it with the quoted original folded in. A message that
-  legitimately quotes an XML snippet would be rejected on reply, and the user has no way
-  to edit the original to fix it. Validating only what the caller wrote keeps every
+  same way (the quote contributes the real tags the test looks for). This is #78, and it is
+  why validation is step 2 of `composeDraftEmail` and expansion is step 8.
+- **An expanded body is not caller input.** `createDraft` cannot host this guard, because a
+  reply or forward reaches it with the quoted original already substituted in. A message
+  that legitimately quotes an XML snippet would be rejected on reply, and the user has no
+  way to edit the original to fix it. Validating only what the caller wrote keeps every
   reject actionable.
 
 **`send_draft` is deliberately outside the gate.** It takes no body parameter, so a draft
@@ -184,10 +186,11 @@ model; do not reintroduce the symmetric option-D description or the `2fc8283` ci
 
 ## The identity signature in the body model (#33)
 
-The sending identity's configured sign-off is a third thing this server puts into a body
-the caller did not write, alongside the reply quote and the forwarded-message block. It is
-opt-in per call (`appendSignature`) and appears in no message that did not ask for it. Two
-properties of the body model above decide almost everything about how it behaves.
+The sending identity's configured sign-off is the one block this server builds out of account
+data rather than out of another message, alongside the reply quote and the forwarded-message
+block. Where it goes is the caller's decision and nobody else's: a signature appears exactly
+where the body says `{{signature}}`, and a body that writes no token gets no sign-off. Two
+properties of the body model above decide almost everything about what gets written there.
 
 **The text form is derived, not the configured one.** An identity carries both
 `textSignature` and `htmlSignature` (RFC 8621 §6; Fastmail writes both and keeps them in
@@ -212,9 +215,9 @@ is load-bearing rather than cosmetic. The `unconditional` policy writes `[image]
 embedded image, which is right for the text alternative of a body that ships that image —
 and wrong for a message that ships no HTML at all, where the recipient's entire sign-off
 would be a line describing something no part of the message carries. (That is the same rule
-`buildReplyBodies` applies to quoted images.) So an images-only HTML signature derives to the
-empty string on that branch and is reported as `no-text-form` rather than shipped as a
-placeholder; alt text, which always wins, still derives normally.
+`buildQuoteBlocks` applies to quoted images.) So an images-only HTML signature derives to the
+empty string on that branch and the token is reported as `no-text-form` rather than expanded
+into a placeholder; alt text, which always wins, still derives normally.
 
 The **other** branch deliberately does not suppress, and the asymmetry is the whole point.
 When HTML ships, the embedded image ships with it, so `[image]` is exactly what
@@ -225,213 +228,74 @@ sign-off from one who supplies HTML alone, which is the by-itself drift this spl
 prevent. So the two spellings of "my signature is a logo" are genuinely different outcomes on
 this branch, not an inconsistency: an **embedded** (`cid:`) logo derives `[image]` and the
 sign-off is present, while a **remote** (`http(s)`) one derives nothing at all — a remote
-image writes no placeholder under any policy — and that one is reported as
-`text-part-unsigned`.
+image writes no placeholder under any policy — and the text part's token is reported as
+`no-text-form`.
 
-**Placement is above the quoted history**, which is why the insertion lives in
-`src/reply-quote.ts` rather than in `createDraft`. By the time a compose path reaches
-`createDraft`, the quote or forwarded block has already been concatenated onto the body, so
-anything appended there lands *underneath* the quoted message and reads as part of it. The
-same trap exists on the edit path: `updateDraft` replaces `updates.htmlBody` with the
-quote-appended body when it rebuilds a quote, so the signature step runs before that.
+**Placement is the caller's, and nothing is placed for them.** The three builders live
+together in `src/reply-quote.ts` because they feed one substitution: `draft_email` expands
+`{{signature}}` on the body it composes, `edit_draft` expands it on a flagged edit, and the
+rule deciding which form a part gets is one rule. Placement used to be this server's problem
+and a delicate one — a sign-off appended after the quote had already been concatenated onto
+the body landed *underneath* the quoted message and read as part of it, so the insertion had
+to run before the concatenation on both the compose and the edit paths. A token has no such
+ordering to get wrong: a caller who wants the sign-off above the history writes
+`{{signature}}` above `{{quote}}`.
 
-**Preservation on edit is keyed on the draft, not on the flag.** The block is wrapped in a
-`<div class="fm-mcp-signature">`, recognised by `hasSignatureMarker` beside the two quote
-marker families. When an edit writes a body, the merge rule above drops the unwritten
-partner and replaces the written one wholesale — so an `htmlBody`-alone edit, the commonest
-edit there is, would drop a signature the draft carried. Reading that as intent would be
-wrong: the caller asked to change a body, not to remove a sign-off. So an omitted
-`appendSignature` *preserves* — the current signature is re-appended when the stored body
-carried the marker and the new one does not — and because that is the one signature outcome
-nobody asked for in the same call, it is the one the result announces. `appendSignature:false`
-is the deliberate way to take one off. Note the asymmetry with the quote guard next door: a
-dropped quote must be *challenged*, because only the caller knows which message it quoted,
-while a dropped signature can simply be re-read from the identity.
+**The block carries no marker class, and everything that hung off one went with it.** It used
+to be wrapped in a `<div class="fm-mcp-signature">` so that a later edit could recognise a
+sign-off this server had written. That recognition existed to serve an automatic append: if a
+body might get signed without being asked, something has to decide whether it is signed
+already, and whether an edit that rewrote the body meant to drop the sign-off or merely
+forgot it. All of it — the marker check as an append gate, the preserve-on-omitted-flag path
+that re-appended a sign-off an `htmlBody`-alone edit would otherwise have dropped, the
+plain-text matcher that cut a body at its forward separator and compared whole lines of what
+was left against both configured forms — was machinery for guessing an answer the caller can
+now simply state. A token says where the sign-off goes; a body handed back without one says
+there is none. Writing an identifying class into every signed body bought a reader nothing
+and claimed the block was this server's to manage, which it no longer is.
 
-**What the marker's survival is proven against, and what it is not.** The class round-trips
-through the JMAP store — written on create, read back unchanged on the next `Email/get`, which
-is what every test here and the live probe exercise. It has **not** been measured against a
-Fastmail *web UI* round trip: a draft this server signed, opened and saved in the browser, and
-then edited here again. Two interactions follow from that gap and neither is tested:
+That also retires a residual worth naming as closed rather than leaving readers to look for
+it: the marker was a `class`, so it existed only in HTML, and a signature on a plain-text
+draft was invisible to every rule keyed on it. The asymmetry is gone because the rules are.
 
-- if the UI re-appends its own signature on each save, a draft this server signed gains a
-  second sign-off that nothing here put there — the accumulation shape reported in
-  [#135](https://github.com/JonathanGodley/fastmail-mcp/issues/135), arriving from the other
-  side of the same draft;
-- if the UI re-serialises the `class` attribute away, `hasSignatureMarker` goes false and the
-  preserve path stops firing — silently, because "the draft carried no signature" and "the
-  marker was lost" are the same observation from in here.
+**On `edit_draft` the trigger is a flag, never the token's presence.** Part of a body handed
+back to that tool was authored by the original message's sender, so any in-band trigger — a
+token, a spelling, an escape convention — can be planted by them; a flag (`expandSignature`)
+cannot. The consequence is the intended one: a stored `{{signature}}`, planted at compose
+time or escaped on purpose, is stable under every unflagged edit, with no rule for the caller
+to re-apply. Passing the flag is the caller claiming the written part as its own, so the
+compose-side refusals apply to it: a flagged edit that wrote no `{{signature}}` anywhere is
+refused, and so is a part carrying more than one.
 
-Settling either needs a measurement against the live UI, not a reading of this code. Until
-then, treat "the marker survives" as a claim about the JMAP store only.
+**A token that expands to nothing is reported, never dropped in silence.** `{{signature}}`
+is an input the caller cannot verify without re-reading the draft, so a token that quietly
+vanishes is indistinguishable from one that worked. Every unexpanded token emits a note
+naming the part it sat in and the cause, and there are two:
 
-**Residual: PRESERVATION is HTML-only.** The marker is a class, so a draft with no HTML body
-carries none. State the residual at its real width: a signature *this server appended* to a
-plain-text draft is exactly as invisible here as a hand-typed one, because nothing about the
-detector looks at where the text came from. So a plain-text draft that was signed keeps its
-signature through any edit that does not write a body (bodies are untouched), but an edit
-that rewrites its text body without passing `appendSignature:true` loses it. Accepted rather
-than fixed: the alternatives are matching the signature's *text* against the identity
-(fragile the moment either is edited by a character) or storing state outside the message
-(there is nowhere to put it that survives the recreate). The edit-time flag is the recovery,
-and it is documented on the parameter.
-
-**Idempotence is NOT the same thing, and the text path has it.** Naming
-`appendSignature:true` as the recovery above only works if asking twice does not sign twice,
-and the HTML marker cannot provide that for a body with no HTML. So `applySignature` also
-declines to append when the body it is given **already carries one of the identity's two block
-forms among its own lines**. That is not the fragile match rejected above: both forms are built
-from the identity by this same call, so neither side is a remembered value that can drift.
-Without it the read-modify-write loop the residual prescribes (read the draft, edit the words,
-send the body back with the flag still set) appends another copy every time round, which is the
-shape a duplicated sign-off actually takes in practice.
-
-**The rule is SUBTRACTIVE: cut off what cannot be the draft's own text, then match over the
-rest.** `updateDraft` hands `applySignature` the caller's **whole** `textBody`, quoted history
-included, so the sign-off it is looking for is usually somewhere in the middle rather than at
-either end. One removal builds the haystack, and it keys on a thing that *is* a line:
-
-- **The forward separator line and everything below it** — this server's
-  `----- Original message -----` and Gmail's `---------- Forwarded message ----------`,
-  anchored at line start, the same two shapes `hasTextForwardMarker` recognises. Because the
-  anchor sits on the dashes, a `> `-quoted separator inside a reply quote does not cut the body
-  short, which is the same answer `hasTextForwardMarker` gives.
-
-What is left is compared against each block form as a contiguous run of **whole lines**.
-
-**A reply quote needs no removal, and removing one was a bug worth recording.** The whole-line
-comparison already keeps quoted content out, because a quoted line is `'> '` + text and
-`> Regards,` is not `Regards,`. An earlier version of this rule *also* dropped every
-`>`-prefixed line from the body as belt and braces, and that was the opposite of safe: the
-block on the other side of the comparison is not filtered, and `signatureTextBlock` derives the
-text form through html-to-text, whose `<blockquote>` output **is** `> `-prefixed. So any
-identity whose HTML signature contains a `<blockquote>` — a quote-of-the-day sign-off — had a
-needle line that no surviving body line could ever equal, and every pass of the read-modify-write
-loop appended another copy of the sign-off in silence. Dropping the filter cannot introduce a
-wrong match either: a `> `-prefixed body line can only equal a `> `-prefixed needle line, which
-is the signature's own quoted content and exactly the match wanted.
-
-**Why subtractive, and why nothing here parses an attribution line.** Four earlier versions of
-this guard tried to find where history *begins* by recognising the attribution above the quote
-(`On <date>, <name> wrote:`). Attribution lines wrap, localise and differ per client, so each
-version was a fresh guess about one client with an unbounded supply of others left to be wrong
-about — a hard-wrapped Gmail attribution is what broke the last one, and each break shipped two
-sign-offs. A separator line needs no parsing: it matches or it does not.
-
-**The two errors are not symmetric, and the rule is tuned for that.** A false positive (read as
-signed when it is not) appends nothing *and* reports `already-signed`, so the caller sees it and
-can write the sign-off into the body themselves. A false negative (read as unsigned when it is
-signed) ships two sign-offs and says nothing at all. Only the second is invisible from the
-caller's side, so wherever the rule cannot be certain it falls on the side of not appending.
-That trade is the whole justification for the design; a "smarter", fuzzier match would swap the
-announced error for the silent one.
-
-**Accepted residual — a forward this server does not recognise as one.** An Outlook-style
-`From:/Sent:/To:/Subject:` header-block forward carries no dashed separator, so it is not
-removed, and a forwarded message whose own text carries this identity's sign-off reads as this
-draft's own: the call reports `already-signed` and the caller's note goes out bare. That is the
-*cheap* error by construction, and it is recovered by writing the sign-off into the note.
-Consistent rather than accidental: `hasTextForwardMarker` does not recognise that shape either,
-so no path in this server treats such a body as carrying a forwarded block. Extending separator
-recognition is tracked as issue #144, and it is one change to both markers.
-
-A *recognised* forward has no such residual: the block is removed wherever the sign-off sits
-inside it, including at its very end, so the caller's note above it is signed normally.
-
-**BOTH forms, not just the one this call would write.** Testing only the outgoing block was a
-duplication bug, not a simplification. Which form is sitting in a body depends on whether the
-call that put it there shipped HTML — an HTML-shipping call writes the form derived from
-`htmlSignature`, a text-only call writes the configured `textSignature` — and for the ordinary
-identity that configures both, those are different strings. So the permitted HTML→text
-conversion (`clearFields:['htmlBody']` with the text the draft just handed back) offered the
-derived form to a call about to write the configured one, and the sign-off stacked: on the
-`appendSignature:true` recovery this residual names, and on the *omitted*-flag preserve path,
-where the result additionally announced a re-append that had not happened. Matching both forms
-is what closes it, and it costs nothing: they are two strings this call already has.
-
-**The comparison is normalised, not byte-exact.** The body being tested has usually made a
-round trip through a mail store, and a store is free to change it in ways that mean nothing to
-a reader and everything to an equality test. Both sides get the SAME normalisation — any line
-ending to LF, then each line trimmed at both ends — so it can only ever make a match more
-likely, which is the announced-error direction. Four things it answers, each of which would
-otherwise ship a second sign-off in silence:
-
-- **CRLF, and a bare CR.** RFC 5322 says CRLF; a store emitting bare CR would leave the whole
-  body reading as one line, matching nothing.
-- **Stripped trailing whitespace.** `-- `, the RFC 3676 signature delimiter, *ends in a space*,
-  so losing it is not exotic.
-- **A space replaced by NBSP.** The trim uses `\s`, which covers U+00A0 and the other Unicode
-  spaces, so the same delimiter still matches when its trailing space arrives as U+00A0.
-- **Leading whitespace**, because of RFC 3676 *space-stuffing*: a `format=flowed` sender
-  prepends a space to any line starting with a space, `>` or `From `. Fastmail does not emit
-  `format=flowed` (verified live), but `edit_draft` receives drafts composed by other clients.
-
-**An append that lands nowhere is reported.** `appendSignature` is an input the caller
-cannot verify without re-reading the draft, so a flag that silently no-ops is
-indistinguishable from one that worked — the never-silently-drop rule, applied to an input.
-Every path emits a note naming which reason applied, and there are five:
-
-| reason | what happened |
+| cause | what happened |
 | --- | --- |
-| `no-signature` | the identity has none configured, or `from` names no verified identity |
-| `no-body` | this call wrote no body for the sign-off to sit under (a blank body counts as none) |
-| `already-signed` | the body supplied already carries a sign-off this call would otherwise duplicate (quoted and forwarded history excluded) |
-| `no-text-form` | the message ships no HTML, and the signature has no plain-text form to write into the text part |
-| `text-part-unsigned` | the HTML body *was* signed, but the signature has no text form for the message's plain-text alternative |
+| `no-signature` | the identity has none configured, or `from` names no verified identity — and, on an HTML part, an identity whose signature has no form at all to write there |
+| `no-text-form` | the identity has a signature, but no plain-text form this part can carry: an images-only HTML signature, in a text part |
 
-The last one is the only **partial** outcome: a recipient rendering the HTML sees the sign-off
-and one reading the plain-text alternative does not, so its note deliberately does not open
-with "nothing was appended", which would be a plainly false report.
+The split is not cosmetic. An identity that has a sign-off but cannot put one in *this* part
+is a different sentence from an identity that has none, and only the second is fixed by
+configuring a signature. The `no-text-form` case is also the only **partial** outcome: a
+recipient rendering the HTML sees the sign-off and one reading the plain-text alternative
+does not, which is why it is reported on the part rather than on the message.
 
-**`text-part-unsigned` does not depend on which bodies the caller passed**, and scoping it to
-"the caller also supplied a text part" was a sixth outcome hiding as a silence. An `htmlBody`
-alone still ships a plain-text alternative — derived downstream from the now-signed HTML, under
-the same policy this derives under — so when there is no text form to derive, the recipient
-reading that alternative sees no sign-off, identically to the case where the caller supplied
-the text part themselves. Reporting only the second made the HTML-only call the one place in
-this feature where a requested flag landed nowhere without saying so.
-
-`no-body` covers a **blank** body as well as an absent one, on both formats. `htmlShips` is
-`!isBlank(htmlBody)` because `buildBodyParts` drops a blank body and signing a part no
-recipient sees is not signing; the text side reads the same way for the same reason. Falling
-through on a blank `textBody` instead made the signature the *whole* body — the caller's own
-(blank) text discarded, a signature-only message stored, and nothing reported — which
-contradicted every wording on every surface, all of which say a blank body counts as none. The
-same rule applies to a blank text alternative beside a real HTML body: it is left alone rather
-than replaced with a bare sign-off, and the alternative is derived from the signed HTML.
-
-`edit_draft` reports the same set from both sides. `appendSignature:true` is a request made in
-that call, so it gets exactly the compose wording for every reason — including
-`already-signed` and `no-body`, which it used to swallow; a flag that reports on three
-surfaces and stays silent on the fourth is worse than one that never reports. An **omitted**
-flag is the stored draft's earlier decision being preserved, so a failure there is a loss
-rather than a declined request and gets loss wording instead. Two outcomes are not losses on
-that path and stay silent: a supplied body that already carries the sign-off (which is what
-preservation wanted), and an edit that writes no body at all (both bodies, signature included,
-are carried through verbatim).
-
-Note that `no-signature` is not the only way an edit's *keep* can fail. An identity whose
-signature is images-only HTML is not signature-less, so a gate keyed on "the identity has
-none" arms nothing for it — and an edit converting that draft to plain text then dropped the
-sign-off in silence. The reason is read off the same plan the append runs, which is what makes
-that gate total rather than a list of remembered cases.
-
-**A note-less forward signs; a body-less reply does not.** `buildForwardBodies` makes the
-signature the whole content above the forwarded-message block when the caller supplied no
-note, because a bare "FYI, see below" forward is the normal shape of that tool and a sign-off
-is the only content such a message would otherwise lack. `buildReplyBodies` has no equivalent
-arm: a reply whose entire content is a sign-off over a quote is not a message, and a body-less
-reply draft is an intermediate state meant to be filled in via `edit_draft` before sending.
-The asymmetry is deliberate; the reply reports the unsigned outcome rather than inventing a
-body for it.
+`no-text-form` does not depend on which bodies the caller passed. An `htmlBody` alone still
+ships a plain-text alternative — derived downstream from the now-signed HTML, under the same
+policy this derives under — so when there is no text form to derive, the recipient reading
+that alternative sees no sign-off, identically to the case where the caller supplied the text
+part themselves.
 
 **The sign-off follows the address written into `from`, not the identity resolved for the
 recreate.** On the edit path these can differ: when the edit writes no `from` and the stored
 one matches no verified identity, `updateDraft`'s identity resolution falls back to the
 account default while the address actually written into `from` stays the stored one. Signing
 from that fallback would put one identity's sign-off under another identity's address, so the
-signature is resolved against the written address instead, and the draft losing its signature
-that way is reported.
+signature is resolved against the written address instead, and a flagged edit that finds no
+signature there says so rather than expanding the token into nothing.
 
 The **display name** follows the same address, but resolves in the *opposite* order (#152):
 the name the stored draft already carries against that address wins first, and the verified
@@ -450,159 +314,81 @@ elsewhere) keeps whatever non-blank name it already carried against that foreign
 and no verified identity to overwrite it with. `edit_draft` never invents or strips a name
 for an address the account cannot send as.
 
-## Reply-quote preservation on edit (#37, redesigned #42)
+## How quoted history survives an edit (#37, #42, superseded by the body hash)
 
-A reply draft carries the quoted original *inside* its body — `buildReplyBodies`
-(`src/reply-quote.ts`) appends an attributed, cited `<blockquote type="cite">…` to the
-`htmlBody` and an attribution + `> `-prefixed block to the `textBody`. Because a body edit
-replaces the whole body (the recreate above writes it verbatim), an edit that rewrites or
-clears the body would silently drop the quote. `edit_draft` guards against this.
+A reply draft carries the quoted original *inside* its body. At compose time the caller writes
+`{{quote}}` (or `{{forward}}`) and `buildQuoteBlocks` / `buildForwardBlocks`
+(`src/reply-quote.ts`) substitute an attributed, cited `<blockquote type="cite">…` into the
+HTML part and an attribution plus a `> `-prefixed block into the text part. After that single
+substitution the quoted history is ordinary body text. Nothing marks it as ours, and nothing
+on the edit path looks for it.
 
-**The decision is made on the EXISTING (stored) body, not the caller's new body** (with one
-refuse-only exception, below). A reply draft (one with an `In-Reply-To` header) "has a quote"
-when its stored `htmlBody` matches `hasQuoteMarker` OR its stored `textBody` matches
-`hasTextQuoteMarker`. When the draft has a
-quote and the edit touches the body in a way that isn't quote-preserving by construction (see
-the carve-outs below), the edit is **rejected** unless the caller resolves it one of two ways:
+**Because a body edit replaces the whole body, an edit that rewrites the body drops the
+quote — and that is now the documented contract rather than a defect to be guarded against.**
+`edit_draft` stores what it is handed, character for character. To keep a reply's quoted
+original, read the draft and hand the whole body back with the edits made in it; the history
+survives because the caller sent it, not because this server detected it. The tool's own
+description says so in those terms, and says the converse just as plainly: a body sent
+without the quote drops the quote, with no challenge and no warning.
 
-- `originalEmailId` — the JMAP id of the message the draft replies to (NOT the draft's own
-  `emailId`). The body the edit is writing is regenerated by re-quoting that named original
-  from scratch via `buildReplyBodies`, so the caller's new text is kept *and* the quote is
-  restored. This is the keep path for BOTH body formats (html, or a text-only draft's text).
-  Because the quote is *appended* to the body supplied, a body that already carries it is
-  refused rather than quoted twice (see the exception below).
-- `noQuote: true` — deliberately drop the quote and store the bare new body.
+**What replaced the guard, and why the trade is worth stating.** The earlier design
+(#37, redesigned #42) recognised the stored quote by its shape and *refused* a body edit that
+would drop it, unless the caller either named the original so the block could be rebuilt from
+it or asked explicitly for a bare body. That guard is gone in every part: the shape
+recognition on both formats, the two flags that resolved a challenge, the four refusals it
+raised, and the check that the rebuilt block had actually landed. The reason is that it
+answered "did this edit drop the quote?" by recognising a shape, and shape recognition is
+lossy in both directions at once. A quote from a foreign client in a shape it did not know
+was dropped in **silence** — the widest edge of the feature, and precisely the failure class
+it existed to kill — while quote-shaped prose in a body this server had never written was
+challenged for nothing.
 
-Design points, each load-bearing:
+`edit_draft` now answers a strictly weaker question and answers it exactly. Any edit that
+writes or clears a body must carry the `bodyHash` that `get_email` issued for that draft,
+which proves the caller is replacing the body it actually **read**. It does not prove the
+caller kept any of that body: someone who reads a reply draft and deliberately sends back a
+single line gets a draft holding a single line. What the hash removes is the *silent* drop —
+you cannot overwrite quoted history you never saw — and it removes it for every draft
+equally, foreign shapes included, because it is a fact about the bytes rather than a guess
+about their meaning. The old guard was stronger wherever it recognised a quote and worthless
+wherever it did not; the hash is uniformly weaker and uniformly total, and the second property
+is the one that was missing.
 
-- **Detection is on the EXISTING body, never the caller's new body.** This supersedes the
-  fork.8 #37 approach (which scanned the caller's *new* html). Scanning new content is
-  fundamentally bypassable and noisy: it can't tell the real quote from any quote-shaped
-  content (a caller who drops the real quote but includes a different quote-shaped block would
-  pass), and ordinary prose ending in "wrote:" false-positives. The stored body, by contrast,
-  is one *this server* generated, so its quote shape is reliable. The markers (`hasQuoteMarker`
-  on html, `hasTextQuoteMarker` on text) are tolerant *presence* checks that only govern
-  whether the guard fires; `originalEmailId` is the authoritative way to keep the quote.
-- **The one exception, and why it is not a bypass (#145).** The keep path *does* read the
-  caller's new body, in exactly one place and in exactly one direction: a keep whose supplied
-  body already carries the block `originalEmailId` would rebuild is **rejected**, naming
-  `noQuote: true` as the way to store that body as written. The rebuild *appends*, so without
-  this the draft silently stored the attribution and the quoted original twice — which is what
-  the plain-text read-edit-write loop the signature section prescribes hands back every time.
-  This does not reopen the bypass above, because consulting the new body can only ever make a
-  call **fail**, never pass: no new-body content exempts an edit from the challenge.
-  The check runs on the bodies as the caller *wrote* them, before the signature step appends
-  this server's own markup (an identity whose html signature contains a cite-blockquote must
-  not trip it), and before the original is fetched, so the refusal costs no round trip to the
-  store and does not depend on the named original resolving. It is variant-scoped like the
-  stored-body check — reply markers on a reply draft, forward markers on a forward draft —
-  because a forward *of* a reply legitimately reproduces `wrote:\n> ` in its text.
+**A `{{quote}}` handed back to `edit_draft` is text, not an instruction.** Neither history
+token expands on the edit path, and neither may be removed either: the body may be a foreign
+one handed back, so a token in it may have been planted by the original's author. It survives
+the pass exactly as typed, and the result notes that it was stored as written — a note rather
+than a refusal, because a refusal keyed on text somebody else wrote would recur on every edit
+of that draft with nothing the caller could do about it.
 
-  **Why reject rather than skip the rebuild.** Skipping was the alternative. The caller's new
-  body is untrusted and prose can false-positive a marker; a silent skip on a false positive
-  would drop the quote entirely, which is precisely the #37 data-loss class this guard exists
-  to prevent. A refusal on a false positive costs one round trip, and the refusal names the way
-  through for that caller too: reword the quote-shaped passage and keep `originalEmailId` —
-  taking `noQuote` there would store the body verbatim, without the draft's real quote.
-  Announced error over silent error, the same posture the signature guard takes.
-- **The original is the caller-named `originalEmailId`, never re-resolved from the draft's
-  `In-Reply-To`.** `In-Reply-To` is an attacker-controllable header; resolving it to fetch a
-  message would be a confused-deputy / quote-spoofing surface. The id is trusted, not
-  validated against the draft's `In-Reply-To` (such a check would false-reject legitimate
-  cases, e.g. correcting a wrong original).
-- **The guard error names only the keep path.** `noQuote` is deliberately omitted from the
-  error message so a model is never nudged toward discarding the quote; it stays discoverable
-  via the schema for a caller who genuinely wants a bare reply.
-- This regenerates from an explicit source; it never reassembles or splices the stored body
-  (consistent with the "regenerate, never reassemble" posture of the body-format model).
-- **Format flip:** supplying `htmlBody` to a *text-only* reply draft + `originalEmailId`
-  converts it to a dual-body (regenerated html + derived text) draft. This is the caller's
-  choice (they supplied html), accepted and pinned by test.
-
-Carve-outs — quote-preserving *by construction*, so no flag is required:
-
-- **Metadata-only edit** (subject / recipients / attachments; no body written or cleared) —
-  both bodies are preserved untouched.
-- **Plain-text conversion** — `clearFields: ['htmlBody']` alone keeps the stored text, which
-  already carries the `> ` quote. This is a clean carve-out **only when the stored text
-  actually matches `hasTextQuoteMarker`** (always true for drafts this server made). If it
-  does not (a foreign draft, or a future divergence in our text shape), the edit correctly
-  falls through to the guard rather than asserting the carve-out unconditionally.
-- **Text-side edits while a non-empty html survives** stay owned by the two pre-existing
-  body-coupling guards (textBody-alone → "edit htmlBody instead"; `clearFields: ['textBody']`
-  while html present → "the fallback is auto-managed"), which emit the correct remedy. The
-  quote guard excludes those cases so it doesn't pre-empt them. On a *text-only* draft the
-  stored html is blank, so this exclusion does not apply and a text edit there falls through
-  to the guard — exactly the #42 case the guard exists to catch.
-
-**Cross-session recovery.** In-session the caller already has `originalEmailId` (it was just
-passed to `reply_email`). Cross-session, a saved reply draft exposes its `inReplyTo` only as a
-*Message-ID* string, not the JMAP id `originalEmailId` needs; recovering the keep path then
-requires resolving the original first (`search_emails` for that Message-ID, with
-`includeTrash:true`/`includeSpam:true` so a filed-away original isn't hidden by the default
-Trash/Spam exclusion) before passing `originalEmailId`. The redesign makes `originalEmailId` the only keep path (there is no
-inline-keep shortcut, deliberately — see below), so this lookup is the standard cross-session
-keep recipe.
-
-**Why no inline-keep shortcut (consciously declined).** Letting the caller re-include the
-quote in the new body count as "keep" was considered and rejected: presence-as-keep is
-bypassable in the same class as the superseded new-body scan (a caller who drops the real
-quote but includes a different/edited quote-shaped block would be silently accepted as
-"kept"). Requiring `originalEmailId` is the accepted price of having no bypass.
-
-**Keep path where nothing quotable reaches the written body (loud-fail, not data-loss).** On
-the keep path the quote is *rebuilt from the named original*. If nothing quotable lands in any
-body the edit writes, `buildReplyBodies` returns that body unquoted — so a keep request would
-yield a quote-less body. The guard checks for a restored marker and rejects with an actionable
-error instead ("…has no quotable content… use noQuote…"). Two routes reach it, and they are
-worth telling apart:
-
-- **The named message has nothing to quote at all** — attachment-only, calendar-only, or a
-  body of embedded images whose parts the draft can no longer carry. Reachable only by naming
-  the wrong/empty original: a draft naming its own original can't hit it, because a quote
-  exists only if that original was quotable and JMAP message content is immutable.
-- **The edit wrote only a plain-text body for an original whose content is images.** A
-  picture has no plain-text form, so there is nothing to quote on that side even though the
-  html quote would have carried it. The repair is to write `htmlBody` as well. Note this case
-  did not exist before embedded-image carry: a cid-image-only original used to be
-  unquotable outright, so it fell into the first route.
-
-Either way it loses no caller input (the new body is preserved) — it just turns a confusing
-quote-less result into a loud one. A UX safeguard on a self-inconsistent request, not a
-data-loss fix.
-
-**Recognition residual (accepted) — the widest edge.** If a stored quote is in a shape the
-markers don't recognize, `draftHasQuote` is false and the edit isn't flagged → a silent drop
-(the failure class this feature exists to kill). Two faces of the same coupling to the
-`buildReplyBodies` shape: (a) a draft created by *another* client; (b) a future change to our
-own format without updating the markers. The generation-side CI pin (markers tested against
-live `buildReplyBodies` output) guards (b). For (a), `hasQuoteMarker` recognizes the two
-common machine-emitted html shapes — `type="cite"` (this server, Apple Mail, Fastmail web) and
-Gmail's `class="gmail_quote"` — and the text marker catches most clients incidentally (they
-also use `… wrote:` + `> `). The remaining gap is html-only quoting that uses neither shape
-(e.g. Outlook's `<div>`-based quoting). The foreign-client shapes are **reasoned about, not
-probed** across clients — a one-time probe of a real foreign reply draft would upgrade this
-from "recognized in principle" to "verified." This is still the **broadest** edge of the
-feature — wider than the non-quotable-original corner above, which needs a wrong argument to
-reach, whereas this needs only an unrecognized draft from another client. Documented and
-accepted; surfaced to users in the README's `edit_draft` notes.
+**Where the hash cannot be issued or cannot be spent, the tool says so** rather than letting a
+body edit through on a body nobody could have read faithfully. `get_email` withholds the hash
+for a draft whose stored body no edit could reproduce — a part flagged truncated or with an
+encoding problem, a part no read returns, or a body interleaving two parts of the same text
+type (#85, #180) — and names recreating the draft as the way forward. Withholding rather than
+issuing a hash that could never be spent is the same never-silently-drop rule applied to an
+output field: the token the caller would have used is absent, and the reason is stated.
 
 ## The read side: stripping quoted history (#73, #74)
 
-Everything above is the **compose** side — building a quote, and recognizing our own quote
-on a draft we are about to rewrite. `src/quote-strip.ts` is the **read** side: given a
-message's `text/plain` body, remove the correspondence quoted inside it. The two live in
-separate modules on purpose, because the same word ("marker") carries a different burden in
-each:
+Everything above is the **compose** side — building a quote and substituting it into a body
+the caller wrote. `src/quote-strip.ts` is the **read** side: given a message's `text/plain`
+body, remove the correspondence quoted inside it. The word "marker" now belongs entirely to
+this side. The compose side had markers of its own once, for recognizing a quote on a draft
+it was about to rewrite; that guard is gone (see the section above), and with it the only
+place in this server where matching a quote shape meant a *challenge* rather than a deletion.
 
-| | compose side (`reply-quote.ts`) | read side (`quote-strip.ts`) |
-|---|---|---|
-| Input | a draft **we or a client of ours** produced | whatever a **foreign** client produced |
-| A match means | a guard fires (a confirmation prompt) | text is **deleted from the output** |
-| Miss cost | the guard doesn't challenge an edit | quoted bytes stay in the response |
-| False-positive cost | a needless challenge, resolved in one step | the reader loses real content |
+What is left is the read side's stakes on their own, and they are the severe ones:
 
-The asymmetry sets the posture: **recognize confidently or not at all.** Every marker is a
+| | read side (`quote-strip.ts`) |
+|---|---|
+| Input | whatever a **foreign** client produced |
+| A match means | text is **deleted from the output** |
+| Miss cost | quoted bytes stay in the response |
+| False-positive cost | the reader loses real content |
+
+A miss leaves the response untidy; a false positive destroys content the reader will never
+know was there. That gap sets the posture: **recognize confidently or not at all.** Every marker is
 conventional, machine-emitted shape anchored at line start — a leading `>` run (nesting is
 the same shape), an `On <date>, <someone> wrote:` attribution *directly above* such a run
 (including Gmail's wrapped two-line form), an Outlook `From:`/`Sent:`/`To:`/`Subject:`
@@ -694,9 +480,9 @@ truncates, for the reason #59 exists: a silently shortened body is indistinguish
 short message. The cap is measured on what would actually be returned, which is what makes
 "retry with `stripQuoted:true`" a real remedy rather than advice.
 
-## Forwarding: the forwarded-message block + guard extension (#30)
+## Forwarding: the forwarded-message block (#30)
 
-`buildForwardBodies` (`src/reply-quote.ts`) reproduces the original *verbatim* below a
+`buildForwardBlocks` (`src/reply-quote.ts`) reproduces the original *verbatim* below a
 header block — no `> ` prefixing (that is reply quoting). The block matches the canonical
 Fastmail shape, probed live 2026-07-05 by generating a native forward through Fastmail's
 own official client and reading the draft back raw:
@@ -712,10 +498,10 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
 
 - **HTML form:** the same lines, each field escaped, in a plain `<div>` with `<br>`
   separators, followed by the original wrapped in `<div type="cite">…</div>` — the
-  platform's own forward wrapper. Deliberately NOT a `<blockquote>`: reply markers are
-  blockquote-anchored, so the two marker families are disjoint by tag name (Fastmail's
-  official client confirms the split — replies get `<blockquote type="cite">`, forwards
-  `<div type="cite">`).
+  platform's own forward wrapper. Deliberately NOT a `<blockquote>`: Fastmail's official
+  client keeps the two shapes apart by tag name — replies get `<blockquote type="cite">`,
+  forwards `<div type="cite">` — and matching that is what makes a forward written here
+  render as a native one does.
 - **Date line:** the `sentAt`/`receivedAt` string verbatim (ISO 8601 with offset), matching
   the platform block — deliberately not the humanized `formatReplyDate` shape replies use.
   Line-omission rule: a field with no usable value drops its whole line (no bare `Date:` /
@@ -746,58 +532,41 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   Message-ID is recorded as `X-Forwarded-Message-Id` (Thunderbird prior art; **Fastmail's
   official client sets the same header**, probed 2026-07-05).
 
-**The edit_draft guard extends to forward drafts** (see the reply-quote section above for
-the shared machinery; `guardVariant` dispatches mutually exclusively, reply-wins on a
-pathological both-marker draft). Forward gating differs from reply gating in one deliberate
-way: the variant engages when the header is present **OR** the body markers match
-(`hasForwardMarker` = `<div type="cite">`; `hasTextForwardMarker` = the Fastmail or Gmail
-dashed line, anchored so a `> `-quoted line never matches). Two postures produce that rule:
+**The forwarded-message header, and how a draft stops being a forward.** The original's
+Message-ID is recorded as `X-Forwarded-Message-Id` (see the threading note above), which is
+what `send_draft` reads to mark the original forwarded. A read exposes it as
+`forwardedMessageId`, and `clearFields: ['forwardedMessageId']` is the deliberate way to
+de-forward a draft: it stops `send_draft` marking the original, and on a forward draft it
+drops the recorded `sourceEmailId` with it (the pointer refines the marking it rides on; on a
+*reply* draft it stays, because the draft is still a reply to that instance). A malformed or
+hostile Message-ID is deliberately treated as absent — Fastmail rejects CRLF/non-ASCII header
+values and mangles embedded angle brackets, probed 2026-07-05 — so forwarding such an original
+records no header at all.
 
-- **Marker-alone gating** protects forwards of a Message-ID-less original (no header could
-  be set — and a malformed/hostile Message-ID is deliberately treated as absent, since
-  Fastmail rejects CRLF/non-ASCII header values and mangles embedded angle brackets,
-  probed 2026-07-05). Accepted false-positive cost, chosen data-loss-first: a draft whose
-  body merely *carries* the conventional dashed shape (e.g. pasted forwarded content) gets
-  challenged on a body edit — resolved in one step by `noQuote` (or `originalEmailId`),
-  never lossy. Side benefit: header-less drafts in the conventional shape gain protection.
-- **The header floor** challenges a forward draft whose block shape isn't recognizable
-  (foreign header-setting clients — including Fastmail's own — or our marker lost to
-  re-serialization). The challenge wording names the runnable recovery: `forwardedMessageId`
-  via `get_email`, then `search_emails` on the **bare** id (the full-text lookup matches
-  the bracket-less form; both probed working 2026-07-05, as is the RFC 8621 §4.4.1 `header`
-  filter, unused). `noQuote` on a forward draft **also clears the header** — from either
-  guard variant — so one step fully de-arms; otherwise the floor would re-challenge every
-  later edit.
-- The forward keep path has **no restored-marker check** (the block always regenerates, so
-  it would be tautological). Flip side, intentional: a WRONG `originalEmailId` produces a
-  valid-looking block for the wrong message with no loud fail — inherent to forwarding
-  (any original yields a block); no caller data is lost.
-- `asAttachment` forwards record the header (for `send_draft`'s keyword maintenance) but
-  keep a deliberately non-marker filler body, and the guard does not arm on the bare
-  header when the draft carries a `message/rfc822` attachment — the forwarded content
-  lives in the `.eml`, which body edits can't drop — so the guard is genuinely inert on
-  them; the `.eml` is an ordinary carried attachment and the recreate carries the header.
-  Residual: any draft with an `.eml` attachment loses the header-floor challenge — a
-  foreign draft with an unrecognizable inline block, and also this server's own inline
-  forward OF an original that itself carried an `.eml` attachment (there the carve-out's
-  premise is false: that `.eml` is unrelated content, not the forwarded message). The
-  floor's loss only bites when the body markers are ALSO absent/mangled (markers still
-  arm on their own), and in the foreign case the `.eml` still preserves the forwarded
-  content; accepted rather than fetching/matching the attachment's blob to the original.
-  Related accepted quirk: `removeAttachments`-ing the `.eml` keeps the recorded source
-  (silently dropping provenance would be worse), so sending that draft unedited still
-  marks the original forwarded; `noQuote` on any edit is the deliberate de-forward.
+Recovering a forwarded original across sessions is one lookup: `forwardedMessageId` from
+`get_email`, then `search_emails` on the **bare** id (the full-text lookup matches the
+bracket-less form; both probed working 2026-07-05, as is the RFC 8621 §4.4.1 `header` filter,
+which stays unused).
 
-**Recognition residual (forward form, accepted).** Narrower than the reply residual: any
-client that sets `X-Forwarded-Message-Id` is challenged via the header floor regardless of
-its block shape (unless the draft carries a `message/rfc822` attachment — the carve-out
-above). The remaining gap is a foreign forward draft with **neither** the header
-nor a recognized dashed/div-cite shape — the guard is inert there, same accepted posture
-(and same README surfacing) as the reply guard's foreign-quote residual. One structural
-sub-case: Gmail's forward *html* cannot be marker-recognized at all — its wrapper is
-class+text-keyed, and `hasForwardMarker` must key only on markup the quote sanitiser strips
-from embedded content (attribute-based), or pasted/quoted forwards would false-trip it.
-Gmail's *text* dashed line IS recognized.
+**No guard extends to forward drafts, and the marker family that armed one is gone.** An
+earlier design recognized the forwarded block by its shape — a `<div type="cite">` in html,
+the Fastmail or Gmail dashed line in text — and challenged an edit that would drop it, arming
+either on those markers or on the bare header, with a carve-out for a draft carrying the
+forwarded message as a `message/rfc822` attachment and a floor that challenged any block shape
+it could not recognize. All of it went with the reply guard and for the same reason: it
+recognized shapes, so it was blind in silence to foreign forwards (Gmail's forward *html* was
+structurally unrecognizable — its wrapper is class-and-text-keyed, and a marker may key only
+on markup the quote sanitiser strips from embedded content, or pasted forwards would
+false-trip it) and noisily wrong about bodies that merely looked like one. `edit_draft` now
+stores the body it is handed and requires the `bodyHash` proving the caller read the body
+being replaced; a forwarded block survives an edit because the caller sent it back.
+
+`asAttachment` forwards are unaffected either way, and that is worth stating rather than
+leaving to be rediscovered. Their forwarded content lives in the `.eml`, which no body edit
+can drop; the `.eml` is an ordinary carried attachment and the recreate carries the header
+alongside it. `removeAttachments`-ing that `.eml` deliberately leaves the recorded source in
+place — silently dropping provenance would be worse — so sending such a draft unedited still
+marks the original forwarded, and `clearFields: ['forwardedMessageId']` is how to stop that.
 
 **Remote-image tracker note (accepted, inherited).** Forwarded HTML keeps real http(s)
 images, same as reply quoting (the sanitizer is a safety floor, not a tracker filter) —
@@ -896,9 +665,12 @@ and `htmlBody` lists. For example, a text-only draft lists its `text/plain` part
 `htmlBody` too, with `type: "text/plain"`. RFC 8621 §4.1.4 keys `bodyValues` by
 `partId`; the `textBody` / `htmlBody` arrays are independent lists of body-part objects.
 
-So `bodyValueForType` (`src/jmap-client.ts:539`) selects the value from the part whose
-actual `type` matches (`text/plain` / `text/html`), then keys into `bodyValues` by that
-part's `partId`. A naive "look up by list position / partId key" is insufficient:
+So `bodyValueForType` (`src/jmap-client.ts`) selects the value from the part in that list
+whose type is the one being asked for, then keys into `bodyValues` by that part's `partId`.
+"Is the one being asked for" is slightly wider than an equality test on `type`: a part that
+declares **no** content type counts as the type of the list carrying it (RFC 8621 §4.1.4),
+because that is how a recipient's client renders it, so such a part is found rather than
+skipped past (#179). A naive "look up by list position / partId key" is insufficient:
 because the single part aliases into both lists, it would read the text value into the
 HTML slot and synthesise a phantom `text/html` part on recreate. (This was the original
 `|| true` extraction bug: both `existingTextBody` and `existingHtmlBody` collapsed to
@@ -967,20 +739,17 @@ reference.
   never be sent. `getEmailById` therefore needs no fetch-knob; the reply-quote module
   keeps only an `isTruncated` elision marker as a cheap defensive net for a hypothetical
   truncating server.
-- **Reply-quote markers survive store/fetch round-trip (2026-06-28).** Created html-only,
-  text-only, and dual reply drafts via `reply_email`, fetched each back raw, and tested the
-  markers against the *stored-and-returned* bodies. The html `<blockquote type="cite">`
-  survives intact, so `hasQuoteMarker` matches the returned html in every html case. Two text
-  shapes appear, and `hasTextQuoteMarker`'s blank-line tolerance is **load-bearing** for one of
-  them: a caller-supplied text body (the text-only and dual cases) comes back as `wrote:\n> `
-  (one newline), but the html-DERIVED text fallback (the html-only case, where the server adds
-  the text part) comes back as `wrote:\n\n> ` (a blank line between attribution and the first
-  `> ` line). The strict `wrote:\n>` would miss the derived case; the `([ \t]*\r?\n)*`
-  tolerance catches both. A *text-only* reply draft returns **no** `text/html` part (its one
-  `text/plain` part aliases into both lists), so `bodyValueForType('text/html')` is undefined
-  and `existingHtmlValue` is blank — which is exactly why a text-side edit there falls through
-  to the quote guard (the #42 case). An *html-only* `reply_email` is actually stored dual (the
-  server derives and stores the text fallback); a genuinely text-part-less html reply draft
-  only arises from another client. This is why detecting the quote on the OLD body (#42
-  redesign) is reliable for drafts this server creates. Covers only drafts this server makes;
+- **Quoted-history shapes survive a store/fetch round-trip (2026-06-28).** Created html-only,
+  text-only, and dual reply drafts, fetched each back raw, and compared the
+  *stored-and-returned* bodies against what had been written. The html
+  `<blockquote type="cite">` survives intact. Two text shapes appear, and the difference is
+  the server's rather than the caller's: a caller-supplied text body (the text-only and dual
+  cases) comes back as `wrote:\n> ` (one newline), but the html-DERIVED text fallback (the
+  html-only case, where the server adds the text part) comes back as `wrote:\n\n> ` — a blank
+  line between the attribution and the first `> ` line. Any rule written against one of those
+  shapes has to tolerate the other. A *text-only* reply draft returns **no** `text/html` part
+  (its one `text/plain` part aliases into both lists), so `bodyValueForType('text/html')` is
+  undefined and `existingHtmlValue` is blank. An *html-only* reply draft is actually stored
+  dual (the server derives and stores the text fallback); a genuinely text-part-less html
+  reply draft only arises from another client. Covers only drafts this server makes;
   foreign-client shapes are assumed, not probed.
