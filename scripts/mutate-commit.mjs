@@ -24,6 +24,11 @@
 //
 // Writes the Stryker config, sandbox and report OUTSIDE the repo tree (os.tmpdir by
 // default; override with MUTATE_OUT_DIR). Re-running overwrites; nothing needs deleting.
+//
+// The node_modules link this makes OUTLIVES the run: it sits beside the sandbox rather than
+// inside it, so nothing wipes it between runs. A copy of this script WITHOUT that link step
+// will therefore appear to work in a scratch directory some other copy has already used -
+// point MUTATE_OUT_DIR at a fresh one before trusting a comparison of two versions of it.
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
