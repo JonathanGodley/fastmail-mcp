@@ -294,7 +294,7 @@ const ATTACHMENT_REF_DESC =
 // There is no `required` for the same reason: no single key is required on every item.
 function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
   return {
-    type: 'array',
+    type: ['array', 'string'],
     items: {
       type: 'object',
       properties: {
@@ -307,7 +307,7 @@ function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
         cid: { type: 'string', description: 'Content-ID to embed this file under (optional), referenced from htmlBody as <img src="cid:THE_CID">. A simple token of up to 64 letters, digits, dot, dash or underscore, of your choosing — a spelling copied from HTML ("cid:logo") or a header ("<logo>") is accepted and normalised. Each item needs a distinct one. Omit it for an ordinary attachment; identifiers of the form ii-<hex>@inline.invalid are reserved for images this server embeds on your behalf and cannot be authored.' },
       },
     },
-    description: leadIn + attachmentsDescription(forEdit),
+    description: leadIn + attachmentsDescription(forEdit) + LENIENT_OBJECT_LIST_DESC,
   };
 }
 
@@ -536,11 +536,40 @@ const LIST_PARENT_PARAM_DESC =
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
 
+// The string forms a lenient list parameter accepts, appended to the parameter's own
+// description. The prose earns its place on top of the widened type for the same reason
+// lenientBool's does: `["array", "string"]` says a string is accepted but not WHICH strings,
+// and the two coercers behind these parameters do not read the same set. (#98)
+//
+// coerceStringArray takes all three forms. The OBJECT-item lists (attachments, and the
+// contact entry lists) go through coercers that read a whole-value string ONLY as a
+// JSON-encoded array and reject anything else naming the parameter, so promising those a
+// comma-separated list would advertise a shape that errors.
+//
+// Declared HERE, above the first description that appends it: several of those are plain
+// `const` initialisers evaluated in file order, and one referencing this from further up
+// would read it in its temporal dead zone.
+//
+// EVERY LIST PARAMETER IN THIS FILE NOW DECLARES ITS STRING FORM. Two things are not done.
+// The drift guard is what #98 stays open for: `tool-schema.test.ts` fails a boolean
+// declared `type: 'boolean'` and has no array-side equivalent, so nothing stops a narrow
+// `type: 'array'` being added tomorrow and quietly making its coercion unreachable again.
+// And the parameters widened in earlier work — `fields`, `draft_email`'s recipient and
+// threading lists, `participants`, `archive_email`'s `emailIds` — carry no note of this
+// kind, so the type is widened there while the description still says nothing about which
+// strings it reads.
+const LENIENT_LIST_DESC =
+  ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
+
+const LENIENT_OBJECT_LIST_DESC =
+  ' Accepts an array, or a JSON-encoded array as one string.';
+
 // The label arrays, which take the same forms per entry. A function rather than two
 // constants so the add/remove verb is the only thing that differs.
 const labelMailboxIdsDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
-  ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.';
+  ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
+  LENIENT_LIST_DESC;
 
 // Shared by all four label tools (#133). States the namespace the tools operate in, which a
 // caller cannot infer from "label" alone: Fastmail's own label picker offers the Inbox and
@@ -955,19 +984,19 @@ const TOOLS = [
               description: "The ID of the draft email to edit (this draft's own id).",
             },
             to: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated recipient email addresses (optional, keeps existing if omitted). Each entry may be "Name <email>" or a bare address.',
+              description: 'Updated recipient email addresses (optional, keeps existing if omitted). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             cc: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated CC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+              description: 'Updated CC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             bcc: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.',
+              description: 'Updated BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             from: {
               type: 'string',
@@ -990,9 +1019,9 @@ const TOOLS = [
               description: "Proof that you are replacing the body you read: the `bodyHash` value get_email returned for this draft. REQUIRED on every edit that writes textBody/htmlBody or clears one of them; ignored on a metadata-only edit, which leaves both bodies untouched. An absent or stale hash is rejected — re-read the draft with get_email and edit from that. It is a lost-update guard and nothing more: it proves you SAW the body, never that you kept any of it, so the check passes on an edit that replaces the body entirely. A successful body edit hands back the hash for your next edit of the same draft, so a run of edits needs one get_email at the start — except where one cannot be issued honestly, when the result carries the reason instead; this tool's own description lists those cases and what each one asks you to do. Where get_email withholds the hash because this draft's body is one no edit can be made against, there is no value to supply and the edit is refused whatever you pass: recreate the draft.",
             },
             replyTo: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             expandSignature: {
               type: ['boolean', 'string'],
@@ -1098,15 +1127,21 @@ const TOOLS = [
               type: 'string',
               description: SEARCH_MAILBOX_PARAM_DESC,
             },
+            // Widened like every other lenient list, and SAFE here specifically because
+            // these two already read through coerceStringArrayStrict: a value that is
+            // present but uncoercible is an error naming the parameter, never a silent
+            // undefined. On an argument that narrows what a call touches, the plain
+            // coercer's silent drop would widen the search the argument was passed to
+            // restrict - which is why the strict half was written first (#98).
             requiredMailboxes: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: REQUIRED_MAILBOXES_PARAM_DESC,
+              description: REQUIRED_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
             },
             excludeMailboxes: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: EXCLUDE_MAILBOXES_PARAM_DESC,
+              description: EXCLUDE_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
             },
             after: {
               type: 'string',
@@ -1233,7 +1268,7 @@ const TOOLS = [
               },
             },
             emails: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1241,10 +1276,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] is rejected — omit the field instead.',
+              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1252,10 +1287,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] is rejected — omit the field instead.',
+              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: 'object',
                 properties: {
@@ -1263,7 +1298,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] is rejected — omit the field instead.',
+              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',
@@ -1307,7 +1342,7 @@ const TOOLS = [
               },
             },
             emails: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1315,10 +1350,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] is rejected — use clearFields.',
+              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: ['object', 'string'],
                 properties: {
@@ -1326,10 +1361,10 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] is rejected — use clearFields.',
+              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
-              type: 'array',
+              type: ['array', 'string'],
               items: {
                 type: 'object',
                 properties: {
@@ -1337,16 +1372,16 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] is rejected — use clearFields.',
+              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',
               description: 'Replacement note text. An empty string is rejected — use clearFields:[\'notes\'].',
             },
             clearFields: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string', enum: ['emails', 'phones', 'addresses', 'notes'] },
-              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected.',
+              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected.' + LENIENT_LIST_DESC,
             },
             allowEntryReplace: {
               type: ['boolean', 'string'],
@@ -1538,9 +1573,9 @@ const TOOLS = [
               `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
             ),
             clearFields: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string', enum: ['description', 'location'] },
-              description: 'Property names to delete from the event. Allowed: description, location. Cannot also pass the same field as a value.',
+              description: 'Property names to delete from the event. Allowed: description, location. Cannot also pass the same field as a value.' + LENIENT_LIST_DESC,
             },
           },
           required: ['eventId'],
@@ -1731,7 +1766,7 @@ const TOOLS = [
               description: 'ID of the email to add labels to',
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('add'),
             },
@@ -1750,7 +1785,7 @@ const TOOLS = [
               description: 'ID of the email to remove labels from',
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('remove'),
             },
@@ -1857,9 +1892,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to mark',
+              description: 'Array of email IDs to mark.' + LENIENT_LIST_DESC,
             },
             read: {
               type: ['boolean', 'string'],
@@ -1877,9 +1912,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to pin/unpin',
+              description: 'Array of email IDs to pin/unpin.' + LENIENT_LIST_DESC,
             },
             pinned: {
               type: ['boolean', 'string'],
@@ -1897,9 +1932,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to move',
+              description: 'Array of email IDs to move.' + LENIENT_LIST_DESC,
             },
             targetMailbox: {
               type: 'string',
@@ -1916,9 +1951,9 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to delete',
+              description: 'Array of email IDs to delete.' + LENIENT_LIST_DESC,
             },
           },
           required: ['emailIds'],
@@ -1931,12 +1966,12 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to add labels to',
+              description: 'Array of email IDs to add labels to.' + LENIENT_LIST_DESC,
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('add'),
             },
@@ -1951,12 +1986,12 @@ const TOOLS = [
           type: 'object',
           properties: {
             emailIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to remove labels from',
+              description: 'Array of email IDs to remove labels from.' + LENIENT_LIST_DESC,
             },
             mailboxIds: {
-              type: 'array',
+              type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('remove'),
             },

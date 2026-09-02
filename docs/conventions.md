@@ -160,22 +160,41 @@ exists to catch.
 `tsc` does not rewrite string literals, so the source and the shipped schema cannot
 disagree here.
 
-The same reasoning applies to the array coercions. `participants` on the calendar write
-tools now declares `type: ['array', 'string']` alongside `coerceParticipants`, but the rest
-are still narrow (`type: 'array'` on `clearFields`, `emailIds`, `mailboxIds`, `attachments`
-and the recipient lists) even though `coerceStringArray` / `coerceAttachments` run behind
-them. That is unfinished work rather than a decision, and no guard covers it — tracked as
-fork issue #98.
+The same reasoning applies to the array coercions, and every list parameter now declares
+its lenient shape: `type: ['array', 'string']` with `items` kept (JSON Schema applies
+`items` to array instances only, so the union is well-formed). The accepted string forms
+are NOT one set, which is why `src/index.ts` carries two description constants rather than
+one: `coerceStringArray` takes a single bare value, a comma-separated list or a
+JSON-encoded array, while the OBJECT-item lists behind `coerceAttachments` and the contact
+entry coercers read a whole-value string **only** as a JSON-encoded array and reject
+anything else naming the parameter — promising those a comma-separated form would
+advertise a shape that errors. The parameters widened in earlier work (`fields`,
+`draft_email`'s recipient and threading lists, `participants`, `archive_email`'s
+`emailIds`) carry no such sentence yet; their type is widened but their description does
+not say which strings they read.
+
+Two of them are narrowing arguments, and they are safe to widen for a reason worth stating:
+`search_emails`' `requiredMailboxes` and `excludeMailboxes` already read through
+`coerceStringArrayStrict`, so a present-but-uncoercible value is an error naming the
+parameter rather than a silent `undefined` that would widen the search the argument was
+passed to restrict. Widening the schema makes that strict half reachable; it does not
+create a new lenient path.
+
+What is still missing is the guard. `src/tool-schema.test.ts` fails a boolean declared
+`type: 'boolean'` and has no array-side equivalent, so a narrow `type: 'array'` added
+tomorrow would make its coercion unreachable again with nothing to catch it — the part of
+fork issue #98 that remains open.
 
 ### Verifying coercion
 
 The normal MCP tool harness validates the declared `inputSchema` before the call
 reaches the handler, so it will reject the malformed inputs these coercions are meant to
-accept. That now holds only for the parameters whose schema has *not* been widened: a
-compliant client can send a stringified boolean, because every boolean declares
-`['boolean', 'string']`. For the rest you must drive a raw JSON-RPC request against the
-built server (`dist/index.js`) with `FASTMAIL_API_TOKEN` set, bypassing the
-schema-validating harness. `scripts/mcp-harness.mjs` is that client; its `list()` (also
+accept. Every boolean and every list parameter now declares its lenient shape, so a
+compliant client can send a stringified boolean or a stringified list through the ordinary
+harness. What that harness still cannot exercise is anything the schema does not admit at
+all — a coercion's behaviour on a number, an object or a malformed element — and for those
+you must drive a raw JSON-RPC request against the built server (`dist/index.js`) with
+`FASTMAIL_API_TOKEN` set, bypassing the schema-validating harness. `scripts/mcp-harness.mjs` is that client; its `list()` (also
 `node scripts/mcp-harness.mjs --list`) dumps the advertised schemas and needs no
 credentials. (See the `verify-lenient-client-coercion` note in project memory.)
 
