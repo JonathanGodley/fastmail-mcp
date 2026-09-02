@@ -9,9 +9,8 @@ import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
 import {
   bodyHash, classifyPartType, collectDraftBodyParts, draftInterleavedTextType, draftPartKey,
-  draftTextBodyType, isTextBodyType, resolveDraftBodyHash,
+  isTextBodyType, resolveDraftBodyHash,
 } from './body-hash.js';
-import type { DraftTextType } from './body-hash.js';
 import {
   buildUnionParts, cidKey, describePart, sanitizeDownloadFilename,
   checkInlineClosure, isRecreatableCid, isReservedCid, reconcileInlineParts,
@@ -538,9 +537,9 @@ export interface DraftBodyShape {
  *
  * Deduping FIRST is load-bearing, not an optimization: a single-format draft lists its one
  * text part under both textBody and htmlBody, so a raw count would see two text/plain parts
- * on an ordinary plain-text draft and refuse to edit it. A part that declares no type is
- * counted as the content of the list it sits in, so ONE of them is the caller's body and is
- * carried, while one BESIDE a typed part makes the pair this cannot express.
+ * on an ordinary plain-text draft and refuse to edit it. A typeless part is left alone —
+ * the body reader treats one as body text, and inventing a refusal for it would reject
+ * drafts that have always worked.
  */
 export function classifyDraftBodyShape(email: any): DraftBodyShape {
   const lists = [email?.textBody, email?.htmlBody].filter(Array.isArray) as any[][];
@@ -2309,24 +2308,30 @@ export class JmapClient {
   //    direction; the client owns keeping the pair in sync.
   //  - A single-format draft has its ONE part aliased into BOTH the textBody and
   //    htmlBody lists (e.g. a text-only draft lists the text/plain part under htmlBody
-  //    too, with type "text/plain"). So we do NOT take mere presence in a list as the
-  //    answer — otherwise we'd read the text value into the html slot and synthesise a
-  //    phantom text/html part on recreate.
+  //    too, with type "text/plain"). So we select by the part's actual MIME type — not
+  //    mere presence in a list — otherwise we'd read the text value into the html slot
+  //    and synthesise a phantom text/html part on recreate.
   //  - JMAP body properties are immutable (RFC 8621 §4.1), which is why updateDraft
   //    rebuilds and re-sends the bodies via a recreate rather than patching.
-  // The test is draftTextBodyType: a part whose declared type IS this format, or a part
-  // that declares no type at all, which is the content of whichever list carries it (RFC
-  // 8621 §4.1.4, and how every read of a body has always displayed one). Matching the type
-  // exactly meant a typeless part was found by neither format and the recreate shipped
-  // without it — the whole body on a one-part draft, one part of two on a larger one, in
-  // silence either way (#179).
-  // Takes the first part of the given type (drafts here carry at most one per type, and a
-  // draft carrying two candidates is refused by the body-shape guard before this runs). If
-  // a value were ever elided from bodyValues, that format reads as undefined rather than a
+  // THE MATCH IS EXACT ON PURPOSE, and it does not follow the read's rule that a part with
+  // no declared type is the content of whichever list carries it (draftTextBodyType). This
+  // selector runs once per format over lists a single-format draft aliases into BOTH, so a
+  // part matching whichever format asks for it is a part that answers both: the recreate
+  // then writes one value into the text/plain slot and the same value into the text/html
+  // one, and a body containing "<" ships as markup with its newlines gone. That lands on
+  // the metadata-only path too, which promises to leave the body untouched, and it lands
+  // in silence — nothing here compares the two slots and no hash is required of a caller
+  // who only renamed the subject.
+  // Widening it bought nothing against that, because the shape cannot reach us: RFC 8621
+  // §4.1.4 makes `type` mandatory on a body part and Cyrus, the server Fastmail runs,
+  // defaults a missing Content-Type to text/plain in Email/get before any client sees it.
+  // Every bodyProperties request in this file asks for `type`, so no read here drops one
+  // either (#179).
+  // Takes the first part of the given type (drafts here carry at most one per type). If a
+  // value were ever elided from bodyValues, that format reads as undefined rather than a
   // partial body (callers fetch full values, so this won't occur in practice).
-  private bodyValueForType(parts: any[] | undefined, mimeType: DraftTextType, bodyValues: Record<string, any>): string | undefined {
-    const part = parts?.find((p: any) => draftTextBodyType(p?.type, mimeType) === mimeType
-      && p.partId != null && bodyValues[p.partId]);
+  private bodyValueForType(parts: any[] | undefined, mimeType: string, bodyValues: Record<string, any>): string | undefined {
+    const part = parts?.find((p: any) => p.type === mimeType && p.partId != null && bodyValues[p.partId]);
     return part ? bodyValues[part.partId].value : undefined;
   }
 

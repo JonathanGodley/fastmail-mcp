@@ -167,8 +167,9 @@ describe('resolveDraftBodyHash sweep', () => {
     // Two parts of one text type in one list — the layout every edit is refused over, and
     // so the layout no bodyHash can be spent on (#180).
     assert.ok(has((r) => Array.isArray(r.text) && r.text[0] === P.plain && r.text[1] === P.plain2));
-    // A part declaring no type beside a typed one, which is that same layout by another
-    // name once a typeless part counts as its list's content (#179).
+    // A part declaring no type beside a typed one. The interleaved check does not count a
+    // typeless part, so this is NOT that layout and is not refused as one — the covered
+    // shape is the pair the two rules could be made to disagree about (#179).
     assert.ok(has((r) => Array.isArray(r.text) && r.text[0] === P.plain && r.text[1] === P.noType));
     // A part declaring no type on its own, which is an ordinary body and gets a hash.
     assert.ok(has((r) => Array.isArray(r.text) && r.text.length === 1 && r.text[0] === P.noType));
@@ -189,20 +190,20 @@ describe('resolveDraftBodyHash sweep', () => {
   // belongs to: the three read-independent refusals (degraded, unreadable, uneditable) are
   // each an exact multiple of 8, the stripQuoted refusal is a multiple of 4 because it can
   // only fire on the four reads that set the flag, and the hash and the three projection
-  // reasons divide the remaining 4,128 evaluations of those same drafts on their other four
+  // reasons divide the remaining 6,668 evaluations of those same drafts on their other four
   // reads. Every bucket is reachable and none is empty.
   it('resolves the whole enumeration into the expected outcomes', () => {
     const counts = tally();
     assert.deepEqual(Object.fromEntries([...counts].sort()), {
-      'hash': 2404,
+      'hash': 3548,
       'degraded': 4200,
       'unreadable': 20552,
-      'uneditable:text/html': 1824,
-      'uneditable:text/plain': 4544,
-      'stripQuoted': 4128,
-      'projection:both': 664,
-      'projection:html': 624,
-      'projection:text': 436,
+      'uneditable:text/html': 128,
+      'uneditable:text/plain': 1160,
+      'stripQuoted': 6668,
+      'projection:both': 1276,
+      'projection:html': 908,
+      'projection:text': 936,
     });
   });
 

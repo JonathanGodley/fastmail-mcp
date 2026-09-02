@@ -139,45 +139,20 @@ describe('draftInterleavedTextType', () => {
     })), undefined);
   });
 
-  // ONE typeless part in a list is the caller's body and is carried — the shape #179 was
-  // about, and the common one. It must not be swept up by the pair rule below.
-  it('carries a lone part that declares no content type', () => {
-    assert.equal(draftInterleavedTextType(draft({
-      textBody: [{ partId: 'a' }], htmlBody: [{ partId: 'a' }],
-    })), undefined);
-    // One in each list is two candidates for two different formats, not two for one.
-    assert.equal(draftInterleavedTextType(draft({
-      textBody: [{ partId: 'a' }], htmlBody: [{ partId: 'b' }],
-    })), undefined);
-    assert.equal(draftInterleavedTextType(draft({
-      textBody: [{ partId: 'a' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
-    })), undefined);
-  });
-
-  // A typeless part BESIDE a typed one in the same list is a pair, because a lookup asked
-  // for that format would have to choose between them and would drop the other in silence.
-  // Refusing is new for drafts that edit today — and they edit today only by losing a part.
-  it('pairs a part that declares no content type with the type of its own list', () => {
+  // A part that declares no type is not counted as either format here, and so never pairs
+  // with anything. That is the whole rule: the shape cannot reach us (RFC 8621 §4.1.4 makes
+  // `type` mandatory and Cyrus defaults a missing one to text/plain in Email/get), so
+  // counting it as its list would only invent a refusal and, on the edit-side selector,
+  // send the same bytes into a text/plain and a text/html part at once (#179).
+  it('does not count a part that declares no content type', () => {
     assert.equal(draftInterleavedTextType(draft({
       textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'b' }],
-    })), 'text/plain');
-    assert.equal(draftInterleavedTextType(draft({
-      textBody: [{ partId: 'b' }, { partId: 'a', type: 'text/plain' }],
-    })), 'text/plain');
-    assert.equal(draftInterleavedTextType(draft({
-      htmlBody: [{ partId: 'h', type: 'text/html' }, { partId: 'b' }],
-    })), 'text/html');
+    })), undefined);
     assert.equal(draftInterleavedTextType(draft({
       textBody: [{ partId: 'a' }, { partId: 'b' }],
-    })), 'text/plain');
-  });
-
-  // The list is what a typeless part counts as, so a part whose declared type belongs to the
-  // OTHER format is not paired with it — an html-only draft aliases its one text/html part
-  // into textBody, and calling that pair interleaved would make an ordinary draft uneditable.
-  it('does not pair a typeless part with a part of the other format', () => {
+    })), undefined);
     assert.equal(draftInterleavedTextType(draft({
-      textBody: [{ partId: 'h', type: 'text/html' }, { partId: 'b' }],
+      htmlBody: [{ partId: 'h', type: 'text/html' }, { partId: 'b' }],
     })), undefined);
   });
 });
@@ -333,19 +308,9 @@ describe('resolveDraftBodyHash', () => {
     assert.equal(out.bodyHash, undefined);
   });
 
-  // The read and the edit-side refusal ask ONE function, so the newly-paired shape is
-  // covered here without a second condition being written to match.
-  it('withholds on a typeless part beside a typed one, the same as the edit refuses it', () => {
-    const paired = draft({
-      textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'b' }],
-      bodyValues: { a: { value: 'one' }, b: { value: 'two' } },
-    });
-    const out = resolveDraftBodyHash(paired, FULL_READ) as any;
-    assert.match(out.bodyHashWithheld, /interleaves multiple text\/plain parts/);
-  });
-
-  // A lone typeless part is an ordinary body. It gets a hash, and the edit that spends it
-  // now carries the part through rather than dropping it.
+  // A typeless part is an ordinary body to the READ: the reader displays it in whichever
+  // list carries it, so the hash covers it and is issued. The interleaved check does not
+  // count it, so it pairs with nothing and earns no refusal.
   it('issues a hash for a draft whose one body part declares no content type', () => {
     const typeless = draft({
       textBody: [{ partId: 't' }], htmlBody: [{ partId: 't' }],

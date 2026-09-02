@@ -77,6 +77,15 @@ export function isTextBodyType(type: unknown): type is DraftTextType {
  * lowercases) passes the classified string, one that compares the server's string verbatim
  * passes that. The absent-type rule is the same either way, which is the part that has to
  * be shared.
+ *
+ * SCOPE: THIS ANSWERS WHAT A READ DISPLAYS, AND ONLY THAT. It is the rule the body reader
+ * and the hash over what it read share, so the hash covers exactly the bytes the caller was
+ * shown. The edit side does NOT widen to match: the selector that picks a part to rebuild a
+ * draft from matches the declared type exactly, because a typeless part matching whichever
+ * list asks for it makes a one-part draft's single part answer BOTH formats, and the
+ * recreate then writes the same bytes into a `text/plain` and a `text/html` part — plain
+ * text rendered as markup, silently, on the metadata-only path that promises to leave the
+ * body alone (#179). Its own comment carries the rest of the reasoning.
  */
 export function draftTextBodyType(type: unknown, listType: DraftTextType): DraftTextType | undefined {
   if (type === undefined || type === null || type === '') return listType;
@@ -88,12 +97,8 @@ export function draftTextBodyType(type: unknown, listType: DraftTextType): Draft
  * text type, the Apple Mail text-image-text layout whose ordering a flat rebuild cannot
  * express (issue #85). Undefined when the body has no such pair.
  *
- * A part that declares NO content type counts as the list it sits in, like everywhere else
- * here — which is what makes ONE typeless part in a list the caller's body, carried, and a
- * typeless part BESIDE a typed one a pair. The pair is refused rather than resolved because
- * a lookup asked for one format would have to CHOOSE between two candidates, and either
- * choice drops the other part as silently as #179 dropped the typeless one. Refusing is new
- * for drafts that edit today, and they edit today only by losing a part without saying so.
+ * A part that declares no content type is not counted at all here — see the skip in the
+ * loop for why that is right rather than merely conservative.
  *
  * ONE EXPRESSION, TWO CONSUMERS, DELIBERATELY. `updateDraft` refuses every edit of this
  * shape, metadata-only included, and a read that issued a `bodyHash` for it would hand out
@@ -123,7 +128,25 @@ export function draftInterleavedTextType(email: any): string | undefined {
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const countsAs = draftTextBodyType(classifyPartType(part.type), list.listType);
+      const type = classifyPartType(part.type);
+      // A part that declares no type is not counted as either format, deliberately, and
+      // this is the one place in this module that does not fall back to the list.
+      //
+      // It costs nothing, because the shape cannot arise. RFC 8621 §4.1.4 makes `type`
+      // mandatory on a body part, and Cyrus — the server Fastmail runs — enforces that on
+      // the way out: `Email/get` fills a missing Content-Type in with `text/plain` (or
+      // `multipart/related`, or `message/rfc822`), lowercased and stripped of parameters,
+      // before it ever reaches a client. Every `bodyProperties` request in this file asks
+      // for `type`, so no read here can drop it either, and a message appended over IMAP
+      // with no Content-Type gets RFC 2045's `text/plain` default, which is the same value.
+      //
+      // And it costs something to widen. Counting a typeless part as its list would pair a
+      // lone one with the typed part beside it and refuse an edit no reader could see a
+      // reason for; the matching widening on the edit-side selector put unescaped plain
+      // text into a text/html part on the metadata-only path (#179). A refusal and a
+      // corruption, both for an input the server cannot emit.
+      if (!type) continue;
+      const countsAs = draftTextBodyType(type, list.listType);
       if (countsAs === undefined) continue;
 
       const count = (counts.get(countsAs) ?? 0) + 1;
