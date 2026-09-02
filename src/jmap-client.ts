@@ -3642,7 +3642,8 @@ export class JmapClient {
       throw new Error(
         'The server returned this draft with no readable mailboxIds, so this server cannot ' +
         'tell whether it is in the Drafts folder and will not send it. Nothing was sent. ' +
-        'Read the draft with get_email to see where it is filed.',
+        'This is a fault in the response rather than in the call — check where the draft is ' +
+        'filed in the Fastmail web interface.',
       );
     }
     const inMailbox = (id: string) =>
@@ -4205,14 +4206,15 @@ export class JmapClient {
       // do" — a confident success statement about filing this server never saw. Fail closed
       // on the id instead.
       //
-      // Array.isArray, because `typeof [] === 'object'`: an array-shaped mailboxIds would
-      // otherwise pass this guard and Object.keys would turn it into the INDICES ["0","1"],
-      // which contain no Inbox and no refusing role — landing the message in `notInInbox`
-      // and producing the exact false "already archived" this guard was written to stop, by
-      // the one shape it did not test. A non-compliant server is this guard's entire
-      // audience, so the shape it emits is not out of scope.
+      // The shape test is `isPlainResponseMap`, whose docblock carries the Array.isArray
+      // reasoning. What is specific to HERE is what an array would do if it got through:
+      // Object.keys turns it into the INDICES ["0","1"], which contain no Inbox and no
+      // refusing role — landing the message in `notInInbox` and producing the exact false
+      // "already archived" this guard was written to stop, by the one shape it did not test.
+      // A non-compliant server is this guard's entire audience, so the shape it emits is not
+      // out of scope.
       const filing = email.mailboxIds;
-      if (!filing || typeof filing !== 'object' || Array.isArray(filing)) {
+      if (!isPlainResponseMap(filing)) {
         unreadableFiling.set(id, 'The server returned this message with no readable mailboxIds object, so its current filing is unknown. Nothing was written for it.');
         continue;
       }
@@ -4679,11 +4681,12 @@ export class JmapClient {
       }
 
       // Fail closed rather than guess. A message whose filing could not be read is exactly
-      // the message a bare removal would destroy. Array.isArray because typeof [] ===
-      // 'object': an array would turn into the INDICES under Object.keys and read as a
-      // membership the message never had.
+      // the message a bare removal would destroy. The shape test is `isPlainResponseMap`
+      // (its docblock carries the Array.isArray reasoning); what would go wrong HERE is that
+      // an array turns into the INDICES under Object.keys and reads as a membership the
+      // message never had.
       const filing = email.mailboxIds;
-      if (!filing || typeof filing !== 'object' || Array.isArray(filing)) {
+      if (!isPlainResponseMap(filing)) {
         unknownFiling.push(id);
         continue;
       }
