@@ -1,6 +1,6 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
-import { redactBearerTokens, describeUntrusted, toolJson } from './coerce.js';
+import { describeUntrusted, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import { CALENDAR_OPEN_WINDOW_DAYS } from './caldav-client.js';
@@ -133,9 +133,14 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
   // rather than at the four places jmap-client.ts assigns the field: this is the single
   // point the value can reach a caller, so a fifth assignment site added later is
   // covered without anyone remembering to redact it.
+  //
+  // describeUntrusted rather than redactBearerTokens alone, for the reason every other
+  // interpolation of not-our-text follows: one of the four assignment sites is a caught
+  // exception's own message, so this is arbitrary server or library text, and a line break
+  // in it would split this warning into what reads as two separate outcomes (#134).
   const disposal = result.trashedOldDraftId
     ? `The previous draft (id ${result.trashedOldDraftId}) was moved to Trash, where it stays recoverable until Trash is emptied or auto-purged.`
-    : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be moved to Trash (${redactBearerTokens(result.orphanedOldDraftReason ?? 'reason unknown')}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
+    : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be moved to Trash (${describeUntrusted(result.orphanedOldDraftReason ?? 'reason unknown')}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
   const fingerprint = formatReplacedDraft(result.replacedDraft);
   const replaced = fingerprint
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
@@ -145,14 +150,14 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
   // the caller cannot use, and an unprinted WITHHELD reason reads to it as "the tool forgot"
   // — it would go looking for a field that is deliberately absent.
   //
-  // bodyHashWithheld gets the same redaction as orphanedOldDraftReason and for the same
+  // bodyHashWithheld gets the same treatment as orphanedOldDraftReason and for the same
   // reason: one of its forms interpolates the message from a failed re-read, which is
   // server/exception text reaching a caller on a RETURNED result, where the CallTool catch
-  // never sees it.
+  // never sees it — and can carry a line break just as readily.
   const hash = result.bodyHash
     ? ` Body hash for your next edit of this draft: ${result.bodyHash}`
     : result.bodyHashWithheld
-      ? ` No body hash was issued: ${redactBearerTokens(result.bodyHashWithheld)}`
+      ? ` No body hash was issued: ${describeUntrusted(result.bodyHashWithheld)}`
       : '';
   return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}${formatInlineNotes(result.notes)}`;
 }

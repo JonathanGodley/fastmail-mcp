@@ -715,11 +715,14 @@ grep anyone can run instead of a claim that has to be re-argued per error class.
 populates it and it is arbitrary JSON a string-shaped scrubber cannot walk.
 
 Server text that reaches the caller on a *successful* result gets no help from that catch,
-so it redacts at its own render site. `orphanedOldDraftReason` is the one such field today
-(`formatEditDraftResult` in `src/response-formatters.ts`, holding a server or exception
-message when an `edit_draft` replacement could not be moved to Trash). It is redacted where
-it is rendered rather than where it is assigned, because the render site is single and the
-assignment sites are not.
+so it is sanitised at its own render site. `orphanedOldDraftReason` and `bodyHashWithheld`
+are those fields today (`formatEditDraftResult` in `src/response-formatters.ts`, holding a
+server or exception message when an `edit_draft` replacement could not be moved to Trash, or
+when the re-read that would issue a body hash failed). Both go through `describeUntrusted`
+rather than redaction alone: one assignment site for each is a caught exception's own
+message, so the text is arbitrary and can carry a line break that would split the warning
+into what reads as two outcomes. It happens where the value is rendered rather than where it
+is assigned, because the render site is single and the assignment sites are not.
 
 The JMAP set-error reason itself is surfaced (not just the code): every throwing
 `Email/set` failure routes its `SetError` through `describeSetError` in
@@ -727,6 +730,31 @@ The JMAP set-error reason itself is surfaced (not just the code): every throwing
 mutators additionally report success/fail counts and the caller's failing ids grouped by
 reason. The helper concatenates only server-authored text — we add no message body of our
 own.
+
+Both halves of that message are values this server did not write, so both go through
+`describeUntrusted` (see **Untrusted values in prose** below): `describeSetError` renders the
+`type` and the `description` separately, so the ` - ` joining them stays the server's own
+punctuation, and the bulk path renders the failing ids with the same `nameEmailIds` the
+label refusals use rather than a bare join. A description or an id carrying a line break
+would otherwise forge what reads as further outcomes in a report a model acts on (#134).
+
+Two consequences worth knowing before reading a bulk failure:
+
+- **A reason is grouped on the RAW `type`+`description`, and sanitised only when printed.**
+  Grouping on the rendered text would key the map on a string already truncated at 64 code
+  points, so two genuinely different server errors differing only past that point would merge
+  into one group asserting a cause they do not share.
+- **A long description loses its tail**, and unlike the `archive_email` summary there is no
+  JSON payload beside a thrown error to carry the full text. Accepted: the `type` is the part
+  a caller recovers from, it is a short spec enum, it is capped separately so a long
+  description cannot crowd it out, and the ellipsis says the reason was cut rather than that
+  the server said no more.
+
+One cap governs how many caller-supplied ids any error message names (`EMAIL_ID_LIST_CAP`),
+shared by the fail-closed archive read, the label-removal refusals and the bulk set-error
+groups. A capped group ends in its own `…and N more`; the message additionally says the whole
+list is **partial** when a group or the reason count was cut, so a truncated list never reads
+as a complete one.
 
 ### The JMAP set-error split
 

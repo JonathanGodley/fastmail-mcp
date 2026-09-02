@@ -944,12 +944,17 @@ export interface ArchiveResult {
 export const ARCHIVE_REFUSING_ROLES = ['trash', 'junk', 'drafts', 'scheduled', 'sent', 'snoozed'] as const;
 
 /**
- * How many unaccounted-for ids the fail-closed read error names before it summarises the
+ * How many caller-supplied email ids any one error message names before it summarises the
  * rest. Named for the same reason the renderer names its caps: a bare 10 written twice in
  * one expression is two places to disagree, and the count in the "…and N more" tail is
  * derived from it rather than restated.
+ *
+ * ONE cap for every such list - the fail-closed archive read, the label-removal refusals and
+ * the bulk set-error groups. The bulk path used to carry its own MAX_IDS_PER_REASON of the
+ * same value, which was a second place to disagree about how much of a caller's input an
+ * error may reflect (#134).
  */
-const UNACCOUNTED_ID_CAP = 10;
+const EMAIL_ID_LIST_CAP = 10;
 
 /**
  * Whether a value returned inside a JMAP method response can be read as an id-keyed map.
@@ -1645,8 +1650,11 @@ export class JmapClient {
       // This is a top-level method-`error` entry (RFC 8620 §3.6.1) — a DIFFERENT
       // shape from the per-id SetError that describeSetError() formats. Same {type,
       // description} fields, distinct error class, so this copy is intentionally
-      // separate rather than routed through that helper.
-      throw new Error(`JMAP error: ${result.type}${result.description ? ' - ' + result.description : ''}`);
+      // separate rather than routed through that helper. It carries the same two
+      // server-authored strings, though, so it gets the same treatment: each field is
+      // rendered by describeUntrusted so neither can forge a line in the thrown message
+      // (#134). Staying a separate copy is about the error CLASS, not about the rendering.
+      throw new Error(`JMAP error: ${describeUntrusted(result.type)}${result.description ? ' - ' + describeUntrusted(result.description) : ''}`);
     }
     return result;
   }
@@ -1663,9 +1671,28 @@ export class JmapClient {
    * description; that is the server's text, identical to what the notCreated path has
    * always shipped — so the promise is "we add no content," not "no content can ever
    * appear.") Caller-supplied failing ids are added by the bulk callers, not here.
+   *
+   * Both fields are SERVER-authored, which makes them untrusted in the sense that matters:
+   * this server did not write them, and they land in prose a model reads as a report of what
+   * the server said. A description carrying a line break would forge what reads as further
+   * sentences of that report. So each field is rendered by describeUntrusted — separately, so
+   * the " - " this joins them with is still the server's own punctuation rather than
+   * something a description could have supplied (#134).
+   *
+   * Sanitising HERE rather than at the throw sites is what makes the promise above hold for
+   * every consumer at once: throwSingleSetError, throwBulkSetError, and the edit_draft
+   * orphan-reason field that is RETURNED rather than thrown and so never meets the CallTool
+   * catch.
+   *
+   * The 64-code-point cap costs a long description its tail, and unlike the archive summary
+   * there is no JSON payload alongside a thrown error to carry the full text. Accepted: the
+   * `type` is the part a caller recovers from and is a short spec enum, it is capped
+   * separately so a long description cannot crowd it out, and the ellipsis says the reason
+   * was cut rather than that the server said nothing more.
    */
   protected describeSetError(entry: { type: string; description?: string }): string {
-    return `${entry.type}${entry.description ? ' - ' + entry.description : ''}`;
+    const type = describeUntrusted(entry.type);
+    return `${type}${entry.description ? ' - ' + describeUntrusted(entry.description) : ''}`;
   }
 
   /**
@@ -1768,27 +1795,41 @@ export class JmapClient {
     trailingNote?: string,
   ): never {
     const MAX_REASONS = 5;
-    const MAX_IDS_PER_REASON = 10;
 
     const failedIds = Object.keys(notUpdated);
     const failCount = failedIds.length;
     const successCount = total - failCount;
 
-    // Group failing ids by their server-stated reason.
-    const byReason = new Map<string, string[]>();
+    // Group failing ids by their server-stated reason, keyed on the RAW type+description and
+    // rendered only when printed. Keying on the describeSetError output would group on text
+    // that has already been truncated at 64 code points, so two different server errors that
+    // differ only past that point would merge into one entry asserting a shared cause they do
+    // not share — a false statement about why messages failed, not merely a terse one. Same
+    // rule, and the same reason, as the archive failure renderer in response-formatters.ts.
+    //
+    // The NUL separator is what makes the key unambiguous: a plain join would let a
+    // description beginning with the separator collide with a different type.
+    type SetErrorEntry = { type: string; description?: string };
+    const byReason = new Map<string, { entry: SetErrorEntry; ids: string[] }>();
     for (const id of failedIds) {
-      const reason = this.describeSetError(notUpdated[id]);
-      const ids = byReason.get(reason);
-      if (ids) ids.push(id);
-      else byReason.set(reason, [id]);
+      const entry = notUpdated[id];
+      const key = `${entry.type}\u0000${entry.description ?? ''}`;
+      const group = byReason.get(key);
+      if (group) group.ids.push(id);
+      else byReason.set(key, { entry, ids: [id] });
     }
 
     let truncated = false;
-    const reasonEntries = [...byReason.entries()];
+    const reasonEntries = [...byReason.values()];
     if (reasonEntries.length > MAX_REASONS) truncated = true;
-    const groups = reasonEntries.slice(0, MAX_REASONS).map(([reason, ids]) => {
-      if (ids.length > MAX_IDS_PER_REASON) truncated = true;
-      return `${reason}: ${ids.slice(0, MAX_IDS_PER_REASON).join(', ')}`;
+    // The ids are the CALLER's own, and have passed only "non-empty string" — no length
+    // bound, no control-character strip — so one carrying a newline would forge extra lines
+    // in prose an agent reads back as the server's report. nameEmailIds is the same renderer
+    // the label refusals in this class use, rather than a second bare join that would say
+    // something different about the same values (#134).
+    const groups = reasonEntries.slice(0, MAX_REASONS).map(({ entry, ids }) => {
+      if (ids.length > EMAIL_ID_LIST_CAP) truncated = true;
+      return `${this.describeSetError(entry)}: ${JmapClient.nameEmailIds(ids)}`;
     });
 
     let message = `Failed to ${action} ${failCount} of ${total} emails (${successCount} succeeded). ${groups.join('; ')}`;
@@ -4196,8 +4237,8 @@ export class JmapClient {
       // describePart. An unbounded join would also put every id of a large batch into one
       // error message. describeUntrusted carries the redact-then-describe order and the
       // reason it is that way round (#131).
-      const shown = unaccounted.slice(0, UNACCOUNTED_ID_CAP).map(describeUntrusted).join(', ');
-      const more = unaccounted.length > UNACCOUNTED_ID_CAP ? `, …and ${unaccounted.length - UNACCOUNTED_ID_CAP} more` : '';
+      const shown = unaccounted.slice(0, EMAIL_ID_LIST_CAP).map(describeUntrusted).join(', ');
+      const more = unaccounted.length > EMAIL_ID_LIST_CAP ? `, …and ${unaccounted.length - EMAIL_ID_LIST_CAP} more` : '';
       throw new Error(
         `The server returned neither a result nor a not-found entry for ${unaccounted.length} of the ${ids.length} requested email(s): ${shown}${more}. Nothing was archived.`
       );
@@ -4550,10 +4591,10 @@ export class JmapClient {
    * truncates; the order and its reasoning live on that helper (#131).
    */
   private static nameEmailIds(list: string[]): string {
-    const shown = list.slice(0, UNACCOUNTED_ID_CAP)
+    const shown = list.slice(0, EMAIL_ID_LIST_CAP)
       .map(describeUntrusted).join(', ');
-    return list.length > UNACCOUNTED_ID_CAP
-      ? `${shown}, …and ${list.length - UNACCOUNTED_ID_CAP} more`
+    return list.length > EMAIL_ID_LIST_CAP
+      ? `${shown}, …and ${list.length - EMAIL_ID_LIST_CAP} more`
       : shown;
   }
 
