@@ -1034,7 +1034,7 @@ Many features in this MCP server are inspired by the official [Fastmail JMAP-Sam
 The server uses bearer token authentication with Fastmail's API. API tokens provide secure access without exposing your main account password.
 
 ### Rate Limits
-Fastmail applies rate limits to API requests. The server handles standard rate limiting, but excessive requests may be throttled.
+Fastmail applies rate limits to API requests. **This server does nothing about them** — it holds no retry, no backoff, no pacing and no queue. When Fastmail refuses a call for rate, its JMAP `rateLimit` error reaches you as a failed tool call, classified like every other server-side refusal — see [Parameter validation](#parameter-validation). Backing off is therefore the caller's job: anything driving this server in a loop, such as a bulk operation or a paged sweep, has to pace itself, because nothing underneath it will.
 
 ## CalDAV Calendar Support
 
