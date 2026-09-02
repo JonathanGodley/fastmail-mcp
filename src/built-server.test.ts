@@ -276,6 +276,31 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
     }
   }
 
+  // What a client can SEND is the fact under test, not how the schema spells it. This file
+  // has both spellings in it — a `type: ['array', 'string']` union and a two-branch `oneOf`
+  // — and either one admits the stringified form, so the assertions read the types the
+  // declaration admits and the constraint on its array elements, whichever shape carries
+  // them. Pinning one spelling would fail a rewrite into the other while the client-visible
+  // behaviour was unchanged.
+  function admittedTypes(declared: any): string[] {
+    const out = new Set<string>();
+    const add = (t: any) => {
+      for (const one of Array.isArray(t) ? t : (t ? [t] : [])) out.add(one);
+    };
+    add(declared.type);
+    for (const branch of declared.oneOf ?? declared.anyOf ?? []) add(branch.type);
+    return [...out].sort();
+  }
+
+  // The element constraint sits in `items`, which applies to array instances only — so it
+  // reads the same off a type union (property-level `items`) as off the array branch of a
+  // `oneOf`.
+  function arrayItems(declared: any): any {
+    if (declared.items) return declared.items;
+    const branch = (declared.oneOf ?? declared.anyOf ?? []).find((b: any) => b.type === 'array');
+    return branch?.items;
+  }
+
   // Both parameters run through coerceStringArray in edit-draft-handler.ts, and
   // edit-draft-handler.test.ts pins that the handler reads `clearFields: 'cc'` and
   // `removeAttachments: 'blob-9'`. That coverage is what makes the narrow schema a split
@@ -284,23 +309,22 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
     it(`declares ${param} as array-or-string`, async () => {
       const schema = await toolSchema('edit_draft');
       const declared = schema.properties[param];
-      assert.ok(
-        Array.isArray(declared.oneOf),
-        `${param} declares ${JSON.stringify(declared.type)} with no string alternative, so a ` +
-          'validating client rejects the stringified form before coerceStringArray runs',
+      assert.deepEqual(
+        admittedTypes(declared),
+        ['array', 'string'],
+        `${param} declares ${JSON.stringify(declared.type ?? declared.oneOf ?? declared.anyOf)} ` +
+          'with no string alternative, so a validating client rejects the stringified form ' +
+          'before coerceStringArray runs',
       );
-      const branches = declared.oneOf.map((b: any) => b.type);
-      assert.deepEqual(branches.slice().sort(), ['array', 'string']);
     });
   }
 
   // The enum is what turns a bad field name into an error naming the nine valid ones. It
-  // lives on the array branch and is the easiest thing to lose to a widening, which is why
-  // it is asserted separately from the branch shape above.
-  it('keeps the clearFields enum on the array branch', async () => {
+  // constrains the array elements and is the easiest thing to lose to a widening, which is
+  // why it is asserted separately from the admitted types above.
+  it('keeps the clearFields enum on the array elements', async () => {
     const schema = await toolSchema('edit_draft');
-    const arrayBranch = schema.properties.clearFields.oneOf.find((b: any) => b.type === 'array');
-    assert.deepEqual(arrayBranch.items.enum, [
+    assert.deepEqual(arrayItems(schema.properties.clearFields).enum, [
       'to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId',
     ]);
   });

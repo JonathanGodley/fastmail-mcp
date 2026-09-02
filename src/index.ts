@@ -1001,21 +1001,24 @@ const TOOLS = [
               // comma-separated string, and a validating client rejects that form against a
               // narrow `type: 'array'` before the coercion is ever reached — leniency that
               // cannot be exercised is not leniency.
-              oneOf: [
-                { type: 'array', items: { type: 'string' } },
-                { type: 'string' },
-              ],
+              // Spelled as a type union rather than a `oneOf`, matching `to`/`cc`/`bcc` on
+              // draft_email and the rest of the lenient list parameters: it is the form most
+              // of this file already uses, and the one a simple validator is likeliest to
+              // read, which is the entire point of declaring the string form at all.
+              type: ['array', 'string'],
+              items: { type: 'string' },
               description: "Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string. Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: drop its <img> reference from the body you supply in the same call, or keep the attachment. To remove every attachment, use clearFields:['attachments'] instead.",
             },
             clearFields: {
-              // Array-OR-string, as removeAttachments above. The item-level `enum` stays on
-              // the ARRAY branch and is not lifted out: it is what produces the rejection
-              // naming the valid field names, and widening the property without it would
-              // trade a named error for a generic one.
-              oneOf: [
-                { type: 'array', items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId'] } },
-                { type: 'string' },
-              ],
+              // Array-OR-string, as removeAttachments above. The `enum` stays in `items` and
+              // is not lifted onto the property: it is what produces the rejection naming the
+              // valid field names, and widening the property without it would trade a named
+              // error for a generic one. `items` constrains ARRAY instances only, so it goes
+              // on constraining the array form exactly as before while leaving the string
+              // form through to the server, where validateClearFields raises the same named
+              // rejection over the coerced array.
+              type: ['array', 'string'],
+              items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId'] },
               description: "Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string. Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments, forwardedMessageId. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). Clearing textBody or htmlBody requires bodyHash. clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). clearFields:['forwardedMessageId'] de-forwards the draft: it drops the recorded X-Forwarded-Message-Id so send_draft will not mark the original forwarded, and on a forward draft it drops the recorded sourceEmailId with it (that pointer names the instance the marking is about; on a reply draft it is kept). That is metadata, so it works on a body edit and a metadata-only edit alike, and it does NOT touch the body — a forwarded-message block already in the body stays there until you replace the body yourself. The converse holds too: deleting that block from the body does not de-forward the draft, so send_draft still marks the original forwarded until you clear this field.",
             },
           },
