@@ -2391,8 +2391,9 @@ describe('sendDraft', () => {
   });
 
   // The locations the refusal names, read out of its parenthetical as a LIST. Object.keys
-  // order is not something this code fixes, so a pattern like /Drafts,|: Drafts/ passes or
-  // fails on where a name happened to land rather than on whether it was named at all.
+  // order is not something this code fixes, so a pattern that matches a name in some
+  // positions and not others passes or fails on where it happened to land rather than on
+  // whether it was named at all.
   // `mb-archive` has no mailbox in this suite's fixture, so it renders as its own id — which
   // is also the fallback these assertions pin.
   const locationsNamed = (message: string): string[] => {
@@ -2422,8 +2423,10 @@ describe('sendDraft', () => {
   // A filing this server cannot read is its own outcome, not "filed somewhere else".
   //
   // The array row is also where `typeof [] === 'object'` is covered. An array read as a map
-  // would be walked by Object.keys into its INDICES and the refusal would say "(it is in:
-  // 0)"; it now cannot reach the sentence that lists locations at all, so the shape is
+  // would be walked by Object.keys into INDICES whose values are the ELEMENTS rather than
+  // `true`, so the listing would drop them all and the refusal would name no location while
+  // still offering a move_email repair; it now cannot reach the sentence that lists
+  // locations at all, so the shape is
   // pinned HERE rather than by a separate test asserting that an index is absent from a
   // message which has no location list to put one in.
   const UNREADABLE_FILINGS: [string, any][] = [
@@ -2444,6 +2447,10 @@ describe('sendDraft', () => {
         () => client.sendDraft('draft-1'),
         (err: Error) => {
           assert.match(err.message, /no readable mailboxIds/i);
+          // The consumer of this string has no browser, so the remedy must not send it
+          // looking for one — it says plainly that nothing here repairs this.
+          assert.match(err.message, /no tool here can repair it/i);
+          assert.equal(/web interface/i.test(err.message), false, err.message);
           // Not the ordinary refusal: that one asserts where the draft is and how to fix it,
           // and neither is known here.
           assert.equal(/not in the Drafts folder/i.test(err.message), false, err.message);
@@ -4402,8 +4409,7 @@ describe('updateDraft embedded images (#13)', () => {
   // The other half of the same claim, and the reason both descriptions say "a part the
   // server routed into a body list" rather than "an attachment". collectDraftBodyParts walks
   // textBody and htmlBody and nothing else, so a part that only ever sat in the attachments
-  // array is not in the hash and taking it off cannot stale one. Telling a caller their hash
-  // is dead when it is not is the same defect as not telling them when it is.
+  // array is not in the hash and taking it off cannot stale one.
   it('leaves a held hash valid when removeAttachments takes off a part no body list carries', async () => {
     const attached = {
       partId: 'p1', blobId: 'blob-att', type: 'application/pdf',

@@ -44,8 +44,9 @@ const MAX_NAMED_PARTS = 3;
  * Render a list of names as quoted data, summarizing beyond the display cap.
  *
  * `total` is how many members the sentence is really about, which is not always how many
- * names there are, so a member the caller could not name is still accounted for rather than
- * quietly shrinking the total the reader was given.
+ * names there are: a member that arrives with NO NAME AT ALL is still counted, rather than
+ * quietly shrinking the total the reader was given. (Distinct from the display cap below,
+ * which hides names that DO exist.)
  *
  * `rest` is `total - shownCount` and `shownCount` comes from `names`, so the subtraction
  * only means anything when both are counting the same members. THERE ARE TWO CONTRACTS
@@ -59,7 +60,7 @@ const MAX_NAMED_PARTS = 3;
  *    argument — it is counted and cannot be named.
  *  - TOKEN-SPELLING CALLERS — the unexpanded-spelling note in jmap-client.ts's edit path,
  *    and `buildReceipt` in draft-email-handler.ts. A member is a DISTINCT SPELLING, and
- *    `total` counts distinct spellings, including any the list could not name. The same
+ *    `total` counts EVERY distinct spelling, the ones past the display cap included. The same
  *    typo written into two supplied bodies is ONE member here, not two, because it is one
  *    thing for the caller to fix.
  *
@@ -618,8 +619,7 @@ export function noteNearMissToken(text: string, token: string): string {
  * ONE note for the whole call, not one per site: `listed` is already bounded and quoted by
  * `describePartNames`, so a body sprinkled with them produces a sentence rather than a wall.
  * `total` is how many DISTINCT spellings there are, not how many sites carried them and not
- * how many are named — the token-spelling contract on `describePartNames`. The same typo
- * written into both supplied bodies is one thing to fix, so it is counted once.
+ * how many are named — the token-spelling contract on `describePartNames`.
  *
  * Separate from `noteNearMissToken` because the two know different things. A near-miss is a
  * misspelling OF a token, so that note can say which token was meant; this one cannot —

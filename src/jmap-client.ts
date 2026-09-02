@@ -3620,8 +3620,12 @@ export class JmapClient {
     //    Drafts as somewhere the draft is while refusing it for not being there.
     //  - The shape is tested by `isPlainResponseMap`, whose docblock carries the
     //    Array.isArray reasoning (`typeof [] === 'object'`). What belongs HERE is what that
-    //    shape would do to this refusal: an array's `Object.keys` are INDICES, so the
-    //    listing below would tell the caller the draft "is in: 0".
+    //    shape would do to this refusal if it got through. `Object.keys` of an array yields
+    //    INDICES, and the value at each is the ELEMENT rather than `true`, so the listing
+    //    below drops every one of them: the refusal names no location while still handing
+    //    back a move_email repair — the "filed nowhere worth naming" outcome described a few
+    //    lines down, reached by a second route. (It would read "is in: 0" only for an array
+    //    whose elements are literally `true`, which is not a shape worth designing around.)
     //
     // Nothing on Fastmail produces these shapes — its mailbox ids are opaque tokens and
     // Cyrus emits `{id: true}`. The reason to read it this way is that the two siblings
@@ -3640,8 +3644,8 @@ export class JmapClient {
       throw new Error(
         'The server returned this draft with no readable mailboxIds, so this server cannot ' +
         'tell whether it is in the Drafts folder and will not send it. Nothing was sent. ' +
-        'This is a fault in the response rather than in the call — check where the draft is ' +
-        'filed in the Fastmail web interface.',
+        'This is a fault in the response rather than in the call, and no tool here can ' +
+        'repair it: report it rather than retrying.',
       );
     }
     const inMailbox = (id: string) =>
