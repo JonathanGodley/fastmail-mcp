@@ -276,12 +276,12 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
     }
   }
 
-  // What a client can SEND is the fact under test, not how the schema spells it. This file
-  // has both spellings in it — a `type: ['array', 'string']` union and a two-branch `oneOf`
-  // — and either one admits the stringified form, so the assertions read the types the
-  // declaration admits and the constraint on its array elements, whichever shape carries
-  // them. Pinning one spelling would fail a rewrite into the other while the client-visible
-  // behaviour was unchanged.
+  // What a client can SEND is the fact under test, not how the schema spells it. A
+  // `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, and
+  // the declarations read here have been written both ways, so the assertions read the
+  // types the declaration admits and the constraint on its array elements, whichever shape
+  // carries them. Pinning one spelling would fail a rewrite into the other while the
+  // client-visible behaviour was unchanged.
   function admittedTypes(declared: any): string[] {
     const out = new Set<string>();
     const add = (t: any) => {

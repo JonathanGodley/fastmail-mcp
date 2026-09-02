@@ -598,10 +598,8 @@ const FIELDS_PARAM_DESC =
 // (coerceStringArray accepts a JSON or comma-separated string). (#69, #79)
 function fieldsSchemaProperty() {
   return {
-    oneOf: [
-      { type: 'array', items: { type: 'string' } },
-      { type: 'string' },
-    ],
+    type: ['array', 'string'],
+    items: { type: 'string' },
     description: FIELDS_PARAM_DESC,
   };
 }
