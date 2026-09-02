@@ -666,16 +666,46 @@ and `htmlBody` lists. For example, a text-only draft lists its `text/plain` part
 `partId`; the `textBody` / `htmlBody` arrays are independent lists of body-part objects.
 
 So `bodyValueForType` (`src/jmap-client.ts`) selects the value from the part in that list
-whose type is the one being asked for, then keys into `bodyValues` by that part's `partId`.
-"Is the one being asked for" is slightly wider than an equality test on `type`: a part that
-declares **no** content type counts as the type of the list carrying it (RFC 8621 §4.1.4),
-because that is how a recipient's client renders it, so such a part is found rather than
-skipped past (#179). A naive "look up by list position / partId key" is insufficient:
+whose declared `type` **equals** the one being asked for, then keys into `bodyValues` by
+that part's `partId`. A naive "look up by list position / partId key" is insufficient:
 because the single part aliases into both lists, it would read the text value into the
 HTML slot and synthesise a phantom `text/html` part on recreate. (This was the original
 `|| true` extraction bug: both `existingTextBody` and `existingHtmlBody` collapsed to
 `Object.values(bodyValues)[0]`, so a trivial subject edit silently destroyed the HTML
 body. Since recipients render HTML, they saw the wrong content.)
+
+### A part that declares no type: the read widens, the rebuild does not
+
+The two sides disagree here on purpose, and the disagreement is the point rather than an
+inconsistency waiting to be tidied away.
+
+**The read counts a typeless part as the type of the list carrying it.** RFC 8621 §4.1.4
+puts a part into `textBody` or `htmlBody` precisely to say a client should display it
+there, so with no type of its own, list membership is the authority — that is how a
+recipient's client renders it. `draftTextBodyType` (`src/body-hash.ts`) is that rule, and
+three consumers ask it: the body reader, the `bodyHash` over what the reader returned (so
+the hash covers exactly the bytes the caller was shown), and `send_draft`'s blank-part
+check (so a part that would render the recipient a blank message is refused wherever it
+sits).
+
+**The rebuild matches the declared type exactly, and has to.** `bodyValueForType` runs once
+per format over lists that a single-format draft aliases into *both*, so a part that
+answered whichever format asked for it would answer both: the recreate would write one
+value into the `text/plain` slot and the same value into the `text/html` one, and a body
+containing `<` would ship as markup with its newlines gone. That reaches the metadata-only
+path too — the one that promises to leave the body untouched — and it reaches it in
+silence, because nothing compares the two slots and no hash is asked of a caller who only
+renamed the subject. Widening this side for symmetry with the read was tried and taken back
+out for exactly that reason (#179): corrupting a body is the worse trade.
+
+A third consumer, `draftInterleavedTextType` (`src/body-hash.ts`), counts a typeless part as
+neither format — the one place in that module that does not fall back to the list. It is
+asking whether two *distinct* parts count as one text type (the layout a flat rebuild
+cannot express), and pairing a typeless part with the typed part beside it would refuse an
+edit no reader could see a reason for. In practice none of this is reachable: `type` is
+mandatory on a body part, and Cyrus — the server Fastmail runs — fills a missing
+Content-Type in before `Email/get` returns. Each function's docblock carries the full
+reasoning; they are the authority, and this section is the map.
 
 ### Edit matrix (12 cells, confirmed live, post-fix)
 
