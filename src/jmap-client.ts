@@ -2802,12 +2802,18 @@ export class JmapClient {
     // call did, and the caller cannot act on it, because those are not their words to change.
     // A refusal on that footing would be intolerable; a note on it is merely useless noise
     // that trains the reader to ignore the ones that matter.
-    // Every `{{…}}` this call ADDED that names no token, gathered across both written parts
-    // and reported as one sentence. Gathered rather than pushed per site because the count is
-    // unbounded by anything the caller had to mean, and one note per site would bury the
-    // others; the compose receipt bounds the same list the same way.
+    // Every DISTINCT `{{…}}` this call ADDED that names no token, gathered across both written
+    // parts and reported as one sentence. Gathered rather than pushed per site because one
+    // note per site would bury the others.
+    //
+    // DISTINCT is the unit the whole note is counted in, list and number alike — that is the
+    // invariant `describePartNames` needs from every caller, and the reason its `total` is a
+    // separate argument is to let a caller count things its list cannot name, not to let the
+    // two disagree. Supplying both bodies means writing the same typo twice, so a per-site
+    // count beside a deduplicated list said "2 … ("{{sig}}")" on the ordinary path and sent
+    // the caller looking for a second spelling that was not there. One typo is one thing to
+    // fix however many times it was written.
     const addedSpellings: string[] = [];
-    let addedSpellingTotal = 0;
 
     for (const p of writtenParts) {
       const scan = scans.get(p.part)!;
@@ -2825,7 +2831,6 @@ export class JmapClient {
       for (const s of scan.otherSpellings) {
         const budget = storedSpellings.get(s.text) ?? 0;
         if (budget > 0) { storedSpellings.set(s.text, budget - 1); continue; }
-        addedSpellingTotal++;
         if (!addedSpellings.includes(s.text)) addedSpellings.push(s.text);
       }
 
@@ -2864,8 +2869,10 @@ export class JmapClient {
       }
     }
 
-    if (addedSpellingTotal > 0) {
-      tokenNotes.push(noteUnexpandedSpelling(describePartNames(addedSpellings, addedSpellingTotal), addedSpellingTotal));
+    if (addedSpellings.length > 0) {
+      tokenNotes.push(
+        noteUnexpandedSpelling(describePartNames(addedSpellings), addedSpellings.length),
+      );
     }
 
     // An html-alone edit drops the draft's stored text part and derives a fresh fallback
@@ -3607,8 +3614,32 @@ export class JmapClient {
         'in the Drafts folder.',
       );
     }
-    if (!email.mailboxIds?.[draftsMailbox.id]) {
-      const filedIn = Object.keys(email.mailboxIds || {})
+    // The membership map is READ THE WAY THIS FILE'S OTHER mailboxIds READS ARE, and for the
+    // same three reasons they are (see setErrorFor and the archive sweep's filing read):
+    //
+    //  - hasOwnProperty rather than an index. `mailboxIds` is parsed from the response, so
+    //    Object.prototype sits behind it, and a mailbox id of "constructor" or "toString"
+    //    indexes through to a truthy function. Here that opens the gate — a draft filed
+    //    anywhere would send — which is the one direction this check must never fail in.
+    //  - The VALUE must be true, not merely present. `{"mb-drafts": false}` is not a
+    //    membership, and reading presence alone would both open the gate and, below, name
+    //    Drafts as somewhere the draft is while refusing it for not being there.
+    //  - Array.isArray, because `typeof [] === 'object'`: an array-shaped map would answer
+    //    for the id "0" and its Object.keys are INDICES, so the refusal would say
+    //    "(it is in: 0)".
+    //
+    // Nothing on Fastmail produces these shapes — its mailbox ids are opaque tokens and
+    // Cyrus emits `{id: true}`. The reason to read it this way is that the two siblings
+    // already do, and the check standing in front of the only irreversible action here
+    // should not be the least careful of the three.
+    const filing = email.mailboxIds;
+    const filedInMap = filing && typeof filing === 'object' && !Array.isArray(filing) ? filing : {};
+    const inMailbox = (id: string) =>
+      Object.prototype.hasOwnProperty.call(filedInMap, id) && filedInMap[id] === true;
+
+    if (!inMailbox(draftsMailbox.id)) {
+      const filedIn = Object.keys(filedInMap)
+        .filter(id => filedInMap[id])
         .map(id => mailboxes.find(mb => mb?.id === id)?.name || id);
       throw new InvalidInputError(
         'This draft is not in the Drafts folder, so it will not be sent' +

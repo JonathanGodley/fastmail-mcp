@@ -46,6 +46,12 @@ const MAX_NAMED_PARTS = 3;
  * `total` is how many parts the sentence is really about, which is not always how many
  * names there are: a part can arrive with no filename at all, and the summary has to
  * account for it rather than quietly shrinking the total the reader was given.
+ *
+ * THE TWO ARGUMENTS MUST COUNT THE SAME KIND OF THING. `total` exists so a caller can
+ * account for members its list cannot NAME, never so the list and the number can disagree
+ * about what is being counted: `rest` is `total - shownCount` and `shownCount` is taken
+ * from `names`, so passing a per-occurrence total beside a deduplicated list invents a
+ * "…and N more" for members that do not exist. Deduplicate both or neither.
  */
 export function describePartNames(
   names: (string | null | undefined)[],

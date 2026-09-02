@@ -1725,6 +1725,45 @@ describe('updateDraft', () => {
     assert.match(note!, /stored as written/);
   });
 
+  // The count in the sentence and the list beside it must count the SAME thing. One typo
+  // written twice is one spelling to fix, and a note saying "2 … ("{{sig}}")" sends the
+  // caller hunting for a second spelling that is not there.
+  it('counts one repeated spelling once, within a single part', async () => {
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p><p>{{sig}}</p>', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /carries 1 \{\{…\}\} spelling this edit added/);
+    assert.equal(/and \d+ more/.test(note!), false, `implied more spellings than exist: ${note}`);
+  });
+
+  // ACROSS the two parts, which is the ordinary path: supplying both bodies means writing the
+  // same typo twice, so this is the common case rather than an unusual one.
+  it('counts one repeated spelling once, across both written parts', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p>', textBody: '{{sig}}', bodyHash: hashOf(DUAL_REPLY),
+    });
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /carries 1 \{\{…\}\} spelling this edit added/);
+    assert.equal(/and \d+ more/.test(note!), false, `implied more spellings than exist: ${note}`);
+  });
+
+  // Two DIFFERENT spellings are two things to fix and must still count as two.
+  it('counts two distinct spellings as two', async () => {
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{sig}}</p><p>{{quotes}}</p>', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    const note = result.notes?.find((n) => /\{\{sig\}\}/.test(n));
+    assert.ok(note, `expected a note, got ${JSON.stringify(result.notes)}`);
+    assert.match(note!, /carries 2 \{\{…\}\} spellings this edit added/);
+    assert.match(note!, /\{\{quotes\}\}/);
+  });
+
   // The flag expands {{signature}} and nothing else, so a mistyped spelling ships from a
   // flagged edit exactly as it does from an unflagged one and is reported on both.
   it('reports the spelling on a flagged edit too', async () => {
@@ -2287,6 +2326,61 @@ describe('sendDraft', () => {
       },
     );
     assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // The membership map is parsed from the response and read by a caller-independent id, so
+  // it is read the way this file's other mailboxIds reads are: an own-property test, not an
+  // index. A drafts-role mailbox whose id collides with an Object.prototype key would
+  // otherwise resolve to a truthy function and open the gate for a draft filed anywhere.
+  it('does not treat a prototype key as membership of Drafts', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      { id: 'constructor', name: 'Drafts', role: 'drafts' },
+      SENT_MAILBOX,
+    ]);
+    const archived = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-archive': true } };
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [archived] }, 'getEmail']],
+    }));
+
+    await assert.rejects(() => client.sendDraft('draft-1'), /not in the Drafts folder/i);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // A `false` value is not a membership, so it must not be reported as one. Refusing because
+  // the draft is not in Drafts and then telling the caller it IS in Drafts is a refusal that
+  // argues against itself.
+  it('does not name a mailbox whose membership value is false', async () => {
+    const notReally = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': false, 'mb-archive': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [notReally] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /not in the Drafts folder/i);
+        assert.equal(/Drafts,|: Drafts/.test(err.message), false, `named Drafts as a location: ${err.message}`);
+        return true;
+      },
+    );
+  });
+
+  // typeof [] === 'object', so an array-shaped map would otherwise be walked by Object.keys
+  // into its INDICES and the refusal would read "(it is in: 0)".
+  it('refuses without naming an index when mailboxIds is array-shaped', async () => {
+    const wrongShape = { ...SENDABLE_DRAFT, mailboxIds: ['mb-archive'] };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [wrongShape] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /not in the Drafts folder/i);
+        assert.equal(/it is in: 0/.test(err.message), false, `named an array index: ${err.message}`);
+        return true;
+      },
+    );
   });
 
   // The substring name fallback would accept a user mailbox merely CONTAINING "draft", and
