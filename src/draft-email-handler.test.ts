@@ -763,8 +763,7 @@ describe('draft_email — the receipt', () => {
   });
 
   // The receipt lists spellings and counts them in the same sentence, so both have to count
-  // DISTINCT ones. Writing the same typo into both bodies is the ordinary way to supply a
-  // dual-format message, not an unusual input.
+  // DISTINCT ones.
   it('counts one spelling written into both bodies once', async () => {
     const { client } = spyClient();
     const r = await compose(

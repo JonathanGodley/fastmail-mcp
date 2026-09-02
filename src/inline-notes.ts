@@ -59,9 +59,9 @@ const MAX_NAMED_PARTS = 3;
  *    argument — it is counted and cannot be named.
  *  - TOKEN-SPELLING CALLERS — the unexpanded-spelling note in jmap-client.ts's edit path,
  *    and `buildReceipt` in draft-email-handler.ts. A member is a DISTINCT SPELLING, and
- *    `total` counts distinct spellings, including any the list could not name. A caller
- *    supplying both bodies writes the same typo in each, and one typo is one thing to fix
- *    however many times it was written.
+ *    `total` counts distinct spellings, including any the list could not name. The same
+ *    typo written into two supplied bodies is ONE member here, not two, because it is one
+ *    thing for the caller to fix.
  *
  * Mixing them renders wrongly in a way that reads as fact: a per-occurrence total beside a
  * deduplicated list promises a "…and N more" for members that do not exist, and a

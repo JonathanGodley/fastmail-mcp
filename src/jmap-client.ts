@@ -2804,11 +2804,9 @@ export class JmapClient {
     // per-part fact and its counter belongs inside the loop. The escape, near-miss and
     // history notes take only the token text: they say nothing about which body carried it,
     // so the same text reported from two parts is the identical sentence twice, and
-    // formatInlineNotes does not deduplicate. Supplying both bodies means writing the same
-    // token in both, which is what this tool's own description tells a caller to do — so the
-    // repeat fires on the instructed path, not an exotic one. These three dedupe ACROSS the
-    // edit; only the count-rise budgets below stay per part, because the stored bytes they
-    // compare against are per part.
+    // formatInlineNotes does not deduplicate. These three dedupe ACROSS the edit; only the
+    // count-rise budgets below stay per part, because the stored bytes they compare against
+    // are per part.
 
     const reportedEscapes = new Set<string>();
     const namedMisses = new Set<string>();
@@ -3650,10 +3648,7 @@ export class JmapClient {
       Object.prototype.hasOwnProperty.call(filing, id) && filing[id] === true;
 
     if (!inMailbox(draftsMailbox.id)) {
-      // `=== true`, the same test the gate itself applies. Plain truthiness here would let a
-      // `{"mb-drafts": 1}` be refused for not being in Drafts and named as being in Drafts in
-      // the same sentence — the self-arguing refusal the value test above exists to prevent,
-      // reintroduced one line further down.
+      // `=== true`, the same test the gate itself applies.
       const filedIn = Object.keys(filing)
         .filter(id => filing[id] === true)
         .map(id => mailboxes.find(mb => mb?.id === id)?.name || id);

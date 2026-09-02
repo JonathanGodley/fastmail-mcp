@@ -1983,8 +1983,7 @@ describe('updateDraft', () => {
   // -- one note per thing, not one per part --
   // The escape, near-miss and history notes name a token and never a part, so the same
   // spelling reaching them from both written bodies is the identical sentence twice, and
-  // nothing downstream deduplicates the notes list. Supplying both bodies is what this
-  // tool's description tells a caller to do, so this is the instructed path.
+  // nothing downstream deduplicates the notes list.
 
   const notesMatching = (result: any, re: RegExp): string[] =>
     (result.notes ?? []).filter((n: string) => re.test(n));
@@ -2420,9 +2419,7 @@ describe('sendDraft', () => {
     );
   });
 
-  // A filing this server cannot read is its own outcome, not "filed somewhere else". Folding
-  // it into the ordinary refusal produced a sentence that named no location and then handed
-  // back a move_email repair for a draft that may already be in Drafts.
+  // A filing this server cannot read is its own outcome, not "filed somewhere else".
   //
   // The array row is also where `typeof [] === 'object'` is covered. An array read as a map
   // would be walked by Object.keys into its INDICES and the refusal would say "(it is in:
@@ -4384,8 +4381,7 @@ describe('updateDraft embedded images (#13)', () => {
   // A metadata-only edit writes no body and is not asked for a hash — but taking a part out
   // of a body list changes the SET the hash is taken over, so a hash the caller was holding
   // stops matching after an edit that wrote nothing. Nothing is lost: the next body edit is
-  // refused and the caller re-reads, which is the guard working. Both descriptions say this;
-  // this pins that they are describing the real behaviour.
+  // refused and the caller re-reads, which is the guard working.
   it('stales a held hash when removeAttachments takes an image out of a body list', async () => {
     const before = htmlDraft('<p>no image displayed here</p>', [], [imagePart()]);
     const heldHash = hashOf(before);
