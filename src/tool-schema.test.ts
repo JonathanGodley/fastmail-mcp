@@ -98,6 +98,7 @@ const HANDLER_FILES = [
   'index.ts',
   'thread-handler.ts',
   'draft-email-handler.ts',
+  'edit-draft-handler.ts',
   'send-draft-handler.ts',
   'mailbox-handler.ts',
   'contacts-handler.ts',
