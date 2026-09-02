@@ -687,8 +687,8 @@ is caller-fixable input there exactly as it is on `get_email`/`get_thread`, whic
 is bad: an unusable reference *form* (a bare `cid:` with no value, a `cid:` value matching
 several parts, a number with junk in it, a part carrying no blob) and a well-formed reference
 that simply *matches nothing* both throw `InvalidInputError` and reach the caller naming what
-to pass instead. Messages quote back only the caller's own input, through `describePart`, so
-a hostile value cannot overrun the sentence.
+to pass instead. Messages quote back only the caller's own input, through `describeUntrusted`, so
+a hostile value cannot overrun the sentence or forge a line inside it.
 
 Naming the failure confirms that a message exists and that a reference does or does not
 resolve, and that is fine here: `get_email_attachments` enumerates a message's parts on
@@ -980,6 +980,57 @@ Two things outside `src/` stay indented on purpose, because their output is not 
 `scripts/dump-official-surface.mjs` writes a checked-in JSON document, where indentation is
 what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a human
 running it by hand.
+
+## Untrusted values in prose: `describeUntrusted`
+
+The rule, stated so it can be checked rather than argued per site: **any untrusted value
+interpolated into prose a caller reads back — thrown or returned — goes through
+`describeUntrusted` (`src/coerce.ts`), and the server's own sentence around it never does.**
+
+"Untrusted" here is not "attacker-authored", it is **not written by this server**: a
+caller-supplied email id or `attachmentId`, a mailbox name or path or role, a Content-ID, a
+server-authored `SetError` description. All of them reach a model as a report of what the
+server said.
+
+Two hazards, and the order of the two steps is what covers both:
+
+- **Line forging** — the one that matters in practice, and it needs no long value and no
+  credential. A value carrying CR, LF or U+2028 splits one message into what reads as
+  several, and the forged lines read as further sentences from the server. `describePart`
+  strips those, drops bidi overrides, collapses space runs, turns a double quote into a
+  single one so the value cannot close the span it is rendered inside, and caps the length so
+  one hostile value cannot become the whole message.
+- **Credential echo** — narrower, but a leak rather than a style point. Both redaction rules
+  are length-sensitive (`FASTMAIL_TOKEN_PATTERN` needs 20+ characters after the `fmu<n>-`
+  prefix; a registered secret is matched as an exact string), so describing **first**
+  truncates at 64 code points, hands the redactor a string the secret no longer fits in, and
+  the surviving prefix goes out verbatim.
+
+Hence: redact the full value, **then** neutralise and truncate it. The wrong order still reads
+correctly and still passes every line-forging test, which is exactly why the pair lives behind
+one name instead of being respelled at each call site (#131).
+
+**Sanitise the value, never the finished sentence.** `mailboxListHint` builds the shared
+`Valid: …` tail from mailbox paths and roles; the three message builders that append it never
+see those values, only one finished string of the server's own words. Running the helper over
+*that* would neutralise the server's own punctuation and let the 64-code-point cap eat the
+whole list. The same split decides the two ambiguity messages: `formatMailboxAmbiguous`
+receives raw paths and describes each one, while `formatMailboxNameVsPath` receives
+descriptions already composed (and already sanitised) by `describeFlatCandidate` /
+`describeNestedCandidate`, and deliberately does not re-describe them.
+
+**The accepted cost.** A path or id longer than 64 code points is truncated, so it stops being
+pasteable input — a real loss for a hint whose job is to offer input back. It is accepted: the
+ellipsis says the value was cut, the hint already points at `list_mailboxes` for the full
+picture, and the alternative is letting an account-controlled name forge lines in prose an
+agent acts on.
+
+**What is outside the rule, and why it is structure rather than a decision.**
+`inline-images.ts` and `inline-notes.ts` sit *below* `coerce.ts` in the import graph, so they
+cannot reach the helper without a cycle; their cid refusals call `describePart` alone. That
+neutralises line forging, which is the hazard that matters — only the narrow
+redact-before-truncate half is missing, and only for a caller-supplied value over 64 code
+points with a credential straddling the cut.
 
 ## Query-level signals: the result count and `position` paging
 

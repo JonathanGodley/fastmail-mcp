@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, describeUntrusted, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { signatureBlock } from './reply-quote.js';
@@ -460,7 +460,7 @@ function resolveAttachmentRef(parts: any[], attachmentId: string): { part: any; 
     // verbatim `cid` echo, so decoding first would break pasting back a cid that really
     // does contain a percent escape. Ambiguity WITHIN a stage is rejected, never guessed.
     const ambiguous = () => new InvalidInputError(
-      `attachmentId "cid:${describePart(literal)}" matches more than one part. ` +
+      `attachmentId "cid:${describeUntrusted(literal)}" matches more than one part. ` +
       'Pass the part\'s blobId or partId from get_email_attachments instead.'
     );
     const literalMatches = parts.filter((p: any) => p?.cid === literal);
@@ -486,7 +486,7 @@ function resolveAttachmentRef(parts: any[], attachmentId: string): { part: any; 
   // error rather than a wrong answer.
   if (!Number.isNaN(Number.parseInt(attachmentId, 10))) {
     throw new InvalidInputError(
-      `attachmentId "${describePart(attachmentId)}" is not a usable attachment reference. ` +
+      `attachmentId "${describeUntrusted(attachmentId)}" is not a usable attachment reference. ` +
       'Pass a partId or blobId from get_email_attachments, cid:<value> for an embedded ' +
       'image, or a plain entry number (0, 1, 2, ...) counting from the start of that listing.'
     );
@@ -1140,13 +1140,26 @@ function mailboxLabel(mb: any, paths: Map<string, string>): string {
 // (label array) messages so they truncate identically and read consistently. The entries
 // are PATHS, not bare names: an ambiguity error hands the caller full paths, so the hint
 // has to speak the same vocabulary or the two would disagree about what to retry with.
+//
+// Sanitisation lives HERE, in the builder, not at the three call sites that append this
+// tail (#131). The call sites never see a mailbox name — by the time they have this, it is
+// one finished sentence of the server's own words wrapped around the untrusted values, and
+// running describeUntrusted over that would neutralise the server's own punctuation and let
+// its 64-code-point cap eat the whole list. The rule the builder follows instead is the one
+// that generalises: sanitise each untrusted VALUE where it is interpolated, never the
+// finished sentence.
+//
+// A path long enough to be truncated stops being pasteable input, which is a real cost to a
+// hint whose job is to offer input back. It is accepted: the ellipsis says the value was cut,
+// the tail already points at list_mailboxes for the full picture, and the alternative is
+// letting an account-controlled name forge lines in prose an agent reads back.
 function mailboxListHint(mailboxes: any[]): string {
   const { paths } = buildMailboxPathMap(mailboxes || []);
   const entries = (mailboxes || [])
     .filter(mb => mb && typeof mb.name === 'string')
     .map(mb => {
-      const label = mailboxLabel(mb, paths);
-      return mb.role ? `${label} (${mb.role})` : label;
+      const label = describeUntrusted(mailboxLabel(mb, paths));
+      return mb.role ? `${label} (${describeUntrusted(mb.role)})` : label;
     });
   const shown = entries.slice(0, MAILBOX_LIST_CAP);
   let list = shown.join(', ');
@@ -1157,24 +1170,32 @@ function mailboxListHint(mailboxes: any[]): string {
 }
 
 function formatMailboxNotFound(input: string, mailboxes: any[]): string {
-  return `Mailbox '${input}' not found. ${mailboxListHint(mailboxes)}`;
+  return `Mailbox '${describeUntrusted(input)}' not found. ${mailboxListHint(mailboxes)}`;
 }
 
 // A name shared by several mailboxes is NOT a typo, so it must never render as
 // "not found" — that would send the caller off correcting spelling that was already
 // right. Name the candidates by full path, which is exactly the input form that
 // disambiguates them.
+// `candidates` here are RAW mailbox paths straight off the resolver, so each is sanitised
+// as it is rendered. Contrast formatMailboxNameVsPath below, whose candidates arrive already
+// composed.
 function formatMailboxAmbiguous(input: string, candidates: string[]): string {
-  return `Mailbox '${input}' is ambiguous: ${candidates.length} mailboxes share that name. ` +
-    `Retry with one of their full paths, or with an id. Candidates: ${joinCapped(candidates)}`;
+  return `Mailbox '${describeUntrusted(input)}' is ambiguous: ${candidates.length} mailboxes share that name. ` +
+    `Retry with one of their full paths, or with an id. Candidates: ${joinCapped(candidates.map(describeUntrusted))}`;
 }
 
 // The other ambiguity: one reference reads BOTH as the name of a folder that contains the
 // separator and as the path to a different, nested mailbox. It gets its own message because
 // its correction is different — the advice above ("retry with a full path") is exactly the
 // input that just failed, since the path IS the ambiguous text. Only an id separates them.
+// `candidates` are the composed descriptions built by describeFlatCandidate /
+// describeNestedCandidate below, which sanitise the untrusted name and id they interpolate.
+// They are deliberately NOT run through describeUntrusted again here: they are this server's
+// own sentences by the time they arrive, and re-describing them would truncate a whole
+// description at 64 code points and strip the punctuation it uses to stay readable.
 function formatMailboxNameVsPath(input: string, candidates: string[]): string {
-  return `Mailbox '${input}' is ambiguous: it is both the name of one folder and the path to a different ` +
+  return `Mailbox '${describeUntrusted(input)}' is ambiguous: it is both the name of one folder and the path to a different ` +
     `mailbox, and a path cannot tell those apart. Retry with the id of the one you mean. ` +
     `Candidates: ${joinCapped(candidates)}`;
 }
@@ -1186,20 +1207,25 @@ function formatMailboxNameVsPath(input: string, candidates: string[]): string {
 // one form that picks either of them. Unlike the candidates of a duplicated name, these are
 // descriptions rather than pasteable input; the id inside each one is what gets pasted back.
 function describeFlatCandidate(mb: any): string {
-  return `folder named '${normalizeMailboxSegment(mb?.name)}' (id: ${mb?.id})`;
+  return `folder named '${describeUntrusted(normalizeMailboxSegment(mb?.name))}' (id: ${describeUntrusted(mb?.id)})`;
 }
 
 function describeNestedCandidate(mb: any, paths: Map<string, string>): string {
   const path = paths.get(mb?.id);
-  const nesting = path ? path.split(MAILBOX_PATH_SEPARATOR).join(' > ') : String(mb?.id);
-  return `nested folder ${nesting} (id: ${mb?.id})`;
+  // The " > " nesting is assembled from sanitised SEGMENTS rather than by describing the
+  // finished string, so a long path is not cut off mid-way and the separators the reader
+  // needs survive; each segment is an account-supplied name and carries the hazard.
+  const nesting = path
+    ? path.split(MAILBOX_PATH_SEPARATOR).map(describeUntrusted).join(' > ')
+    : describeUntrusted(mb?.id);
+  return `nested folder ${nesting} (id: ${describeUntrusted(mb?.id)})`;
 }
 
 // Distinct from both "not found" and "ambiguous": the tree itself is unwalkable, so no
 // path input can be resolved at all. Says which mailbox broke the walk and which input
 // forms still work.
 function formatMailboxUnwalkable(input: string, id: string): string {
-  return `Mailbox '${input}' could not be resolved as a path: mailbox '${id}' has a parent chain that never reaches ` +
+  return `Mailbox '${describeUntrusted(input)}' could not be resolved as a path: mailbox '${describeUntrusted(id)}' has a parent chain that never reaches ` +
     `a top-level mailbox (a loop, or a parent missing from the mailbox list), so full paths cannot be computed. ` +
     `Refer to the mailbox by id, role, or name instead.`;
 }
@@ -1210,13 +1236,15 @@ function formatMailboxUnwalkable(input: string, id: string): string {
 // are separate because they call for different corrections — a typo is respelled, an
 // ambiguous name is replaced with one of its paths — and collapsing them into
 // "not found" would tell a caller their spelling was wrong when it was not. The reflected
-// values are the caller's own input (redacted at the top-level catch), but bound the
-// volume anyway: cap the count with a "…and N more" tail and clamp each value's length so
-// a huge/long mailboxIds array can't be reflected wholesale.
-const UNRESOLVED_VALUE_MAXLEN = 80;
-function clampUnresolvedValue(v: string): string {
-  return v.length > UNRESOLVED_VALUE_MAXLEN ? `${v.slice(0, UNRESOLVED_VALUE_MAXLEN)}…` : v;
-}
+// values are the caller's own input, and the count is capped with a "…and N more" tail so a
+// huge mailboxIds array can't be reflected wholesale.
+//
+// Each value is rendered by describeUntrusted rather than a length clamp of its own (#131).
+// The clamp this replaces cut at 80 characters and did nothing else, so a value carrying a
+// newline forged what read as further lines of the server's own report; the shared helper
+// strips those, redacts first, and brings its own cap — so there is no longer a second
+// length constant here to drift against the rest of the file, and no local wrapper hiding
+// which values are treated as untrusted.
 
 // Join a capped list and SAY when it was capped. Every list rendered into a resolver error
 // goes through this, because a truncated list with no tail reads as a complete one — a
@@ -1228,7 +1256,7 @@ function joinCapped(items: string[], separator = ', '): string {
 }
 
 function formatMailboxesNotFound(unresolved: string[], mailboxes: any[]): string {
-  const listed = joinCapped(unresolved.map(v => `'${clampUnresolvedValue(v)}'`));
+  const listed = joinCapped(unresolved.map(v => `'${describeUntrusted(v)}'`));
   return `Mailbox(es) not found: ${listed}. ${mailboxListHint(mailboxes)}`;
 }
 
@@ -1246,19 +1274,21 @@ export interface MailboxResolutionFailures {
 function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailboxes: any[]): string {
   const parts: string[] = [];
   if (failures.notFound.length > 0) {
-    const listed = joinCapped(failures.notFound.map(v => `'${clampUnresolvedValue(v)}'`));
+    const listed = joinCapped(failures.notFound.map(v => `'${describeUntrusted(v)}'`));
     parts.push(`Mailbox(es) not found: ${listed}.`);
   }
   if (failures.ambiguous.length > 0) {
+    // `candidates` are raw mailbox paths, so each is described; the nameVsPath block below
+    // takes composed descriptions and deliberately does not re-describe them.
     const listed = joinCapped(
-      failures.ambiguous.map(a => `'${clampUnresolvedValue(a.input)}' matches ${joinCapped(a.candidates)}`),
+      failures.ambiguous.map(a => `'${describeUntrusted(a.input)}' matches ${joinCapped(a.candidates.map(describeUntrusted))}`),
       '; ',
     );
     parts.push(`Ambiguous mailbox name(s) — retry with a full path or an id: ${listed}.`);
   }
   if (failures.nameVsPath.length > 0) {
     const listed = joinCapped(
-      failures.nameVsPath.map(a => `'${clampUnresolvedValue(a.input)}' matches ${joinCapped(a.candidates)}`),
+      failures.nameVsPath.map(a => `'${describeUntrusted(a.input)}' matches ${joinCapped(a.candidates)}`),
       '; ',
     );
     parts.push(
@@ -1268,7 +1298,7 @@ function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailbox
   }
   if (failures.unwalkable.length > 0) {
     const listed = joinCapped(
-      failures.unwalkable.map(u => `'${clampUnresolvedValue(u.input)}' (blocked by mailbox '${u.id}')`),
+      failures.unwalkable.map(u => `'${describeUntrusted(u.input)}' (blocked by mailbox '${describeUntrusted(u.id)}')`),
     );
     parts.push(
       `Mailbox path(s) unresolvable because a parent chain never reaches a top-level mailbox: ${listed}. ` +
@@ -1316,7 +1346,7 @@ function findNonLabelMailboxes(resolvedIds: string[], mailboxes: any[]): string[
     const name = mailbox && typeof mailbox.name === 'string' && mailbox.name.trim() !== ''
       ? mailbox.name
       : id;
-    named.push(`'${clampUnresolvedValue(name)}' (${role})`);
+    named.push(`'${describeUntrusted(name)}' (${describeUntrusted(role)})`);
   }
   return named;
 }
@@ -4164,13 +4194,9 @@ export class JmapClient {
       // they are CALLER-supplied strings that have passed only "non-empty string", this text
       // reaches an agent's transcript, and the CallTool catch applies redaction but not
       // describePart. An unbounded join would also put every id of a large batch into one
-      // error message.
-      //
-      // Redact BEFORE describePart, never after: describePart truncates at 64 code points and
-      // both redaction rules are length-sensitive, so truncating first lets a partial secret
-      // through. Same order, and the same reason, as the failure renderer in
-      // response-formatters.ts.
-      const shown = unaccounted.slice(0, UNACCOUNTED_ID_CAP).map(id => describePart(redactBearerTokens(id))).join(', ');
+      // error message. describeUntrusted carries the redact-then-describe order and the
+      // reason it is that way round (#131).
+      const shown = unaccounted.slice(0, UNACCOUNTED_ID_CAP).map(describeUntrusted).join(', ');
       const more = unaccounted.length > UNACCOUNTED_ID_CAP ? `, …and ${unaccounted.length - UNACCOUNTED_ID_CAP} more` : '';
       throw new Error(
         `The server returned neither a result nor a not-found entry for ${unaccounted.length} of the ${ids.length} requested email(s): ${shown}${more}. Nothing was archived.`
@@ -4520,13 +4546,12 @@ export class JmapClient {
   /**
    * Caller-supplied email ids rendered into prose an agent reads back, capped and made safe.
    *
-   * Redacts BEFORE describePart: describePart truncates at 64 code points and the redaction
-   * rules are length-sensitive, so truncating first can leave a partial secret behind. Same
-   * order, and the same reason, as the failure renderer in response-formatters.ts.
+   * Every id goes through describeUntrusted, which redacts before it neutralises and
+   * truncates; the order and its reasoning live on that helper (#131).
    */
   private static nameEmailIds(list: string[]): string {
     const shown = list.slice(0, UNACCOUNTED_ID_CAP)
-      .map(id => describePart(redactBearerTokens(id))).join(', ');
+      .map(describeUntrusted).join(', ');
     return list.length > UNACCOUNTED_ID_CAP
       ? `${shown}, …and ${list.length - UNACCOUNTED_ID_CAP} more`
       : shown;
@@ -4964,7 +4989,7 @@ export class JmapClient {
 
     if (!resolved) {
       throw new InvalidInputError(
-        `Attachment not found: attachmentId "${describePart(attachmentId)}" matches no part of that message. ` +
+        `Attachment not found: attachmentId "${describeUntrusted(attachmentId)}" matches no part of that message. ` +
         'List its parts with get_email_attachments and pass a partId or blobId from it.'
       );
     }
@@ -5339,8 +5364,8 @@ export class JmapClient {
           } catch (e) {
             if (e instanceof InvalidInputError) {
               throw new InvalidInputError(
-                `attachments[${i}] names emailId "${describePart(spec.emailId)}" and attachmentId ` +
-                `"${describePart(spec.attachmentId as string)}". ${e.message}`
+                `attachments[${i}] names emailId "${describeUntrusted(spec.emailId)}" and attachmentId ` +
+                `"${describeUntrusted(spec.attachmentId as string)}". ${e.message}`
               );
             }
             throw e;
@@ -5352,7 +5377,7 @@ export class JmapClient {
           // from what the resolver did, never from whether the string looks numeric.
           if (info.matchedBy === 'index') {
             throw new InvalidInputError(
-              `attachments[${i}] resolved attachmentId "${describePart(spec.attachmentId as string)}" only as an entry number in the part listing. ` +
+              `attachments[${i}] resolved attachmentId "${describeUntrusted(spec.attachmentId as string)}" only as an entry number in the part listing. ` +
               'An entry number moves whenever the listing does, and this attaches the file to mail you may then send. ' +
               'Pass the partId or blobId from get_email_attachments instead.'
             );

@@ -1,7 +1,6 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
-import { redactBearerTokens, toolJson } from './coerce.js';
-import { describePart } from './inline-images.js';
+import { redactBearerTokens, describeUntrusted, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import { CALENDAR_OPEN_WINDOW_DAYS } from './caldav-client.js';
@@ -372,7 +371,7 @@ const ARCHIVE_REFUSAL_REASONS: Record<string, string> = {
 // inside double quotes so hostile text reads as quoted data. Nothing caps a mailbox name's
 // LENGTH on the create path, which is the other half of why this cannot interpolate raw.
 function quoteMailboxNames(names: string[]): string {
-  const shown = names.slice(0, ARCHIVE_NAME_CAP).map(n => `"${describePart(redactBearerTokens(n))}"`).join(', ');
+  const shown = names.slice(0, ARCHIVE_NAME_CAP).map(n => `"${describeUntrusted(n)}"`).join(', ');
   const more = names.length > ARCHIVE_NAME_CAP ? `, …and ${names.length - ARCHIVE_NAME_CAP} more` : '';
   return `${shown}${more}`;
 }
@@ -389,7 +388,7 @@ function quoteMailboxNames(names: string[]): string {
 // response and verbatim in the other. Truncating first would defeat it anyway: both the token
 // pattern and the exact-secret match are length-sensitive.
 function listIds(ids: string[]): string {
-  const shown = ids.slice(0, ARCHIVE_ID_CAP).map(id => describePart(redactBearerTokens(id))).join(', ');
+  const shown = ids.slice(0, ARCHIVE_ID_CAP).map(describeUntrusted).join(', ');
   const more = ids.length > ARCHIVE_ID_CAP ? `, …and ${ids.length - ARCHIVE_ID_CAP} more` : '';
   return `${shown}${more}`;
 }
@@ -556,7 +555,7 @@ export function formatArchiveResult(result: ArchiveResult): string {
       // Object.prototype and render it as the explanation.
       const why = Object.prototype.hasOwnProperty.call(ARCHIVE_REFUSAL_REASONS, role)
         ? ARCHIVE_REFUSAL_REASONS[role]
-        : `Fastmail offers no Archive action for a message in the "${describePart(redactBearerTokens(role))}" mailbox. Use move_email to file it somewhere else.`;
+        : `Fastmail offers no Archive action for a message in the "${describeUntrusted(role)}" mailbox. Use move_email to file it somewhere else.`;
       lines.push(`${count} refused: ${why}`);
     }
   }
@@ -580,18 +579,20 @@ export function formatArchiveResult(result: ArchiveResult): string {
     // alongside this summary, where the untruncated description survives and JSON.stringify
     // escapes any newline in it — so nothing is lost, it just moves one block down.
     //
-    // ORDER MATTERS, and getting it backwards is a credential leak rather than a style
-    // point. Both redactions are length-sensitive — the token pattern needs 20+ characters
-    // after the `fmu<n>-` prefix, and a registered secret is matched as an exact string — so
-    // running describePart first, which truncates at 64 code points, hands redaction a
-    // string the secret no longer fits in and the surviving prefix goes out verbatim.
-    // Redact the full value, THEN neutralise and truncate it.
+    // Both steps, in that order, are what `describeUntrusted` is; the reason the order is a
+    // credential leak rather than a style point lives on that helper. This file no longer
+    // spells the pair out at each site.
     //
-    // The rule as stated governs THIS return path — every site here obeys it. It is not yet
-    // true of the server as a whole: several thrown-error messages in jmap-client.ts call
-    // describePart on a caller-supplied id and are redacted later by the CallTool catch, so
-    // they truncate first. Closing that is #131; do not read the paragraph above as a claim
-    // that it is already closed everywhere.
+    // The rule is no longer scoped to this return path. #131 and #134 carried it across the
+    // thrown-error prose in jmap-client.ts — the attachment-reference refusals, the mailbox
+    // resolver's messages and its "Valid: …" hint, and the single and bulk set-error
+    // messages — so the criterion now reads as one rule: any untrusted value interpolated
+    // into prose a caller reads back, thrown or returned, goes through `describeUntrusted`.
+    // What is still outside it is a boundary of module structure rather than a decision:
+    // `inline-images.ts` and `inline-notes.ts` sit BELOW `coerce.ts` in the import graph and
+    // cannot reach the helper without a cycle, so their cid refusals call `describePart`
+    // alone. That neutralises line forging, which is the hazard that matters; only the
+    // narrow redact-before-truncate half is missing there.
     //
     // Group on the RAW reason and truncate only when rendering. Keying the map on the
     // describePart output would merge failures that differ only past the 64th code point
@@ -630,7 +631,7 @@ export function formatArchiveResult(result: ArchiveResult): string {
         // the same parenthetical. No separator fixes it, since any separator can occur inside
         // a server description; the untruncated slots are in the JSON result item, which is
         // where a caller telling the two apart should look.
-        rendered: parts.map(part => describePart(redactBearerTokens(part))).join(' - '),
+        rendered: parts.map(describeUntrusted).join(' - '),
         ids: [r.id],
       });
     }
