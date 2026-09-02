@@ -540,8 +540,10 @@ export function rejectMissingBodyHash(): string {
 /** The hash was current when it was issued and is not current now. */
 export function rejectStaleBodyHash(): string {
   return (
-    'The bodyHash you passed is not this draft\'s current one, so its body changed after the ' +
-    'read that issued it (the web UI, another client, or an edit you have already made). ' +
+    'The bodyHash you passed is not this draft\'s current one, so what it covers changed ' +
+    'after the read that issued it: either the body itself (the web UI, another client, or ' +
+    'an edit you have already made), or the set of parts it is taken over — removing an ' +
+    'embedded image changes that without writing a body. ' +
     'Nothing was written. Read the draft again with get_email, re-apply your changes to the ' +
     'body it returns, and pass the bodyHash from that read.'
   );

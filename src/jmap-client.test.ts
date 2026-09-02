@@ -4382,6 +4382,28 @@ describe('updateDraft embedded images (#13)', () => {
     assert.deepEqual(result.notes, ['2 of your image(s) became regular attachments (nothing in the body displays them).']);
   });
 
+  // A metadata-only edit writes no body and is not asked for a hash — but taking a part out
+  // of a body list changes the SET the hash is taken over, so a hash the caller was holding
+  // stops matching after an edit that wrote nothing. Nothing is lost: the next body edit is
+  // refused and the caller re-reads, which is the guard working. Both descriptions say this;
+  // this pins that they are describing the real behaviour.
+  it('stales a held hash when removeAttachments takes an image out of a body list', async () => {
+    const before = htmlDraft('<p>no image displayed here</p>', [], [imagePart()]);
+    const heldHash = hashOf(before);
+    const after = htmlDraft('<p>no image displayed here</p>');
+
+    mockEdit(client, before, after);
+    const removal = await client.updateDraft('draft-1', { removeAttachments: ['blob-img'] });
+    // Metadata-only: no body written, so no hash is issued for the next edit either.
+    assert.equal(removal.bodyHash, undefined);
+
+    mockEdit(client, after, after);
+    await assert.rejects(
+      () => client.updateDraft('draft-2', { htmlBody: '<p>next</p>', bodyHash: heldHash }),
+      /not this draft's current one/,
+    );
+  });
+
   it('reports a part the caller removed once, as a removal it asked for', async () => {
     // The explicit removal is the caller's own action and needs no sentence; what must not
     // happen is the same part ALSO being counted as one the edit took off the body.
