@@ -41,24 +41,32 @@ export function formatSize(bytes: number): string {
 const MAX_NAMED_PARTS = 3;
 
 /**
- * Render a list of part names as quoted data, summarizing beyond the display cap.
+ * Render a list of names as quoted data, summarizing beyond the display cap.
  *
- * `total` is how many parts the sentence is really about, which is not always how many
- * names there are: a part can arrive with no filename at all, and the summary has to
- * account for it rather than quietly shrinking the total the reader was given.
+ * `total` is how many members the sentence is really about, which is not always how many
+ * names there are, so a member the caller could not name is still accounted for rather than
+ * quietly shrinking the total the reader was given.
  *
- * PASS A DEDUPLICATED LIST, AND A `total` COUNTING DISTINCT MEMBERS — those it could not
- * name included. Not "deduplicate both or neither": deduplicating neither satisfies that
- * weaker rule and still renders badly, because the display cap is spent quoting one member
- * twice while the members it was hiding go unnamed. `rest` is `total - shownCount` and
- * `shownCount` comes from `names`, so the subtraction only means anything if both are
- * counting distinct members; a per-occurrence total beside a deduplicated list invents a
- * "…and N more" for members that do not exist.
+ * `rest` is `total - shownCount` and `shownCount` comes from `names`, so the subtraction
+ * only means anything when both are counting the same members. THERE ARE TWO CONTRACTS
+ * HERE, because "a member" is a different thing on either side. Find yours before you pass
+ * anything:
  *
- * Both callers passing token spellings deduplicate by the spelling's TEXT: the
- * unexpanded-spelling note in jmap-client.ts's edit path, and buildReceipt in
- * draft-email-handler.ts. A caller supplying both bodies writes the same typo in each, and
- * one typo is one thing to fix however many times it was written.
+ *  - FILENAME CALLERS — `noteForwardPooled` and `noteMintedDropped`. A member is a PART, and
+ *    `total` is the part count. Names MAY repeat and must not be collapsed: two forwarded
+ *    parts can genuinely both be called "image001.png", and merging them would report one
+ *    part lost where five were. A part with no filename at all is why `total` is a separate
+ *    argument — it is counted and cannot be named.
+ *  - TOKEN-SPELLING CALLERS — the unexpanded-spelling note in jmap-client.ts's edit path,
+ *    and `buildReceipt` in draft-email-handler.ts. A member is a DISTINCT SPELLING, and
+ *    `total` counts distinct spellings, including any the list could not name. A caller
+ *    supplying both bodies writes the same typo in each, and one typo is one thing to fix
+ *    however many times it was written.
+ *
+ * Mixing them renders wrongly in a way that reads as fact: a per-occurrence total beside a
+ * deduplicated list promises a "…and N more" for members that do not exist, and a
+ * per-occurrence list spends the display cap quoting one member twice while the members it
+ * was meant to summarise go unnamed.
  */
 export function describePartNames(
   names: (string | null | undefined)[],
@@ -609,7 +617,9 @@ export function noteNearMissToken(text: string, token: string): string {
  *
  * ONE note for the whole call, not one per site: `listed` is already bounded and quoted by
  * `describePartNames`, so a body sprinkled with them produces a sentence rather than a wall.
- * `total` is how many sites there really are, which is not how many are named.
+ * `total` is how many DISTINCT spellings there are, not how many sites carried them and not
+ * how many are named — the token-spelling contract on `describePartNames`. The same typo
+ * written into both supplied bodies is one thing to fix, so it is counted once.
  *
  * Separate from `noteNearMissToken` because the two know different things. A near-miss is a
  * misspelling OF a token, so that note can say which token was meant; this one cannot —
