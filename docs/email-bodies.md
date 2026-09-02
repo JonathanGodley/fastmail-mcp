@@ -434,8 +434,16 @@ are conventions, not syntax, so over-strip is real and the reader has to know to
   Rejecting the combination outright was also rejected — a caller cannot know a message is
   HTML-only before reading it, and on a thread read one such message would fail the whole
   call. It reports `quotedStripSkipped` and returns unchanged.
-- **A wrapped quoted line whose continuation lost its `>` prefix** survives as a fragment.
-  Deleting an unquoted line on suspicion is the one thing this module will not do.
+- **A wrapped quoted line whose continuation lost its `>` prefix survives as a fragment when
+  the continuation starts at the LEFT MARGIN.** An indented one is recognized and removed
+  with the rest of the run (#181); a flush-left one is not, because it is the same text as a
+  terse inline reply written straight under a quoted question ("> Can you do Thursday?" /
+  "Yes.") and deleting that would be an over-strip of the sender's own new writing. The
+  recognized case is bounded on both sides as well as indented — a quote line directly above
+  with no blank line between, and a quote line again within two lines below — since a
+  person's interleaved paragraph is set off from the quote by a blank line. Before #181 no
+  continuation was recognized at all, and the fragment leaked into the kept output glued to
+  the text above it, repeated once per quote depth at which the sender's wrap recurred.
 - **Localized attributions** ("schrieb:", "a écrit :") are not recognized, so the
   attribution line survives above a stripped `>` run.
 - **An Outlook header block whose `From:` carries no address** (Outlook can render a known
@@ -468,6 +476,13 @@ are conventions, not syntax, so over-strip is real and the reader has to know to
   happen to end in "wrote:" directly above a genuine `>` block, and eats both. Narrowing it
   further would drop the wrapped-attribution case, which is common; this is the accepted
   trade.
+- **An inline answer that is both indented and glued to the quote is read as a wrapped
+  continuation** and removed (#181). This is the residual that rule accepts, and it is
+  narrow by construction: a composed line is written at the left margin, and an interleaved
+  paragraph is set off from the quoted text by the blank line that makes it readable, so
+  either habit on its own keeps the text. Only a reply with neither — indented, and pressed
+  against a quote line above and below with no blank line either side — matches, and the
+  bound of two such lines stops a pasted block being absorbed. Pinned by test.
 
 In every over-strip case the remedy is the same and is stated in the README: the response
 carries `quotedBytesStripped`, so a number that looks too large for the message is the cue

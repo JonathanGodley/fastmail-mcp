@@ -266,11 +266,109 @@ describe('stripQuotedText — no-marker passthrough and signal semantics', () =>
     assert.equal(strip(body).text, 'New text.');
   });
 
-  it('keeps an unquoted wrap continuation of a quoted line (a known, deliberate limit)', () => {
-    // Some clients wrap a long quoted line without re-prefixing it. Rather than delete an
-    // unquoted line on suspicion, the fragment is kept and the surrounding quote goes.
+  it('keeps a FLUSH-LEFT wrap continuation of a quoted line (a known, deliberate limit)', () => {
+    // Some clients wrap a long quoted line without re-prefixing it. A continuation that
+    // starts at the left margin is indistinguishable from a terse inline reply written
+    // straight under a quoted question, so the fragment is kept and the quote around it
+    // goes. An INDENTED continuation is recognised and removed — see the run-continuation
+    // block below.
     const body = ['Reply.', '', '> a very long quoted line that got', 'wrapped without a marker', '> next quoted line'].join('\n');
     assert.equal(strip(body).text, 'Reply.\nwrapped without a marker');
+  });
+});
+
+// A quoted line whose wrap lost its ">" prefix used to end the run one line early, leaking
+// the fragment into the kept output and repeating it once per quote depth (#181). The run
+// now continues across such a line, but ONLY where it cannot be an inline reply: indented
+// (not written at the left margin) and glued to quote lines above and below with no blank
+// line either side. These tests hold that boundary from both directions.
+describe('stripQuotedText — unprefixed continuations inside a quote run', () => {
+  it('removes an unprefixed continuation at every quote depth it appears at', () => {
+    const body = [
+      'Hi,',
+      '',
+      'New reply text here.',
+      '',
+      'On Tue, Sep 1, 2026, at 9:00 AM, Someone Else wrote:',
+      '> Quoted paragraph one.',
+      '> ',
+      ' <https://example.com/link>*Boilerplate that follows a wrapped link, unprefixed.',
+      '> ',
+      '> Sent from a phone',
+      '>> On Aug 28, 2026, Another Person wrote:',
+      '>> Quoted paragraph two.',
+      '>> ',
+      ' <https://example.com/link>*Boilerplate that follows a wrapped link, unprefixed.',
+      '>> ',
+      '>> Sent from a phone',
+    ].join('\n');
+    const { text, quotedBytesStripped } = strip(body);
+    assert.equal(text, 'Hi,\n\nNew reply text here.');
+    assert.ok(quotedBytesStripped > 0);
+  });
+
+  it('keeps an indented paragraph that a blank line sets off from the quote', () => {
+    // The reader pasted an indented note between two quoted questions. It is separated by
+    // blank lines, which is what an interleaved reply looks like, so it stays.
+    const body = [
+      '> Can you review the draft?',
+      '',
+      '    Done, see the indented note pasted below.',
+      '',
+      '> And confirm the budget?',
+      '',
+      'Confirmed at 40k.',
+    ].join('\n');
+    assert.equal(
+      strip(body).text,
+      '    Done, see the indented note pasted below.\n\nConfirmed at 40k.',
+    );
+  });
+
+  it('keeps a terse inline answer written flush left directly under each quoted question', () => {
+    // No blank lines at all, so only the left margin distinguishes this from a wrapped
+    // continuation. It is the sender's own new writing and must survive.
+    const body = [
+      '> Can you do Thursday?',
+      'Yes.',
+      '> And can you bring the figures?',
+      'Yes, all of them.',
+    ].join('\n');
+    assert.equal(strip(body).text, 'Yes.\nYes, all of them.');
+  });
+
+  it('carries the run across a continuation that itself wrapped onto a second line', () => {
+    const body = [
+      'Reply.',
+      '',
+      'On Mon, Alice wrote:',
+      '> a very long quoted line that got',
+      '  wrapped without a marker, and the wrap',
+      '  wrapped again',
+      '> next quoted line',
+    ].join('\n');
+    assert.equal(strip(body).text, 'Reply.');
+  });
+
+  it('ends the run at a BLOCK of unprefixed lines — three is not a wrap', () => {
+    const body = [
+      'Reply.',
+      '',
+      '> Quoted opening.',
+      '  first pasted line',
+      '  second pasted line',
+      '  third pasted line',
+      '> Quoted close.',
+    ].join('\n');
+    assert.equal(
+      strip(body).text,
+      'Reply.\n  first pasted line\n  second pasted line\n  third pasted line',
+    );
+  });
+
+  it('never absorbs an indented line with no quote line below it', () => {
+    const body = ['On Mon, Alice wrote:', '> Are we still on?', '  Yes, indented for some reason.'].join('\n');
+    assert.equal(strip(body).text, '  Yes, indented for some reason.');
   });
 });
 
@@ -289,6 +387,21 @@ describe('stripQuotedText — documented over-strip residuals', () => {
   it('strips pasted shell/REPL output whose prompt is ">"', () => {
     const body = ['Repro:', '', '> npm test', '> 3 failing', '', 'Any ideas?'].join('\n');
     assert.equal(strip(body).text, 'Repro:\n\nAny ideas?');
+  });
+
+  it('can eat an INDENTED inline answer glued between two quoted lines', () => {
+    // The residual the run-continuation rule (#181) accepts: an answer that is both
+    // indented and pressed against the quote with no blank line either side is the same
+    // shape as a wrapped continuation. Composers write flush left and set a reply off with
+    // a blank line, so either habit alone keeps the text; this is the case with neither.
+    const body = [
+      '> Can you do Thursday?',
+      '  Yes.',
+      '> And bring the figures?',
+      '',
+      'Anything else?',
+    ].join('\n');
+    assert.equal(strip(body).text, 'Anything else?');
   });
 
   it('can eat a prose line pulled into a wrapped attribution above a real quote', () => {

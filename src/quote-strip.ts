@@ -78,16 +78,62 @@ function byteLength(s: string): number {
   return Buffer.byteLength(s, 'utf8');
 }
 
+// A line inside a quote run that carries no ">" of its own and yet belongs to the quoted
+// block rather than to the reader (#181). Some clients' HTML-to-text conversion breaks a
+// long quoted line so that the continuation is emitted without the prefix; the run then
+// ended one line early, the fragment was never marked for removal, and it leaked into the
+// kept output — once per quote depth where the sender's wrap recurred.
+//
+// The two conditions are what tell a machine's broken line from a person's INLINE REPLY,
+// which sits between two quoted blocks in exactly the same crude shape. Eating an inline
+// reply deletes the sender's own new writing, which is the worst thing this module can do,
+// so both must hold:
+//
+//   1. The line does not begin at the left margin. A composer writes a typed line flush
+//      left; a fragment that fell out of a converter's line-breaking need not.
+//   2. It is glued to the quote — a quote line directly above with no blank line between,
+//      and a quote line again within QUOTE_GAP_MAX_LINES below. A person's interleaved
+//      paragraph is set off from the quoted text by a blank line; that break is what makes
+//      an inline reply readable, and it is present in every inline reply worth keeping.
+//
+// Each condition alone would eat a real shape the other saves: a flush-left "Yes." written
+// straight under a quoted question with no blank line (kept by 1), and an indented block a
+// reader pasted between two quoted paragraphs (kept by 2). A flush-left continuation stays
+// a documented under-strip, unchanged from before: it is not distinguishable from the terse
+// inline reply, and under-strip is the direction to fail in.
+const UNPREFIXED_CONTINUATION = /^[ \t]+\S/;
+// One soft-wrap of a long line yields one continuation, and a continuation that itself
+// wraps yields two. Past that the gap is a block of text, not a broken line, and the safe
+// reading is that the quote ended there.
+const QUOTE_GAP_MAX_LINES = 2;
+
+// The quote line that resumes the run after the unprefixed continuation at `j`, or -1 when
+// the run genuinely ends there. Bounded on both sides: no quote line directly above, no
+// quote line within reach below, or a gap line that starts at the left margin, all end it.
+function continuationResumesQuote(lines: string[], j: number): number {
+  if (j === 0 || !QUOTE_LINE.test(lines[j - 1])) return -1;
+  for (let k = j; k < lines.length && k - j < QUOTE_GAP_MAX_LINES; k++) {
+    if (!UNPREFIXED_CONTINUATION.test(lines[k])) return -1;
+    if (k + 1 < lines.length && QUOTE_LINE.test(lines[k + 1])) return k + 1;
+  }
+  return -1;
+}
+
 // End of a run of quoted lines: blank lines inside the run are tolerated (clients often
 // drop the "> " from an empty quoted line), but the run ends at the LAST quoted line, so
 // a blank separator before following content is never swallowed. An unquoted content line
-// ends the run — text below a quote block is the reader's own writing and is kept.
+// ends the run — text below a quote block is the reader's own writing and is kept — unless
+// it is the wrapped continuation described above, which is part of the quote.
 function quoteRunEnd(lines: string[], start: number): number {
   let last = start;
   for (let j = start; j < lines.length; j++) {
     if (QUOTE_LINE.test(lines[j])) { last = j; continue; }
     if (BLANK_LINE.test(lines[j])) continue;
-    break;
+    const resume = continuationResumesQuote(lines, j);
+    if (resume < 0) break;
+    // Resume ON the quote line that closed the gap, so `last` advances only to quote lines
+    // and the run still ends at the last of them.
+    j = resume - 1;
   }
   return last;
 }

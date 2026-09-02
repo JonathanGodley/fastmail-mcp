@@ -688,6 +688,7 @@ Both are opt-in and neither changes any default.
 - **Pasted email headers count as a quoted section** when the `From:` line carries an address, and that rule cuts to the end of the message. A display-name-only paste (a job posting's "From: The Hiring Team", a newsletter) carries no address and passes through untouched.
 - On a **forwarded** message, the forwarded content sits below `-----Original Message-----` too, so `stripQuoted` removes it and leaves your covering note.
 - A **prose line ending in "wrote:"** directly above a genuine quote can be pulled in with the attribution (the same walk-back that catches Gmail's wrapped two-line attribution).
+- An **inline answer that is both indented and pressed against the quote** — no blank line above or below it — is read as a quoted line whose wrap lost its `>` prefix, and goes with the quote. An answer written at the left margin, or one set off by a blank line, is kept; only a reply with neither habit matches.
 
 *Other:*
 
