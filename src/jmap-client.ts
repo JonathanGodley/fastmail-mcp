@@ -3578,7 +3578,13 @@ export class JmapClient {
     // One mailbox fetch serves both the Drafts gate below and the Sent target further down.
     const mailboxes = await this.getMailboxes();
 
-    // A DRAFT IS SENDABLE ONLY FROM THE DRAFTS FOLDER.
+    // A DRAFT IS SENDABLE ONLY FROM THE DRAFTS FOLDER. Being in Drafts is what says the
+    // message is still meant to go out; filed anywhere else, someone has since made it
+    // something other than outbound mail, and this is the only tool that transmits.
+    //
+    // MEMBERSHIP, NOT EXCLUSIVITY: a draft in Drafts that also carries another label is in
+    // Drafts and sends. The test is "is in Drafts", never "is solely in Drafts" — a label
+    // beside it is not a move.
     //
     // Deliberately stronger than "not solely in Trash": a draft that was moved to Archive,
     // or filed into a custom folder by hand, is refused too.
@@ -3614,22 +3620,41 @@ export class JmapClient {
     //  - The VALUE must be true, not merely present. `{"mb-drafts": false}` is not a
     //    membership, and reading presence alone would both open the gate and, below, name
     //    Drafts as somewhere the draft is while refusing it for not being there.
-    //  - Array.isArray, because `typeof [] === 'object'`: an array-shaped map would answer
-    //    for the id "0" and its Object.keys are INDICES, so the refusal would say
-    //    "(it is in: 0)".
+    //  - The shape is tested by `isPlainResponseMap`, whose docblock carries the
+    //    Array.isArray reasoning (`typeof [] === 'object'`). What belongs HERE is what that
+    //    shape would do to this refusal: an array's `Object.keys` are INDICES, so the
+    //    listing below would tell the caller the draft "is in: 0".
     //
     // Nothing on Fastmail produces these shapes — its mailbox ids are opaque tokens and
     // Cyrus emits `{id: true}`. The reason to read it this way is that the two siblings
     // already do, and the check standing in front of the only irreversible action here
     // should not be the least careful of the three.
+    //
+    // AN UNREADABLE MAP GETS ITS OWN REFUSAL rather than being substituted with `{}`. That
+    // substitution refused the send correctly and then described it wrongly: `filedIn` came
+    // out empty, so the message read as "not in Drafts, filed nowhere worth naming" and
+    // handed back a move_email repair for a draft that may already be in Drafts. A
+    // degradation is said out loud here, never folded into a neighbouring outcome, which is
+    // the same rule the archive sweep's filing read follows with its own `unreadableFiling`
+    // sentence.
     const filing = email.mailboxIds;
-    const filedInMap = filing && typeof filing === 'object' && !Array.isArray(filing) ? filing : {};
+    if (!isPlainResponseMap(filing)) {
+      throw new Error(
+        'The server returned this draft with no readable mailboxIds, so this server cannot ' +
+        'tell whether it is in the Drafts folder and will not send it. Nothing was sent. ' +
+        'Read the draft with get_email to see where it is filed.',
+      );
+    }
     const inMailbox = (id: string) =>
-      Object.prototype.hasOwnProperty.call(filedInMap, id) && filedInMap[id] === true;
+      Object.prototype.hasOwnProperty.call(filing, id) && filing[id] === true;
 
     if (!inMailbox(draftsMailbox.id)) {
-      const filedIn = Object.keys(filedInMap)
-        .filter(id => filedInMap[id])
+      // `=== true`, the same test the gate itself applies. Plain truthiness here would let a
+      // `{"mb-drafts": 1}` be refused for not being in Drafts and named as being in Drafts in
+      // the same sentence — the self-arguing refusal the value test above exists to prevent,
+      // reintroduced one line further down.
+      const filedIn = Object.keys(filing)
+        .filter(id => filing[id] === true)
         .map(id => mailboxes.find(mb => mb?.id === id)?.name || id);
       throw new InvalidInputError(
         'This draft is not in the Drafts folder, so it will not be sent' +

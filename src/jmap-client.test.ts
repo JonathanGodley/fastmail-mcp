@@ -2410,9 +2410,42 @@ describe('sendDraft', () => {
     );
   });
 
-  // typeof [] === 'object', so an array-shaped map would otherwise be walked by Object.keys
-  // into its INDICES and the refusal would read "(it is in: 0)".
-  it('refuses without naming an index when mailboxIds is array-shaped', async () => {
+  // A filing this server cannot read is its own outcome, not "filed somewhere else". Folding
+  // it into the ordinary refusal produced a sentence that named no location and then handed
+  // back a move_email repair for a draft that may already be in Drafts.
+  const UNREADABLE_FILINGS: [string, any][] = [
+    ['array-shaped', ['mb-archive']],
+    ['a bare string', 'mb-archive'],
+    ['null', null],
+    ['absent', undefined],
+  ];
+
+  for (const [label, mailboxIds] of UNREADABLE_FILINGS) {
+    it(`refuses with its own message when mailboxIds is ${label}`, async () => {
+      const wrongShape = { ...SENDABLE_DRAFT, mailboxIds };
+      const makeReq = stubRequests(client, async () => ({
+        methodResponses: [['Email/get', { list: [wrongShape] }, 'getEmail']],
+      }));
+
+      await assert.rejects(
+        () => client.sendDraft('draft-1'),
+        (err: Error) => {
+          assert.match(err.message, /no readable mailboxIds/i);
+          // Not the ordinary refusal: that one asserts where the draft is and how to fix it,
+          // and neither is known here.
+          assert.equal(/not in the Drafts folder/i.test(err.message), false, err.message);
+          assert.equal(/move_email/.test(err.message), false, err.message);
+          return true;
+        },
+      );
+      // Refused before submission: only the Email/get went out.
+      assert.equal(makeReq.mock.calls.length, 1);
+    });
+  }
+
+  // typeof [] === 'object', so an array-shaped map read as one would be walked by Object.keys
+  // into its INDICES and a refusal would read "(it is in: 0)".
+  it('never names an array index as a location', async () => {
     const wrongShape = { ...SENDABLE_DRAFT, mailboxIds: ['mb-archive'] };
     stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [wrongShape] }, 'getEmail']],
@@ -2421,8 +2454,26 @@ describe('sendDraft', () => {
     await assert.rejects(
       () => client.sendDraft('draft-1'),
       (err: Error) => {
-        assert.match(err.message, /not in the Drafts folder/i);
         assert.equal(/it is in: 0/.test(err.message), false, `named an array index: ${err.message}`);
+        return true;
+      },
+    );
+  });
+
+  // The gate demands `=== true`, and the sentence that reports where the draft IS has to
+  // apply the same test. Plain truthiness there refuses the draft for not being in Drafts and
+  // names Drafts as somewhere it is, in one sentence.
+  it('does not name a mailbox whose membership value is truthy but not true', async () => {
+    const notReallyEither = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': 1, 'mb-archive': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [notReallyEither] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.match(err.message, /not in the Drafts folder/i);
+        assert.equal(/Drafts,|: Drafts/.test(err.message), false, `named Drafts as a location: ${err.message}`);
         return true;
       },
     );
