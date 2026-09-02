@@ -1,6 +1,6 @@
 // Quote/forward-carry live smoke over draft_email's {{quote}} and {{forward}} tokens:
 // minted ii-...@inline.invalid cids,
-// keep-rebuild reuse (stable identifiers), text-only-reply drop note, the
+// their durability across an edit that hands the quote back, text-only-reply drop note, the
 // unsupported-reference-form drop count, flag-off forwards still carrying body
 // images, asAttachment untouched, and the send_draft transmit receipt (one
 // send-to-self, swept afterwards). Fixtures are received-like messages created
@@ -86,14 +86,22 @@ try {
   check('reply: original cid nowhere in draft html', !st.html.includes(CID_A));
   check('reply: derived text has no cid leak', !st.txt.includes('cid:'), JSON.stringify(st.txt.slice(0, 120)));
 
-  // 2. keep-rebuild edit of that reply: the minted cid is REUSED (stable)
-  r = await c.call('edit_draft', { emailId: d1, htmlBody: '<p>Edited note, quote kept.</p>', originalEmailId: FIX_A });
-  check('edit keep-rebuild: succeeded', !r.isError, text(r).slice(0, 300));
+  // 2. edit of that reply, handing the quote back: the minted cid is DURABLE (unchanged)
+  // The draft's html is handed back whole, minted reference and all, which is what an edit
+  // that keeps the quote looks like now that nothing is preserved for the caller. The cid
+  // still names a part this draft carries, so the reserved-shape guard permits it; what is
+  // being measured is that the identifier survives the recreate rather than being re-minted,
+  // because a caller holding that html across two edits would otherwise reference nothing.
+  r = await c.call('get_email', { emailId: d1, fields: ['bodyText', 'bodyHtml', 'bodyHash'] });
+  const hash1 = jsonOf(text(r)).bodyHash;
+  check('edit: the draft read issued a bodyHash', typeof hash1 === 'string' && hash1.length > 0, text(r).slice(0, 200));
+  r = await c.call('edit_draft', { emailId: d1, bodyHash: hash1, htmlBody: `<p>Edited note, quote kept.</p>${st.html}` });
+  check('edit: succeeded', !r.isError, text(r).slice(0, 300));
   const d2 = idOf(text(r)); if (d2) trash.push(d2);
   r = await c.call('get_email', { emailId: d2 });
   em = jsonOf(text(r));
   const minted2 = (em.attachments ?? []).map(a => a.cid).find(x => MINT_RE.test(x ?? ''));
-  check('edit keep-rebuild: minted cid reused verbatim', !!minted2 && minted2 === minted1, `${minted1} vs ${minted2}`);
+  check('edit: minted cid durable across the edit', !!minted2 && minted2 === minted1, `${minted1} vs ${minted2}`);
 
   // 3. text-only reply: no mint, drop reported
   r = await c.call('draft_email', { mode: 'reply', originalEmailId: FIX_A, textBody: 'Plain text reply only.\n\n{{quote}}' });
