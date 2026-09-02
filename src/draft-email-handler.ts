@@ -946,13 +946,16 @@ function buildReceipt(
   expansions: Map<PartName, BodyTokenExpansion>, fillerBody: true | undefined,
 ): DraftEmailReceipt | undefined {
   const parts: TokenPartReceipt[] = [];
+  // DISTINCT SPELLINGS, gathered across every part rather than per occurrence, because that
+  // is what describePartNames renders and what a caller can act on: one typo is one thing to
+  // fix however many times it was written, and supplying both bodies means writing it twice.
+  // Counting occurrences would spend the display cap quoting one spelling twice and then
+  // promise a further spelling that does not exist.
   const unexpandedSpellings: string[] = [];
-  let unexpandedTotal = 0;
 
   for (const [part, expansion] of expansions) {
     for (const s of expansion.otherSpellings) {
-      unexpandedTotal++;
-      unexpandedSpellings.push(s.text);
+      if (!unexpandedSpellings.includes(s.text)) unexpandedSpellings.push(s.text);
     }
     if (expansion.tokens.length === 0) continue;
     const expanded = new Map<BodyTokenName, number>();
@@ -977,8 +980,8 @@ function buildReceipt(
     });
   }
 
-  if (parts.length === 0 && unexpandedTotal === 0 && !fillerBody) return undefined;
-  const listed = describePartNames(unexpandedSpellings, unexpandedTotal);
+  if (parts.length === 0 && unexpandedSpellings.length === 0 && !fillerBody) return undefined;
+  const listed = describePartNames(unexpandedSpellings);
   return {
     parts,
     ...(listed && { unexpanded: listed }),

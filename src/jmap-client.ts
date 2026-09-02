@@ -2799,6 +2799,21 @@ export class JmapClient {
     // fix however many times it was written.
     const addedSpellings: string[] = [];
 
+    // WHAT A NOTE IS ABOUT DECIDES WHERE ITS ACCUMULATOR LIVES, and the rule is readable off
+    // the note's own signature. `noteSignatureTokenStored` takes a part name, so it is a
+    // per-part fact and its counter belongs inside the loop. The escape, near-miss and
+    // history notes take only the token text: they say nothing about which body carried it,
+    // so the same text reported from two parts is the identical sentence twice, and
+    // formatInlineNotes does not deduplicate. Supplying both bodies means writing the same
+    // token in both, which is what this tool's own description tells a caller to do — so the
+    // repeat fires on the instructed path, not an exotic one. These three dedupe ACROSS the
+    // edit; only the count-rise budgets below stay per part, because the stored bytes they
+    // compare against are per part.
+
+    const reportedEscapes = new Set<string>();
+    const namedMisses = new Set<string>();
+    const notedHistory = new Set<string>();
+
     for (const p of writtenParts) {
       const scan = scans.get(p.part)!;
       const storedScan = scanBodyTokens(p.stored ?? '');
@@ -2821,19 +2836,20 @@ export class JmapClient {
         if (added > 0) tokenNotes.push(noteSignatureTokenStored(p.part, added));
         const storedEscapes = new Map<string, number>();
         for (const e of storedScan.escapes) storedEscapes.set(e.text, (storedEscapes.get(e.text) ?? 0) + 1);
-        const reported = new Set<string>();
         for (const e of scan.escapes) {
           const budget = storedEscapes.get(e.text) ?? 0;
           if (budget > 0) { storedEscapes.set(e.text, budget - 1); continue; }
-          if (reported.has(e.text)) continue;
-          reported.add(e.text);
+          if (reportedEscapes.has(e.text)) continue;
+          reportedEscapes.add(e.text);
           tokenNotes.push(noteEscapedTokenShips(e.text));
         }
       }
       // Count rise per token, the signature note's gate: a `{{quote}}` sitting in the quoted
       // history is the original author's text and rides along on every edit.
       const history = (['quote', 'forward'] as const)
-        .filter((t) => scan.counts[t] - storedScan.counts[t] > 0);
+        .filter((t) => scan.counts[t] - storedScan.counts[t] > 0)
+        .filter((t) => !notedHistory.has(t));
+      for (const t of history) notedHistory.add(t);
       if (history.length > 0) tokenNotes.push(noteHistoryTokenStored([...history]));
 
       // Per-text budget, the escape note's gate rather than the count one, because a
@@ -2841,7 +2857,6 @@ export class JmapClient {
       // cancel each other out.
       const storedMisses = new Map<string, number>();
       for (const m of storedScan.nearMisses) storedMisses.set(m.text, (storedMisses.get(m.text) ?? 0) + 1);
-      const namedMisses = new Set<string>();
       for (const miss of scan.nearMisses) {
         const budget = storedMisses.get(miss.text) ?? 0;
         if (budget > 0) { storedMisses.set(miss.text, budget - 1); continue; }

@@ -762,6 +762,33 @@ describe('draft_email — the receipt', () => {
     assert.match(r.tokens!.unexpanded!, /\{\{sig\}\}/);
   });
 
+  // The receipt lists spellings and counts them in the same sentence, so both have to count
+  // DISTINCT ones. Writing the same typo into both bodies is the ordinary way to supply a
+  // dual-format message, not an unusual input.
+  it('counts one spelling written into both bodies once', async () => {
+    const { client } = spyClient();
+    const r = await compose(
+      { mode: 'new', textBody: 'hi {{sig}}', htmlBody: '<p>hi {{sig}}</p>' },
+      client,
+    );
+    assert.match(r.tokens!.unexpanded!, /^"\{\{sig\}\}"$/);
+  });
+
+  // With the display cap at three, four occurrences of two spellings must not quote one of
+  // them twice and then promise a further spelling that was never in the body.
+  it('does not spend the display cap on a repeat, nor promise a spelling that is not there', async () => {
+    const { client } = spyClient();
+    const r = await compose(
+      { mode: 'new', textBody: 'hi {{sig}} {{fwd}}', htmlBody: '<p>hi {{sig}} {{fwd}}</p>' },
+      client,
+    );
+    const listed = r.tokens!.unexpanded!;
+    assert.match(listed, /\{\{sig\}\}/);
+    assert.match(listed, /\{\{fwd\}\}/);
+    assert.equal(/and \d+ more/.test(listed), false, `promised absent spellings: ${listed}`);
+    assert.equal(listed.match(/\{\{sig\}\}/g)!.length, 1, `quoted one spelling twice: ${listed}`);
+  });
+
   it('reports the escape as consumed, with the braces shipped as text', async () => {
     const { client, calls } = spyClient();
     const r = await compose({ mode: 'new', textBody: 'write \\{{signature}} to sign' }, client);

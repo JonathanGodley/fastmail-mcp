@@ -47,11 +47,18 @@ const MAX_NAMED_PARTS = 3;
  * names there are: a part can arrive with no filename at all, and the summary has to
  * account for it rather than quietly shrinking the total the reader was given.
  *
- * THE TWO ARGUMENTS MUST COUNT THE SAME KIND OF THING. `total` exists so a caller can
- * account for members its list cannot NAME, never so the list and the number can disagree
- * about what is being counted: `rest` is `total - shownCount` and `shownCount` is taken
- * from `names`, so passing a per-occurrence total beside a deduplicated list invents a
- * "…and N more" for members that do not exist. Deduplicate both or neither.
+ * PASS A DEDUPLICATED LIST, AND A `total` COUNTING DISTINCT MEMBERS — those it could not
+ * name included. Not "deduplicate both or neither": deduplicating neither satisfies that
+ * weaker rule and still renders badly, because the display cap is spent quoting one member
+ * twice while the members it was hiding go unnamed. `rest` is `total - shownCount` and
+ * `shownCount` comes from `names`, so the subtraction only means anything if both are
+ * counting distinct members; a per-occurrence total beside a deduplicated list invents a
+ * "…and N more" for members that do not exist.
+ *
+ * Both callers passing token spellings deduplicate by the spelling's TEXT: the
+ * unexpanded-spelling note in jmap-client.ts's edit path, and buildReceipt in
+ * draft-email-handler.ts. A caller supplying both bodies writes the same typo in each, and
+ * one typo is one thing to fix however many times it was written.
  */
 export function describePartNames(
   names: (string | null | undefined)[],

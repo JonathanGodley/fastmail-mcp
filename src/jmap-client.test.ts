@@ -1980,6 +1980,59 @@ describe('updateDraft', () => {
     assert.ok((result.notes ?? []).some((n) => /\{\{Signature\}\}/.test(n)));
   });
 
+  // -- one note per thing, not one per part --
+  // The escape, near-miss and history notes name a token and never a part, so the same
+  // spelling reaching them from both written bodies is the identical sentence twice, and
+  // nothing downstream deduplicates the notes list. Supplying both bodies is what this
+  // tool's description tells a caller to do, so this is the instructed path.
+
+  const notesMatching = (result: any, re: RegExp): string[] =>
+    (result.notes ?? []).filter((n: string) => re.test(n));
+
+  it('reports an escape written into both parts once', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: String.raw`<p>write \{{signature}} here</p>`,
+      textBody: String.raw`write \{{signature}} here`,
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.equal(notesMatching(result, /an escaped token spelling the stored body did not/).length, 1);
+  });
+
+  it('reports a near-miss written into both parts once', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>{{Signature}} goes here</p>',
+      textBody: '{{Signature}} goes here',
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.equal(notesMatching(result, /\{\{Signature\}\}/).length, 1);
+  });
+
+  it('reports a history token written into both parts once', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>see {{quote}}</p>',
+      textBody: 'see {{quote}}',
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    assert.equal(notesMatching(result, /stored as written: those tokens expand/).length, 1);
+  });
+
+  // Deduplicating across parts must not silence a token that only ONE part introduced: two
+  // different history tokens, one per body, are two things to say.
+  it('still names a history token that only one of the two parts added', async () => {
+    mockBodyEdit(client, DUAL_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>see {{quote}}</p>',
+      textBody: 'see {{forward}}',
+      bodyHash: hashOf(DUAL_REPLY),
+    });
+    const named = notesMatching(result, /stored as written: those tokens expand/).join(' ');
+    assert.match(named, /\{\{quote\}\}/);
+    assert.match(named, /\{\{forward\}\}/);
+  });
+
   it('leaves a {{quote}} in the body it stores rather than removing it', async () => {
     const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
     const body = '<p>see {{quote}} here</p>';
