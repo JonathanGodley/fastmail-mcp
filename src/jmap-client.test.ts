@@ -4403,6 +4403,28 @@ describe('updateDraft embedded images (#13)', () => {
     );
   });
 
+  // The other half of the same claim, and the reason both descriptions say "a part the
+  // server routed into a body list" rather than "an attachment". collectDraftBodyParts walks
+  // textBody and htmlBody and nothing else, so a part that only ever sat in the attachments
+  // array is not in the hash and taking it off cannot stale one. Telling a caller their hash
+  // is dead when it is not is the same defect as not telling them when it is.
+  it('leaves a held hash valid when removeAttachments takes off a part no body list carries', async () => {
+    const attached = {
+      partId: 'p1', blobId: 'blob-att', type: 'application/pdf',
+      name: 'doc.pdf', disposition: 'attachment', size: 10,
+    };
+    const before = htmlDraft('<p>unchanged body</p>', [attached]);
+    const heldHash = hashOf(before);
+    const after = htmlDraft('<p>unchanged body</p>');
+
+    mockEdit(client, before, after);
+    await client.updateDraft('draft-1', { removeAttachments: ['blob-att'] });
+
+    mockEdit(client, after, after);
+    const next = await client.updateDraft('draft-2', { htmlBody: '<p>next</p>', bodyHash: heldHash });
+    assert.ok(next.id, 'the held hash was rejected after a removal the hash does not cover');
+  });
+
   it('reports a part the caller removed once, as a removal it asked for', async () => {
     // The explicit removal is the caller's own action and needs no sentence; what must not
     // happen is the same part ALSO being counted as one the edit took off the body.
