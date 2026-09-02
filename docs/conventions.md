@@ -168,10 +168,12 @@ one: `coerceStringArray` takes a single bare value, a comma-separated list or a
 JSON-encoded array, while the OBJECT-item lists behind `coerceAttachments` and the contact
 entry coercers read a whole-value string **only** as a JSON-encoded array and reject
 anything else naming the parameter — promising those a comma-separated form would
-advertise a shape that errors. The parameters widened in earlier work (`fields`,
-`draft_email`'s recipient and threading lists, `participants`, `archive_email`'s
-`emailIds`) carry no such sentence yet; their type is widened but their description does
-not say which strings they read.
+advertise a shape that errors, so the object-list constant denies the comma-joined form in
+so many words rather than leaving a caller to infer it from an omission. Every list
+parameter carries the sentence matching its own coercer. `participants` is the exception to
+the *mechanism* and not to the rule: it states the same contract in its own words, with a
+worked JSON example of the object shape that neither constant can carry, so replacing it
+with a constant would say less.
 
 Two of them are narrowing arguments, and they are safe to widen for a reason worth stating:
 `search_emails`' `requiredMailboxes` and `excludeMailboxes` already read through

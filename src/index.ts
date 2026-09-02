@@ -550,19 +550,24 @@ const CREATE_PARENT_PARAM_DESC =
 // `const` initialisers evaluated in file order, and one referencing this from further up
 // would read it in its temporal dead zone.
 //
-// EVERY LIST PARAMETER IN THIS FILE NOW DECLARES ITS STRING FORM. Two things are not done.
-// The drift guard is what #98 stays open for: `tool-schema.test.ts` fails a boolean
-// declared `type: 'boolean'` and has no array-side equivalent, so nothing stops a narrow
-// `type: 'array'` being added tomorrow and quietly making its coercion unreachable again.
-// And the parameters widened in earlier work — `fields`, `draft_email`'s recipient and
-// threading lists, `participants`, `archive_email`'s `emailIds` — carry no note of this
-// kind, so the type is widened there while the description still says nothing about which
-// strings it reads.
+// EVERY LIST PARAMETER IN THIS FILE NOW DECLARES ITS STRING FORM AND SAYS WHICH STRINGS IT
+// READS. `participants` is the one that says it in its own words rather than by appending a
+// constant, and that is deliberate: its sentence carries a worked JSON example of the object
+// shape, which neither constant can. Do not replace it with one of these for the sake of
+// uniformity.
+//
+// One thing is not done, and it is what #98 stays open for: the drift guard.
+// `tool-schema.test.ts` fails a boolean declared `type: 'boolean'` and has no array-side
+// equivalent, so nothing stops a narrow `type: 'array'` being added tomorrow and quietly
+// making its coercion unreachable again.
 const LENIENT_LIST_DESC =
   ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
 
+// The denial is spelled out rather than left to be inferred from what this sentence omits: a
+// caller who has just read the comma-separated form on a sibling parameter is exactly the one
+// who will try it here, and the rejection names the parameter without naming the shape to use.
 const LENIENT_OBJECT_LIST_DESC =
-  ' Accepts an array, or a JSON-encoded array as one string.';
+  ' Accepts an array, or a JSON-encoded array as one string; a comma-joined string is NOT accepted.';
 
 // The label arrays, which take the same forms per entry. A function rather than two
 // constants so the add/remove verb is the only thing that differs.
@@ -623,13 +628,14 @@ const FIELDS_PARAM_DESC =
   'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId, sourceEmailId) is a valid name on list_emails/search_emails/get_recent_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden. On get_thread, `bodyText` IS populated when includeBodies:true (`bodyHtml` never is), and a projected bodyText keeps its signals (quotedBytesStripped/quotedStripSkipped/bodyTextUnavailable) uninvited — without them a stripped body would read as verbatim.';
 
 // The `fields` parameter, declared identically on every read tool that offers it.
-// The string alternative is advertised because lenient clients stringify arrays
-// (coerceStringArray accepts a JSON or comma-separated string). (#69, #79)
+// The type is widened so a validating client passes a stringified array through instead of
+// rejecting it before coerceStringArray ever runs; LENIENT_LIST_DESC names the strings that
+// coercion reads, which the type alone does not say. (#69, #79)
 function fieldsSchemaProperty() {
   return {
     type: ['array', 'string'],
     items: { type: 'string' },
-    description: FIELDS_PARAM_DESC,
+    description: FIELDS_PARAM_DESC + LENIENT_LIST_DESC,
   };
 }
 
@@ -913,17 +919,17 @@ const TOOLS = [
             to: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Recipient email addresses. REQUIRED on mode:\'forward\' — a forward has no default recipient; optional on mode:\'reply\' (defaults to the original sender) and on mode:\'new\'. Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+              description: 'Recipient email addresses. REQUIRED on mode:\'forward\' — a forward has no default recipient; optional on mode:\'reply\' (defaults to the original sender) and on mode:\'new\'. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             cc: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+              description: 'CC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             bcc: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+              description: 'BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             from: {
               type: 'string',
@@ -932,7 +938,7 @@ const TOOLS = [
             replyTo: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address; a single address may be given as a bare string.',
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
             },
             mailbox: {
               type: 'string',
@@ -953,12 +959,12 @@ const TOOLS = [
             inReplyTo: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId). A single Message-ID may be given as a bare string. ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
             references: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself). A single Message-ID may be given as a bare string. ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
             asAttachment: {
               type: ['boolean', 'string'],
@@ -1749,7 +1755,7 @@ const TOOLS = [
               // stringified form before the lenient coercion runs (#98).
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'IDs of the emails to archive — message ids, NOT thread ids. Pass an array even for a single message; duplicates are collapsed. To archive a whole conversation, pass every message id in the thread.',
+              description: 'IDs of the emails to archive — message ids, NOT thread ids. Pass an array even for a single message; duplicates are collapsed. To archive a whole conversation, pass every message id in the thread.' + LENIENT_LIST_DESC,
             },
           },
           required: ['emailIds'],
