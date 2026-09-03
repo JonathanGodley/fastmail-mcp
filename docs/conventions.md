@@ -498,9 +498,11 @@ ids to re-assert, because it names the only two mailboxes it changes. The emptin
 what makes that safe rather than merely shorter — the danger there is a *bare* `null` leaving a
 message with no live record, and this patch always adds Sent, so the message is never left filed
 nowhere. The `null` is still written **before** the `true`, matching the ordering convention above:
-the two ids come from different resolvers (`findByExactRole` for Drafts, `findMailboxByRoleOrName`
-for Sent), so unlike the removed/kept ids above they *can* in principle name one mailbox, and in
-that order the surviving key is the one that adds.
+if the two keys ever name one mailbox, the surviving key in that order is the one that *adds*.
+Both ids now come from `findByExactRole` against two **different** roles, and a mailbox carries one
+role, so that collision is no longer reachable. The ordering stays anyway — it is this file's
+convention for a subtract-and-add patch, and the reason it exists returns the moment either id is
+resolved any other way.
 
 Note the two forms are mutually exclusive rather than additive, which is why the send's tests pin
 the **absence** of a whole-value key and not just the presence of the patch keys: Cyrus reads
