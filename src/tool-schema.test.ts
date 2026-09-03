@@ -34,8 +34,8 @@
 //
 // Nothing else enforces the pair. The note text is built from the roles that were actually
 // excluded, so it is the same string on every tool that emits it, while the parameters are
-// declared per tool — a tool can start emitting notes (get_recent_emails did, #29) without
-// declaring the flags they prescribe, and both halves still look correct in isolation. So
+// declared per tool — a tool can start emitting notes without declaring the flags they
+// prescribe, and both halves still look correct in isolation. So
 // the assertion is derived from both sides at once: which tools emit a note is read out of
 // the handlers, and which parameters a note names is read out of the real emitter's output
 // rather than a copy of its wording.
@@ -380,14 +380,19 @@ describe('recovery notes name only parameters the tool has', () => {
     // would then hold vacuously for it. Raise this number with each emitter added; do not
     // lower it to make a failure go away without checking which of the two it is.
     //
+    // This floor WAS lowered, from 3 to 2, when #92 deleted get_recent_emails — one of the
+    // three emitters (list_emails, get_recent_emails, search_emails). That is the case the
+    // warning above exists to let through: the scan still matches (list_emails and
+    // search_emails still turn up in `emitters`) and no emitter moved into an
+    // injected-client module — the tool that emitted is simply gone. Check which of the two
+    // applies before ever lowering this number again.
+    //
     // The subset assertion is not carried by the floor, and neither carries the other. The
     // failure it detects is a tool that emits the note while missing a flag the note
     // prescribes: hold `emitters` fixed, delete includeTrash from one of those tools'
-    // schemas, and `missing` is non-empty. (Against the state before get_recent_emails
-    // started emitting notes, `missing` is legitimately empty — that tool emitted nothing
-    // to be held to — and it is the floor, not the subset check, that fails there.)
+    // schemas, and `missing` is non-empty.
     assert.ok(
-      emitters.length >= 3,
+      emitters.length >= 2,
       `found only ${emitters.length} tools appending buildExclusionNote; either the handler ` +
         `scan has stopped matching, or an emitter moved out of the CallTool switch and is ` +
         `no longer being checked`,
@@ -536,18 +541,18 @@ function collectClamps(): Map<string, { fallback: number; max: number }> {
   return clamps;
 }
 
-// The limit bound belongs to the handler, not to the JMAP client (#29). getRecentEmails
-// used to carry a `Math.min(limit, 50)` of its own; that came off, because a second clamp
-// can only ever disagree with the first, and the client now passes `limit` to JMAP exactly
-// as given. What made the deletion safe is that every caller clamps BEFORE calling in —
-// which is a property of the call sites, so it is asserted at the call sites.
+// The limit bound belongs to the handler, not to the JMAP client (#29). getEmails passes
+// `limit` to JMAP exactly as given — it carries no clamp of its own — so every caller must
+// clamp BEFORE calling in. That is a property of the call sites, so it is asserted at the
+// call sites: today the list_emails handler and test_bulk_operations (#92 deleted the
+// third caller, get_recent_emails, along with its own handler).
 //
 // The failure being guarded is quiet and expensive: an unclamped non-numeric limit reaches
 // JMAP as `"limit": null`, which is not a small page but no bound at all — a whole-mailbox
 // metadata dump. Nothing else notices it. The client-level tests deliberately assert the
 // unclamped passthrough, so they would stay green through exactly this regression.
 describe('the limit bound is owned by the handlers', () => {
-  it('clamps in every handler that calls getRecentEmails', () => {
+  it('clamps in every handler that calls getEmails', () => {
     // Every call site, across the files that read tool arguments — not index.ts alone. A
     // call from a handler module would have no case body to clamp in, so it must show up
     // as a failure rather than as a site this scan never looked at.
@@ -555,31 +560,31 @@ describe('the limit bound is owned by the handlers', () => {
     for (const file of HANDLER_FILES) {
       readLines(file).forEach((line, i) => {
         if (line.trimStart().startsWith('//')) return;
-        if (/\.getRecentEmails\(/.test(line)) callSites.push(`src/${file}:${i + 1}`);
+        if (/\.getEmails\(/.test(line)) callSites.push(`src/${file}:${i + 1}`);
       });
     }
     assert.ok(
       callSites.length >= 2,
-      `found only ${callSites.length} getRecentEmails call sites; the scan has probably ` +
+      `found only ${callSites.length} getEmails call sites; the scan has probably ` +
         `stopped matching`,
     );
 
     const clamping = new Set(
       [...collectCaseBodies()]
-        .filter(([, body]) => body.some((l) => l.includes('.getRecentEmails(')))
+        .filter(([, body]) => body.some((l) => l.includes('.getEmails(')))
         .filter(([tool]) => collectClamps().has(tool))
         .map(([tool]) => tool),
     );
     const clampedSites = [...collectCaseBodies()]
       .filter(([tool]) => clamping.has(tool))
-      .reduce((n, [, body]) => n + body.filter((l) => l.includes('.getRecentEmails(')).length, 0);
+      .reduce((n, [, body]) => n + body.filter((l) => l.includes('.getEmails(')).length, 0);
 
     assert.equal(
       clampedSites,
       callSites.length,
-      `${callSites.length} call site(s) of getRecentEmails exist (${callSites.join(', ')}) but ` +
-        `only ${clampedSites} sit in a handler that calls clampLimit. The client no longer ` +
-        `bounds its own limit, so an unclamped call sends "limit": null — no bound at all. ` +
+      `${callSites.length} call site(s) of getEmails exist (${callSites.join(', ')}) but ` +
+        `only ${clampedSites} sit in a handler that calls clampLimit. The client does not ` +
+        `bound its own limit, so an unclamped call sends "limit": null — no bound at all. ` +
         `Clamp with clampLimit(value, default, max) in the handler`,
     );
   });
@@ -1244,5 +1249,20 @@ describe('label tools take mailboxes, not mailboxIds (#91)', () => {
       assert.ok(requiredSet.has('mailboxes'), `${tool}'s 'required' list does not name 'mailboxes' - it should still be required, just under the new name`);
       assert.ok(!requiredSet.has('mailboxIds'), `${tool}'s 'required' list still names the old 'mailboxIds' key`);
     }
+  });
+});
+
+// get_recent_emails was deleted (#92): list_emails already covered the same query, and a
+// small `limit` (e.g. 10) on list_emails now covers the quick "what's new" look it existed
+// for. This pins the deletion so a revert, or a copy-pasted tool that reintroduces the
+// name, fails here rather than only showing up as README/schema drift elsewhere.
+describe('get_recent_emails is gone (#92)', () => {
+  it('is absent from the TOOLS literal', () => {
+    const params = collectToolParams();
+    assert.ok(
+      !params.has('get_recent_emails'),
+      'get_recent_emails is still declared in the TOOLS literal - #92 deleted this tool with ' +
+        'no replacement; list_emails with a small limit covers the same need',
+    );
   });
 });

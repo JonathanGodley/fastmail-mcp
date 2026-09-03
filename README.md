@@ -247,7 +247,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
    `FASTMAIL_ALLOW_UNSAFE_BASE_URL` is deliberately not offered here — it decides where your API token may be sent, so it stays an environment variable you set on purpose.
 
-3. Use any of the tools (e.g. `get_recent_emails`).
+3. Use any of the tools (e.g. `list_emails`).
 
 ## Response Simplification
 
@@ -269,7 +269,7 @@ This is not a per-tool setting. Every handler and formatter goes through a singl
 | Tool | `verbose` | `raw` | `fields` |
 |------|-----------|-------|----------|
 | `get_email` | ✅ | ✅ | ✅ |
-| `list_emails`, `search_emails`, `get_recent_emails` | — | ✅ | ✅ |
+| `list_emails`, `search_emails` | — | ✅ | ✅ |
 | `get_thread` | — | ✅ | ✅ |
 | `get_email_attachments` | — | ✅ (a set escape; see its entry) | — |
 | `list_mailboxes`, `create_mailbox` | ✅ | ✅ | — |
@@ -357,7 +357,7 @@ search_emails { "after": "2026-07-01", "limit": 100,
 get_email { "emailId": "M123", "fields": ["bodyHtml"] }
 ```
 
-Available on `get_email`, `list_emails`, `search_emails`, `get_recent_emails` and `get_thread`. It is how you keep a response size under your own control: without it, size is decided by what happens to be in the mailbox — the thread headers and previews of a wide sweep, or one editor-inflated draft's HTML body ([#79](https://github.com/JonathanGodley/fastmail-mcp/issues/79), [#69](https://github.com/JonathanGodley/fastmail-mcp/issues/69)). `limit` is not a substitute — per-message size varies by more than an order of magnitude, so no limit is both safe and useful.
+Available on `get_email`, `list_emails`, `search_emails` and `get_thread`. It is how you keep a response size under your own control: without it, size is decided by what happens to be in the mailbox — the thread headers and previews of a wide sweep, or one editor-inflated draft's HTML body ([#79](https://github.com/JonathanGodley/fastmail-mcp/issues/79), [#69](https://github.com/JonathanGodley/fastmail-mcp/issues/69)). `limit` is not a substitute — per-message size varies by more than an order of magnitude, so no limit is both safe and useful.
 
 The rules:
 
@@ -376,7 +376,7 @@ Projection is applied to output only; it does not change what is fetched from th
 
 ### Result counts and paging (`position`)
 
-Every `list_emails`, `search_emails` and `get_recent_emails` response opens with a summary line that states **how many results matched in total**, not just how many came back:
+Every `list_emails` and `search_emails` response opens with a summary line that states **how many results matched in total**, not just how many came back:
 
 ```
 Showing 20 of 137 results. nextPosition: 20 (pass position:20 for the next page).
@@ -399,7 +399,7 @@ The rules:
 - **A position past the end is not an error.** It returns an empty page next to the real total (`Showing 0 of 137 results from position 500.`), so you can see you overshot.
 - **The summary is identical on the `raw` path**, which already carried one; `raw` callers can also read JMAP's own `total`/`position` by querying directly.
 
-`position` is how you read past the `limit` caps (`search_emails`/`list_emails` cap at 100, `get_recent_emails` at 50). Contacts and calendar listings do not take it: passing one back would be rejected as an unknown parameter. `list_contacts`/`search_contacts` state their total the same way but never carry a `nextPosition`, so a total larger than the returned count means the rest is out of reach behind the hard cap. `list_calendar_events` goes over CalDAV rather than JMAP but states its total the same way, and its total counts every matching occurrence across every calendar queried, before `limit` trimmed the list — so a total larger than the returned count means raising `limit` (hard cap 500) will reach the rest, and only a total above that cap calls for a narrower window.
+`position` is how you read past the `limit` caps (`search_emails`/`list_emails` cap at 100). Contacts and calendar listings do not take it: passing one back would be rejected as an unknown parameter. `list_contacts`/`search_contacts` state their total the same way but never carry a `nextPosition`, so a total larger than the returned count means the rest is out of reach behind the hard cap. `list_calendar_events` goes over CalDAV rather than JMAP but states its total the same way, and its total counts every matching occurrence across every calendar queried, before `limit` trimmed the list — so a total larger than the returned count means raising `limit` (hard cap 500) will reach the rest, and only a total above that cap calls for a narrower window.
 
 ### Mailbox fields
 
@@ -538,14 +538,14 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
 
 `deletedCard` degrades the same way, and that is the worst case of the two: `previousCard` is read before the update and the update does not proceed without it, but the delete's copy is read alongside the destroy, so on the rare occasion the server does not return it the card is gone and no copy came back. The response carries an explicit warning saying exactly that instead of returning `{deleted}` on its own. Nothing can reconstruct the card at that point.
 
-## Available Tools (42 Total)
+## Available Tools (41 Total)
 
 **🎯 Most Popular Tools:**
 - **check_function_availability**: Check what's available and get setup guidance  
 - **test_bulk_operations**: Safely test bulk operations with dry-run mode
 - **send_draft**: The one tool that transmits a composed message — compose with `draft_email`, then send here
 - **search_emails**: Free-text + structured email search (from/to/cc/bcc/subject/date/mailbox, plus multi-mailbox scoping), with Trash and Spam excluded by default
-- **get_recent_emails**: The small, cheap read across all mailboxes (Sent and drafts included), with Trash and Spam excluded by default
+- **list_emails**: List emails across all mailboxes (or one, via `mailbox`), with Trash and Spam excluded by default — pass a small `limit` for a quick look
 
 ### Email Tools
 
@@ -561,7 +561,7 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
   - Parameters: `parent` (optional - id, role, name, or path; lists that mailbox's direct children only), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response - untransformed JMAP carries no `path`)
 - **create_mailbox**: Create a mailbox (a Fastmail folder, which is also what a label is). Returns the new mailbox in the same shape `list_mailboxes` returns, `path` included, so you can use it as a move destination or a label straight away without a second lookup. `name` is a leaf name and must not contain `/`; to nest the mailbox, pass `parent` (which itself accepts an id, role, name, or path).
   - Parameters: `name` (required - leaf name, no `/`), `parent` (optional - id, role, name, or path; omit to create at the top level), `verbose` (optional, include all fields), `raw` (optional, return original JMAP object)
-- **list_emails**: List recent emails across all mailboxes (or one, via `mailbox`). **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam` to include them); drafts are included (set `excludeDrafts` to omit them). When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing filed only in Trash/Spam matched, and you need not re-search to check. One mailbox is all this tool scopes to; to intersect several mailboxes or exclude some, use `search_emails` with no query (see [Scoping across several mailboxes](#scoping-across-several-mailboxes)). `get_recent_emails` runs the same query with a smaller default and cap (10, max 50) for a quick check of what has come in.
+- **list_emails**: List recent emails across all mailboxes (or one, via `mailbox`). **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam` to include them); drafts are included (set `excludeDrafts` to omit them). When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing filed only in Trash/Spam matched, and you need not re-search to check. One mailbox is all this tool scopes to; to intersect several mailboxes or exclude some, use `search_emails` with no query (see [Scoping across several mailboxes](#scoping-across-several-mailboxes)). Pass a small `limit` (e.g. 10) for a quick check of what has come in.
   - Parameters: `mailbox` (optional — [id, role, name, or path](#naming-a-mailbox); scoping to a mailbox ignores the default exclusion), `limit` (default: 20, max: 100), `position` (optional offset — see [Result counts and paging](#result-counts-and-paging-position)), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
 - **get_email**: Get a specific email by ID. Returns plain text body with HTML omitted (bodyHtmlSize hint provided). Only use `verbose` if you specifically need the HTML body — it can be very large for marketing emails. To read a large HTML body without the rest of the message alongside it, use `fields: ["bodyHtml"]`.
   - Parameters: `emailId` (required), `verbose` (optional, include HTML body — can be 50K+ chars for rich emails), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `stripQuoted` (optional, drop quoted reply history from `bodyText`), `raw` (optional, return original JMAP response)
@@ -588,8 +588,6 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
   - **`requiredMailboxes` / `excludeMailboxes`** scope across several mailboxes at once, and are the only place this server does — see [Scoping across several mailboxes](#scoping-across-several-mailboxes) for what exclusion actually means here (it is weaker than the name suggests).
   - **`hasAttachment` filters on the server's own heuristic**, compared directly (RFC 8621 §4.4.1) — it is the same value the results report, not a count of parts. It answers "is there content attached", so a message whose only image is a small embedded one is filtered *out* by `hasAttachment: true`. There is no server-side filter for embedded images: narrow with the other filters, then read the parts with `get_email`.
   - **Date bounds (`after` / `before`).** Both accept a plain date (`2026-07-20`) or a full datetime (`2026-07-20T14:30:00Z`, or with an offset such as `2026-07-20T14:30:00+01:00`); a datetime with no zone is read as the server host's local time. A date-only value means **00:00:00 UTC on that date**, so `after:"2026-07-20"` includes all of July 20 while `before:"2026-07-20"` (the bound is exclusive) excludes it — pass `before:"2026-07-21"` to search up to and including July 20. Only those two shapes are accepted: an unpadded or slash-separated date (`2026-7-20`, `2026/07/20`), free text (`20 July 2026`), a partial date (`2026-07`), a day that doesn't exist in its month, and an empty string are all **rejected** with a message naming the parameter — omit the parameter to search without that bound. The strictness is deliberate: the loose forms are read as host-local midnight rather than UTC, which would silently move the search window ([#70](https://github.com/JonathanGodley/fastmail-mcp/issues/70)).
-- **get_recent_emails**: Get the newest emails across all mailboxes (or one, via `mailbox`) — the small, cheap read. **It is not an arrivals feed**: "all mailboxes" is every folder except Trash and Spam, so your own Sent copies, drafts and any custom folder come back alongside newly received mail. Pass `mailbox:"inbox"` for delivered mail only, and `excludeDrafts` to drop drafts. **Trash and Spam are excluded by default** (set `includeTrash`/`includeSpam` to include them). When a Trash/Spam match is withheld, a trailing note reports how many — so no note means nothing filed only in Trash/Spam matched, and you need not re-run to check. It filters exactly as `list_emails` does; what separates them is size, not scope — this returns 10 by default and caps at 50, `list_emails` returns 20 and caps at 100, so use `list_emails` when you are working through a folder rather than taking a quick look ([#29](https://github.com/JonathanGodley/fastmail-mcp/issues/29)).
-  - Parameters: `limit` (default: 10, max: 50), `position` (optional offset — the way to read past the 50 cap, see [Result counts and paging](#result-counts-and-paging-position)), `mailbox` (optional — [id, role, name, or path](#naming-a-mailbox); scoping to a mailbox ignores the default exclusion, e.g. `mailbox:"trash"` to read Trash directly), `ascending` (optional, oldest first), `excludeDrafts` (optional), `includeTrash` (optional), `includeSpam` (optional), `fields` (optional array — return only these fields, see [Field projection](#field-projection-fields)), `raw` (optional, return original JMAP response)
 - **mark_email_read**: Mark an email as read or unread
   - Parameters: `emailId` (required), `read` (default: true)
 - **pin_email**: Pin or unpin an email
@@ -619,7 +617,7 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
   - `includeBodies` turns an N-message conversation read into one call — see [Reading long threads cheaply](#reading-long-threads-cheaply).
   - Draft messages are **excluded by default** (an in-progress reply is noise when reading a conversation). When any are present, a trailing note reports **how many drafts are hidden** (so a draft reply you already started isn't missed) — the drafts themselves are not surfaced. Set `includeDrafts: true` to include them. (The note is on the simplified path only; `raw` output stays pure JSON, so a raw consumer passes `includeDrafts` itself.)
 
-> **Draft handling is asymmetric by design.** `get_thread` excludes drafts by default while `search_emails`/`list_emails`/`get_recent_emails` include them: a draft reply is noise when reconstructing a conversation, but a search/list should still find everything you've written. Drafts are identified by the `$draft` keyword (robust even if a draft is moved out of the Drafts mailbox), not by mailbox role - with one carve-out: a draft that now lives ONLY in Trash is neither shown nor counted, since it is not an active draft (`edit_draft` and `delete_email` both leave a `$draft` copy there, and counting those would inflate the warning). Use `includeDrafts` (get_thread) / `excludeDrafts` (the three list/search tools) to override either default.
+> **Draft handling is asymmetric by design.** `get_thread` excludes drafts by default while `search_emails`/`list_emails` include them: a draft reply is noise when reconstructing a conversation, but a search/list should still find everything you've written. Drafts are identified by the `$draft` keyword (robust even if a draft is moved out of the Drafts mailbox), not by mailbox role - with one carve-out: a draft that now lives ONLY in Trash is neither shown nor counted, since it is not an active draft (`edit_draft` and `delete_email` both leave a `$draft` copy there, and counting those would inflate the warning). Use `includeDrafts` (get_thread) / `excludeDrafts` (the two list/search tools) to override either default.
 
 ### Archiving does what the Fastmail client does
 

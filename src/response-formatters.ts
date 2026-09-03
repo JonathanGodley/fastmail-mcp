@@ -67,16 +67,15 @@ export function formatQueryResult(result: QueryResult): string {
   return `${formatQuerySummary(result)}\n${toolJson(result.items)}`;
 }
 
-// Raw rendering for the three paging email tools (list_emails, search_emails,
-// get_recent_emails), the counterpart to formatEmailQueryResult below: same summary,
-// untransformed items.
+// Raw rendering for the two paging email tools (list_emails, search_emails), the
+// counterpart to formatEmailQueryResult below: same summary, untransformed items.
 export function formatRawEmailQueryResult(result: QueryResult): string {
   return `${formatQuerySummary(result, { paged: true })}\n${toolJson(result.items)}`;
 }
 
 // The one seam every list/search read tool renders through (list_emails,
-// search_emails, get_recent_emails), so `fields` projection lands on all three at
-// once and cannot drift between them. The summary line (its result count and
+// search_emails), so `fields` projection lands on both at once and cannot drift
+// between them. The summary line (its result count and
 // `nextPosition`) and the trailing exclusion note are NOT fields and are never
 // projected away — they are out-of-band signals about the query, and a caller
 // silently losing "N results were withheld" or "there is another page" while asking

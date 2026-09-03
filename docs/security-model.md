@@ -458,18 +458,18 @@ overlooked:
 ## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
 
 The read surface gained one `mailbox` param (id/role/name) resolved **exactly** across the
-read + single-mailbox-write tools, and `search_emails`/`list_emails`/`get_recent_emails` hide Trash and Spam by
+read + single-mailbox-write tools, and `search_emails`/`list_emails` hide Trash and Spam by
 default with a hidden-count note. Several residuals are accepted here, framed honestly rather
 than overclaimed:
 
 - **The default Trash/Spam exclusion is a product/noise default — NO security property is
   claimed.** It is *not* an anti-prompt-injection control: an injected agent simply passes
-  `includeSpam:true` (or reads Spam via `get_recent_emails mailbox:"junk"`). Treating it as a
+  `includeSpam:true` (or reads Spam via `list_emails mailbox:"junk"`). Treating it as a
   security boundary would be the same overclaim as "redaction neutralizes the oracle" — so it
   isn't claimed. The `includeTrash`/`includeSpam` descriptions stay plain (no injection caution).
 - **The hidden-count note is TRANSPARENCY for a cooperative reader, not an injection control.**
   `get_mailbox_stats mailbox:"junk"` returns Trash/Spam totals directly with zero friction, and
-  `get_recent_emails mailbox:"trash"` reads them outright — so a determined/injected agent
+  `list_emails mailbox:"trash"` reads them outright — so a determined/injected agent
   trivially bypasses the note. Its purpose is honesty (disclose what default-scope hid), not a
   boundary. The fail-closed degraded note exists so the published "no note ⇒ nothing was
   withheld" contract can be *trusted by a cooperative caller*, not to stop an attacker. Read
