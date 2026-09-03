@@ -4,6 +4,11 @@
 // not hand-rewritten (and re-bugged) each time. The server speaks newline-delimited
 // JSON over stdio and logs only to stderr, so stdout is pure protocol.
 //
+// Importing from OUTSIDE the repo (a scratchpad driver): an absolute Windows path
+// in an ESM `import` fails with ERR_UNSUPPORTED_ESM_URL_SCHEME (the drive letter
+// reads as a protocol, "Received protocol 'c:'") — import via a file:/// URL
+// instead, e.g. `await import('file:///C:/.../scripts/mcp-harness.mjs')`.
+//
 // Before use:
 //   1. `npm run build`  (the server runs from dist/index.js, not src/)
 //   2. set FASTMAIL_API_TOKEN in the environment (and FASTMAIL_ATTACH_DIR for
