@@ -5970,6 +5970,16 @@ describe('CalDAVCalendarClient calendar discovery failures', () => {
     );
   });
 
+  // #102: an empty response array confirmed nothing either — the status-check loop simply
+  // never ran, and the PROPFIND was reported as having succeeded.
+  it('throws on an empty PROPFIND response array instead of treating it as success', async () => {
+    const { client } = clientWithEmptyDiscovery([]);
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50),
+      /discover calendars: server returned no status/,
+    );
+  });
+
   it('throws when discovery succeeds but lists no calendars', async () => {
     // An empty-but-successful discovery is still an error: answering an availability
     // question with nothing reads as free time.

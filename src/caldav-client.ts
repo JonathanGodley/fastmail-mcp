@@ -2609,6 +2609,12 @@ export function normalizeMasterVEventFirst(icalData: string): string {
  */
 function assertDavOk(resp: unknown, action: string): void {
   const responses = Array.isArray(resp) ? resp : [resp];
+  // An empty array confirms nothing either — the loop below would simply never run and
+  // return as though the write succeeded. Same criterion as the missing-status case: a
+  // response nobody here actually observed must not be reported as success.
+  if (responses.length === 0) {
+    throw new Error(`Failed to ${action}: server returned no status`);
+  }
   for (const r of responses) {
     const status = (r as any)?.status;
     const ok = (r as any)?.ok;
