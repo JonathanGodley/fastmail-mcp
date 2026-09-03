@@ -2574,6 +2574,74 @@ describe('sendDraft', () => {
     await assert.rejects(() => client.sendDraft('draft-1'), /drafts/i);
   });
 
+  // ---- resolving Sent ----
+  //
+  // The send's filing destination is resolved the same way its Drafts gate is: EXACT role,
+  // case-insensitive, and a usable id required. The two rows below are what a substring name
+  // fallback did instead — it picked a mailbox that merely READ like Sent and filed the sent
+  // copy of a transmitted message there, on an account that has no sent-role folder at all.
+  const NAMED_NOT_ROLED: [string, any][] = [
+    ['is named "Sent" but carries no role', { id: 'mb-named-sent', name: 'Sent', role: null }],
+    // 'Presentations' contains "sent" (pre-SENT-ations), so an ordinary user folder was a
+    // substring match — the name need not look anything like Sent to have been chosen.
+    ['merely contains "sent" in its name', { id: 'mb-preso', name: 'Presentations', role: null }],
+  ];
+
+  for (const [label, mailbox] of NAMED_NOT_ROLED) {
+    it(`refuses when the only Sent candidate ${label}`, async () => {
+      mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, mailbox]);
+      const makeReq = stubSend(SENDABLE_DRAFT);
+
+      await assert.rejects(
+        () => client.sendDraft('draft-1'),
+        (err: Error) => {
+          assert.match(err.message, /"sent" role/i);
+          assert.match(err.message, /Nothing was sent/i);
+          return true;
+        },
+      );
+      // Refused before submission: only the Email/get went out, so no mail was transmitted
+      // and nothing was filed into the wrongly-matched mailbox.
+      assert.equal(makeReq.mock.calls.length, 1);
+    });
+  }
+
+  // A role record with no usable id would otherwise be compared against as the string
+  // "undefined" and write the patch key `mailboxIds/undefined` on a message that HAS been
+  // transmitted, so it refuses ahead of the submission like the two rows above.
+  it('refuses a sent-role mailbox with no usable id rather than filing to "undefined"', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      DRAFTS_MAILBOX,
+      { name: 'Sent', role: 'sent' },
+    ]);
+    const makeReq = stubSend(SENDABLE_DRAFT);
+
+    await assert.rejects(() => client.sendDraft('draft-1'), /"sent" role/i);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  it('files into the sent-role mailbox whatever it is called', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      DRAFTS_MAILBOX,
+      { id: 'mb-outbound', name: 'Archive of outbound', role: 'sent' },
+    ]);
+    const makeReq = stubSend(SENDABLE_DRAFT);
+    await client.sendDraft('draft-1');
+
+    assert.equal(filingUpdate(makeReq)['mailboxIds/mb-outbound'], true);
+  });
+
+  it('matches the sent role case-insensitively', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      DRAFTS_MAILBOX,
+      { id: 'mb-sent-upper', name: 'Outbox', role: 'SENT' },
+    ]);
+    const makeReq = stubSend(SENDABLE_DRAFT);
+    await client.sendDraft('draft-1');
+
+    assert.equal(filingUpdate(makeReq)['mailboxIds/mb-sent-upper'], true);
+  });
+
   it('throws when email not found', async () => {
     stubRequests(client, async () => ({
       methodResponses: [['Email/get', { list: [] }, 'getEmail']],

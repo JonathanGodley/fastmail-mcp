@@ -2015,10 +2015,15 @@ export class JmapClient {
   }
 
   // Resolve a fixed role with a SUBSTRING name fallback. The substring fallback is an
-  // injection-steering / mis-resolution hazard on any exclusion/delete/move target, so
-  // this is kept ONLY for the compose path (drafts/sent save target), where it resolves
-  // a benign save destination. Default-exclusion uses computeExclusion (exact role),
-  // delete/move/the #12 sweep use resolveMailbox / resolveMailboxId (exact only).
+  // injection-steering / mis-resolution hazard on any exclusion/delete/move target.
+  //
+  // NOTHING CALLS THIS. It survives only as the shape the comments elsewhere in this file
+  // warn against by name: every role in this server is now resolved exactly — the default
+  // exclusion by computeExclusion, delete/move/the #12 sweep by resolveMailbox /
+  // resolveMailboxId, and the drafts/sent roles on the compose and send paths by
+  // findByExactRole. The last caller was sendDraft's Sent target, where the fallback could
+  // file a sent copy into a role-less mailbox that merely matched by name. Do not give it a
+  // new one: a role is resolved by findByExactRole.
   protected findMailboxByRoleOrName(mailboxes: any[], role: string, nameFallback?: string): any | undefined {
     return mailboxes.find(mb => mb.role === role) ||
            (nameFallback ? mailboxes.find(mb => mb.name.toLowerCase().includes(nameFallback)) : undefined);
@@ -3806,10 +3811,24 @@ export class JmapClient {
       );
     }
 
-    // Find the Sent mailbox
-    const sentMailbox = this.findMailboxByRoleOrName(mailboxes, 'sent', 'sent');
+    // The filing destination, resolved by EXACT role, case-insensitive — the same question
+    // the Drafts gate above asks, through the same helper, for the same reason. What stood
+    // here was findMailboxByRoleOrName, whose substring name fallback ('sent') would pick
+    // any mailbox whose NAME contains it on an account with no sent-role folder: a folder
+    // called "Sent" that a user made by hand, or an ordinary "Presentations" (pre-SENT-ations).
+    // The sent copy of a transmitted message then landed in that folder, and nothing said so.
+    // findByExactRole also requires a usable id, so a role record with no id refuses here
+    // rather than writing the patch key `mailboxIds/undefined` on a message already sent.
+    //
+    // Both arms refuse, and both refuse BEFORE the submission — the only irreversible step
+    // in this method — so an account with no sent-role mailbox transmits nothing rather than
+    // sending and then filing the copy somewhere arbitrary.
+    const sentMailbox = this.findByExactRole(mailboxes, 'sent');
     if (!sentMailbox) {
-      throw new Error('Could not find Sent mailbox');
+      throw new Error(
+        'Could not find a Sent mailbox (no mailbox in this account carries the "sent" role), ' +
+        'so there is nowhere to file the sent copy of this message. Nothing was sent.',
+      );
     }
 
     // Submit the draft
@@ -3847,10 +3866,13 @@ export class JmapClient {
           // whole-value key must never be reintroduced beside these. It would not conflict
           // loudly; it would silently win, and the label-dropping would come back unannounced.
           //
-          // Removal is written BEFORE the addition deliberately. The two ids are resolved by
-          // different helpers, so on a pathological account one mailbox can satisfy both and
-          // the keys collide; in this order the surviving key is the additive one, which
-          // leaves the message filed somewhere rather than nowhere.
+          // Removal is written BEFORE the addition deliberately: if the two keys ever name one
+          // mailbox, the surviving key in this order is the additive one, which leaves the
+          // message filed somewhere rather than nowhere. Both ids now come from
+          // findByExactRole against two DIFFERENT roles, and a mailbox carries one role, so
+          // that collision is no longer reachable — the ordering stays because it is this
+          // file's convention for a subtract-and-add patch, and because the reason it exists
+          // returns the moment either id is resolved any other way.
           onSuccessUpdateEmail: {
             '#submission': {
               [`mailboxIds/${draftsMailbox.id}`]: null,
