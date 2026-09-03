@@ -1761,6 +1761,37 @@ describe('validateAttendeeEmail', () => {
     assert.throws(() => validateAttendeeEmail('a b@example.com'), /illegal/i);
     assert.throws(() => validateAttendeeEmail('a\tb@example.com'), /illegal/i);
   });
+
+  // #102: the single-`@` shape plus the old reject list let a bare address carry angle
+  // brackets, a second address after a comma, or an invisible Unicode format character —
+  // none of those is a single bare addr-spec.
+  it('rejects an address wrapped in angle brackets', () => {
+    assert.throws(() => validateAttendeeEmail('<a@b>'), /illegal/i);
+  });
+
+  it('rejects a second address appended after a comma', () => {
+    assert.throws(() => validateAttendeeEmail('a@b,c'), /illegal/i);
+  });
+
+  it('rejects an address with a trailing bracketed fragment', () => {
+    assert.throws(() => validateAttendeeEmail('a@b<c>'), /illegal/i);
+  });
+
+  it('rejects an address carrying a trailing U+200E left-to-right mark', () => {
+    assert.throws(() => validateAttendeeEmail('a@b.example‎'), /illegal/i);
+  });
+
+  it('still accepts a plain dotted address', () => {
+    assert.doesNotThrow(() => validateAttendeeEmail('alice.smith@example.com'));
+  });
+
+  it('still accepts a plus-tagged local part', () => {
+    assert.doesNotThrow(() => validateAttendeeEmail('alice+tag@example.com'));
+  });
+
+  it('still accepts a hyphenated domain', () => {
+    assert.doesNotThrow(() => validateAttendeeEmail('alice@my-domain.example.com')); // allowlist-secret: synthetic fixture on example.com, not a real address
+  });
 });
 
 describe('quoteParamValue', () => {

@@ -1602,7 +1602,15 @@ export function validateAttendeeEmail(email: string): void {
   if (!/^[^@]+@[^@]+$/.test(email)) {
     throw new InvalidInputError(`Invalid participant email: ${email}`);
   }
-  if (/[\r\n:;"\\]|\s/.test(email)) {
+  // This is a CRITERION, not a character whitelist: reject the RFC 5322 specials that would
+  // let a bare addr-spec smuggle a route, a display name, a second address, or (via a stray
+  // parameter delimiter) an iCal property injection; reject every whitespace character; and
+  // reject every Unicode category C code point (controls, format characters such as the
+  // U+200E left-to-right mark, surrogates, unassigned) since none of those is legitimate
+  // inside an address and the category catches whole classes no literal list could enumerate.
+  // Everything else — including `.` for dot-atoms, `+` for tagged locals, and `-` in a
+  // domain — stays allowed.
+  if (/[()<>[\]:;\\,"]|\s|\p{C}/u.test(email)) {
     throw new InvalidInputError(`Invalid participant email (contains illegal characters): ${email}`);
   }
 }
