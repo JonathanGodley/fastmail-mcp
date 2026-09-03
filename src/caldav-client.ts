@@ -538,7 +538,10 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
     // Use quote-aware colon detection for the parameter/value boundary
     const colonIdx = findValueBoundary(fullLine);
     if (colonIdx === -1) return undefined;
-    return fullLine.substring(colonIdx + 1).trim();
+    // Not trimmed: RFC 5545 whitespace inside a property VALUE is significant (a padded
+    // SUMMARY is a padded SUMMARY). A caller that feeds this into an anchored parser trims
+    // at its own call site instead — see each such call site's own one-line comment.
+    return fullLine.substring(colonIdx + 1);
   }
 
   return undefined;
@@ -937,7 +940,8 @@ export function removeOrphanedVTimezones(icalData: string): string {
       if (blockEnd === -1) { i = lines.length; break; }
       // Use parseICalValue for proper unfolding support
       const tzBlock = lines.slice(blockStart, blockEnd + 1).join('\n');
-      const tzid = parseICalValue(tzBlock, 'TZID') || '';
+      // Trimmed here because this feeds an exact-match `;TZID=${tzid}` substring check below.
+      const tzid = (parseICalValue(tzBlock, 'TZID') || '').trim();
       tzBlocks.push({ tzid, start: blockStart, end: blockEnd });
       i = blockEnd;
     }
@@ -998,7 +1002,8 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
           // Extract RECURRENCE-ID using parseICalValue for consistency
           // with the orphan detection code path (handles unfolding)
           const veventText = lines.slice(blockStart, j + 1).join('\n');
-          const recId = parseICalValue(veventText, 'RECURRENCE-ID');
+          // Trimmed here because this feeds formatICalDate, which anchors its pattern.
+          const recId = parseICalValue(veventText, 'RECURRENCE-ID')?.trim();
           veventBlocks.push({ start: blockStart, end: j, recurrenceId: recId });
           i = j;
           break;
@@ -1220,8 +1225,9 @@ function parseVEvent(
 ): CalendarEvent {
   const title = parseICalValue(vevent, 'SUMMARY') || 'Untitled';
   const description = parseICalValue(vevent, 'DESCRIPTION');
-  const rawStart = parseICalValue(vevent, 'DTSTART');
-  let rawEnd = parseICalValue(vevent, 'DTEND');
+  // Trimmed here because both feed formatICalDate, which anchors its pattern.
+  const rawStart = parseICalValue(vevent, 'DTSTART')?.trim();
+  let rawEnd = parseICalValue(vevent, 'DTEND')?.trim();
   const location = parseICalValue(vevent, 'LOCATION');
   const uid = parseICalValue(vevent, 'UID') || obj.url || '';
 
@@ -1233,7 +1239,8 @@ function parseVEvent(
 
   // DURATION parsing: compute end from start + duration if DTEND absent
   if (!rawEnd && rawStart) {
-    const rawDuration = parseICalValue(vevent, 'DURATION');
+    // Trimmed here because this feeds parseICalDuration, which anchors its pattern.
+    const rawDuration = parseICalValue(vevent, 'DURATION')?.trim();
     if (rawDuration) {
       const startIso = formatICalDate(rawStart);
       if (startIso) {
@@ -1433,7 +1440,8 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
  */
 function addRecurrenceToEvent(event: CalendarEvent, vevent: string): void {
   const rrule = parseICalValue(vevent, 'RRULE');
-  const recurrenceId = parseICalValue(vevent, 'RECURRENCE-ID');
+  // Trimmed here because this feeds formatICalDate, which anchors its pattern.
+  const recurrenceId = parseICalValue(vevent, 'RECURRENCE-ID')?.trim();
   if (recurrenceId) {
     event.isRecurring = true;
     event.recurrenceId = formatICalDate(recurrenceId);

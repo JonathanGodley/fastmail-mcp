@@ -142,6 +142,13 @@ describe('parseICalValue', () => {
     assert.equal(parseICalValue(vevent, 'LOCATION'), undefined);
   });
 
+  // #102: RFC 5545 whitespace inside a property VALUE is significant, so a free-text
+  // property must read back exactly as stored rather than silently losing padding.
+  it('does not trim a free-text value', () => {
+    const vevent = 'SUMMARY:  padded  ';
+    assert.equal(parseICalValue(vevent, 'SUMMARY'), '  padded  ');
+  });
+
   it('handles line folding (continuation lines)', () => {
     const vevent = 'DESCRIPTION:This is a long\n description that wraps\nSUMMARY:Test';
     assert.equal(parseICalValue(vevent, 'DESCRIPTION'), 'This is a longdescription that wraps');
