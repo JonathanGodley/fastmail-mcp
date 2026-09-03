@@ -1289,7 +1289,9 @@ function parseVEvent(
   const rawStart = parseICalValue(vevent, 'DTSTART')?.trim();
   let rawEnd = parseICalValue(vevent, 'DTEND')?.trim();
   const location = parseICalValue(vevent, 'LOCATION');
-  const uid = parseICalValue(vevent, 'UID') || obj.url || '';
+  // Trimmed here because this is the id findCalendarObjectByUID later matches by exact
+  // equality — the same exact-match category as the TZID substring check.
+  const uid = parseICalValue(vevent, 'UID')?.trim() || obj.url || '';
 
   // The zone this account is configured for, resolved to a name ICU can actually use. Passed
   // in rather than read from module state (see resolveUsableTimezone's own comment in
@@ -3244,7 +3246,9 @@ export class CalDAVCalendarClient {
       for (const obj of objects) {
         const vevent = extractVEvent(obj.data || '');
         if (!vevent) continue;
-        const uid = parseICalValue(vevent, 'UID');
+        // Trimmed here because this is an exact-match comparison against the caller's id,
+        // the same exact-match category as the TZID substring check.
+        const uid = parseICalValue(vevent, 'UID')?.trim();
         if (uid === eventId || obj.url === eventId) {
           return obj;
         }
@@ -3489,7 +3493,10 @@ export class CalDAVCalendarClient {
       throw new Error('Cannot update event: no VEVENT block found');
     }
 
-    const existingUid = parseICalValue(originalVevent, 'UID') || eventId;
+    // Trimmed here for the same reason as the other UID reads: it is echoed back as the
+    // result's `eventId`, which a caller may then pass straight into another exact-match
+    // UID lookup.
+    const existingUid = parseICalValue(originalVevent, 'UID')?.trim() || eventId;
     let data = normalizedData;
 
     // --- timeZone validation (#157) ---

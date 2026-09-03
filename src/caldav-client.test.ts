@@ -1095,6 +1095,25 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
     assert.equal(event.title, 'Findable');
   });
 
+  // #102: parseICalValue no longer trims, so a stored UID with padding around it must be
+  // trimmed at ITS OWN call sites (the same exact-match category as the TZID substring
+  // check) or a caller can no longer find the event by its real, unpadded id.
+  it('finds an event by its unpadded id when the stored UID line carries padding', async () => {
+    const ical = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID: padded-uid ',
+      'DTSTART:20260401T100000Z',
+      'SUMMARY:Padded UID',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client } = createMockedClientWithObjects([{ data: ical, url: '/cal/padded.ics' }]);
+
+    const event = await client.getCalendarEventById('padded-uid');
+    assert.equal(event.id, 'padded-uid');
+  });
+
   it('returns the STORED start and its zone exactly as written, unexpanded', async () => {
     // This is the call that reads a resource rather than a window over one, so it is the only
     // one that can promise the stored property back verbatim. `list_calendar_events` used to
