@@ -279,6 +279,36 @@ function collectToolParams(): Map<string, Set<string>> {
   return params;
 }
 
+// The `required` array each tool declares, keyed by tool name, read off the TOOLS literal
+// the same way collectToolParams reads `properties` above. Every tool writes its required
+// list on one line (`required: ['emailId', 'mailboxes'],`), so this does not need the
+// brace-tracking collectToolParams does for the multi-line `properties` block.
+function collectRequiredParams(): Map<string, Set<string>> {
+  const lines = readLines('index.ts');
+  const start = lines.findIndex((l) => l.trim() === 'const TOOLS = [');
+  assert.notEqual(start, -1, 'could not find the `const TOOLS = [` literal in src/index.ts');
+  const end = lines.findIndex((l, i) => i > start && l.trim() === '];');
+  assert.notEqual(end, -1, 'could not find the end of the TOOLS literal in src/index.ts');
+
+  const required = new Map<string, Set<string>>();
+  let current: string | undefined;
+  for (let i = start + 1; i < end; i++) {
+    const line = lines[i];
+    const name = /^ {8}name: '([a-z][a-z0-9_]*)',$/.exec(line);
+    if (name) {
+      current = name[1];
+      continue;
+    }
+    if (!current) continue;
+    const req = /^\s*required: \[(.*)\],$/.exec(line);
+    if (req) {
+      const names = [...req[1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
+      required.set(current, new Set(names));
+    }
+  }
+  return required;
+}
+
 // The CallTool switch in index.ts, split into one body per `case '<tool>':`. A case runs
 // until the next case label, which is exact here because no case in that switch falls
 // through into another (the label-only ones are single-line delegations to a handler
@@ -1191,5 +1221,28 @@ describe('the compact-serialisation scan reaches every shipped file', () => {
     const files = collectSourceFiles();
     assert.ok(files.includes('index.ts') && files.includes('coerce.ts'), files.join(', '));
     assert.ok(!files.some((f) => f.endsWith('.test.ts') || f.startsWith('testing/')), files.join(', '));
+  });
+});
+
+// The label tools' array parameter is `mailboxes`, not `mailboxIds` (#91): the old name
+// promised bare ids while the matcher behind it always accepted id/role/name/path, so the
+// surface lied about what it took. This pins the rename on all four label tools at once so a
+// revert, or a copy-pasted new label tool that keeps the old name, fails here rather than
+// only showing up as a caller's unknown-parameter error.
+describe('label tools take mailboxes, not mailboxIds (#91)', () => {
+  it('declares mailboxes (required) and never mailboxIds on every label tool', () => {
+    const params = collectToolParams();
+    const labelTools = ['add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'];
+    const required = collectRequiredParams();
+    for (const tool of labelTools) {
+      const declared = params.get(tool);
+      assert.ok(declared, `${tool} is missing from the TOOLS literal - the schema scan has drifted`);
+      assert.ok(declared.has('mailboxes'), `${tool} no longer declares 'mailboxes' - has the parameter been renamed again?`);
+      assert.ok(!declared.has('mailboxIds'), `${tool} still declares the old 'mailboxIds' name alongside (or instead of) 'mailboxes' - #91 renamed it, with no alias`);
+      const requiredSet = required.get(tool);
+      assert.ok(requiredSet, `${tool} has no 'required' array in its schema`);
+      assert.ok(requiredSet.has('mailboxes'), `${tool}'s 'required' list does not name 'mailboxes' - it should still be required, just under the new name`);
+      assert.ok(!requiredSet.has('mailboxIds'), `${tool}'s 'required' list still names the old 'mailboxIds' key`);
+    }
   });
 });

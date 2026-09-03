@@ -500,7 +500,7 @@ than overclaimed:
   Name/role resolution also **lowers the steering bar** from "must know a valid opaque id (needs a
   prior `list_mailboxes`)" to "blind one-shot by literal name" — a real, if modest, escalation.
   **The label tools join this class (#50):** `add_labels`/`remove_labels`/`bulk_add_labels`/
-  `bulk_remove_labels` now resolve their `mailboxIds` arrays by exact id/role/name/path too, so an
+  `bulk_remove_labels` now resolve their `mailboxes` arrays by exact id/role/name/path too, so an
   injected agent can label a message into e.g. `"trash"` blind-one-shot-by-name, the same modest
   escalation as move. Accepted on the same footing; not a new capability class.
 - **The path form (#27), and the collision it made reachable on write paths.**
@@ -565,7 +565,7 @@ than overclaimed:
   nothing (they name the folder outright). It removes the case where a **cooperative** agent
   running an innocuous instruction is steered by a folder someone else created.
 - **Resolver error message is an information oracle, reachable account-wide.** A bad `mailbox`/
-  `targetMailbox`/`mailboxIds` to *any* swept tool (search, list, stats, move, compose, labels)
+  `targetMailbox`/`mailboxes` to *any* swept tool (search, list, stats, move, compose, labels)
   reflects the caller's input and a capped list of mailbox **paths** reachable by the configured
   token - since #27 these are full paths rather than bare names, so the oracle now also discloses
   the *shape* of the folder tree (which folder nests under which), not just the set of names. That
@@ -580,7 +580,7 @@ than overclaimed:
   **not** what makes the oracle acceptable — recoverability (naming valid mailboxes so a caller
   can retry) is, and it's the caller's own reachable tree. Accepted, capped, framed honestly.
 - **`get_mailbox_stats` and the label tools reject a real id that is absent from the fetched
-  list.** Reading stats off the shared `getMailboxes()` list (and resolving label `mailboxIds`
+  list.** Reading stats off the shared `getMailboxes()` list (and resolving label `mailboxes`
   against it) means a hidden/role-less mailbox's id now throws `InvalidInputError` rather than
   returning data. Accepted; "resolvable" is defined as "matches some `mailbox.id`/role/name, or a
   path built from that same fetched list."

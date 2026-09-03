@@ -342,7 +342,7 @@ wrong destination is worth a retry to avoid. A flat name and a path landing on t
 mailbox (a top-level folder named `A/B`, no such nesting) is not a collision and resolves.
 
 The walk lives in `findMailboxExact` rather than in its throwing wrapper, and that placement
-is the point: both callers inherit it. The label tools' `mailboxIds` arrays (`add_labels` /
+is the point: both callers inherit it. The label tools' `mailboxes` arrays (`add_labels` /
 `remove_labels` / `bulk_add_labels` / `bulk_remove_labels`) call the matcher directly, and
 `search_emails`' `requiredMailboxes` / `excludeMailboxes` entries go through `resolveMailbox`,
 so a form accepted on `move_email` but not in one of those arrays would rebuild the split

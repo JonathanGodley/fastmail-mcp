@@ -472,10 +472,11 @@ const SEARCH_SCOPE_RELIABILITY_CONTRACT =
   ' requiredMailboxes is an explicit scope too and turns the default exclusion and its note off the same way; excludeMailboxes does NOT — the default exclusion and its note stay on, minus any Trash/Spam role you excluded yourself.';
 
 // The forms every mailbox-taking parameter accepts, written ONCE and shared by all of
-// them — the scalar ones (mailbox / targetMailbox / parent) and the mailboxIds arrays
-// alike. They resolve through a single matcher, so a form documented on one tool and not
-// another would be a documentation-only difference, and the path form is specified here
-// and nowhere else in the schemas.
+// them — the scalar ones (mailbox / targetMailbox / parent) and the array ones (the label
+// tools' mailboxes, search_emails' requiredMailboxes/excludeMailboxes) alike. They resolve
+// through a single matcher, so a form documented on one tool and not another would be a
+// documentation-only difference, and the path form is specified here and nowhere else in
+// the schemas.
 const MAILBOX_REF_FORMS =
   'Accepts an id, a role (inbox, archive, sent, drafts, trash, junk), a folder name (e.g. Receipts), or a root-anchored path (e.g. Archive/2026/Receipts): "/"-separated, no leading or trailing slash, segments matched case-insensitively. ' +
   'A folder name matching exactly one mailbox wins over reading the same text as a path, so a folder whose own name contains "/" stays reachable by that name — unless the same text ALSO reaches a different mailbox as a path (a folder named "A/B" alongside a real A > B nesting), which is rejected as ambiguous and answered with the id of each, since no path can tell those two apart. ' +
@@ -1773,13 +1774,13 @@ const TOOLS = [
               type: 'string',
               description: 'ID of the email to add labels to',
             },
-            mailboxIds: {
+            mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('add'),
             },
           },
-          required: ['emailId', 'mailboxIds'],
+          required: ['emailId', 'mailboxes'],
         },
       },
       {
@@ -1792,13 +1793,13 @@ const TOOLS = [
               type: 'string',
               description: 'ID of the email to remove labels from',
             },
-            mailboxIds: {
+            mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('remove'),
             },
           },
-          required: ['emailId', 'mailboxIds'],
+          required: ['emailId', 'mailboxes'],
         },
       },
       {
@@ -1978,13 +1979,13 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Array of email IDs to add labels to.' + LENIENT_LIST_DESC,
             },
-            mailboxIds: {
+            mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('add'),
             },
           },
-          required: ['emailIds', 'mailboxIds'],
+          required: ['emailIds', 'mailboxes'],
         },
       },
       {
@@ -1998,13 +1999,13 @@ const TOOLS = [
               items: { type: 'string' },
               description: 'Array of email IDs to remove labels from.' + LENIENT_LIST_DESC,
             },
-            mailboxIds: {
+            mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
               description: labelMailboxIdsDesc('remove'),
             },
           },
-          required: ['emailIds', 'mailboxIds'],
+          required: ['emailIds', 'mailboxes'],
         },
       },
       {
@@ -2592,12 +2593,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'add_labels': {
         const { emailId } = args as any;
-        const mailboxIds = coerceStringArray((args as any).mailboxIds);
+        const mailboxIds = coerceStringArray((args as any).mailboxes);
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
         if (!mailboxIds || mailboxIds.length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
+          throw new McpError(ErrorCode.InvalidParams, 'mailboxes array is required and must not be empty');
         }
         const client = initializeClient();
         await client.addLabels(emailId, mailboxIds);
@@ -2613,12 +2614,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'remove_labels': {
         const { emailId } = args as any;
-        const mailboxIds = coerceStringArray((args as any).mailboxIds);
+        const mailboxIds = coerceStringArray((args as any).mailboxes);
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
         if (!mailboxIds || mailboxIds.length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
+          throw new McpError(ErrorCode.InvalidParams, 'mailboxes array is required and must not be empty');
         }
         const client = initializeClient();
         const { rescued, unchangedCount } = await client.removeLabels(emailId, mailboxIds);
@@ -2871,12 +2872,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'bulk_add_labels': {
         const emailIds = coerceStringArray((args as any).emailIds);
-        const mailboxIds = coerceStringArray((args as any).mailboxIds);
+        const mailboxIds = coerceStringArray((args as any).mailboxes);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
         if (!mailboxIds || mailboxIds.length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
+          throw new McpError(ErrorCode.InvalidParams, 'mailboxes array is required and must not be empty');
         }
         const client = initializeClient();
         await client.bulkAddLabels(emailIds, mailboxIds);
@@ -2892,12 +2893,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'bulk_remove_labels': {
         const emailIds = coerceStringArray((args as any).emailIds);
-        const mailboxIds = coerceStringArray((args as any).mailboxIds);
+        const mailboxIds = coerceStringArray((args as any).mailboxes);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
         }
         if (!mailboxIds || mailboxIds.length === 0) {
-          throw new McpError(ErrorCode.InvalidParams, 'mailboxIds array is required and must not be empty');
+          throw new McpError(ErrorCode.InvalidParams, 'mailboxes array is required and must not be empty');
         }
         const client = initializeClient();
         const { rescued, unchangedCount } = await client.bulkRemoveLabels(emailIds, mailboxIds);
