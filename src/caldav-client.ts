@@ -2529,15 +2529,25 @@ export function normalizeMasterVEventFirst(icalData: string): string {
  * Assert a tsdav write (create/update/delete calendar object) actually succeeded.
  * tsdav returns the raw Response(s) without throwing on 4xx/5xx, so without this
  * a server-side rejection would be reported to the caller as success. Accepts a
- * single Response or an array; treats a missing status as success (older tsdav
- * shapes) but fails loudly on any status outside 2xx.
+ * single Response or an array; fails loudly on any status outside 2xx AND on a
+ * response that carries no numeric status at all — including a bare `{ ok: true }`
+ * with nothing else. A write whose outcome nothing here actually confirmed must
+ * not be reported as success: the same never-silent rule the contacts client
+ * follows for `updated`/`destroyed`, applied to a status this function never
+ * observed. (This used to treat a missing status as success, on the theory that
+ * an older tsdav shape might omit it; that reading let a response nobody had
+ * verified pass as a confirmed write, which is the failure mode this function
+ * exists to catch on 4xx/5xx and cannot then wave through on "absent".)
  */
 function assertDavOk(resp: unknown, action: string): void {
   const responses = Array.isArray(resp) ? resp : [resp];
   for (const r of responses) {
     const status = (r as any)?.status;
     const ok = (r as any)?.ok;
-    if (typeof status === 'number' && (status < 200 || status >= 300)) {
+    if (typeof status !== 'number') {
+      throw new Error(`Failed to ${action}: server returned no status`);
+    }
+    if (status < 200 || status >= 300) {
       throw new Error(`Failed to ${action}: server returned ${status}${(r as any)?.statusText ? ' ' + (r as any).statusText : ''}`);
     }
     if (ok === false) {

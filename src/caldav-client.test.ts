@@ -921,8 +921,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
-      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1007,7 +1007,7 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({})),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1919,7 +1919,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2237,7 +2237,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
 
@@ -2272,7 +2272,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
 
@@ -2517,8 +2517,8 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
-      deleteCalendarObject: mock.fn(async (_params: any) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+      deleteCalendarObject: mock.fn(async (_params: any) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2859,7 +2859,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2931,7 +2931,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     await assert.rejects(
       () => client.createCalendarEvent({
@@ -3149,7 +3149,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3450,6 +3450,43 @@ describe('CalDAV write status checking (assertDavOk)', () => {
     const client = mockClientWithStatus(204);
     await client.updateCalendarEvent('s@fm', { title: 'X' });
   });
+
+  // #102: a response that never carried a numeric status used to be read as success (the
+  // "older tsdav shapes" reading) — including a bare `{ ok: true }` with no status at all. A
+  // write whose outcome nothing confirmed must not be reported as success.
+  function mockClientWithResponse(response: unknown) {
+    const ical = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//t//EN',
+      'BEGIN:VEVENT', 'UID:s@fm', 'DTSTAMP:20260101T000000Z',
+      'DTSTART:20260101T090000Z', 'DTEND:20260101T093000Z', 'SUMMARY:S',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => response),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => response),
+    };
+    return client;
+  }
+
+  it('throws on a response with no status at all', async () => {
+    const client = mockClientWithResponse({});
+    await assert.rejects(
+      () => client.updateCalendarEvent('s@fm', { title: 'X' }),
+      /Failed to update calendar event: server returned no status/,
+    );
+  });
+
+  it('throws on a bare `{ ok: true }` response with no status', async () => {
+    const client = mockClientWithResponse({ ok: true });
+    await assert.rejects(
+      () => client.deleteCalendarEvent('s@fm'),
+      /Failed to delete calendar event: server returned no status/,
+    );
+  });
 });
 
 describe('resolveDisplayName', () => {
@@ -3479,7 +3516,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3516,7 +3553,7 @@ describe('ORGANIZER display name comes from the client config', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: NO_ORGANIZER_ICAL, url: '/cal/noorg-cn.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3590,7 +3627,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3735,7 +3772,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3803,7 +3840,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4058,7 +4095,7 @@ describe('timeZone parameter (#157)', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4070,7 +4107,7 @@ describe('timeZone parameter (#157)', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4419,7 +4456,7 @@ describe('calendar write result classification, driven from real create/update c
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4431,7 +4468,7 @@ describe('calendar write result classification, driven from real create/update c
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -6574,7 +6611,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
         { displayName: 'DEFAULT_TASK_CALENDAR_NAME', url: '/cal/tasks/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
 
@@ -6603,7 +6640,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Work', url: '/cal/work/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     await client.createCalendarEvent({
@@ -6627,7 +6664,7 @@ describe('calendarNotFoundError lists only calendars a caller can name', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
         { displayName: 'DEFAULT_TASK_CALENDAR_NAME', url: '/cal/tasks/' },
       ]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
 
     await assert.rejects(
@@ -6813,7 +6850,7 @@ describe('calendar display names that are not strings', () => {
     // needed the same normalisation. Diverging here would put an event in the wrong
     // collection, or refuse a calendar the read path accepts.
     const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
-    const createCalendarObject = mock.fn(async (_p: CreateObjectParams) => ({ ok: true }));
+    const createCalendarObject = mock.fn(async (_p: CreateObjectParams) => ({ ok: true, status: 200 }));
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [
