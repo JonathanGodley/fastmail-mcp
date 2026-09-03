@@ -1820,9 +1820,11 @@ export class JmapClient {
 
   /**
    * Throw the correctly-classified error for a bulk Email/set partial failure. Reports
-   * success/fail counts plus the caller's own failing ids grouped by reason (#22), so an
-   * agent can retry exactly the failures. Iterates ONLY the caller's input ids
-   * (Object.keys(notUpdated)) — never echoes a server-originated id or message content.
+   * success/fail counts plus the failing ids grouped by reason (#22), so an agent can
+   * retry exactly the failures. Iterates the ids in `notUpdated` — the SERVER's own map,
+   * which can name an id the caller never submitted at all — and neutralises each one
+   * through `nameEmailIds`, and each server-authored description through
+   * `describeSetError`, before either reaches this function's prose.
    * Caps the ids-per-reason and reason count; on truncation it says the list is PARTIAL
    * (so a truncated list never reads as complete) and points at re-running the full input
    * set, which is safe because these mutators are idempotent. Classified per #41: if every
@@ -1836,11 +1838,14 @@ export class JmapClient {
    * which is wrong the moment `total` includes an id the write never submitted at all (a
    * bulk_remove_labels call skips messages that carried none of the named labels). The
    * caller passes the count the server actually acknowledged instead (see
-   * `countAcknowledged`). `total - failCount - successCount` is then the number of ids
-   * `total` counts that are neither a reported failure nor a reported success — reachable
-   * only when a non-compliant server drops an id from both its `updated` and `notUpdated`
-   * maps — and is surfaced as its own clause rather than folded into either number, per the
-   * never-silently-drop-a-field rule in CLAUDE.md.
+   * `countAcknowledged`). The denominator is then floored at `effectiveTotal =
+   * Math.max(total, failCount + successCount)`, because a server can name an id in
+   * `notUpdated` that the caller's `total` never accounted for at all — without the floor
+   * the message could claim more outcomes than emails. `effectiveTotal - failCount -
+   * successCount` is the number of ids `effectiveTotal` counts that are neither a reported
+   * failure nor a reported success — reachable only when a non-compliant server drops an id
+   * from both its `updated` and `notUpdated` maps — and is surfaced as its own clause rather
+   * than folded into either number, per the never-silently-drop-a-field rule in CLAUDE.md.
    */
   protected throwBulkSetError(
     notUpdated: Record<string, { type: string; description?: string }>,
@@ -5012,10 +5017,10 @@ export class JmapClient {
       }
 
       // Shared with the five uniform bulk sites — see countAcknowledged's docblock. Must run
-      // here, after the outcomeUnknown loop above and before the notFound synthesis below:
-      // an id synthesized as notFound was never in `update` to begin with, so it cannot
-      // affect this count, but an id the outcomeUnknown loop just added to `notUpdated` must
-      // already be excluded from it.
+      // here, after the outcomeUnknown loop above: an id that loop just added to `notUpdated`
+      // must already be excluded from this count. Its position relative to the notFound
+      // synthesis below does not matter — a notFound id was never in `update` to begin with,
+      // so it is not among the ids this call even looks at.
       updatedCount = JmapClient.countAcknowledged(Object.keys(update), result?.updated, notUpdated);
     }
 
