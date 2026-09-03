@@ -1593,7 +1593,10 @@ describe('bulkMarkRead', () => {
   it('throws when some emails fail to update, surfacing counts + failing ids + reason (#22)', async () => {
     stubMakeRequest(client, {
       methodResponses: [
-        ['Email/set', { notUpdated: { 'e2': { type: 'notFound' } } }, 'bulkUpdate'],
+        // updated carries e1 explicitly: the success count now comes from what the server
+        // acknowledged, not from total - failCount, so a stub that omits it would
+        // (correctly) report e1 as having no reported outcome instead of as a success.
+        ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': { type: 'notFound' } } }, 'bulkUpdate'],
       ],
     });
 
@@ -1626,6 +1629,25 @@ describe('bulk set-error formatting', () => {
   function stubBulkMoveFailure(notUpdated: Record<string, { type: string; description?: string }>) {
     stubMakeRequest(client, { methodResponses: [['Email/set', { notUpdated }, 'bulkMove']] });
   }
+
+  it('reports an id acknowledged in neither map as having no reported outcome, never as a success (#120)', async () => {
+    // Only a non-compliant server produces this: e3 is submitted but appears in neither
+    // `updated` nor `notUpdated`. Folding it into successCount (as total - failCount did)
+    // would report a change nothing confirmed; the fix states it as its own clause instead.
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { updated: { e1: null }, notUpdated: { e2: { type: 'forbidden' } } }, 'bulkMove'],
+      ],
+    });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2', 'e3'], 'mb-archive'),
+      (err: Error) => {
+        assert.match(err.message, /Failed to move 1 of 3 emails \(1 succeeded, 1 with no reported outcome\)/);
+        return true;
+      },
+    );
+  });
 
   it('groups failing ids by reason, surfacing type AND description (#22)', async () => {
     stubBulkMoveFailure({
@@ -3850,6 +3872,31 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
       () => client.bulkRemoveLabels(['e1', 'e1', 'e2'], ['Receipts']),
       (err: Error) => {
         assert.match(err.message, /1 of 2 emails/);
+        return true;
+      },
+    );
+  });
+
+  it('never counts a skipped no-op id among the successes (#120)', async () => {
+    // e1 carries none of the named labels, so the write skips it entirely - it is never
+    // submitted to Email/set. e2 is submitted and the server refuses it. e3 is submitted and
+    // succeeds. The only real success is e3: counting the skipped e1 as a second success is
+    // exactly the #120 defect (deriving the count as total - failCount, which reads "not
+    // reported as failed" as "succeeded" even for an id the write never touched).
+    stubRemoval(
+      client,
+      {
+        e1: { 'mb-sent': true },
+        e2: { 'mb-receipts': true, 'mb-sent': true },
+        e3: { 'mb-receipts': true, 'mb-sent': true },
+      },
+      { notUpdated: { e2: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e2', 'e3'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /Failed to remove labels from 1 of 2 emails \(1 succeeded\)/);
+        assert.match(err.message, /1 of the messages named did not carry any of these labels and was left untouched\./);
         return true;
       },
     );

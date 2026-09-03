@@ -909,6 +909,14 @@ export interface LabelRemovalResult {
 interface LabelRemovalOutcome extends LabelRemovalResult {
   notUpdated: Record<string, any>;
   distinctCount: number;
+  /**
+   * Count of ids this call actually submitted to Email/set (a key of the write's own
+   * `update` map) that the server acknowledged in its `updated` map and that do not also
+   * appear in the final `notUpdated`. This is the bulk success count threaded out for
+   * `throwBulkSetError` — never `total - failCount`, which would count an id the write
+   * skipped as a no-op (never submitted at all) as a success.
+   */
+  updatedCount: number;
 }
 
 export interface ArchiveEmailResult {
@@ -1819,10 +1827,21 @@ export class JmapClient {
    * InvalidInputError (InvalidParams); one operational failure in the batch means a bare
    * re-form cannot clear it → plain Error (InternalError). The type split is
    * CALLER_FIXABLE_SET_ERROR_TYPES above.
+   *
+   * `successCount` is the CALLER's to supply, never derived here as `total - failCount`:
+   * that derivation counted an id as done whenever the server did not report it as failed,
+   * which is wrong the moment `total` includes an id the write never submitted at all (a
+   * bulk_remove_labels call skips messages that carried none of the named labels). The
+   * caller passes the count the server actually acknowledged instead. `total - failCount -
+   * successCount` is then the number of ids `total` counts that are neither a reported
+   * failure nor a reported success — reachable only when a non-compliant server drops an id
+   * from both its `updated` and `notUpdated` maps — and is surfaced as its own clause rather
+   * than folded into either number, per the never-silently-drop-a-field rule in CLAUDE.md.
    */
   protected throwBulkSetError(
     notUpdated: Record<string, { type: string; description?: string }>,
     total: number,
+    successCount: number,
     action: string,
     // Appended verbatim after the failure list. For a side effect the SUCCEEDING messages
     // in the same call incurred: a partial failure must not be the reason a caller is never
@@ -1833,7 +1852,10 @@ export class JmapClient {
 
     const failedIds = Object.keys(notUpdated);
     const failCount = failedIds.length;
-    const successCount = total - failCount;
+    // Ids `total` counts that are neither a reported success nor a reported failure. Never
+    // negative in practice: successCount is built by the caller as an intersection with the
+    // final notUpdated, so a submitted id cannot be counted on both sides at once.
+    const unaccountedCount = total - failCount - successCount;
 
     // Group failing ids by their server-stated reason, keyed on the RAW type+description and
     // rendered only when printed. Keying on the describeSetError output would group on text
@@ -1867,7 +1889,10 @@ export class JmapClient {
       return `${this.describeSetError(entry)}: ${JmapClient.nameEmailIds(ids)}`;
     });
 
-    let message = `Failed to ${action} ${failCount} of ${total} emails (${successCount} succeeded). ${groups.join('; ')}`;
+    const successPhrase = unaccountedCount > 0
+      ? `${successCount} succeeded, ${unaccountedCount} with no reported outcome`
+      : `${successCount} succeeded`;
+    let message = `Failed to ${action} ${failCount} of ${total} emails (${successPhrase}). ${groups.join('; ')}`;
     if (truncated) {
       message += '. (Partial list — not every failure is shown. These operations are idempotent, so re-run with the full input set to retry every failure safely.)';
     }
@@ -4923,6 +4948,10 @@ export class JmapClient {
     // map is Object.assign-ed in rather than spread into a fresh {}, for the same reason.
     const notUpdated: Record<string, any> = newUpdateMap();
     let wroteEmailSet = false;
+    // Count of submitted ids the server acknowledged as updated, for throwBulkSetError's
+    // success count. Stays 0 when no Email/set was issued at all (every id was a no-op or
+    // a notFound), which is the right answer: nothing was submitted, so nothing succeeded.
+    let updatedCount = 0;
     if (Object.keys(update).length > 0) {
       wroteEmailSet = true;
       const response = await this.makeRequest({
@@ -4944,6 +4973,15 @@ export class JmapClient {
         if (Object.prototype.hasOwnProperty.call(acknowledged, id)) continue;
         notUpdated[id] = { type: 'outcomeUnknown' };
       }
+
+      // Both halves matter: `acknowledged` alone would let a non-compliant server that lists
+      // one id in BOTH maps count as a success here and a failure in throwBulkSetError,
+      // pushing that function's unaccounted-for count negative. Excluding anything already
+      // in `notUpdated` keeps every submitted id counted on exactly one side.
+      updatedCount = Object.keys(update).filter(id =>
+        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
+        !Object.prototype.hasOwnProperty.call(notUpdated, id)
+      ).length;
     }
 
     // Synthesized so an id the read already proved absent reports exactly what the server
@@ -4973,6 +5011,7 @@ export class JmapClient {
       rescued: confirmedRescued,
       unchangedCount: unchanged.length,
       distinctCount: ids.length,
+      updatedCount,
     };
   }
 
@@ -5019,27 +5058,58 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      this.throwBulkSetError(result.notUpdated, emailIds.length, 'add labels to');
+      // Object.keys(updates).length, not emailIds.length: `updates` is built by assigning
+      // into an id-keyed map over emailIds, so a duplicate id collapses to one entry and the
+      // raw array length would overstate what was actually submitted to the server. The
+      // success count is the same submitted-ids set intersected with what the server
+      // acknowledged in `updated`, minus anything also in `notUpdated` (belt-and-braces
+      // against a non-compliant server that lists one id in both maps).
+      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
+      const successCount = Object.keys(updates).filter(id =>
+        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
+        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
+      ).length;
+      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, 'add labels to');
     }
   }
 
   async bulkRemoveLabels(emailIds: string[], mailboxIds: string[]): Promise<LabelRemovalResult> {
     // Per message, not one shared patch: each message keeps a different set of surviving
     // memberships, and the archive rescue fires only for those the removal would empty.
-    const { notUpdated, rescued, unchangedCount, distinctCount } =
+    const { notUpdated, rescued, unchangedCount, distinctCount, updatedCount } =
       await this.applyLabelRemoval(emailIds, mailboxIds, 'bulkRemoveLabels');
 
     if (Object.keys(notUpdated).length > 0) {
-      // distinctCount, not emailIds.length: the write is de-duplicated, so a caller passing
-      // the same id twice would otherwise be told "1 of 3 emails failed" about two messages.
+      // distinctCount - unchangedCount, not distinctCount: an unchanged id is never
+      // submitted to Email/set at all (the write skips a no-op patch entirely), so counting
+      // it in the total this error is measured against would let it read as a success once
+      // that count comes from the server's acknowledgement rather than derived by
+      // subtraction. notFound ids stay IN the total, because applyLabelRemoval synthesizes a
+      // failure for each of them above, matching what a compliant server would report.
       //
-      // The rescue rides on the error rather than being lost with the return value. A stale
-      // id in a batch is the commonest failure there is, and without this a message that the
-      // same call relocated to Archive is never mentioned to anyone.
-      this.throwBulkSetError(notUpdated, distinctCount, 'remove labels from',
-        rescued.length > 0
-          ? `Of the messages that did succeed, ${rescued.length} had no mailbox left and ${rescued.length === 1 ? 'was' : 'were'} filed in Archive: ${JmapClient.nameEmailIds(rescued)}.`
-          : undefined);
+      // updatedCount is the same acknowledged-and-not-failed count applyLabelRemoval already
+      // computed for its own write; see its docblock for why it can't be re-derived here as
+      // total - failCount.
+      const notes: string[] = [];
+      if (rescued.length > 0) {
+        // The rescue rides on the error rather than being lost with the return value. A
+        // stale id in a batch is the commonest failure there is, and without this a message
+        // that the same call relocated to Archive is never mentioned to anyone.
+        notes.push(`Of the messages that did succeed, ${rescued.length} had no mailbox left and ${rescued.length === 1 ? 'was' : 'were'} filed in Archive: ${JmapClient.nameEmailIds(rescued)}.`);
+      }
+      if (unchangedCount > 0) {
+        // Same wording formatLabelRemoval uses on the success path (response-formatters.ts),
+        // so a batch that both failed and skipped some messages does not describe the
+        // skipped ones in a different register than a batch that only skipped them.
+        notes.push(`${unchangedCount} of the messages named did not carry any of these labels and ${unchangedCount === 1 ? 'was' : 'were'} left untouched.`);
+      }
+      this.throwBulkSetError(
+        notUpdated,
+        distinctCount - unchangedCount,
+        updatedCount,
+        'remove labels from',
+        notes.length > 0 ? notes.join(' ') : undefined,
+      );
     }
     return { rescued, unchangedCount };
   }
@@ -6097,7 +6167,14 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
     
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      this.throwBulkSetError(result.notUpdated, emailIds.length, `mark as ${read ? 'read' : 'unread'}`);
+      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
+      // count comes from the server's acknowledgement rather than total - failCount.
+      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
+      const successCount = Object.keys(updates).filter(id =>
+        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
+        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
+      ).length;
+      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, `mark as ${read ? 'read' : 'unread'}`);
     }
   }
 
@@ -6125,7 +6202,14 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      this.throwBulkSetError(result.notUpdated, emailIds.length, `${pinned ? 'pin' : 'unpin'}`);
+      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
+      // count comes from the server's acknowledgement rather than total - failCount.
+      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
+      const successCount = Object.keys(updates).filter(id =>
+        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
+        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
+      ).length;
+      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, `${pinned ? 'pin' : 'unpin'}`);
     }
   }
 
@@ -6158,7 +6242,14 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      this.throwBulkSetError(result.notUpdated, emailIds.length, 'move');
+      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
+      // count comes from the server's acknowledgement rather than total - failCount.
+      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
+      const successCount = Object.keys(updates).filter(id =>
+        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
+        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
+      ).length;
+      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, 'move');
     }
   }
 
@@ -6195,7 +6286,14 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      this.throwBulkSetError(result.notUpdated, emailIds.length, 'delete');
+      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
+      // count comes from the server's acknowledgement rather than total - failCount.
+      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
+      const successCount = Object.keys(updates).filter(id =>
+        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
+        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
+      ).length;
+      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, 'delete');
     }
   }
 }
