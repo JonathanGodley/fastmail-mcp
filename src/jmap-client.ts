@@ -1610,8 +1610,9 @@ export function assertLeafMailboxName(name: string): void {
 }
 
 // Compute the default Trash/Spam exclusion. Resolves trash/junk by EXACT role only
-// (case-insensitive) — NEVER findMailboxByRoleOrName, whose substring name fallback
-// could mis-hit a custom mailbox (e.g. "Junk mail rules") and silently hide real mail.
+// (case-insensitive) — NEVER a role lookup that falls back to a substring of the mailbox
+// NAME, which could mis-hit a custom mailbox (e.g. "Junk mail rules") and silently hide
+// real mail. (A helper of that shape lived here and was removed once nothing needed it.)
 // When the caller set an explicit scope, exclusion is off (the explicit scope wins).
 // When we intend to exclude a role we can't resolve (role absent, OR an empty/degraded
 // mailbox list), DO NOT silently include it: flag it in unresolvedRoles so the handler
@@ -2014,21 +2015,6 @@ export class JmapClient {
     return data as JmapResponse;
   }
 
-  // Resolve a fixed role with a SUBSTRING name fallback. The substring fallback is an
-  // injection-steering / mis-resolution hazard on any exclusion/delete/move target.
-  //
-  // NOTHING CALLS THIS. It survives only as the shape the comments elsewhere in this file
-  // warn against by name: every role in this server is now resolved exactly — the default
-  // exclusion by computeExclusion, delete/move/the #12 sweep by resolveMailbox /
-  // resolveMailboxId, and the drafts/sent roles on the compose and send paths by
-  // findByExactRole. The last caller was sendDraft's Sent target, where the fallback could
-  // file a sent copy into a role-less mailbox that merely matched by name. Do not give it a
-  // new one: a role is resolved by findByExactRole.
-  protected findMailboxByRoleOrName(mailboxes: any[], role: string, nameFallback?: string): any | undefined {
-    return mailboxes.find(mb => mb.role === role) ||
-           (nameFallback ? mailboxes.find(mb => mb.name.toLowerCase().includes(nameFallback)) : undefined);
-  }
-
   // Resolve trash/junk for the default Trash/Spam exclusion by EXACT role only
   // (case-insensitive) — used by both searchEmails and getEmails. Fixed-role lookup
   // with a private helper to share the resolved id between the visible filter and the
@@ -2353,9 +2339,10 @@ export class JmapClient {
       // ends of this workflow have to agree about which mailbox "Drafts" is, or the create
       // surface produces a draft the send gate can never accept.
       //
-      // findMailboxByRoleOrName is what stood here, and its substring name fallback
-      // ('draft') would file the draft into a user mailbox called "Draft notes" on an
-      // account with no drafts role, then report success. That draft is not merely
+      // What stood here resolved the role with a fallback to a substring of the mailbox
+      // NAME, and that fallback ('draft') would file the draft into a user mailbox called
+      // "Draft notes" on an account with no drafts role, then report success. That draft
+      // is not merely
       // misfiled: sendDraft refuses it, and no move repairs it, because the folder the
       // send wants does not exist. The rule is stated in full at that gate.
       const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
@@ -3737,11 +3724,11 @@ export class JmapClient {
     // Placed after the checks that need no round trip, and before the submission, which is
     // the only irreversible step here.
     //
-    // Resolved by EXACT role, case-insensitive, never findMailboxByRoleOrName: its
-    // substring name fallback would let a user mailbox called "Draft notes" satisfy this,
-    // and in front of an irreversible send that failure PERMITS — precisely the send the
-    // gate exists to stop. The default Trash/Spam exclusion is held to the same rule for
-    // the same reason (see computeExclusion's comment, "NEVER findMailboxByRoleOrName").
+    // Resolved by EXACT role, case-insensitive, never through a fallback to a substring of
+    // the mailbox NAME: such a fallback would let a user mailbox called "Draft notes"
+    // satisfy this, and in front of an irreversible send that failure PERMITS — precisely
+    // the send the gate exists to stop. The default Trash/Spam exclusion is held to the
+    // same rule for the same reason (see computeExclusion's comment).
     // findByExactRole also requires a usable id, so a role record with no id refuses here
     // rather than being compared against as the string "undefined".
     //
@@ -3813,9 +3800,10 @@ export class JmapClient {
 
     // The filing destination, resolved by EXACT role, case-insensitive — the same question
     // the Drafts gate above asks, through the same helper, for the same reason. What stood
-    // here was findMailboxByRoleOrName, whose substring name fallback ('sent') would pick
-    // any mailbox whose NAME contains it on an account with no sent-role folder: a folder
-    // called "Sent" that a user made by hand, or an ordinary "Presentations" (pre-SENT-ations).
+    // here resolved the role with a fallback to a substring of the mailbox NAME, and that
+    // fallback ('sent') would pick any mailbox whose NAME contains it on an account with no
+    // sent-role folder: a folder called "Sent" that a user made by hand, or an ordinary
+    // "Presentations" (pre-SENT-ations).
     // The sent copy of a transmitted message then landed in that folder, and nothing said so.
     // findByExactRole also requires a usable id, so a role record with no id refuses here
     // rather than writing the patch key `mailboxIds/undefined` on a message already sent.
@@ -4120,9 +4108,9 @@ export class JmapClient {
   async deleteEmail(emailId: string): Promise<void> {
     const session = await this.getSession();
 
-    // Find the trash mailbox by EXACT role only (case-insensitive). NOT the substring
-    // findMailboxByRoleOrName: a custom "Trash bin rules" mailbox (no trash role) must
-    // never be the delete destination, and computeExclusion's exact-role Trash would
+    // Find the trash mailbox by EXACT role only (case-insensitive). NOT by a fallback to a
+    // substring of the mailbox NAME: a custom "Trash bin rules" mailbox (no trash role)
+    // must never be the delete destination, and computeExclusion's exact-role Trash would
     // then never count mail mis-filed there.
     const mailboxes = await this.getMailboxes();
     const trashMailbox = this.findByExactRole(mailboxes, 'trash');

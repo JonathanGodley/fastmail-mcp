@@ -491,8 +491,9 @@ than overclaimed:
   the parameter maps to JMAP's solely-in `inMailboxOtherThan`, so it hides less than its name
   suggests — a message cross-filed outside the excluded set still comes back.
 - **Exact resolution hardens *mis-resolution*, NOT deliberate steering.** Switching every
-  read/delete/move target from substring (`findMailboxByRoleOrName`'s name fallback, which could
-  mis-hit e.g. a custom "Junk mail rules" mailbox and silently hide real mail) to exact id/role/
+  read/delete/move target from substring (a role lookup that fell back to a substring of the
+  mailbox NAME, which could mis-hit e.g. a custom "Junk mail rules" mailbox and silently hide real
+  mail; that helper has since been deleted, and nothing here resolves a role any other way) to exact id/role/
   name/path removes *fuzzy* mis-targeting. It does **not** close *deliberate* steering: an injected
   agent with `move_email`/`bulk_move` access can still aim mail at `"trash"`/`"Archive"` by exact
   name. Move-to-any stays open **by design** (a move-target restriction is tracked as fork #43).
