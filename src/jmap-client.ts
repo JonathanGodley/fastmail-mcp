@@ -1896,11 +1896,12 @@ export class JmapClient {
     let truncated = false;
     const reasonEntries = [...byReason.values()];
     if (reasonEntries.length > MAX_REASONS) truncated = true;
-    // The ids are the CALLER's own, and have passed only "non-empty string" — no length
-    // bound, no control-character strip — so one carrying a newline would forge extra lines
-    // in prose an agent reads back as the server's report. nameEmailIds is the same renderer
-    // the label refusals in this class use, rather than a second bare join that would say
-    // something different about the same values (#134).
+    // These ids come from the server's own `notUpdated` map, and can include one the caller
+    // never submitted at all — nothing here bounds their length or strips control characters,
+    // so one carrying a newline would forge extra lines in prose an agent reads back as the
+    // server's report. nameEmailIds is the same renderer the label refusals in this class
+    // use, rather than a second bare join that would say something different about the same
+    // values (#134).
     const groups = reasonEntries.slice(0, MAX_REASONS).map(({ entry, ids }) => {
       if (ids.length > EMAIL_ID_LIST_CAP) truncated = true;
       return `${this.describeSetError(entry)}: ${JmapClient.nameEmailIds(ids)}`;
