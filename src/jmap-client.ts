@@ -1821,9 +1821,13 @@ export class JmapClient {
   /**
    * Throw the correctly-classified error for a bulk Email/set partial failure. Reports
    * success/fail counts plus the failing ids grouped by reason (#22), so an agent can
-   * retry exactly the failures. Iterates the ids in `notUpdated` — the SERVER's own map,
-   * which can name an id the caller never submitted at all — and neutralises each one
-   * through `nameEmailIds`, and each server-authored description through
+   * retry exactly the failures. Iterates the ids in `notUpdated` as THIS FUNCTION'S CALLER
+   * assembled it — for the five uniform bulk writers that is the server's own map, passed
+   * straight through; `bulkRemoveLabels` builds its own copy first, mixing the server's
+   * entries with an outcomeUnknown entry for every id the server acknowledged nowhere and a
+   * notFound entry for every id its pre-read proved absent, both keyed off the caller's own
+   * ids. Either way, an id nobody ever submitted to the server can end up named here. Each
+   * id is neutralised through `nameEmailIds`, and each server-authored description through
    * `describeSetError`, before either reaches this function's prose.
    * Caps the ids-per-reason and reason count; on truncation it says the list is PARTIAL
    * (so a truncated list never reads as complete) and points at re-running the full input
@@ -1896,9 +1900,11 @@ export class JmapClient {
     let truncated = false;
     const reasonEntries = [...byReason.values()];
     if (reasonEntries.length > MAX_REASONS) truncated = true;
-    // These ids come from the server's own `notUpdated` map, and can include one the caller
-    // never submitted at all — nothing here bounds their length or strips control characters,
-    // so one carrying a newline would forge extra lines in prose an agent reads back as the
+    // These ids come from `notUpdated` as this function's caller assembled it — a mix of ids
+    // the server named (which can include one nobody submitted) and, on the label-removal
+    // path, entries this server synthesises from the caller's own input. They have passed
+    // only "non-empty string" on arrival — no length bound, no control-character strip — so
+    // one carrying a newline would forge extra lines in prose an agent reads back as the
     // server's report. nameEmailIds is the same renderer the label refusals in this class
     // use, rather than a second bare join that would say something different about the same
     // values (#134).

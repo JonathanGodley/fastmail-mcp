@@ -1788,6 +1788,24 @@ describe('bulk set-error formatting', () => {
     );
   });
 
+  it('keeps the truncated id list joined to the partial-list notice by a single period (#120)', async () => {
+    // Same fixture as the truncation test above. Pins the exact join a punctuation change
+    // could silently move: the period belongs at the end of the id list, not at the front of
+    // the notice, and there is exactly one space either side of it.
+    const ids = Array.from({ length: 12 }, (_, i) => `id${i}`);
+    const notUpdated: Record<string, { type: string }> = {};
+    ids.forEach(id => { notUpdated[id] = { type: 'notFound' }; });
+    stubMakeRequest(client, { methodResponses: [['Email/set', { notUpdated }, 'bulkDelete']] });
+
+    await assert.rejects(
+      () => client.bulkDelete(ids),
+      (err: Error) => {
+        assert.match(err.message, /more\. \(Partial list/);
+        return true;
+      },
+    );
+  });
+
   // ---------- untrusted values in set-error prose (#134) ----------
 
   // Two untrusted inputs meet in this message and neither was this server's to write: the
