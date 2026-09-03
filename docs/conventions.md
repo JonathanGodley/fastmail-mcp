@@ -483,6 +483,36 @@ that a single-user stdio server has no concurrency; concurrency was never what m
 `ifInState` was considered as a tighter alternative and declined: `Email` state is account-wide, so
 one unrelated message arriving mid-call would abort the whole batch.
 
+### `send_draft` files into Sent by patch too, without the read-back
+
+The fourth tool that writes a message's filing is the send. `sendDraft`'s `EmailSubmission/set`
+carries an `onSuccessUpdateEmail` patch, and it uses the `mailboxIds/<id>` form for the same reason
+the subtracting tools do: a draft that sits in Drafts *and* carries a label is in Drafts and sends
+(the Drafts gate says so in as many words), so the send that files it into Sent must not be what
+takes that label away. It writes exactly two keys — `null` for the Drafts mailbox, `true` for Sent —
+and every other mailbox the draft was in, the Inbox included, is left alone. It previously wrote
+`mailboxIds` whole-value, which replaced the membership outright and dropped all of that.
+
+It differs from the three above in **not reading the current membership back**: there are no kept
+ids to re-assert, because it names the only two mailboxes it changes. The emptiness hazard above is
+what makes that safe rather than merely shorter — the danger there is a *bare* `null` leaving a
+message with no live record, and this patch always adds Sent, so the message is never left filed
+nowhere. The `null` is still written **before** the `true`, matching the ordering convention above:
+the two ids come from different resolvers (`findByExactRole` for Drafts, `findMailboxByRoleOrName`
+for Sent), so unlike the removed/kept ids above they *can* in principle name one mailbox, and in
+that order the surviving key is the one that adds.
+
+Note the two forms are mutually exclusive rather than additive, which is why the send's tests pin
+the **absence** of a whole-value key and not just the presence of the patch keys: Cyrus reads
+`mailboxIds` first and, when it is present, never looks at the `mailboxIds/<id>` keys at all
+(`imap/jmap_mail.c:11761-11775`; the additive apply is at `:12022-12040`). A whole-value key
+reintroduced beside a patch does not conflict
+loudly; it silently wins.
+
+`delete_email` and `bulk_delete` are unchanged by any of this and still write whole-value, so a
+message's other labels are still dropped by the move to Trash and the Trash copy cannot show you
+what they were. Fork issue #123 is the open record of that one.
+
 ## Scoping a query: intersection, exclusion, and what `inMailboxOtherThan` really means
 
 The read tools scope by mailbox through two JMAP filter keys, and both have a shape that is
