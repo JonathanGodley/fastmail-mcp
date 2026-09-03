@@ -1491,6 +1491,162 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     assert.deepEqual(explicit.calls.draft.to, ['alice@x.example']);
   });
 
+  it("carries the original's other To and CC recipients into cc, minus the account's own address", async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      to: [{ email: 'me@example.com' }, { name: 'Dana Fox', email: 'dana@example.com' }],
+      cc: [{ email: 'raj@example.com' }, { name: 'Sue Ng', email: 'sue@example.com' }],
+    }));
+    const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.to, ['Jon Godley <jon@example.com>']);
+    assert.deepEqual(calls.draft.cc, [
+      'Dana Fox <dana@example.com>', 'raj@example.com', 'Sue Ng <sue@example.com>',
+    ]);
+    // The result reports the carry, so a caller can see who the reply went out to.
+    assert.deepEqual(r.cc, calls.draft.cc);
+  });
+
+  it("prefers the original's Reply-To over its From when defaulting the recipient", async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      replyTo: [{ name: 'List, Announce', email: 'list@example.com' }],
+      to: [{ email: 'dana@example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    // The comma inside the display name must not split into a second recipient (#31).
+    assert.deepEqual(calls.draft.to, ['List, Announce <list@example.com>']);
+    assert.deepEqual(calls.draft.cc, ['dana@example.com']);
+
+    // A Reply-To naming no address is no Reply-To: From still decides.
+    const empty = plainClient(makeOriginal({ replyTo: [{ name: 'Nobody' }] }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, empty.client);
+    assert.deepEqual(empty.calls.draft.to, ['Jon Godley <jon@example.com>']);
+  });
+
+  it('excludes every address a wildcard identity covers from the carried cc', async () => {
+    const { client, calls } = plainClient(
+      makeOriginal({
+        to: [{ email: 'me@example.com' }, { email: 'alias@example.com' }],
+        cc: [{ email: 'outsider@other.example' }],
+      }),
+      { getIdentities: async () => [{ id: 'id-w', email: '*@example.com' }] },
+    );
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.cc, ['outsider@other.example']);
+  });
+
+  it('dedupes the carried cc by address, case-insensitively, keeping the first spelling', async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      from: [{ name: 'Jon Godley', email: 'JON@example.com' }],
+      to: [{ name: 'Dana Fox', email: 'dana@example.com' }, { email: 'jon@EXAMPLE.com' }],
+      cc: [{ name: 'D. Fox', email: 'DANA@Example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    // The recipient of the reply is not also cc'd, whatever case the original spelled it in;
+    // and one participant listed twice is carried once, under the spelling met first.
+    assert.deepEqual(calls.draft.cc, ['Dana Fox <dana@example.com>']);
+  });
+
+  it('omits cc entirely when the carry is empty after the exclusions', async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      to: [{ email: 'me@example.com' }], cc: [{ email: 'jon@example.com' }],
+    }));
+    const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.equal('cc' in calls.draft, false);
+    assert.equal('cc' in r, false);
+  });
+
+  it('carries no cc once the caller has named a recipient of their own', async () => {
+    const original = makeOriginal({
+      to: [{ email: 'dana@example.com' }], cc: [{ email: 'raj@example.com' }],
+    });
+
+    // An explicit `to` is a deliberately narrowed reply: nobody else is added.
+    const narrowed = plainClient(original);
+    await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'x', to: ['alice@x.example'] },
+      narrowed.client,
+    );
+    assert.deepEqual(narrowed.calls.draft.to, ['alice@x.example']);
+    assert.equal('cc' in narrowed.calls.draft, false);
+
+    // An explicit `cc` suppresses the carry too, but the `to` fallback still runs.
+    const ccOnly = plainClient(original);
+    await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'x', cc: ['bob@x.example'] },
+      ccOnly.client,
+    );
+    assert.deepEqual(ccOnly.calls.draft.to, ['Jon Godley <jon@example.com>']);
+    assert.deepEqual(ccOnly.calls.draft.cc, ['bob@x.example']);
+  });
+
+  it("carries the other participants when replying to the account's own message", async () => {
+    // No special case for a self-sent original: `to` defaults to the account's own address
+    // (that is what the original's From says) and the rest of the thread is carried into cc.
+    // A caller who means to reply to one person passes `to` explicitly — the drafting
+    // workflow does — and that suppresses the carry by the rule above.
+    const { client, calls } = plainClient(makeOriginal({
+      from: [{ name: 'Test User', email: 'me@example.com' }],
+      to: [{ email: 'dana@example.com' }],
+      cc: [{ email: 'raj@example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.to, ['Test User <me@example.com>']);
+    assert.deepEqual(calls.draft.cc, ['dana@example.com', 'raj@example.com']);
+  });
+
+  it('skips an original address entry that names no address at all', async () => {
+    // A header entry can carry a display name and no address (a group syntax, or a client
+    // that wrote one), and a malformed message can carry a hole in the list. Neither is a
+    // recipient, and neither may throw.
+    const { client, calls } = plainClient(makeOriginal({
+      to: [null, { name: 'Undisclosed recipients' }, { email: '' }, { email: 'dana@example.com' }],
+      cc: undefined,
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.cc, ['dana@example.com']);
+  });
+
+  it('tests the carried cc against EVERY identity, and survives a malformed identity list', async () => {
+    const { client, calls } = plainClient(
+      makeOriginal({
+        to: [{ email: 'me@example.com' }, { email: 'alias@example.com' }],
+        cc: [{ email: 'outsider@other.example' }],
+      }),
+      // Two verified identities, so an exclusion that asked whether ALL of them matched
+      // (rather than any) would carry both of the account's own addresses into the cc. The
+      // null and the identity with no address must be stepped over, not thrown on.
+      {
+        getIdentities: async () => [
+          null, { id: 'no-address' },
+          { id: 'id-1', email: 'me@example.com' }, { id: 'id-2', email: 'alias@example.com' },
+        ] as any,
+      },
+    );
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.cc, ['outsider@other.example']);
+  });
+
+  it('carries the whole list when the account reports no identities at all', async () => {
+    const { client, calls } = plainClient(
+      makeOriginal({ to: [{ email: 'me@example.com' }], cc: [{ email: 'raj@example.com' }] }),
+      { getIdentities: async () => undefined as any },
+    );
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    // Nothing to exclude, so nothing is excluded — including the address that would have
+    // been the account's own. An absent identity list must not throw the compose away.
+    assert.deepEqual(calls.draft.cc, ['me@example.com', 'raj@example.com']);
+  });
+
+  it('does not carry a cc on a forward — reply-all is a reply rule', async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      to: [{ email: 'dana@example.com' }], cc: [{ email: 'raj@example.com' }],
+    }));
+    await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'x\n{{forward}}' },
+      client,
+    );
+    assert.equal('cc' in calls.draft, false);
+  });
+
   it('allows a body-less reply draft — fill it in with edit_draft before sending', async () => {
     const { client, calls } = plainClient();
     const r = await compose({ mode: 'reply', originalEmailId: 'o1' }, client);
