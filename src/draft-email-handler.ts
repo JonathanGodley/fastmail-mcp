@@ -11,7 +11,7 @@ import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type {
   BlockUnavailableCause, BodyBlock, BodyBlocks, BodyTokenExpansion, BodyTokenName, BodyTokenScan,
 } from './body-tokens.js';
-import { selectIdentity, signatureOf } from './identity.js';
+import { matchesIdentity, selectIdentity, signatureOf } from './identity.js';
 import type { ResolvedSignature } from './identity.js';
 import { formatAddress } from './email-formatter.js';
 import {
@@ -491,6 +491,54 @@ export function sanitizeEmlFilename(subject: string | null | undefined): string 
 }
 
 // ---------------------------------------------------------------------------
+// Reply recipients
+// ---------------------------------------------------------------------------
+
+/** One of a fetched message's address headers, reduced to the entries that name an address. */
+function addressList(value: unknown): { name?: string; email: string }[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (x: any): x is { name?: string; email: string } => typeof x?.email === 'string' && x.email !== '',
+  );
+}
+
+/**
+ * The reply-all cc: everyone the original's To and CC named, minus the addresses this reply
+ * is already going to and minus every address the account itself sends as.
+ *
+ * Built with formatAddress and never through coerceStringArray, for the same reason the `to`
+ * default is (#31): a display name carrying a comma would otherwise re-split into a bogus
+ * second recipient.
+ *
+ * Both exclusions and the dedupe are decided on the ADDRESS alone, case-folded, because the
+ * address is the only part that identifies a person — one participant listed as "D. Fox" in
+ * To and "Dana" in CC is one recipient. What is KEPT is the whole formatted address, so the
+ * display names still ship. Self is tested with matchesIdentity rather than a string compare,
+ * so a wildcard identity (`*@example.com`) excludes every address at that domain, exactly as
+ * it does when deciding what this account may send as.
+ *
+ * Order is the original's own: its To in order, then its CC. Nothing here re-sorts, so the
+ * reply's cc reads as the thread's participant list did.
+ */
+function replyAllCc(
+  original: any, addressed: { email: string }[], identities: any[],
+): string[] {
+  const seen = new Set(addressed.map((a) => a.email.toLowerCase()));
+  const out: string[] = [];
+  for (const entry of [...addressList(original.to), ...addressList(original.cc)]) {
+    const key = entry.email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const isSelf = identities.some(
+      (id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, entry.email),
+    );
+    if (isSelf) continue;
+    out.push(formatAddress(entry));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // The orchestration
 // ---------------------------------------------------------------------------
 
@@ -614,7 +662,14 @@ export async function composeDraftEmail(
   // --- 5. The identity, fetched once ---------------------------------------
   // Always fetched on this tool, because the warning below needs to know whether the
   // identity HAS a signature even when the caller placed no token.
-  const identity = selectIdentity(await client.getIdentities(), from);
+  // The whole list is kept, not just the selected one: the reply-all cc below excludes every
+  // address this account can send as, which is a question about all of them. The `?? []` is
+  // new tolerance the cc carry needs — selectIdentity has its own — and it is deliberately
+  // unpinnable: any non-empty value in its place matches nothing at either consumer, so no
+  // assertion can tell it from the empty list. A client returning no list must not throw the
+  // compose away, which is what the test beside it pins.
+  const identities = (await client.getIdentities()) ?? [];
+  const identity = selectIdentity(identities, from);
   const signature = signatureOf(identity);
 
   // --- 6. The caller's embedded images, read PRE-expansion -----------------
@@ -745,16 +800,32 @@ export async function composeDraftEmail(
     if (subjectOverride === undefined && !/^Re:/i.test(subject)) subject = `Re: ${subject}`;
     params.subject = subject;
 
-    // Default the recipient to the original sender, keeping the display name via
-    // formatAddress. This array bypasses coerceStringArray, so a comma inside a name is
-    // never re-split into a bogus second recipient (#31).
+    // Default the recipient to the original's Reply-To when it named one, else its From,
+    // keeping the display name via formatAddress. This array bypasses coerceStringArray, so
+    // a comma inside a name is never re-split into a bogus second recipient (#31). The
+    // address objects are kept beside it so the cc carry below can exclude them by address
+    // without re-parsing a formatted string.
+    //
+    // `params.to` is non-empty here exactly when the caller supplied one, so this whole
+    // branch IS the "caller named no recipient" case — which is why the carry is nested
+    // inside it rather than re-testing `toArg`.
     if (!params.to?.length) {
-      params.to = Array.isArray(original.from)
-        ? original.from.filter((x: any) => x?.email).map(formatAddress)
-        : [];
-    }
-    if (!params.to?.length) {
-      throw bad('Could not determine reply recipient. Please provide "to" explicitly.');
+      const replyToHeader = addressList(original.replyTo);
+      const addressed = replyToHeader.length ? replyToHeader : addressList(original.from);
+      params.to = addressed.map(formatAddress);
+      if (!params.to.length) {
+        throw bad('Could not determine reply recipient. Please provide "to" explicitly.');
+      }
+
+      // A reply is reply-all by default: everyone else the original addressed is carried
+      // into cc (#184). It runs ONLY when the caller named nobody at all, because an
+      // explicit `to` or `cc` is a deliberately narrowed reply and this server must not
+      // widen it back out. Note what an explicit `cc` suppresses is the CARRY alone — the
+      // `to` fallback above still runs beside it.
+      if (!cc?.length) {
+        const carried = replyAllCc(original, addressed, identities);
+        if (carried.length) params.cc = carried;
+      }
     }
   }
 
@@ -907,7 +978,9 @@ export async function composeDraftEmail(
     mode,
     ...(params.subject !== undefined && { subject: params.subject }),
     ...(params.to && { to: params.to }),
-    ...(cc && { cc }),
+    // Read off `params`, not the caller's argument, so a reply-all carry is reported rather
+    // than the draft quietly going to more people than the result names.
+    ...(params.cc && { cc: params.cc }),
     ...(receipt && { tokens: receipt }),
     ...(notes.length > 0 && { notes }),
   };
