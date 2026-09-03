@@ -1791,7 +1791,10 @@ interface FormattedDateProperty {
  * inherit-then-floating, never defaulted. See docs/conventions.md for why that split is
  * deliberate rather than an inconsistency to "fix".
  */
-function formatDateTimeProperty(
+// Exported for direct unit testing of `tzidSource` (#157, #102): every consumer of the
+// result reads it only through `describeFrame`'s `=== 'default'` branch, so 'stored' and
+// 'caller' are otherwise indistinguishable from outside this function's own return value.
+export function formatDateTimeProperty(
   propName: string,
   value: string,
   originalVevent: string | null,

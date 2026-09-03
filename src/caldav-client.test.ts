@@ -6,6 +6,7 @@ import {
   parseICalValue,
   findValueBoundary,
   extractTzidParam,
+  formatDateTimeProperty,
   parseAllICalProperties,
   hasICalProperty,
   parseAttendee,
@@ -461,6 +462,22 @@ describe('timeZone / endTimeZone (#139)', () => {
     ].join('\r\n');
     const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
     assert.equal(event.timeZone, 'Pacific/Auckland');
+  });
+
+  // #102: this is describeDateProperty's `storedTzid.replace(/^"|"$/g, '')` unquote path,
+  // pinned a second way (a different zone name) so the property is not resting on one fixture.
+  it('classifies a quoted TZID as zoned with the tzid unquoted', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:quoted2@fm',
+      'DTSTART;TZID="Europe/Paris":20260401T090000',
+      'SUMMARY:Quoted TZID 2',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Europe/Paris');
   });
 
   it('treats a leading-slash TZID (RFC 5545 §3.2.19) as the same zone, but emits it unstripped when different', () => {
@@ -1239,6 +1256,37 @@ describe('extractTzidParam', () => {
 
   it('the first TZID parameter wins when one is repeated (malformed input)', () => {
     assert.equal(extractTzidParam('DTSTART;TZID=Europe/Paris;TZID=America/New_York:20260401T090000'), 'Europe/Paris');
+  });
+});
+
+describe('formatDateTimeProperty tzidSource (#157)', () => {
+  // #102: nothing pinned that an INHERITED TZID reports tzidSource 'stored' specifically
+  // (as opposed to 'caller' or 'default') — every current consumer of the field only
+  // branches on `=== 'default'`, so these two sites are the only place 'stored' is checkable.
+  it('reports tzidSource "stored" when the property\'s OWN TZID is preserved', () => {
+    const originalVevent = [
+      'BEGIN:VEVENT',
+      'UID:x@fm',
+      'DTSTART;TZID=Europe/Paris:20260401T090000',
+      'DTEND;TZID=Europe/Paris:20260401T100000',
+      'END:VEVENT',
+    ].join('\r\n');
+    const result = formatDateTimeProperty('DTSTART', '2026-04-01T09:30:00', originalVevent, '\r\n');
+    assert.equal(result.tzidSource, 'stored');
+    assert.equal(result.line, 'DTSTART;TZID=Europe/Paris:20260401T093000');
+  });
+
+  it('reports tzidSource "stored" when DTEND falls back to DTSTART\'s TZID', () => {
+    const originalVevent = [
+      'BEGIN:VEVENT',
+      'UID:x@fm',
+      'DTSTART;TZID=Europe/Paris:20260401T090000',
+      'DURATION:PT1H',
+      'END:VEVENT',
+    ].join('\r\n');
+    const result = formatDateTimeProperty('DTEND', '2026-04-01T10:30:00', originalVevent, '\r\n');
+    assert.equal(result.tzidSource, 'stored');
+    assert.equal(result.line, 'DTEND;TZID=Europe/Paris:20260401T103000');
   });
 });
 
