@@ -139,11 +139,11 @@ describe('contacts reads', () => {
     assert.equal(result.items.length, 1);
   });
 
-  it('omits total on the AddressBook fallback rather than inventing one', async () => {
-    // AddressBook/get returns no count, so a fabricated total (say items.length)
-    // would read as "this is the whole address book" on a truncated page.
+  // #102: getContacts used to fall back to AddressBook/get on a failed ContactCard/query and
+  // return address books dressed up as contacts, discarding the real error entirely.
+  it('throws the real error instead of falling back to AddressBook/get', async () => {
     let call = 0;
-    mock.method(client, 'makeRequest', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => {
       call += 1;
       if (call === 1) throw new Error('ContactCard/query not supported');
       return {
@@ -151,9 +151,12 @@ describe('contacts reads', () => {
       };
     });
 
-    const result = await client.getContacts(10);
-    assert.equal('total' in result, false);
-    assert.equal(result.items.length, 1);
+    await assert.rejects(
+      () => client.getContacts(10),
+      /Contacts not supported or accessible: ContactCard\/query not supported/,
+    );
+    // The fallback request must never be sent at all, not merely never used.
+    assert.equal(makeReq.mock.calls.length, 1);
   });
 });
 
