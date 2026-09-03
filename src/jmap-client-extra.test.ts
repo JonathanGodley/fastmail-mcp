@@ -3880,6 +3880,25 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     );
   });
 
+  it('ends the failure list with a period before the trailing note (#120)', async () => {
+    // Reuses the rescue-note fixture above: it already produces both a reason-grouped
+    // failure list and a trailing note, which is exactly the boundary a run-on sentence
+    // would appear at. Asserting the note is merely PRESENT proves nothing about the
+    // period - this checks the punctuation between the two halves specifically.
+    stubRemoval(
+      client,
+      { e1: { 'mb-receipts': true }, e2: { 'mb-receipts': true, 'mb-sent': true } },
+      { notUpdated: { e2: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /forbidden: e2\. Of the messages that did succeed/);
+        return true;
+      },
+    );
+  });
+
   it('treats an id the server acknowledged in neither map as a failure', async () => {
     // Reporting it as done — and worse, as rescued — would state an outcome nothing
     // confirmed. archiveEmails draws the same conclusion for the same case.
