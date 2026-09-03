@@ -1913,6 +1913,11 @@ export class JmapClient {
     if (truncated) {
       message += '. (Partial list — not every failure is shown. These operations are idempotent, so re-run with the full input set to retry every failure safely.)';
     }
+    // No terminating period before this: the reason-group list and the note run on as one
+    // sentence when both are present. Known, and left alone on purpose — the failure text is
+    // guaranteed byte-identical wherever every id has a reported outcome, and inserting a
+    // separator here would change that text on the existing archive-rescue path too. Fixing
+    // the punctuation is a call for whoever next revisits that guarantee.
     if (trailingNote) message += ` ${trailingNote}`;
 
     if (failedIds.every(id => JmapClient.isCallerFixableSetError(notUpdated[id].type))) {
