@@ -154,6 +154,14 @@ describe('parseICalValue', () => {
     const vevent = 'DESCRIPTION:This is a long\n description that wraps\nSUMMARY:Test';
     assert.equal(parseICalValue(vevent, 'DESCRIPTION'), 'This is a longdescription that wraps');
   });
+
+  // #102: a lone trailing `\r` (no following `\n`) is not a line break to `icalContentLines`,
+  // so it survives inside the LAST physical line's text — including a folded continuation
+  // line's — and only the first physical line got the `\r$` strip before unfolding.
+  it('strips a lone trailing \\r left on the last folded continuation line', () => {
+    const vevent = 'SUMMARY:abc\r\n more\r';
+    assert.equal(parseICalValue(vevent, 'SUMMARY'), 'abcmore');
+  });
 });
 
 describe('formatICalDate', () => {

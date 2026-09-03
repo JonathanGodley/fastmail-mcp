@@ -594,6 +594,12 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
       if (!isFoldedContinuation(lines[j])) break;
       fullLine += lines[j].substring(1);
     }
+    // A lone trailing `\r` (no following `\n`) is not a line break to `icalContentLines`, so
+    // it survives inside a line's own text — including a continuation line's, appended after
+    // the per-line strip above already ran on the first line only. Strip it here too, now
+    // that folding is done, so a `\r` on the LAST physical line of a folded value does not
+    // leak into the returned value.
+    fullLine = fullLine.replace(/\r$/, '');
 
     // Use quote-aware colon detection for the parameter/value boundary
     const colonIdx = findValueBoundary(fullLine);
