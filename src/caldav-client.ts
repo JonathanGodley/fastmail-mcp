@@ -511,10 +511,15 @@ export function findValueBoundary(line: string): number {
  * counts as a match.
  *
  * Accepts either a raw property line (parameters AND value, e.g. from
- * `parseAllICalProperties`) or a parameter-only string already cut at the value boundary
- * (e.g. `describeDateProperty`'s `params`): `findValueBoundary` returns -1 on a string with
- * no unquoted colon, which is read here as "the whole string is the parameter segment" — so
- * one function serves both callers with no shape flag.
+ * `parseAllICalProperties`) or the segment before the value boundary, property name
+ * included (e.g. `describeDateProperty`'s `params`, built as `line.slice(0, colonIdx)`, so
+ * its segment 0 is the property name, not a parameter — harmless, since it never starts with
+ * `TZID=`): `findValueBoundary` returns -1 on a string with no unquoted colon, which is read
+ * here as "the whole string is that segment" — so one function serves both callers with no
+ * shape flag. Not "parameter-only": relying on that stronger reading is what would make a
+ * bare `TZID=Europe/Paris` (no property name, no leading `;`) match here where the regex
+ * this replaces returned undefined — inert today because no caller passes that shape, so
+ * don't invite it.
  *
  * Returns `undefined`, never `''`, both when no TZID parameter is present and when a
  * `TZID=` is found with an empty value (`;TZID=;X=1`): the regex this replaces required at
