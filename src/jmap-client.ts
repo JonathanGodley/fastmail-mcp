@@ -1018,9 +1018,12 @@ function isPlainResponseMap(value: any): boolean {
  * Object.create(null), not `{}`, and this is a correctness fix rather than hygiene.
  * `updates['__proto__'] = patch` on an ordinary object invokes the prototype SETTER instead
  * of creating an own key, so the entry never reaches the request. The server is then never
- * asked about that id, cannot list it in `notUpdated`, and every tool here infers success
- * from the absence of a set-error — so the message is REPORTED AS DONE while nothing touched
- * it. Underscores are in the base64url alphabet JMAP ids are drawn from, so `__proto__` is a
+ * asked about that id, cannot list it in `notUpdated`, and every tool here's SUCCESS text
+ * infers success from the absence of a set-error — so a call that reports success says the
+ * message was changed while nothing touched it. (The bulk write paths' own FAILURE text is
+ * unaffected: it counts a success from the server's `updated` acknowledgement, and an id the
+ * server was never asked about cannot appear there either — see countAcknowledged.)
+ * Underscores are in the base64url alphabet JMAP ids are drawn from, so `__proto__` is a
  * legal id rather than a contrived one.
  *
  * Reading such a map back needs Object.prototype.hasOwnProperty.call for the mirror-image
@@ -1832,11 +1835,12 @@ export class JmapClient {
    * that derivation counted an id as done whenever the server did not report it as failed,
    * which is wrong the moment `total` includes an id the write never submitted at all (a
    * bulk_remove_labels call skips messages that carried none of the named labels). The
-   * caller passes the count the server actually acknowledged instead. `total - failCount -
-   * successCount` is then the number of ids `total` counts that are neither a reported
-   * failure nor a reported success — reachable only when a non-compliant server drops an id
-   * from both its `updated` and `notUpdated` maps — and is surfaced as its own clause rather
-   * than folded into either number, per the never-silently-drop-a-field rule in CLAUDE.md.
+   * caller passes the count the server actually acknowledged instead (see
+   * `countAcknowledged`). `total - failCount - successCount` is then the number of ids
+   * `total` counts that are neither a reported failure nor a reported success — reachable
+   * only when a non-compliant server drops an id from both its `updated` and `notUpdated`
+   * maps — and is surfaced as its own clause rather than folded into either number, per the
+   * never-silently-drop-a-field rule in CLAUDE.md.
    */
   protected throwBulkSetError(
     notUpdated: Record<string, { type: string; description?: string }>,
@@ -1852,10 +1856,18 @@ export class JmapClient {
 
     const failedIds = Object.keys(notUpdated);
     const failCount = failedIds.length;
-    // Ids `total` counts that are neither a reported success nor a reported failure. Never
-    // negative in practice: successCount is built by the caller as an intersection with the
-    // final notUpdated, so a submitted id cannot be counted on both sides at once.
-    const unaccountedCount = total - failCount - successCount;
+    // `successCount` cannot double-count a single id against `failCount`: countAcknowledged
+    // already excludes anything present in `notUpdated` from its own count. What it does NOT
+    // rule out is `total` itself being too small — a server can name an id in `notUpdated`
+    // that the caller's `total` never accounted for at all (an id outside what was submitted
+    // or already known to have failed), which pushes failCount past what `total` expected.
+    // Flooring the denominator at whichever is larger keeps the sentence from ever claiming
+    // more outcomes than the emails it names.
+    const effectiveTotal = Math.max(total, failCount + successCount);
+    // Ids `effectiveTotal` counts that are neither a reported success nor a reported
+    // failure — reachable only when a non-compliant server drops a submitted id from both
+    // its `updated` and `notUpdated` maps.
+    const unaccountedCount = effectiveTotal - failCount - successCount;
 
     // Group failing ids by their server-stated reason, keyed on the RAW type+description and
     // rendered only when printed. Keying on the describeSetError output would group on text
@@ -1892,7 +1904,7 @@ export class JmapClient {
     const successPhrase = unaccountedCount > 0
       ? `${successCount} succeeded, ${unaccountedCount} with no reported outcome`
       : `${successCount} succeeded`;
-    let message = `Failed to ${action} ${failCount} of ${total} emails (${successPhrase}). ${groups.join('; ')}`;
+    let message = `Failed to ${action} ${failCount} of ${effectiveTotal} emails (${successPhrase}). ${groups.join('; ')}`;
     if (truncated) {
       message += '. (Partial list — not every failure is shown. These operations are idempotent, so re-run with the full input set to retry every failure safely.)';
     }
@@ -1902,6 +1914,31 @@ export class JmapClient {
       throw new InvalidInputError(message);
     }
     throw new Error(message);
+  }
+
+  /**
+   * Count of `submittedIds` — a bulk write's own `Object.keys(update)` — that the server
+   * acknowledged in `updated` and that do NOT also appear in `notUpdated`. This is the
+   * success count every bulk write path passes to `throwBulkSetError`, computed in exactly
+   * one place rather than once per call site.
+   *
+   * `updated` is read through `isPlainResponseMap` because a non-compliant server can send
+   * anything there; a non-map degrades to "nothing acknowledged". The `notUpdated` exclusion
+   * matters for the same reason: a non-compliant server can list one id in BOTH maps, and
+   * without excluding it here that id would be double-counted — present in this success
+   * count AND in the caller's failCount — which is exactly the shape that pushes
+   * throwBulkSetError's residue clause negative (see the comment there).
+   */
+  private static countAcknowledged(
+    submittedIds: string[],
+    updated: any,
+    notUpdated: Record<string, any>,
+  ): number {
+    const acknowledged = isPlainResponseMap(updated) ? updated : {};
+    return submittedIds.filter(id =>
+      Object.prototype.hasOwnProperty.call(acknowledged, id) &&
+      !Object.prototype.hasOwnProperty.call(notUpdated, id)
+    ).length;
   }
 
   /**
@@ -4974,14 +5011,12 @@ export class JmapClient {
         notUpdated[id] = { type: 'outcomeUnknown' };
       }
 
-      // Both halves matter: `acknowledged` alone would let a non-compliant server that lists
-      // one id in BOTH maps count as a success here and a failure in throwBulkSetError,
-      // pushing that function's unaccounted-for count negative. Excluding anything already
-      // in `notUpdated` keeps every submitted id counted on exactly one side.
-      updatedCount = Object.keys(update).filter(id =>
-        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
-        !Object.prototype.hasOwnProperty.call(notUpdated, id)
-      ).length;
+      // Shared with the five uniform bulk sites — see countAcknowledged's docblock. Must run
+      // here, after the outcomeUnknown loop above and before the notFound synthesis below:
+      // an id synthesized as notFound was never in `update` to begin with, so it cannot
+      // affect this count, but an id the outcomeUnknown loop just added to `notUpdated` must
+      // already be excluded from it.
+      updatedCount = JmapClient.countAcknowledged(Object.keys(update), result?.updated, notUpdated);
     }
 
     // Synthesized so an id the read already proved absent reports exactly what the server
@@ -5060,16 +5095,10 @@ export class JmapClient {
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
       // Object.keys(updates).length, not emailIds.length: `updates` is built by assigning
       // into an id-keyed map over emailIds, so a duplicate id collapses to one entry and the
-      // raw array length would overstate what was actually submitted to the server. The
-      // success count is the same submitted-ids set intersected with what the server
-      // acknowledged in `updated`, minus anything also in `notUpdated` (belt-and-braces
-      // against a non-compliant server that lists one id in both maps).
-      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
-      const successCount = Object.keys(updates).filter(id =>
-        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
-        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
-      ).length;
-      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, 'add labels to');
+      // raw array length would overstate what was actually submitted to the server.
+      const submittedIds = Object.keys(updates);
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
+      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, 'add labels to');
     }
   }
 
@@ -5105,6 +5134,12 @@ export class JmapClient {
       }
       this.throwBulkSetError(
         notUpdated,
+        // Deliberately NOT the same count formatLabelRemoval's success subject uses
+        // (`total` there, unchangedCount included): that text reports on every message the
+        // caller named, while this error's total counts only the ids the write actually
+        // submitted or already knew had failed. One tool describing skipped messages in its
+        // subject line on the success path and excluding them from its denominator on the
+        // failure path is intentional, not a mismatch to reconcile.
         distinctCount - unchangedCount,
         updatedCount,
         'remove labels from',
@@ -6167,14 +6202,10 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
     
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
-      // count comes from the server's acknowledgement rather than total - failCount.
-      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
-      const successCount = Object.keys(updates).filter(id =>
-        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
-        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
-      ).length;
-      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, `mark as ${read ? 'read' : 'unread'}`);
+      // See bulkAddLabels for why the total is the distinct submitted ids.
+      const submittedIds = Object.keys(updates);
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
+      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, `mark as ${read ? 'read' : 'unread'}`);
     }
   }
 
@@ -6202,14 +6233,10 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
-      // count comes from the server's acknowledgement rather than total - failCount.
-      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
-      const successCount = Object.keys(updates).filter(id =>
-        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
-        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
-      ).length;
-      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, `${pinned ? 'pin' : 'unpin'}`);
+      // See bulkAddLabels for why the total is the distinct submitted ids.
+      const submittedIds = Object.keys(updates);
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
+      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, `${pinned ? 'pin' : 'unpin'}`);
     }
   }
 
@@ -6242,14 +6269,10 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
-      // count comes from the server's acknowledgement rather than total - failCount.
-      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
-      const successCount = Object.keys(updates).filter(id =>
-        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
-        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
-      ).length;
-      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, 'move');
+      // See bulkAddLabels for why the total is the distinct submitted ids.
+      const submittedIds = Object.keys(updates);
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
+      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, 'move');
     }
   }
 
@@ -6286,14 +6309,10 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is Object.keys(updates).length and the success
-      // count comes from the server's acknowledgement rather than total - failCount.
-      const acknowledged = isPlainResponseMap(result.updated) ? result.updated : {};
-      const successCount = Object.keys(updates).filter(id =>
-        Object.prototype.hasOwnProperty.call(acknowledged, id) &&
-        !Object.prototype.hasOwnProperty.call(result.notUpdated, id)
-      ).length;
-      this.throwBulkSetError(result.notUpdated, Object.keys(updates).length, successCount, 'delete');
+      // See bulkAddLabels for why the total is the distinct submitted ids.
+      const submittedIds = Object.keys(updates);
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
+      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, 'delete');
     }
   }
 }

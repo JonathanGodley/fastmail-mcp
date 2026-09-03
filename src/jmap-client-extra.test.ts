@@ -1649,6 +1649,32 @@ describe('bulk set-error formatting', () => {
     );
   });
 
+  it('never double-counts an id a non-compliant server lists in both result maps, and never reports fewer emails than the outcomes named (#120)', async () => {
+    // Two submitted ids (e1, e2). e2 is a non-compliant double-listing: the server names it
+    // in BOTH `updated` and `notUpdated`. `zz` is a second non-compliance: notUpdated names
+    // an id that was never submitted at all. Without the exclusion in countAcknowledged, e2
+    // would count as a success here AND a failure below, reading as 2 succeeded. Without the
+    // defensive denominator, the extra `zz` failure would push the failure+success count
+    // past the submitted total of 2, and the message would claim "2 of 2" for three outcomes.
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', {
+          updated: { e1: null, e2: null },
+          notUpdated: { e2: { type: 'forbidden' }, zz: { type: 'notFound' } },
+        }, 'bulkMove'],
+      ],
+    });
+
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
+      (err: Error) => {
+        // e1 is the only real success; the denominator grows to 3 to fit the extra zz outcome.
+        assert.match(err.message, /Failed to move 2 of 3 emails \(1 succeeded\)/);
+        return true;
+      },
+    );
+  });
+
   it('groups failing ids by reason, surfacing type AND description (#22)', async () => {
     stubBulkMoveFailure({
       e1: { type: 'invalidArguments', description: 'bad patch' },
@@ -3845,6 +3871,10 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
       () => client.bulkRemoveLabels(['e1', 'e2'], ['Receipts']),
       (err: Error) => {
         assert.match(err.message, /filed in Archive: e1/);
+        // Nothing was skipped in this batch, so the note must not appear. An always-true
+        // guard around it would print "0 of the messages named … were left untouched" here
+        // — a false statement — with every other assertion in this test still passing.
+        assert.doesNotMatch(err.message, /did not carry any of these labels/);
         return true;
       },
     );
@@ -3897,6 +3927,45 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
       (err: Error) => {
         assert.match(err.message, /Failed to remove labels from 1 of 2 emails \(1 succeeded\)/);
         assert.match(err.message, /1 of the messages named did not carry any of these labels and was left untouched\./);
+        return true;
+      },
+    );
+  });
+
+  it('states both the rescue note and the skip note together when a batch has one of each', async () => {
+    stubRemoval(
+      client,
+      {
+        e1: { 'mb-sent': true },                     // no Receipts -> unchanged
+        e2: { 'mb-receipts': true },                  // emptied by the removal -> rescued
+        e3: { 'mb-receipts': true, 'mb-sent': true }, // submitted, server refuses
+      },
+      { notUpdated: { e3: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e2', 'e3'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /filed in Archive: e2/);
+        assert.match(err.message, /1 of the messages named did not carry any of these labels and was left untouched\./);
+        return true;
+      },
+    );
+  });
+
+  it('uses the plural form of the skip note when more than one message is left untouched', async () => {
+    stubRemoval(
+      client,
+      {
+        e1: { 'mb-sent': true },  // unchanged
+        e2: { 'mb-sent': true },  // unchanged
+        e3: { 'mb-receipts': true, 'mb-sent': true },
+      },
+      { notUpdated: { e3: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e2', 'e3'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /2 of the messages named did not carry any of these labels and were left untouched\./);
         return true;
       },
     );

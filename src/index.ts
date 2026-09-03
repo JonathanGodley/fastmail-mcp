@@ -1989,7 +1989,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_remove_labels',
-        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC + LABEL_REMOVAL_RESCUE_DESC + ' The rescue is decided per message, so a batch can archive some and merely unlabel others. A rejection is NOT decided per message: one unservable id rejects the whole batch before anything is written. When some messages succeed and others fail at the server, the error still names any message the call filed in Archive.',
+        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC + LABEL_REMOVAL_RESCUE_DESC + ' The rescue is decided per message, so a batch can archive some and merely unlabel others. A rejection is NOT decided per message: one unservable id rejects the whole batch before anything is written. When some messages succeed and others fail at the server, the error still names any message the call filed in Archive and how many of the rest carried none of these labels to begin with.',
         inputSchema: {
           type: 'object',
           properties: {
