@@ -3812,9 +3812,6 @@ export class JmapClient {
       throw new Error('Could not find Sent mailbox');
     }
 
-    const sentMailboxIds: Record<string, boolean> = {};
-    sentMailboxIds[sentMailbox.id] = true;
-
     // Submit the draft
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail', 'urn:ietf:params:jmap:submission'],
@@ -3831,9 +3828,33 @@ export class JmapClient {
               }
             }
           },
+          // THE FILING IS A PATCH, NOT A REPLACEMENT. `mailboxIds/<id>` keys are applied
+          // against the message's CURRENT membership — `true` adds, `null` removes, and
+          // every mailbox not named is left exactly as it was. A whole-value `mailboxIds`
+          // instead REPLACES membership outright, so a draft the user had also labelled, or
+          // that also sat in the Inbox, came out of the send filed only in Sent with nothing
+          // recording what it had been in. The Drafts gate a few lines up promises the
+          // opposite in as many words — "a draft in Drafts that also carries another label is
+          // in Drafts and sends" — and this is the write that finally honours it: the send
+          // trades Drafts for Sent and touches nothing else.
+          //
+          // It is also the shape its own neighbours already use: `keywords/$draft` and
+          // `keywords/$seen` below are patch keys against the same object, and the archive
+          // and label writes elsewhere in this file patch `mailboxIds/<id>` the same way.
+          //
+          // The two forms are mutually exclusive rather than additive — a server that sees a
+          // whole-value `mailboxIds` key does not read the patch keys at all — so a
+          // whole-value key must never be reintroduced beside these. It would not conflict
+          // loudly; it would silently win, and the label-dropping would come back unannounced.
+          //
+          // Removal is written BEFORE the addition deliberately. The two ids are resolved by
+          // different helpers, so on a pathological account one mailbox can satisfy both and
+          // the keys collide; in this order the surviving key is the additive one, which
+          // leaves the message filed somewhere rather than nowhere.
           onSuccessUpdateEmail: {
             '#submission': {
-              mailboxIds: sentMailboxIds,
+              [`mailboxIds/${draftsMailbox.id}`]: null,
+              [`mailboxIds/${sentMailbox.id}`]: true,
               'keywords/$draft': null,
               'keywords/$seen': true,
             }

@@ -2204,6 +2204,85 @@ describe('sendDraft', () => {
     assert.deepEqual(rcptTo[1], { email: 'cc@example.com' });
   });
 
+  // ---- the Sent filing ----
+  //
+  // These three read the filing the way the SERVER would, rather than only checking which
+  // keys were written, because the property under test is what the message is a member of
+  // after the send — not the spelling of the request.
+  //
+  // applyFiling mirrors the server's two arms (Cyrus, jmap_mail.c): a whole-value
+  // `mailboxIds` REPLACES membership and, when present, the `mailboxIds/<id>` keys are not
+  // even read; absent it, each `mailboxIds/<id>` key is applied against current membership,
+  // `true` adding and `null` removing, with every mailbox not named left alone.
+  function applyFiling(before: Record<string, boolean>, update: Record<string, any>): string[] {
+    const after = new Set(Object.keys(before).filter(id => before[id] === true));
+    if (update.mailboxIds) {
+      after.clear();
+      for (const id of Object.keys(update.mailboxIds)) {
+        if (update.mailboxIds[id] === true) after.add(id);
+      }
+    } else {
+      for (const key of Object.keys(update)) {
+        if (!key.startsWith('mailboxIds/')) continue;
+        const id = key.slice('mailboxIds/'.length);
+        if (update[key] === true) after.add(id);
+        else if (update[key] === null) after.delete(id);
+      }
+    }
+    return [...after].sort();
+  }
+
+  function filingUpdate(makeReq: RequestMock): Record<string, any> {
+    return callArguments(makeReq, 1)[0].methodCalls[0][1].onSuccessUpdateEmail['#submission'];
+  }
+
+  function stubSend(draft: any): RequestMock {
+    return stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+  }
+
+  it('files into Sent by patching membership, never by replacing it', async () => {
+    const makeReq = stubSend(SENDABLE_DRAFT);
+    await client.sendDraft('draft-1');
+
+    const update = filingUpdate(makeReq);
+    assert.equal(update['mailboxIds/mb-drafts'], null, 'Drafts membership is removed by name');
+    assert.equal(update['mailboxIds/mb-sent'], true, 'Sent membership is added by name');
+    // A whole-value key alongside the patch keys is worse than useless: the server reads it
+    // and ignores the patch keys entirely, so the replacement would come back unannounced.
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(update, 'mailboxIds'),
+      'no whole-value mailboxIds key may remain',
+    );
+  });
+
+  it('leaves a label the draft carried beside Drafts on the message it sends', async () => {
+    const labelled = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-receipts': true } };
+    const makeReq = stubSend(labelled);
+    await client.sendDraft('draft-1');
+
+    assert.deepEqual(
+      applyFiling(labelled.mailboxIds, filingUpdate(makeReq)),
+      ['mb-receipts', 'mb-sent'],
+      'the label survives the send; only Drafts is traded for Sent',
+    );
+  });
+
+  it('files an ordinary Drafts-only draft into Sent and nowhere else', async () => {
+    const makeReq = stubSend(SENDABLE_DRAFT);
+    await client.sendDraft('draft-1');
+
+    assert.deepEqual(
+      applyFiling(SENDABLE_DRAFT.mailboxIds, filingUpdate(makeReq)),
+      ['mb-sent'],
+      'the ordinary case is unchanged: a draft filed only in Drafts lands only in Sent',
+    );
+  });
+
   // sendDraft is the only transmit path, so the envelope must cover every recipient
   // field — including bcc, which appears in the SMTP envelope but not the headers.
   it('includes bcc recipients in the envelope rcptTo', async () => {
