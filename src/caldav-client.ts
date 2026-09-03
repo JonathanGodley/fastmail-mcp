@@ -497,6 +497,66 @@ export function findValueBoundary(line: string): number {
 }
 
 /**
+ * Extract the TZID parameter's value, AS STORED (quotes included if quoted), from an
+ * iCalendar property. Quote-aware over the parameter list — the same technique
+ * `findValueBoundary` uses for the value boundary itself — so a `;TZID=` embedded inside
+ * another parameter's quoted value (e.g. `;X-FOO=";TZID=trap"`) is never mistaken for the
+ * real parameter. That was possible with the naive `;TZID=("[^"]*"|[^;:]+)` regex this
+ * replaces, which had no quote state and matched the first literal `;TZID=` it saw, trap or
+ * real, and could emit an unbalanced quote when it matched inside one.
+ *
+ * RATIFIED scope: only the segment BEFORE the value boundary is searched. A `;TZID=` inside
+ * the property VALUE never matched legitimately either — a value is not a parameter list —
+ * so this stops matching a pattern that never should have matched, rather than widening what
+ * counts as a match.
+ *
+ * Accepts either a raw property line (parameters AND value, e.g. from
+ * `parseAllICalProperties`) or a parameter-only string already cut at the value boundary
+ * (e.g. `describeDateProperty`'s `params`): `findValueBoundary` returns -1 on a string with
+ * no unquoted colon, which is read here as "the whole string is the parameter segment" — so
+ * one function serves both callers with no shape flag.
+ *
+ * Returns `undefined`, never `''`, both when no TZID parameter is present and when a
+ * `TZID=` is found with an empty value (`;TZID=;X=1`): the regex this replaces required at
+ * least one value character, so a caller's own no-TZID fallback branch still fires on that
+ * malformed line exactly as it did before.
+ *
+ * If TZID repeats — malformed, since RFC 5545 §3.2 says a parameter must not repeat — the
+ * FIRST occurrence wins, matching what the left-to-right regex search it replaces returned.
+ *
+ * Matches `TZID` case-sensitively, same as the regex it replaces. RFC 5545 §3.1 allows a
+ * lower-cased parameter name; reading this case-insensitively is conformance work that
+ * belongs with the audit already tracked as #57/#111, not a silent widening bundled into a
+ * hardening fix.
+ */
+export function extractTzidParam(line: string): string | undefined {
+  const boundary = findValueBoundary(line);
+  const params = boundary === -1 ? line : line.slice(0, boundary);
+
+  let inQuote = false;
+  let segStart = 0;
+  const segments: string[] = [];
+  for (let i = 0; i < params.length; i++) {
+    const ch = params[i];
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (ch === ';' && !inQuote) {
+      segments.push(params.slice(segStart, i));
+      segStart = i + 1;
+    }
+  }
+  segments.push(params.slice(segStart));
+
+  for (const segment of segments) {
+    if (segment.startsWith('TZID=')) {
+      const value = segment.slice('TZID='.length);
+      return value === '' ? undefined : value;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Parse an iCalendar property value from within a VEVENT block.
  * Handles simple (KEY:value), parameterized (KEY;TZID=...:value),
  * and VALUE=DATE (KEY;VALUE=DATE:20260319) forms.
@@ -1312,8 +1372,8 @@ type ZoneDescriptor =
  * Built on `describeDateProperty` rather than re-deriving the TZID extraction, so the read
  * path and the write path's DTSTART/DTEND consistency check (`describeDateProperty`,
  * `validateDateConsistency`) agree about what a `zoned` value even is — including sharing
- * its `;TZID=("[^"]*"|[^;:]+)` extraction and unquoting, the same shape `formatDateTimeProperty`
- * uses to preserve a TZID on a floating rewrite.
+ * `extractTzidParam`'s quote-aware parameter-list read and unquoting, the same helper
+ * `formatDateTimeProperty` uses to preserve a TZID on a floating rewrite.
  *
  * `describeDateProperty`'s `date` (all-day) and `utc` (Z-suffixed) frames collapse to one
  * `none` outcome here: both are already self-describing and neither carries a zone name, so
@@ -1750,18 +1810,18 @@ function formatDateTimeProperty(
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
-        const tzMatch = rawLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
-        if (tzMatch) {
-          return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding), tzidSource: 'stored' };
+        const storedTzid = extractTzidParam(rawLines[0]);
+        if (storedTzid !== undefined) {
+          return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
         }
       }
       // If propName is DTEND and no TZID found (DURATION-based), fall back to DTSTART's TZID
       if (propName === 'DTEND') {
         const startLines = parseAllICalProperties(originalVevent, 'DTSTART');
         if (startLines.length > 0) {
-          const tzMatch = startLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
-          if (tzMatch) {
-            return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding), tzidSource: 'stored' };
+          const storedTzid = extractTzidParam(startLines[0]);
+          if (storedTzid !== undefined) {
+            return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
           }
         }
       }
@@ -1855,9 +1915,9 @@ function describeDateProperty(rawLine: string, displayOverride?: string, tzidSou
   if (isDateOnlyProperty(line) || /^\d{8}$/.test(value)) {
     return { frame: 'date', value, display };
   }
-  const tzMatch = params.match(/;TZID=("[^"]*"|[^;:]+)/);
-  if (tzMatch) {
-    return { frame: 'zoned', tzid: tzMatch[1].replace(/^"|"$/g, ''), tzidSource: tzidSourceOverride, value, display };
+  const storedTzid = extractTzidParam(params);
+  if (storedTzid !== undefined) {
+    return { frame: 'zoned', tzid: storedTzid.replace(/^"|"$/g, ''), tzidSource: tzidSourceOverride, value, display };
   }
   if (/Z$/.test(value)) {
     return { frame: 'utc', value, display };

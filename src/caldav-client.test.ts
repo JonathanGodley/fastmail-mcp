@@ -5,6 +5,7 @@ import {
   resolveDisplayName,
   parseICalValue,
   findValueBoundary,
+  extractTzidParam,
   parseAllICalProperties,
   hasICalProperty,
   parseAttendee,
@@ -1177,6 +1178,43 @@ describe('findValueBoundary', () => {
   });
 });
 
+describe('extractTzidParam', () => {
+  it('extracts an unquoted TZID', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=Europe/Paris:20260401T090000'), 'Europe/Paris');
+  });
+
+  it('extracts a quoted TZID, quotes included, AS STORED', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID="Custom/Zone":20260401T090000'), '"Custom/Zone"');
+  });
+
+  it('accepts a params-only string with no value boundary at all', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=Europe/Paris'), 'Europe/Paris');
+  });
+
+  it('returns undefined when there is no TZID parameter', () => {
+    assert.equal(extractTzidParam('DTSTART:20260401T090000'), undefined);
+  });
+
+  it('returns undefined, not empty string, for an empty TZID value', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=;X-FOO=1:20260401T090000'), undefined);
+  });
+
+  it('ignores a ;TZID= trapped inside another parameter\'s quoted value', () => {
+    assert.equal(
+      extractTzidParam('DTSTART;X-FOO=";TZID=trap";TZID=Europe/Paris:20260401T090000'),
+      'Europe/Paris',
+    );
+  });
+
+  it('never matches a ;TZID= sitting in the property VALUE, only in the parameters', () => {
+    assert.equal(extractTzidParam('DESCRIPTION:call re ;TZID=Europe/Paris'), undefined);
+  });
+
+  it('the first TZID parameter wins when one is repeated (malformed input)', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=Europe/Paris;TZID=America/New_York:20260401T090000'), 'Europe/Paris');
+  });
+});
+
 describe('parseAllICalProperties', () => {
   it('returns multiple ATTENDEEs', () => {
     const vevent = [
@@ -2157,6 +2195,29 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DTEND;TZID=Europe/Rome:20260401T120000'));
+  });
+
+  // #102: the naive `;TZID=("[^"]*"|[^;:]+)` regex the TZID-inherit reads used to run had no
+  // quote state and matched the FIRST literal `;TZID=` it saw, trap or real — including one
+  // sitting inside another parameter's quoted value.
+  it('inherits the real stored TZID past a fake ;TZID= trapped inside another parameter value', async () => {
+    const trapIcal = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:trap@fm',
+      'DTSTART;X-FOO=";TZID=trap";TZID=Europe/Paris:20260401T090000',
+      'DTEND;TZID=Europe/Paris:20260401T100000',
+      'SUMMARY:Trap',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const objects = [{ data: trapIcal, url: '/cal/trap.ics' }];
+    const { client, mockDAVClient } = createMockedPatchClient(objects);
+
+    await client.updateCalendarEvent('trap@fm', { start: '2026-04-01T09:30:00' });
+
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.ok(updatedData.includes('DTSTART;TZID=Europe/Paris:20260401T093000'), updatedData);
   });
 
   it('date-only start emits VALUE=DATE', async () => {
