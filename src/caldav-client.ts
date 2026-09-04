@@ -610,8 +610,9 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
     const colonIdx = findValueBoundary(fullLine);
     if (colonIdx === -1) return undefined;
     // Not trimmed: RFC 5545 whitespace inside a property VALUE is significant (a padded
-    // SUMMARY is a padded SUMMARY). A caller that feeds this into an anchored parser trims
-    // at its own call site instead — see each such call site's own one-line comment.
+    // SUMMARY is a padded SUMMARY). A caller that feeds this into an anchored parser, or that
+    // needs it for an exact-match comparison (e.g. a UID equality check), trims at its own
+    // call site instead — see each such call site's own one-line comment.
     return fullLine.substring(colonIdx + 1);
   }
 
