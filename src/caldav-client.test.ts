@@ -2045,6 +2045,21 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     return { client, mockDAVClient };
   }
 
+  it('returns the unpadded id when the stored UID line carries padding (#102)', async () => {
+    // The lookup that finds this object already trims when matching `eventId`
+    // against the stored UID (see the getCalendarEventById test of the same
+    // name), so the padded UID line here still resolves. This test is about a
+    // second, independent trim: the value echoed back in the result's own
+    // `eventId` field.
+    const ical = makeRichIcal('padded-uid ');
+    const objects = [{ data: ical, url: '/cal/padded.ics' }];
+    const { client } = createMockedPatchClient(objects);
+
+    const result = await client.updateCalendarEvent('padded-uid', { title: 'New Title' });
+
+    assert.equal(result.eventId, 'padded-uid');
+  });
+
   it('preserves unknown properties when updating title only', async () => {
     const ical = makeRichIcal('evt1@fm');
     const objects = [{ data: ical, url: '/cal/evt1.ics' }];
