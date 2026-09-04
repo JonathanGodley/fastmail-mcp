@@ -3160,6 +3160,9 @@ export class CalDAVCalendarClient {
           // The title and id come from the first block, which is the same pair a row would
           // have carried and is two property reads rather than a parse of the whole payload.
           const title = parseICalValue(blocks[0], 'SUMMARY') || 'Untitled';
+          // Not trimmed here, unlike the other UID reads in this file: this one is not an
+          // exact-match comparison, and the padding is removed a few lines down by
+          // echoCallerText before `id` ever reaches the thrown message.
           const id = parseICalValue(blocks[0], 'UID') || obj.url || '';
           // UNWRAPPED through the shared helper, the same one `list_calendars` and the
           // not-found error use. A DAV displayName arrives as a property object whenever the
