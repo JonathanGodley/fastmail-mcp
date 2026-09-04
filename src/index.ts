@@ -592,18 +592,18 @@ const LABEL_REMOVAL_RESCUE_DESC =
   ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request (see issue #130). That combination has not been measured.';
 
 // One canonical explanation of the simplified location + status fields, shared
-// verbatim by every read tool (get_email, get_thread, list_emails, search_emails)
-// so the four can't drift. Carries the only-when-true semantics,
-// the junk=Spam gloss, the "same set, not parallel arrays — test membership" rule,
-// and the keyword-vs-location two-axis model. The rare unresolvedMailboxIds field is
+// verbatim by every read tool (get_email, get_thread, list_emails, search_emails) so
+// the four can't drift. Carries the only-when-true semantics, the junk=Spam gloss,
+// the "same set, not parallel arrays — test membership" rule, and the
+// keyword-vs-location two-axis model. The rare unresolvedMailboxIds field is
 // intentionally NOT here (documented in the README, not this per-call surface). (#49)
 const LOCATION_FIELDS_DESC =
   'Use `roles` to tell where a message is filed — stable lowercase JMAP roles: inbox, archive, sent, drafts, trash, junk (junk is the role of the folder shown as "Spam"; there is no "spam" role). `mailboxes` holds folder display names, which the user can rename, so do not identify a folder by a `mailboxes` name (a custom folder can even be named "Trash"). `roles` and `mailboxes` describe the SAME set of mailboxes the message is in (a message can be in several at once) but are NOT positionally aligned — a custom folder appears in `mailboxes` with no `roles` entry — so test membership (roles.includes("trash")), never roles[0] or roles[i] vs mailboxes[i]. Separately, the is* flags (isRead/isFlagged/isDraft/isAnswered/isForwarded) are status, not location: isDraft and a drafts role normally agree, and when they diverge (a draft filed in Trash gives isDraft:true with roles:["trash"]) both are still correct. isAnswered/isForwarded appear only when true. Simplified-only — raw=true returns the underlying JMAP keywords and opaque mailboxIds.';
 
 // Shared, verbatim across the compact-listing read tools (list_emails, search_emails,
-// get_thread) so their preview/size guidance can't drift. Names the
-// trap behind #59: an agent read a `preview` snippet, saw a large `size`, and wrongly
-// concluded the body's real content was absent without ever fetching get_email.
+// get_thread) so their preview/size guidance can't drift. Names the trap behind #59: an
+// agent read a `preview` snippet, saw a large `size`, and wrongly concluded the body's
+// real content was absent without ever fetching get_email.
 const PREVIEW_SIZE_DESC =
   '`preview` is a truncated snippet (~256 chars max), NOT the full body. `bodyTextSize` is the full text-body size in bytes (it includes quoted history, so treat it as an upper bound); when it is much larger than the preview, fetch get_email before concluding content is absent. `size` is the whole-message size including attachments and inline images, so it is NOT a body-length proxy.';
 
@@ -689,11 +689,11 @@ const MINTED_CID_NONDURABILITY =
 const CARRIED_IMAGE_BOUND_DESC =
   'What is carried is bounded only by this: a part is carried when the body references it AND the sender declared it an image (image/*). The content type is sender-declared metadata — nothing is sniffed and nothing verifies the claim — and there is no size limit and no count limit, because the parts are re-referenced by blob rather than uploaded.';
 
-// Shared verbatim by the compact list/search reads (list_emails, search_emails)
-// and by get_thread's default mode, which fetch no attachment parts
-// at all. Without this, hasAttachment:false reads as "no images" — and Fastmail's
-// hasAttachment heuristic answers "content or decoration", so an embedded logo or a
-// small pasted image is exactly what it filters out. (#13)
+// Shared verbatim by the compact list/search reads (list_emails, search_emails) and by
+// get_thread's default mode, which fetch no attachment parts at all. Without this,
+// hasAttachment:false reads as "no images" — and Fastmail's hasAttachment heuristic
+// answers "content or decoration", so an embedded logo or a small pasted image is
+// exactly what it filters out. (#13)
 const COMPACT_ATTACHMENT_DESC =
   'These results carry hasAttachment but never the attachment entries themselves, and hasAttachment is a server heuristic that deliberately ignores small decorative images — so a message whose only picture is embedded in its body can read as hasAttachment:false here. Fetch get_email (or get_thread with includeBodies) to see the actual parts.';
 
@@ -837,7 +837,7 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. Pass a small limit (e.g. 10) for a quick "what\'s new" look; a larger one to work through a folder. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. Pass a small limit (e.g. 10) for a quick "what\'s new" look; a larger one to work through a folder. This is not an arrivals feed: "all mailboxes" means every folder except Trash and Spam, so Sent copies, drafts and custom folders come back alongside newly received mail — pass mailbox:"inbox" for delivered mail only. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {

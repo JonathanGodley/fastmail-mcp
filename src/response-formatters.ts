@@ -59,10 +59,10 @@ export function formatQuerySummary(result: QueryResult, options?: { paged?: bool
 // out of CalDAV iCalendar. "Raw" here means only that this helper applies no
 // transformation of its own — the caller decides what the items are — and it is the
 // absence of `position`, not the protocol or the item shape, that separates these from
-// the paged listings. Paging is a property of the tool, so it is
-// carried by which renderer the handler picks rather than by a flag each call site has
-// to remember to pass: forgetting a flag would silently drop a promised signal, while
-// reaching for the wrong function is visible in the handler.
+// the paged listings. Paging is a property of the tool, so it is carried by which
+// renderer the handler picks rather than by a flag each call site has to remember to
+// pass: forgetting a flag would silently drop a promised signal, while reaching for the
+// wrong function is visible in the handler.
 export function formatQueryResult(result: QueryResult): string {
   return `${formatQuerySummary(result)}\n${toolJson(result.items)}`;
 }
@@ -75,11 +75,11 @@ export function formatRawEmailQueryResult(result: QueryResult): string {
 
 // The one seam every list/search read tool renders through (list_emails,
 // search_emails), so `fields` projection lands on both at once and cannot drift
-// between them. The summary line (its result count and
-// `nextPosition`) and the trailing exclusion note are NOT fields and are never
-// projected away — they are out-of-band signals about the query, and a caller
-// silently losing "N results were withheld" or "there is another page" while asking
-// for a narrower shape would be a scope lie, not a smaller response.
+// between them. The summary line (its result count and `nextPosition`) and the
+// trailing exclusion note are NOT fields and are never projected away — they are
+// out-of-band signals about the query, and a caller silently losing "N results were
+// withheld" or "there is another page" while asking for a narrower shape would be a
+// scope lie, not a smaller response.
 export function formatEmailQueryResult(result: QueryResult, options?: { fields?: ReadonlySet<string> }): string {
   const simplified = result.items.map(e => projectEmail(simplifyEmail(e), options?.fields));
   return `${formatQuerySummary(result, { paged: true })}\n${toolJson(simplified)}`;

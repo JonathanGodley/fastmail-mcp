@@ -188,6 +188,18 @@ describe('getEmails', () => {
     assert.equal(countFilter.notKeyword, '$draft');
     assert.equal(countFilter.inMailboxOtherThan, undefined);
   });
+
+  // getEmails does not clamp: the callers that need a bound (list_emails) apply clampLimit
+  // themselves before calling in, so the client must forward whatever limit it is given.
+  it('passes the limit through to JMAP unclamped', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
+    );
+
+    await client.getEmails({ limit: 999 });
+    assert.equal(callArguments(makeReq)[0].methodCalls[0][1].limit, 999);
+  });
 });
 
 // ---------- paging (#51) ----------
