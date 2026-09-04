@@ -39,6 +39,22 @@ jobs:
           npm pack
           TARBALL="$(ls fastmail-mcp-*.tgz)"
           export HOME="$(mktemp -d)"
+          # Install the tarball as its own step, with its own timeout, and run
+          # the installed bin afterwards. A single `npx --yes <tarball>` under
+          # one timeout could not say which half stalled: on 4 Sep 2026 one
+          # matrix leg per run timed out with no output at all, and the log
+          # could not separate a registry fetch stall from a server that never
+          # started. 300s is generous for a fresh install of five runtime
+          # dependencies (it takes ~5s when the registry is healthy), so hitting
+          # it is a fetch problem, never a server fault.
+          INSTALL_DIR="$(mktemp -d)"
+          rc=0
+          timeout 300s npm install --prefix "$INSTALL_DIR" --no-audit --no-fund "./$TARBALL" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "tarball install failed or stalled (exit status $rc); the server was never run" >&2
+            exit "$rc"
+          fi
+          BIN="$INSTALL_DIR/node_modules/.bin/fastmail-mcp"
           REQ='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"npx-smoke","version":"0.0.0"}}}'
           # The server answers initialize and exits 0 when stdin closes; the
           # timeout is only a backstop against a hung process. Exit 124 means
@@ -46,7 +62,7 @@ jobs:
           # still judged by whether it produced a valid initialize response.
           # Any other non-zero exit is a startup crash and fails the job.
           rc=0
-          OUT="$(printf '%s\n' "$REQ" | timeout 60s npx --yes "./$TARBALL")" || rc=$?
+          OUT="$(printf '%s\n' "$REQ" | timeout 60s "$BIN")" || rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
             echo "server exited with status $rc before answering initialize" >&2
             exit "$rc"
