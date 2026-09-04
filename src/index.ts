@@ -570,7 +570,7 @@ const LENIENT_OBJECT_LIST_DESC =
 
 // The label arrays, which take the same forms per entry. A function rather than two
 // constants so the add/remove verb is the only thing that differs.
-const labelMailboxIdsDesc = (verb: 'add' | 'remove') =>
+const labelMailboxesDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
   LENIENT_LIST_DESC;
@@ -1735,7 +1735,7 @@ const TOOLS = [
             mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: labelMailboxIdsDesc('add'),
+              description: labelMailboxesDesc('add'),
             },
           },
           required: ['emailId', 'mailboxes'],
@@ -1754,7 +1754,7 @@ const TOOLS = [
             mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: labelMailboxIdsDesc('remove'),
+              description: labelMailboxesDesc('remove'),
             },
           },
           required: ['emailId', 'mailboxes'],
@@ -1940,7 +1940,7 @@ const TOOLS = [
             mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: labelMailboxIdsDesc('add'),
+              description: labelMailboxesDesc('add'),
             },
           },
           required: ['emailIds', 'mailboxes'],
@@ -1960,7 +1960,7 @@ const TOOLS = [
             mailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: labelMailboxIdsDesc('remove'),
+              description: labelMailboxesDesc('remove'),
             },
           },
           required: ['emailIds', 'mailboxes'],

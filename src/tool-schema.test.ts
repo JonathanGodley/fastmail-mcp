@@ -1231,9 +1231,13 @@ describe('the compact-serialisation scan reaches every shipped file', () => {
 
 // The label tools' array parameter is `mailboxes`, not `mailboxIds` (#91): the old name
 // promised bare ids while the matcher behind it always accepted id/role/name/path, so the
-// surface lied about what it took. This pins the rename on all four label tools at once so a
-// revert, or a copy-pasted new label tool that keeps the old name, fails here rather than
-// only showing up as a caller's unknown-parameter error.
+// surface lied about what it took. This pins the rename on all four label tools at once -
+// the SCHEMA half AND the HANDLER half - so a revert of either, or a copy-pasted new label
+// tool that keeps the old name, fails here rather than only showing up as a caller's
+// unknown-parameter error (a schema-only revert) or a 100%-rejection bug (a handler-only
+// revert: the schema would advertise `mailboxes` while the handler still read the
+// caller's `mailboxIds`, so every correct call would be rejected as if the required array
+// were missing).
 describe('label tools take mailboxes, not mailboxIds (#91)', () => {
   it('declares mailboxes (required) and never mailboxIds on every label tool', () => {
     const params = collectToolParams();
@@ -1248,6 +1252,26 @@ describe('label tools take mailboxes, not mailboxIds (#91)', () => {
       assert.ok(requiredSet, `${tool} has no 'required' array in its schema`);
       assert.ok(requiredSet.has('mailboxes'), `${tool}'s 'required' list does not name 'mailboxes' - it should still be required, just under the new name`);
       assert.ok(!requiredSet.has('mailboxIds'), `${tool}'s 'required' list still names the old 'mailboxIds' key`);
+    }
+  });
+
+  it('reads (args as any).mailboxes, never .mailboxIds, in every label tool handler', () => {
+    const bodies = collectCaseBodies();
+    const labelTools = ['add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'];
+    for (const tool of labelTools) {
+      const body = bodies.get(tool);
+      assert.ok(body, `${tool} has no case body in the CallTool switch - the handler scan has drifted`);
+      assert.ok(
+        body.some((l) => l.includes('(args as any).mailboxes')),
+        `${tool}'s handler never reads (args as any).mailboxes - the schema may advertise ` +
+          `'mailboxes' while the handler still reads a different key, which would reject every ` +
+          `correct call as if the required array were missing`,
+      );
+      assert.ok(
+        !body.some((l) => l.includes('(args as any).mailboxIds')),
+        `${tool}'s handler still reads (args as any).mailboxIds - #91 renamed the parameter to ` +
+          `'mailboxes' with no alias, so this key is never sent by a caller`,
+      );
     }
   });
 });
