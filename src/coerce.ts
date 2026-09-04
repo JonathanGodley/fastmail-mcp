@@ -15,8 +15,8 @@ export class PathAccessError extends Error {
 }
 
 // Tagged error for caller-supplied input that is well-formed JSON but semantically
-// invalid (e.g. a `mailbox` that resolves to nothing, or a label `mailboxIds`
-// element that isn't a real id). Thrown from jmap-client.ts (which stays free of
+// invalid (e.g. a `mailbox` that resolves to nothing, or a label `mailboxes`
+// entry that resolves to no mailbox). Thrown from jmap-client.ts (which stays free of
 // MCP SDK types); the index boundary maps every InvalidInputError to
 // McpError(InvalidParams), mirroring PathAccessError. instanceof is the
 // discriminator. Like every other branch of that catch — the McpError rethrow, the

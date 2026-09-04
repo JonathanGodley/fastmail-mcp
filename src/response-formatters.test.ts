@@ -517,8 +517,8 @@ describe('formatEmailQueryResult', () => {
     assert.ok(result.startsWith('Showing 2 of 50 results.'));
   });
 
-  // The `fields` projection reaches list_emails, search_emails and get_recent_emails
-  // through this one formatter, so these cover all three tools' list shape (#79).
+  // The `fields` projection reaches list_emails and search_emails through this one
+  // formatter, so these cover both tools' list shape (#79).
   describe('fields projection', () => {
     const threaded = () => ({
       ...makeEmail('e1'),

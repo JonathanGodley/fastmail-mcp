@@ -2233,9 +2233,9 @@ export class JmapClient {
   // exclusion + hidden-count as searchEmails. Its only structural filter is the
   // excludeDrafts keyword — isUnread/isPinned are NOT exposed on list_emails.
   //
-  // Two tools run on this: list_emails, and get_recent_emails through getRecentEmails
-  // below, which delegates here rather than assembling its own batch. So a change to the
-  // filter or the exclusion rule here changes both.
+  // Called directly by the list_emails handler, and by test_bulk_operations as its
+  // diagnostic probe (clamped limit, explicit mailbox:'inbox') — see the comments at each
+  // call site in index.ts for why they pass what they do.
   async getEmails(opts: {
     mailbox?: string;
     limit?: number;
@@ -2254,13 +2254,11 @@ export class JmapClient {
     const conds: any[] = [];
     if (opts.excludeDrafts) conds.push({ notKeyword: '$draft' });
 
-    // The scalar `mailbox` is the only explicit scope either tool on this method offers —
-    // neither list_emails nor get_recent_emails takes the multi-mailbox scope arrays, so
-    // this expression needs nothing beyond it. searchEmails has its OWN copy of this line
-    // (over `filters.*`) which additionally counts requiredMailboxes; the shared
-    // runFilteredQuery does not compute it, so the two must be changed together whenever
-    // what counts as an explicit scope changes. Two copies, not three: getRecentEmails
-    // inherits this one instead of carrying its own.
+    // The scalar `mailbox` is the only explicit scope this method offers — it takes no
+    // multi-mailbox scope arrays, so this expression needs nothing beyond it. searchEmails
+    // has its OWN copy of this line (over `filters.*`) which additionally counts
+    // requiredMailboxes; the shared runFilteredQuery does not compute it, so the two must
+    // be changed together whenever what counts as an explicit scope changes.
     const hasExplicitScope = !!resolvedMailboxId;
     const exclusion = computeExclusion(mailboxes, {
       includeTrash: opts.includeTrash,
@@ -4050,46 +4048,6 @@ export class JmapClient {
     const email = this.getListResult(response, 0)[0];
     if (!email) return null;
     return Array.isArray(email.messageId) ? email.messageId : [];
-  }
-
-  // The quick "what's new?" read. It reads all mail — no Inbox default — and runs exactly
-  // the query getEmails runs: the same mailbox scoping, the same default Trash/Spam
-  // exclusion and hidden-count note, the same keyword filter and paging (#29). The only
-  // thing that separates the two tools is the limit default and cap their handlers apply
-  // (10/50 here against list_emails' 20/100), and neither of those is a query difference.
-  //
-  // So this delegates instead of assembling a second batch. A private copy would have to
-  // repeat the `exclusionIntended` expression, and that expression already has to agree
-  // with computeExclusion's `hasExplicitScope` — two sites docs/conventions.md names
-  // explicitly and warns must be changed together. A third copy is a third way for them to
-  // fall out of step.
-  //
-  // A blank or whitespace `mailbox` is an omitted `mailbox`: resolveMailboxId reads both as
-  // "no mailbox filter", which is now all mail rather than the Inbox this used to fall back
-  // to.
-  //
-  // Neither the limit default nor the cap lives here — both belong to the handler's
-  // clampLimit(limit, 10, 50), which is also what the tool schema advertises. A second copy
-  // of either would be dead on every production path (no caller reaches this without a
-  // number) while still reading as authoritative, and two clamps can only ever disagree.
-  // What that leaves on this method is its NAME, the tool-to-method mapping, rather than
-  // any behaviour that differs from getEmails.
-  //
-  // The one thing single ownership costs is defence in depth: an unclamped caller would put
-  // `"limit": null` on the wire, which JMAP reads as no bound at all. That is held instead
-  // by a source-scan drift guard in tool-schema.test.ts asserting every call site of this
-  // method sits in a handler that clamps — today the get_recent_emails handler and
-  // test_bulk_operations, which passes clampLimit(limit, 3, 10).
-  async getRecentEmails(opts: {
-    mailbox?: string;
-    limit?: number;
-    position?: number;
-    ascending?: boolean;
-    includeTrash?: boolean;
-    includeSpam?: boolean;
-    excludeDrafts?: boolean;
-  } = {}): Promise<QueryResult> {
-    return this.getEmails(opts);
   }
 
   async markEmailRead(emailId: string, read: boolean = true): Promise<void> {

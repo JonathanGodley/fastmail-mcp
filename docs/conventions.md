@@ -342,7 +342,7 @@ wrong destination is worth a retry to avoid. A flat name and a path landing on t
 mailbox (a top-level folder named `A/B`, no such nesting) is not a collision and resolves.
 
 The walk lives in `findMailboxExact` rather than in its throwing wrapper, and that placement
-is the point: both callers inherit it. The label tools' `mailboxIds` arrays (`add_labels` /
+is the point: both callers inherit it. The label tools' `mailboxes` arrays (`add_labels` /
 `remove_labels` / `bulk_add_labels` / `bulk_remove_labels`) call the matcher directly, and
 `search_emails`' `requiredMailboxes` / `excludeMailboxes` entries go through `resolveMailbox`,
 so a form accepted on `move_email` but not in one of those arrays would rebuild the split
@@ -583,9 +583,7 @@ shape; the cost of suppressing it is a missing warning on a fuzzy match.
 caller of `runFilteredQuery` computes for itself (`getEmails` over `opts.*`, `searchEmails`
 over `filters.*`). The shared helper does not compute it, so "they both go through
 `runFilteredQuery`" does not keep them in step — anything that changes what counts as an
-explicit scope has two edit sites. It is still two and not three after `get_recent_emails`
-joined the default exclusion (#29): `getRecentEmails` delegates to `getEmails` rather than
-assembling its own batch, precisely so it inherits that expression instead of copying it. Naming folders to look **in** (`mailbox`,
+explicit scope has two edit sites. Naming folders to look **in** (`mailbox`,
 `requiredMailboxes`) is an explicit scope and turns the default off; naming folders to
 exclude is not, because narrowing by exclusion says nothing about wanting Trash/Spam back.
 
@@ -936,10 +934,10 @@ them:
 - **One seam, post-simplification.** `parseEmailFields` / `projectEmail`
   (`src/field-projection.ts`) run on the *simplified* object, so `raw: true` stays pure
   JMAP and untouched. The list/search tools inherit it through the single
-  `formatEmailQueryResult` seam, which is why `list_emails`, `search_emails` and
-  `get_recent_emails` cannot drift apart. `get_thread` applies the same pair in
-  `readThread`, projecting each message *before* the thread-body byte cap is measured —
-  the cap guards what is actually returned, so projecting `bodyText` away also lifts it.
+  `formatEmailQueryResult` seam, which is why `list_emails` and `search_emails` cannot
+  drift apart. `get_thread` applies the same pair in `readThread`, projecting each
+  message *before* the thread-body byte cap is measured — the cap guards what is
+  actually returned, so projecting `bodyText` away also lifts it.
 - **One vocabulary, checked by the compiler.** The valid names are the keys of
   `SimplifiedEmail`, held in a `Record<keyof SimplifiedEmail, true>` map — a field added to
   the shape without a line there is a compile error, so a new field can never become
@@ -1124,13 +1122,13 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   never the requested `limit`, so a short final page ends the listing instead of
   advertising a page that does not exist.
 - **One seam.** `position` is threaded through `runFilteredQuery` into `Email/query`, so
-  `list_emails`, `search_emails` and `get_recent_emails` inherit it together (the last of
-  those through `getEmails`, which it delegates to). The filters (including the default Trash/Spam
-  exclusion, which lives inside the JMAP `filter` as `inMailboxOtherThan`) are applied
-  server-side to every page, so paging cannot change what matches, and the hidden-count
-  query stays a count — it carries no `position`. That count is over the whole filtered
-  set, not the page, so the withheld-count note repeats identically on every page and
-  must never be summed across pages (the tool descriptions and README say so).
+  `list_emails` and `search_emails` inherit it together. The filters (including the
+  default Trash/Spam exclusion, which lives inside the JMAP `filter` as
+  `inMailboxOtherThan`) are applied server-side to every page, so paging cannot change
+  what matches, and the hidden-count query stays a count — it carries no `position`.
+  That count is over the whole filtered set, not the page, so the withheld-count note
+  repeats identically on every page and must never be summed across pages (the tool
+  descriptions and README say so).
 - **`position: 0` and an omitted `position` are the same request.** 0 is the JMAP
   default, so the parameter is only put on the wire when it is non-zero.
 - **A position past the end is not an error.** JMAP clamps it and returns an empty page
