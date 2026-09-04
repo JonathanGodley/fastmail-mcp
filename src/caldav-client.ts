@@ -497,6 +497,71 @@ export function findValueBoundary(line: string): number {
 }
 
 /**
+ * Extract the TZID parameter's value, AS STORED (quotes included if quoted), from an
+ * iCalendar property. Quote-aware over the parameter list — the same technique
+ * `findValueBoundary` uses for the value boundary itself — so a `;TZID=` embedded inside
+ * another parameter's quoted value (e.g. `;X-FOO=";TZID=trap"`) is never mistaken for the
+ * real parameter. That was possible with the naive `;TZID=("[^"]*"|[^;:]+)` regex this
+ * replaces, which had no quote state and matched the first literal `;TZID=` it saw, trap or
+ * real, and could emit an unbalanced quote when it matched inside one.
+ *
+ * RATIFIED scope: only the segment BEFORE the value boundary is searched. A `;TZID=` inside
+ * the property VALUE never matched legitimately either — a value is not a parameter list —
+ * so this stops matching a pattern that never should have matched, rather than widening what
+ * counts as a match.
+ *
+ * Accepts either a raw property line (parameters AND value, e.g. from
+ * `parseAllICalProperties`) or the segment before the value boundary, property name
+ * included (e.g. `describeDateProperty`'s `params`, built as `line.slice(0, colonIdx)`, so
+ * its segment 0 is the property name, not a parameter — harmless, since it never starts with
+ * `TZID=`): `findValueBoundary` returns -1 on a string with no unquoted colon, which is read
+ * here as "the whole string is that segment" — so one function serves both callers with no
+ * shape flag. Not "parameter-only": relying on that stronger reading is what would make a
+ * bare `TZID=Europe/Paris` (no property name, no leading `;`) match here where the regex
+ * this replaces returned undefined — inert today because no caller passes that shape, so
+ * don't invite it.
+ *
+ * Returns `undefined`, never `''`, both when no TZID parameter is present and when a
+ * `TZID=` is found with an empty value (`;TZID=;X=1`): the regex this replaces required at
+ * least one value character, so a caller's own no-TZID fallback branch still fires on that
+ * malformed line exactly as it did before.
+ *
+ * If TZID repeats — malformed, since RFC 5545 §3.2 says a parameter must not repeat — the
+ * FIRST occurrence wins, matching what the left-to-right regex search it replaces returned.
+ *
+ * Matches `TZID` case-sensitively, same as the regex it replaces. RFC 5545 §3.1 allows a
+ * lower-cased parameter name; reading this case-insensitively is conformance work that
+ * belongs with the audit already tracked as #57/#111, not a silent widening bundled into a
+ * hardening fix.
+ */
+export function extractTzidParam(line: string): string | undefined {
+  const boundary = findValueBoundary(line);
+  const params = boundary === -1 ? line : line.slice(0, boundary);
+
+  let inQuote = false;
+  let segStart = 0;
+  const segments: string[] = [];
+  for (let i = 0; i < params.length; i++) {
+    const ch = params[i];
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (ch === ';' && !inQuote) {
+      segments.push(params.slice(segStart, i));
+      segStart = i + 1;
+    }
+  }
+  segments.push(params.slice(segStart));
+
+  for (const segment of segments) {
+    if (segment.startsWith('TZID=')) {
+      const value = segment.slice('TZID='.length);
+      return value === '' ? undefined : value;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Parse an iCalendar property value from within a VEVENT block.
  * Handles simple (KEY:value), parameterized (KEY;TZID=...:value),
  * and VALUE=DATE (KEY;VALUE=DATE:20260319) forms.
@@ -534,11 +599,21 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
       if (!isFoldedContinuation(lines[j])) break;
       fullLine += lines[j].substring(1);
     }
+    // A lone trailing `\r` (no following `\n`) is not a line break to `icalContentLines`, so
+    // it survives inside a line's own text — including a continuation line's, appended after
+    // the per-line strip above already ran on the first line only. Strip it here too, now
+    // that folding is done, so a `\r` on the LAST physical line of a folded value does not
+    // leak into the returned value.
+    fullLine = fullLine.replace(/\r$/, '');
 
     // Use quote-aware colon detection for the parameter/value boundary
     const colonIdx = findValueBoundary(fullLine);
     if (colonIdx === -1) return undefined;
-    return fullLine.substring(colonIdx + 1).trim();
+    // Not trimmed: RFC 5545 whitespace inside a property VALUE is significant (a padded
+    // SUMMARY is a padded SUMMARY). A caller that feeds this into an anchored parser, or that
+    // needs it for an exact-match comparison (e.g. a UID equality check), trims at its own
+    // call site instead — see each such call site's own one-line comment.
+    return fullLine.substring(colonIdx + 1);
   }
 
   return undefined;
@@ -937,7 +1012,8 @@ export function removeOrphanedVTimezones(icalData: string): string {
       if (blockEnd === -1) { i = lines.length; break; }
       // Use parseICalValue for proper unfolding support
       const tzBlock = lines.slice(blockStart, blockEnd + 1).join('\n');
-      const tzid = parseICalValue(tzBlock, 'TZID') || '';
+      // Trimmed here because this feeds an exact-match `;TZID=${tzid}` substring check below.
+      const tzid = (parseICalValue(tzBlock, 'TZID') || '').trim();
       tzBlocks.push({ tzid, start: blockStart, end: blockEnd });
       i = blockEnd;
     }
@@ -998,7 +1074,8 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
           // Extract RECURRENCE-ID using parseICalValue for consistency
           // with the orphan detection code path (handles unfolding)
           const veventText = lines.slice(blockStart, j + 1).join('\n');
-          const recId = parseICalValue(veventText, 'RECURRENCE-ID');
+          // Trimmed here because this feeds formatICalDate, which anchors its pattern.
+          const recId = parseICalValue(veventText, 'RECURRENCE-ID')?.trim();
           veventBlocks.push({ start: blockStart, end: j, recurrenceId: recId });
           i = j;
           break;
@@ -1220,10 +1297,13 @@ function parseVEvent(
 ): CalendarEvent {
   const title = parseICalValue(vevent, 'SUMMARY') || 'Untitled';
   const description = parseICalValue(vevent, 'DESCRIPTION');
-  const rawStart = parseICalValue(vevent, 'DTSTART');
-  let rawEnd = parseICalValue(vevent, 'DTEND');
+  // Trimmed here because both feed formatICalDate, which anchors its pattern.
+  const rawStart = parseICalValue(vevent, 'DTSTART')?.trim();
+  let rawEnd = parseICalValue(vevent, 'DTEND')?.trim();
   const location = parseICalValue(vevent, 'LOCATION');
-  const uid = parseICalValue(vevent, 'UID') || obj.url || '';
+  // Trimmed here because this is the id findCalendarObjectByUID later matches by exact
+  // equality — the same exact-match category as the TZID substring check.
+  const uid = parseICalValue(vevent, 'UID')?.trim() || obj.url || '';
 
   // The zone this account is configured for, resolved to a name ICU can actually use. Passed
   // in rather than read from module state (see resolveUsableTimezone's own comment in
@@ -1233,7 +1313,8 @@ function parseVEvent(
 
   // DURATION parsing: compute end from start + duration if DTEND absent
   if (!rawEnd && rawStart) {
-    const rawDuration = parseICalValue(vevent, 'DURATION');
+    // Trimmed here because this feeds parseICalDuration, which anchors its pattern.
+    const rawDuration = parseICalValue(vevent, 'DURATION')?.trim();
     if (rawDuration) {
       const startIso = formatICalDate(rawStart);
       if (startIso) {
@@ -1305,8 +1386,8 @@ type ZoneDescriptor =
  * Built on `describeDateProperty` rather than re-deriving the TZID extraction, so the read
  * path and the write path's DTSTART/DTEND consistency check (`describeDateProperty`,
  * `validateDateConsistency`) agree about what a `zoned` value even is — including sharing
- * its `;TZID=("[^"]*"|[^;:]+)` extraction and unquoting, the same shape `formatDateTimeProperty`
- * uses to preserve a TZID on a floating rewrite.
+ * `extractTzidParam`'s quote-aware parameter-list read and unquoting, the same helper
+ * `formatDateTimeProperty` uses to preserve a TZID on a floating rewrite.
  *
  * `describeDateProperty`'s `date` (all-day) and `utc` (Z-suffixed) frames collapse to one
  * `none` outcome here: both are already self-describing and neither carries a zone name, so
@@ -1433,7 +1514,8 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
  */
 function addRecurrenceToEvent(event: CalendarEvent, vevent: string): void {
   const rrule = parseICalValue(vevent, 'RRULE');
-  const recurrenceId = parseICalValue(vevent, 'RECURRENCE-ID');
+  // Trimmed here because this feeds formatICalDate, which anchors its pattern.
+  const recurrenceId = parseICalValue(vevent, 'RECURRENCE-ID')?.trim();
   if (recurrenceId) {
     event.isRecurring = true;
     event.recurrenceId = formatICalDate(recurrenceId);
@@ -1602,7 +1684,15 @@ export function validateAttendeeEmail(email: string): void {
   if (!/^[^@]+@[^@]+$/.test(email)) {
     throw new InvalidInputError(`Invalid participant email: ${email}`);
   }
-  if (/[\r\n:;"\\]|\s/.test(email)) {
+  // This is a CRITERION, not a character whitelist: reject the RFC 5322 specials that would
+  // let a bare addr-spec smuggle a route, a display name, a second address, or (via a stray
+  // parameter delimiter) an iCal property injection; reject every whitespace character; and
+  // reject every Unicode category C code point (controls, format characters such as the
+  // U+200E left-to-right mark, surrogates, unassigned) since none of those is legitimate
+  // inside an address and the category catches whole classes no literal list could enumerate.
+  // Everything else — including `.` for dot-atoms, `+` for tagged locals, and `-` in a
+  // domain — stays allowed.
+  if (/[()<>[\]:;\\,"]|\s|\p{C}/u.test(email)) {
     throw new InvalidInputError(`Invalid participant email (contains illegal characters): ${email}`);
   }
 }
@@ -1702,7 +1792,10 @@ interface FormattedDateProperty {
  * inherit-then-floating, never defaulted. See docs/conventions.md for why that split is
  * deliberate rather than an inconsistency to "fix".
  */
-function formatDateTimeProperty(
+// Exported for direct unit testing of `tzidSource` (#157, #102): every consumer of the
+// result reads it only through `describeFrame`'s `=== 'default'` branch, so 'stored' and
+// 'caller' are otherwise indistinguishable from outside this function's own return value.
+export function formatDateTimeProperty(
   propName: string,
   value: string,
   originalVevent: string | null,
@@ -1734,18 +1827,18 @@ function formatDateTimeProperty(
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
-        const tzMatch = rawLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
-        if (tzMatch) {
-          return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding), tzidSource: 'stored' };
+        const storedTzid = extractTzidParam(rawLines[0]);
+        if (storedTzid !== undefined) {
+          return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
         }
       }
       // If propName is DTEND and no TZID found (DURATION-based), fall back to DTSTART's TZID
       if (propName === 'DTEND') {
         const startLines = parseAllICalProperties(originalVevent, 'DTSTART');
         if (startLines.length > 0) {
-          const tzMatch = startLines[0].match(/;TZID=("[^"]*"|[^;:]+)/);
-          if (tzMatch) {
-            return { line: foldICalLine(`${propName};TZID=${tzMatch[1]}:${serialized}`, lineEnding), tzidSource: 'stored' };
+          const storedTzid = extractTzidParam(startLines[0]);
+          if (storedTzid !== undefined) {
+            return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
           }
         }
       }
@@ -1839,9 +1932,9 @@ function describeDateProperty(rawLine: string, displayOverride?: string, tzidSou
   if (isDateOnlyProperty(line) || /^\d{8}$/.test(value)) {
     return { frame: 'date', value, display };
   }
-  const tzMatch = params.match(/;TZID=("[^"]*"|[^;:]+)/);
-  if (tzMatch) {
-    return { frame: 'zoned', tzid: tzMatch[1].replace(/^"|"$/g, ''), tzidSource: tzidSourceOverride, value, display };
+  const storedTzid = extractTzidParam(params);
+  if (storedTzid !== undefined) {
+    return { frame: 'zoned', tzid: storedTzid.replace(/^"|"$/g, ''), tzidSource: tzidSourceOverride, value, display };
   }
   if (/Z$/.test(value)) {
     return { frame: 'utc', value, display };
@@ -2521,15 +2614,31 @@ export function normalizeMasterVEventFirst(icalData: string): string {
  * Assert a tsdav write (create/update/delete calendar object) actually succeeded.
  * tsdav returns the raw Response(s) without throwing on 4xx/5xx, so without this
  * a server-side rejection would be reported to the caller as success. Accepts a
- * single Response or an array; treats a missing status as success (older tsdav
- * shapes) but fails loudly on any status outside 2xx.
+ * single Response or an array; fails loudly on any status outside 2xx AND on a
+ * response that carries no numeric status at all — including a bare `{ ok: true }`
+ * with nothing else. A write whose outcome nothing here actually confirmed must
+ * not be reported as success: the same never-silent rule the contacts client
+ * follows for `updated`/`destroyed`, applied to a status this function never
+ * observed. (This used to treat a missing status as success, on the theory that
+ * an older tsdav shape might omit it; that reading let a response nobody had
+ * verified pass as a confirmed write, which is the failure mode this function
+ * exists to catch on 4xx/5xx and cannot then wave through on "absent".)
  */
 function assertDavOk(resp: unknown, action: string): void {
   const responses = Array.isArray(resp) ? resp : [resp];
+  // An empty array confirms nothing either — the loop below would simply never run and
+  // return as though the write succeeded. Same criterion as the missing-status case: a
+  // response nobody here actually observed must not be reported as success.
+  if (responses.length === 0) {
+    throw new Error(`Failed to ${action}: server returned no status`);
+  }
   for (const r of responses) {
     const status = (r as any)?.status;
     const ok = (r as any)?.ok;
-    if (typeof status === 'number' && (status < 200 || status >= 300)) {
+    if (typeof status !== 'number') {
+      throw new Error(`Failed to ${action}: server returned no status`);
+    }
+    if (status < 200 || status >= 300) {
       throw new Error(`Failed to ${action}: server returned ${status}${(r as any)?.statusText ? ' ' + (r as any).statusText : ''}`);
     }
     if (ok === false) {
@@ -3051,6 +3160,9 @@ export class CalDAVCalendarClient {
           // The title and id come from the first block, which is the same pair a row would
           // have carried and is two property reads rather than a parse of the whole payload.
           const title = parseICalValue(blocks[0], 'SUMMARY') || 'Untitled';
+          // Not trimmed here, unlike the other UID reads in this file: this one is not an
+          // exact-match comparison, and the padding is removed a few lines down by
+          // echoCallerText before `id` ever reaches the thrown message.
           const id = parseICalValue(blocks[0], 'UID') || obj.url || '';
           // UNWRAPPED through the shared helper, the same one `list_calendars` and the
           // not-found error use. A DAV displayName arrives as a property object whenever the
@@ -3152,7 +3264,9 @@ export class CalDAVCalendarClient {
       for (const obj of objects) {
         const vevent = extractVEvent(obj.data || '');
         if (!vevent) continue;
-        const uid = parseICalValue(vevent, 'UID');
+        // Trimmed here because this is an exact-match comparison against the caller's id,
+        // the same exact-match category as the TZID substring check.
+        const uid = parseICalValue(vevent, 'UID')?.trim();
         if (uid === eventId || obj.url === eventId) {
           return obj;
         }
@@ -3397,7 +3511,10 @@ export class CalDAVCalendarClient {
       throw new Error('Cannot update event: no VEVENT block found');
     }
 
-    const existingUid = parseICalValue(originalVevent, 'UID') || eventId;
+    // Trimmed here for the same reason as the other UID reads: it is echoed back as the
+    // result's `eventId`, which a caller may then pass straight into another exact-match
+    // UID lookup.
+    const existingUid = parseICalValue(originalVevent, 'UID')?.trim() || eventId;
     let data = normalizedData;
 
     // --- timeZone validation (#157) ---

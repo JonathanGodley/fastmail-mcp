@@ -120,23 +120,12 @@ export class ContactsCalendarClient extends JmapClient {
       const response = await this.makeRequest(request);
       return this.getQueryResult(response, 0, 1);
     } catch (error) {
-      // Fallback: try to get contacts using AddressBook methods
-      const fallbackRequest: JmapRequest = {
-        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'],
-        methodCalls: [
-          ['AddressBook/get', {
-            accountId
-          }, 'addressbooks']
-        ]
-      };
-
-      try {
-        const fallbackResponse = await this.makeRequest(fallbackRequest);
-        const items = this.getListResult(fallbackResponse, 0);
-        return { items };
-      } catch (fallbackError) {
-        throw new Error(`Contacts not supported or accessible: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
-      }
+      // No AddressBook/get fallback: that used to swallow the real ContactCard/query error
+      // and return address books dressed up as contacts, discarding the one thing the caller
+      // needed to see. Same never-silent rule the mailbox resolver follows for
+      // unresolvedMailboxIds, applied in the right direction here — a failed contacts query
+      // must surface as a failure, never as a different kind of record.
+      throw new Error(`Contacts not supported or accessible: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
     }
   }
 

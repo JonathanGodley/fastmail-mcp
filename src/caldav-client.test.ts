@@ -5,6 +5,8 @@ import {
   resolveDisplayName,
   parseICalValue,
   findValueBoundary,
+  extractTzidParam,
+  formatDateTimeProperty,
   parseAllICalProperties,
   hasICalProperty,
   parseAttendee,
@@ -142,9 +144,24 @@ describe('parseICalValue', () => {
     assert.equal(parseICalValue(vevent, 'LOCATION'), undefined);
   });
 
+  // #102: RFC 5545 whitespace inside a property VALUE is significant, so a free-text
+  // property must read back exactly as stored rather than silently losing padding.
+  it('does not trim a free-text value', () => {
+    const vevent = 'SUMMARY:  padded  ';
+    assert.equal(parseICalValue(vevent, 'SUMMARY'), '  padded  ');
+  });
+
   it('handles line folding (continuation lines)', () => {
     const vevent = 'DESCRIPTION:This is a long\n description that wraps\nSUMMARY:Test';
     assert.equal(parseICalValue(vevent, 'DESCRIPTION'), 'This is a longdescription that wraps');
+  });
+
+  // #102: a lone trailing `\r` (no following `\n`) is not a line break to `icalContentLines`,
+  // so it survives inside the LAST physical line's text — including a folded continuation
+  // line's — and only the first physical line got the `\r$` strip before unfolding.
+  it('strips a lone trailing \\r left on the last folded continuation line', () => {
+    const vevent = 'SUMMARY:abc\r\n more\r';
+    assert.equal(parseICalValue(vevent, 'SUMMARY'), 'abcmore');
   });
 });
 
@@ -445,6 +462,22 @@ describe('timeZone / endTimeZone (#139)', () => {
     ].join('\r\n');
     const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
     assert.equal(event.timeZone, 'Pacific/Auckland');
+  });
+
+  // #102: this is describeDateProperty's `storedTzid.replace(/^"|"$/g, '')` unquote path,
+  // pinned a second way (a different zone name) so the property is not resting on one fixture.
+  it('classifies a quoted TZID as zoned with the tzid unquoted', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:quoted2@fm',
+      'DTSTART;TZID="Europe/Paris":20260401T090000',
+      'SUMMARY:Quoted TZID 2',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Europe/Paris');
   });
 
   it('treats a leading-slash TZID (RFC 5545 §3.2.19) as the same zone, but emits it unstripped when different', () => {
@@ -921,8 +954,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
-      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1007,7 +1040,7 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({})),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1085,6 +1118,25 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
     const event = await client.getCalendarEventById('get1@fm');
     assert.equal(event.id, 'get1@fm');
     assert.equal(event.title, 'Findable');
+  });
+
+  // #102: parseICalValue no longer trims, so a stored UID with padding around it must be
+  // trimmed at ITS OWN call sites (the same exact-match category as the TZID substring
+  // check) or a caller can no longer find the event by its real, unpadded id.
+  it('finds an event by its unpadded id when the stored UID line carries padding', async () => {
+    const ical = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID: padded-uid ',
+      'DTSTART:20260401T100000Z',
+      'SUMMARY:Padded UID',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client } = createMockedClientWithObjects([{ data: ical, url: '/cal/padded.ics' }]);
+
+    const event = await client.getCalendarEventById('padded-uid');
+    assert.equal(event.id, 'padded-uid');
   });
 
   it('returns the STORED start and its zone exactly as written, unexpanded', async () => {
@@ -1167,6 +1219,74 @@ describe('findValueBoundary', () => {
 
   it('returns -1 when no colon found', () => {
     assert.equal(findValueBoundary('NOCOLON'), -1);
+  });
+});
+
+describe('extractTzidParam', () => {
+  it('extracts an unquoted TZID', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=Europe/Paris:20260401T090000'), 'Europe/Paris');
+  });
+
+  it('extracts a quoted TZID, quotes included, AS STORED', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID="Custom/Zone":20260401T090000'), '"Custom/Zone"');
+  });
+
+  it('accepts a params-only string with no value boundary at all', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=Europe/Paris'), 'Europe/Paris');
+  });
+
+  it('returns undefined when there is no TZID parameter', () => {
+    assert.equal(extractTzidParam('DTSTART:20260401T090000'), undefined);
+  });
+
+  it('returns undefined, not empty string, for an empty TZID value', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=;X-FOO=1:20260401T090000'), undefined);
+  });
+
+  it('ignores a ;TZID= trapped inside another parameter\'s quoted value', () => {
+    assert.equal(
+      extractTzidParam('DTSTART;X-FOO=";TZID=trap";TZID=Europe/Paris:20260401T090000'),
+      'Europe/Paris',
+    );
+  });
+
+  it('never matches a ;TZID= sitting in the property VALUE, only in the parameters', () => {
+    assert.equal(extractTzidParam('DESCRIPTION:call re ;TZID=Europe/Paris'), undefined);
+  });
+
+  it('the first TZID parameter wins when one is repeated (malformed input)', () => {
+    assert.equal(extractTzidParam('DTSTART;TZID=Europe/Paris;TZID=America/New_York:20260401T090000'), 'Europe/Paris');
+  });
+});
+
+describe('formatDateTimeProperty tzidSource (#157)', () => {
+  // #102: nothing pinned that an INHERITED TZID reports tzidSource 'stored' specifically
+  // (as opposed to 'caller' or 'default') — every current consumer of the field only
+  // branches on `=== 'default'`, so these two sites are the only place 'stored' is checkable.
+  it('reports tzidSource "stored" when the property\'s OWN TZID is preserved', () => {
+    const originalVevent = [
+      'BEGIN:VEVENT',
+      'UID:x@fm',
+      'DTSTART;TZID=Europe/Paris:20260401T090000',
+      'DTEND;TZID=Europe/Paris:20260401T100000',
+      'END:VEVENT',
+    ].join('\r\n');
+    const result = formatDateTimeProperty('DTSTART', '2026-04-01T09:30:00', originalVevent, '\r\n');
+    assert.equal(result.tzidSource, 'stored');
+    assert.equal(result.line, 'DTSTART;TZID=Europe/Paris:20260401T093000');
+  });
+
+  it('reports tzidSource "stored" when DTEND falls back to DTSTART\'s TZID', () => {
+    const originalVevent = [
+      'BEGIN:VEVENT',
+      'UID:x@fm',
+      'DTSTART;TZID=Europe/Paris:20260401T090000',
+      'DURATION:PT1H',
+      'END:VEVENT',
+    ].join('\r\n');
+    const result = formatDateTimeProperty('DTEND', '2026-04-01T10:30:00', originalVevent, '\r\n');
+    assert.equal(result.tzidSource, 'stored');
+    assert.equal(result.line, 'DTEND;TZID=Europe/Paris:20260401T103000');
   });
 });
 
@@ -1761,6 +1881,37 @@ describe('validateAttendeeEmail', () => {
     assert.throws(() => validateAttendeeEmail('a b@example.com'), /illegal/i);
     assert.throws(() => validateAttendeeEmail('a\tb@example.com'), /illegal/i);
   });
+
+  // #102: the single-`@` shape plus the old reject list let a bare address carry angle
+  // brackets, a second address after a comma, or an invisible Unicode format character —
+  // none of those is a single bare addr-spec.
+  it('rejects an address wrapped in angle brackets', () => {
+    assert.throws(() => validateAttendeeEmail('<a@b>'), /illegal/i);
+  });
+
+  it('rejects a second address appended after a comma', () => {
+    assert.throws(() => validateAttendeeEmail('a@b,c'), /illegal/i);
+  });
+
+  it('rejects an address with a trailing bracketed fragment', () => {
+    assert.throws(() => validateAttendeeEmail('a@b<c>'), /illegal/i);
+  });
+
+  it('rejects an address carrying a trailing U+200E left-to-right mark', () => {
+    assert.throws(() => validateAttendeeEmail('a@b.example‎'), /illegal/i);
+  });
+
+  it('still accepts a plain dotted address', () => {
+    assert.doesNotThrow(() => validateAttendeeEmail('alice.smith@example.com'));
+  });
+
+  it('still accepts a plus-tagged local part', () => {
+    assert.doesNotThrow(() => validateAttendeeEmail('alice+tag@example.com'));
+  });
+
+  it('still accepts a hyphenated domain', () => {
+    assert.doesNotThrow(() => validateAttendeeEmail('alice@my-domain.example.com')); // allowlist-secret: synthetic fixture on example.com, not a real address
+  });
 });
 
 describe('quoteParamValue', () => {
@@ -1888,11 +2039,26 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
   }
+
+  it('returns the unpadded id when the stored UID line carries padding (#102)', async () => {
+    // The lookup that finds this object already trims when matching `eventId`
+    // against the stored UID (see the getCalendarEventById test of the same
+    // name), so the padded UID line here still resolves. This test is about a
+    // second, independent trim: the value echoed back in the result's own
+    // `eventId` field.
+    const ical = makeRichIcal('padded-uid ');
+    const objects = [{ data: ical, url: '/cal/padded.ics' }];
+    const { client } = createMockedPatchClient(objects);
+
+    const result = await client.updateCalendarEvent('padded-uid', { title: 'New Title' });
+
+    assert.equal(result.eventId, 'padded-uid');
+  });
 
   it('preserves unknown properties when updating title only', async () => {
     const ical = makeRichIcal('evt1@fm');
@@ -2121,6 +2287,29 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.ok(updatedData.includes('DTEND;TZID=Europe/Rome:20260401T120000'));
   });
 
+  // #102: the naive `;TZID=("[^"]*"|[^;:]+)` regex the TZID-inherit reads used to run had no
+  // quote state and matched the FIRST literal `;TZID=` it saw, trap or real — including one
+  // sitting inside another parameter's quoted value.
+  it('inherits the real stored TZID past a fake ;TZID= trapped inside another parameter value', async () => {
+    const trapIcal = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:trap@fm',
+      'DTSTART;X-FOO=";TZID=trap";TZID=Europe/Paris:20260401T090000',
+      'DTEND;TZID=Europe/Paris:20260401T100000',
+      'SUMMARY:Trap',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const objects = [{ data: trapIcal, url: '/cal/trap.ics' }];
+    const { client, mockDAVClient } = createMockedPatchClient(objects);
+
+    await client.updateCalendarEvent('trap@fm', { start: '2026-04-01T09:30:00' });
+
+    const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.ok(updatedData.includes('DTSTART;TZID=Europe/Paris:20260401T093000'), updatedData);
+  });
+
   it('date-only start emits VALUE=DATE', async () => {
     const allDayIcal = [
       'BEGIN:VCALENDAR',
@@ -2206,7 +2395,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
 
@@ -2241,7 +2430,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
 
@@ -2486,8 +2675,8 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
-      deleteCalendarObject: mock.fn(async (_params: any) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+      deleteCalendarObject: mock.fn(async (_params: any) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2828,7 +3017,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
       fetchCalendars: mock.fn(async () => [
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -2900,7 +3089,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     await assert.rejects(
       () => client.createCalendarEvent({
@@ -3118,7 +3307,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3419,6 +3608,43 @@ describe('CalDAV write status checking (assertDavOk)', () => {
     const client = mockClientWithStatus(204);
     await client.updateCalendarEvent('s@fm', { title: 'X' });
   });
+
+  // #102: a response that never carried a numeric status used to be read as success (the
+  // "older tsdav shapes" reading) — including a bare `{ ok: true }` with no status at all. A
+  // write whose outcome nothing confirmed must not be reported as success.
+  function mockClientWithResponse(response: unknown) {
+    const ical = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//t//EN',
+      'BEGIN:VEVENT', 'UID:s@fm', 'DTSTAMP:20260101T000000Z',
+      'DTSTART:20260101T090000Z', 'DTEND:20260101T093000Z', 'SUMMARY:S',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    (client as any).client = {
+      login: mock.fn(async () => {}),
+      fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => response),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => response),
+    };
+    return client;
+  }
+
+  it('throws on a response with no status at all', async () => {
+    const client = mockClientWithResponse({});
+    await assert.rejects(
+      () => client.updateCalendarEvent('s@fm', { title: 'X' }),
+      /Failed to update calendar event: server returned no status/,
+    );
+  });
+
+  it('throws on a bare `{ ok: true }` response with no status', async () => {
+    const client = mockClientWithResponse({ ok: true });
+    await assert.rejects(
+      () => client.deleteCalendarEvent('s@fm'),
+      /Failed to delete calendar event: server returned no status/,
+    );
+  });
 });
 
 describe('resolveDisplayName', () => {
@@ -3448,7 +3674,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3485,7 +3711,7 @@ describe('ORGANIZER display name comes from the client config', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: NO_ORGANIZER_ICAL, url: '/cal/noorg-cn.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3559,7 +3785,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3704,7 +3930,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -3772,7 +3998,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4027,7 +4253,7 @@ describe('timeZone parameter (#157)', () => {
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4039,7 +4265,7 @@ describe('timeZone parameter (#157)', () => {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4388,7 +4614,7 @@ describe('calendar write result classification, driven from real create/update c
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -4400,7 +4626,7 @@ describe('calendar write result classification, driven from real create/update c
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: '/cal/personal/' }]),
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
-      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({})),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -5834,6 +6060,16 @@ describe('CalDAVCalendarClient calendar discovery failures', () => {
     );
   });
 
+  // #102: an empty response array confirmed nothing either — the status-check loop simply
+  // never ran, and the PROPFIND was reported as having succeeded.
+  it('throws on an empty PROPFIND response array instead of treating it as success', async () => {
+    const { client } = clientWithEmptyDiscovery([]);
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50),
+      /discover calendars: server returned no status/,
+    );
+  });
+
   it('throws when discovery succeeds but lists no calendars', async () => {
     // An empty-but-successful discovery is still an error: answering an availability
     // question with nothing reads as free time.
@@ -6543,7 +6779,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
         { displayName: 'DEFAULT_TASK_CALENDAR_NAME', url: '/cal/tasks/' },
       ]),
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
 
@@ -6572,7 +6808,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     const mockDAVClient = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [{ displayName: 'Work', url: '/cal/work/' }]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
     (client as any).client = mockDAVClient;
     await client.createCalendarEvent({
@@ -6596,7 +6832,7 @@ describe('calendarNotFoundError lists only calendars a caller can name', () => {
         { displayName: 'Personal', url: '/cal/personal/' },
         { displayName: 'DEFAULT_TASK_CALENDAR_NAME', url: '/cal/tasks/' },
       ]),
-      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({})),
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     };
 
     await assert.rejects(
@@ -6782,7 +7018,7 @@ describe('calendar display names that are not strings', () => {
     // needed the same normalisation. Diverging here would put an event in the wrong
     // collection, or refuse a calendar the read path accepts.
     const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
-    const createCalendarObject = mock.fn(async (_p: CreateObjectParams) => ({ ok: true }));
+    const createCalendarObject = mock.fn(async (_p: CreateObjectParams) => ({ ok: true, status: 200 }));
     (client as any).client = {
       login: mock.fn(async () => {}),
       fetchCalendars: mock.fn(async () => [
