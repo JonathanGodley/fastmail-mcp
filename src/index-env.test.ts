@@ -163,3 +163,76 @@ describe('env-resolution convention', () => {
     }
   });
 });
+
+// Drift guards over the broken-collection disclosure's two halves in src/index.ts (#136).
+//
+// Read as TEXT for the same reason as everything above: index.ts runs `server.connect()` at
+// load, so a unit test cannot import it, and the CallTool switch has no harness at all. These
+// two facts are therefore checkable nowhere else — and both are the kind that stay correct by
+// accident until someone edits the file beside them.
+describe('broken-collection disclosure in the tool surface', () => {
+  // Which consequence sentence each calendar handler's note must carry. The three differ in
+  // what they claim was checked, and a swap is invisible: the note still prints, still names
+  // the path, and quietly tells a caller either that an availability answer is complete when
+  // it is not, or that a copy of their event was looked for when nothing looked.
+  const CONTEXT_BY_TOOL: Record<string, 'read' | 'create' | 'write'> = {
+    list_calendars: 'read',
+    list_calendar_events: 'read',
+    get_calendar_event: 'read',
+    create_calendar_event: 'create',
+    update_calendar_event: 'write',
+    delete_calendar_event: 'write',
+  };
+
+  it('passes each calendar handler the consequence its own call actually supports', () => {
+    const lines = readFileSync(join(SRC_DIR, 'index.ts'), 'utf8').split('\n');
+    const found = new Map<string, string>();
+    let currentTool: string | undefined;
+    for (const line of lines) {
+      const label = /^\s*case '([a-z_]+)':/.exec(line);
+      if (label) currentTool = label[1];
+      const call = /buildBrokenCollectionNote\([^,)]+,\s*'([a-z]+)'\)/.exec(line);
+      if (!call) continue;
+      assert.ok(currentTool !== undefined, `buildBrokenCollectionNote outside any case: ${line.trim()}`);
+      assert.ok(!found.has(currentTool!), `${currentTool} calls buildBrokenCollectionNote twice`);
+      found.set(currentTool!, call[1]);
+    }
+
+    // ENUMERATED, not sampled: the claim is about every calendar tool, so every one of them
+    // has to be present and matched.
+    assert.deepEqual(
+      [...found.keys()].sort(),
+      Object.keys(CONTEXT_BY_TOOL).sort(),
+      'a calendar tool either lost its broken-collection note or gained one this guard does not know about',
+    );
+    for (const [tool, context] of found) {
+      assert.equal(context, CONTEXT_BY_TOOL[tool], `${tool} passes the wrong consequence to buildBrokenCollectionNote`);
+    }
+  });
+
+  it('quotes the disclosure phrase from the constant, never as a hand-typed sentence', () => {
+    // The descriptions tell a caller what line to look for. Typed out, the natural thing to
+    // write is the SINGULAR sentence — which never prints when two collections fail, so a
+    // model hunting for it concludes there is no note, the one conclusion this disclosure
+    // exists to prevent. Interpolating the constant makes the quoted text follow the emitted
+    // text by construction.
+    const source = readFileSync(join(SRC_DIR, 'index.ts'), 'utf8');
+    // ENUMERATED per tool, not counted across the file: the claim is that each of the six
+    // calendar descriptions quotes it, and a total would stay green while one description
+    // dropped the phrase and another gained a second mention of it.
+    for (const tool of Object.keys(CONTEXT_BY_TOOL)) {
+      const start = source.indexOf(`name: '${tool}',`);
+      assert.ok(start !== -1, `src/index.ts declares no tool named ${tool}`);
+      const next = source.indexOf("\n        name: '", start + 1);
+      const block = source.slice(start, next === -1 ? undefined : next);
+      assert.ok(
+        block.includes('+ BROKEN_COLLECTION_PHRASE +'),
+        `${tool}'s description no longer quotes the broken-collection phrase from its constant`,
+      );
+    }
+    assert.ok(
+      !source.includes('a collection in the calendar list failed to list'),
+      'a tool description hard-codes the SINGULAR broken-collection sentence, which does not print when more than one collection fails',
+    );
+  });
+});

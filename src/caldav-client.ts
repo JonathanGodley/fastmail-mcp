@@ -1,4 +1,4 @@
-import { DAVClient, DAVCalendar, DAVCalendarObject } from 'tsdav';
+import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest } from 'tsdav';
 // requireNonEmpty/validateClearFields come from coerce.ts rather than being
 // defined here, so their rejections throw the tagged InvalidInputError and the
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
@@ -163,6 +163,44 @@ export interface CalendarEventQueryResult {
   // sentence down here instead put the wording somewhere no formatter test can reach it and
   // gave the separator convention a second home.
   windowClamp?: CalendarWindowClamp;
+  brokenCollections?: string[];
+}
+
+/**
+ * THE COLLECTIONS IN THE CALENDAR HOME'S OWN LISTING THAT FAILED TO LIST (#136).
+ *
+ * Carried as STRUCTURE beside every calendar result, exactly as `windowClamp` above is: the
+ * client returns the paths, `buildBrokenCollectionNote` in response-formatters.ts owns the
+ * wording and the blank-line separator, and the handler concatenates. Absent (never an empty
+ * array on a result) means every entry in the home listing answered.
+ *
+ * WHAT THE VALUES ARE, and what they deliberately are not: a broken entry keeps its href and
+ * nothing else — the failure destroys the display name and the resourcetype alike — so this is
+ * a list of PATHS and there is no name to give, and no way to say whether the collection was a
+ * calendar at all. Every message built from it is worded for that, and none of them claims a
+ * calendar was lost.
+ */
+export type BrokenCollections = string[];
+
+/** What `getCalendars` returns: the listing, plus any collection that failed to list (#136). */
+export interface CalendarListResult {
+  calendars: CalendarInfo[];
+  brokenCollections?: BrokenCollections;
+}
+
+/**
+ * What `getCalendarEventById` returns. The event is nested rather than carrying the disclosure
+ * as a field of its own because the event object IS the tool's JSON body — a `brokenCollections`
+ * key inside it would read as a property of the event.
+ */
+export interface CalendarEventResult {
+  event: CalendarEvent;
+  brokenCollections?: BrokenCollections;
+}
+
+/** What `deleteCalendarEvent` returns. Only the disclosure: a delete has nothing else to say. */
+export interface DeleteCalendarEventResult {
+  brokenCollections?: BrokenCollections;
 }
 
 /** Why, and to what, a calendar window ended up narrower than the one the caller described. */
@@ -2433,6 +2471,290 @@ const CALENDAR_NAME_LIST_CAP = 20;
 const CALENDAR_URL_ECHO_LIMIT = 200;
 
 /**
+ * The bound on ONE broken collection's path wherever it is echoed (#136) — the trailing note
+ * the read tools carry, the write tools' note, and the two error messages that name it.
+ *
+ * Its own constant rather than a share of CALENDAR_URL_ECHO_LIMIT above, because the two are
+ * bounding different things for different reasons and would drift apart under any change to
+ * either. That one bounds a URL OFFERED AS A HANDLE — it has to survive intact or the caller
+ * pastes back a value that fails again — so it is sized to clear Fastmail's own prefix plus an
+ * address. This one bounds a path the caller is TOLD ABOUT and can do nothing with: it is
+ * server-authored text arriving on a path that has already gone wrong, so it is cut where a
+ * reader can still recognise which collection is meant, and it is cut with the shared echo's
+ * visible marker so a truncated path can never be mistaken for a short one.
+ */
+export const BROKEN_COLLECTION_PATH_ECHO_LIMIT = 160;
+
+/**
+ * How many broken collections one message names before the rest are counted. A home listing
+ * that failed wholesale would otherwise put every path it holds into the note.
+ */
+export const BROKEN_COLLECTION_LIST_CAP = 5;
+
+/**
+ * Is this entry of the calendar-home listing BROKEN — i.e. did the server fail to describe it?
+ *
+ * ONE RULE COVERING BOTH FORMS a failure takes in what tsdav's parser hands back, because they
+ * are the same event seen from two places in the multistatus:
+ *
+ *   - a failed RESPONSE element keeps its href and a non-2xx status, and carries no propstat
+ *     at all (`props` reduces to `{}`);
+ *   - a failed PROPSTAT leaves the element itself 2xx but strips the properties, because
+ *     tsdav's reducer takes props from 2xx propstats only — so `resourcetype` is simply gone.
+ *
+ * And that is ALL the raw answer can say. The failure destroyed the display name and the
+ * resourcetype together, so nothing here can tell a broken calendar from a broken address book,
+ * a broken scheduling collection, or a broken anything else. Every message built on this says
+ * "a collection … failed to list" for that reason, and none of them upgrades it to "a calendar".
+ *
+ * A MISSING resourcetype is the test, NOT an empty one. `<resourcetype/>` parses to `{}`, which
+ * is a real answer — an ordinary non-collection resource — and flagging it would report every
+ * healthy account as broken. `undefined` is the absence of an answer.
+ *
+ * `status` is required to be a NUMBER: tsdav always sets one (from the parsed status line, or
+ * the HTTP response's), so a non-number is an entry nothing here observed a status for, which
+ * is the same "not confirmed" class assertDavOk refuses to wave through.
+ */
+export function isBrokenCalendarHomeEntry(entry: DAVResponse): boolean {
+  const status = entry?.status;
+  if (typeof status !== 'number' || status < 200 || status >= 300) return true;
+  return (entry?.props as Record<string, unknown> | undefined)?.resourcetype === undefined;
+}
+
+/** An href resolved against the calendar home, or undefined when it cannot be resolved at all. */
+function resolveCollectionUrl(url: string, base: string): URL | undefined {
+  try {
+    return new URL(url, base);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The comparable form of a collection path: its SEGMENTS, each decoded on its own.
+ *
+ * Decoded because the two sides come from different places — the calendar home URL is the one
+ * tsdav resolved at login, each href is whatever the server wrote in its multistatus — and
+ * Fastmail's home path carries an email address, so one side spelling `@` as `%40` would make
+ * every child look like it sat somewhere else. A malformed escape falls back to that segment's
+ * raw text, so both sides still agree on it.
+ *
+ * SEGMENTS, not one decoded string, because `%2F` inside a segment decodes to a separator that
+ * was never a separator. Decoded whole, `/dav/…/probe%2Fwobbly/` reads as a child of
+ * `/dav/…/probe/` and gets reported as a broken collection inside this account's calendar home
+ * — an href the server can legally write about somewhere else entirely. Comparing segment by
+ * segment keeps a decoded slash inside the segment it came from, where it cannot match.
+ */
+function collectionPathSegments(pathname: string): string[] {
+  return pathname
+    .split('/')
+    .filter(segment => segment.length > 0)
+    .map(segment => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        // A stray '%' is not an escape; compare the raw text rather than losing the entry.
+        return segment;
+      }
+    });
+}
+
+/** Is `entry` a path strictly BELOW `home` — inside it, and not the home itself? */
+function isPathInsideHome(home: string[], entry: string[]): boolean {
+  if (entry.length <= home.length) return false;
+  return home.every((segment, i) => entry[i] === segment);
+}
+
+/**
+ * The collections inside `homeUrl`'s own PROPFIND answer that failed to list (#136).
+ *
+ * An entry qualifies when its href sits UNDER the calendar home, is NOT the home itself, and
+ * `isBrokenCalendarHomeEntry` says the server did not describe it. The two positional
+ * conditions are what keeps a REQUEST-level failure out of this list, and that distinction is
+ * the whole reason they are here rather than being taken for granted:
+ *
+ *   - a non-multistatus or non-2xx body becomes ONE pseudo-entry whose href is the request URL
+ *     (or nothing at all, for a null response element). No href, or the home's own href, means
+ *     the home did not answer — which is #100's case, reported by the empty-list guard in
+ *     `discoverCalendars` as a whole-discovery failure, and never as one broken child;
+ *   - the home's own response element in a healthy depth-1 listing is a collection with no
+ *     `calendar` resourcetype. It is not a calendar and never was, so it is not a loss.
+ *
+ * "Under the home" is tested on the ORIGIN as well as the path. A multistatus href may be an
+ * absolute URL on any host — legal, and how a server points at a collection it does not itself
+ * hold — and a path-only comparison would read one as a collection inside this account and echo
+ * a foreign URL into the note as though it were the caller's.
+ */
+export function findBrokenCalendarHomeCollections(entries: DAVResponse[], homeUrl: string): BrokenCollections {
+  const home = resolveCollectionUrl(homeUrl, homeUrl);
+  // No resolvable calendar home means there is no inside to be inside of, and every test below
+  // would be against nothing. Silence is the safe direction: a missed disclosure, never a
+  // healthy collection reported broken.
+  if (home === undefined) return [];
+  const homeSegments = collectionPathSegments(home.pathname);
+  const broken: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const href = typeof entry?.href === 'string' ? entry.href.trim() : '';
+    if (href.length === 0) continue;
+    const resolved = resolveCollectionUrl(href, homeUrl);
+    if (resolved === undefined) continue;
+    if (resolved.origin !== home.origin) continue;
+    if (!isPathInsideHome(homeSegments, collectionPathSegments(resolved.pathname))) continue;
+    if (!isBrokenCalendarHomeEntry(entry)) continue;
+    if (seen.has(resolved.href)) continue;
+    seen.add(resolved.href);
+    broken.push(resolved.href);
+  }
+  return broken;
+}
+
+/**
+ * The internal always-a-list form turned into the result field, which is ABSENT when nothing
+ * broke. Silence is the published "every collection answered" signal, the same discipline the
+ * window clamp and the Trash/Spam exclusion follow: an empty array on every healthy response
+ * would be a field to interpret rather than a disclosure to act on.
+ */
+function asBrokenCollectionsField(broken: BrokenCollections): BrokenCollections | undefined {
+  return broken.length > 0 ? broken : undefined;
+}
+
+/** What discovery hands back internally: the library's list, plus what failed beside it. */
+interface DiscoveredCalendars {
+  calendars: DAVCalendar[];
+  brokenCollections: BrokenCollections;
+}
+
+/**
+ * The bytes of one DAV answer, kept so the detection can re-read exactly what tsdav parsed.
+ *
+ * No `statusText`: the reason phrase is server-authored prose that nothing in the replay reads,
+ * and the `Response` constructor THROWS on a control character or DEL in it. Every phrase the
+ * grammar actually allows is accepted, so this is not a legal-input problem — it is that a
+ * lenient HTTP parser can hand through a phrase the grammar does not allow, and then an
+ * otherwise perfect 207 would throw inside the reconstruction and silently cost the detection.
+ * A failure caused entirely by copying a value nobody wanted.
+ */
+interface CapturedDavAnswer {
+  body: string;
+  status: number;
+  contentType: string | null;
+}
+
+/**
+ * Re-parse a captured calendar-home answer and report its broken collections (#136).
+ *
+ * The parse is TSDAV'S OWN, not a second implementation of it: `davRequest` accepts a `fetch`
+ * override, so it is handed one that replays the captured bytes and never touches a network.
+ * That matters because the detection has to see the entries exactly as `fetchCalendars` saw
+ * them — the same status-line reading, the same 2xx-propstats-only property reducer — or it
+ * would be judging a different answer from the one that produced the list.
+ *
+ * A parse that cannot be completed reports NOTHING BROKEN rather than throwing. The likeliest
+ * reason is that the answer was never a multistatus — the request-level case, which
+ * `discoverCalendars`' empty-list guard already reports as a whole-discovery failure, so there
+ * is nothing this could add — and for any other reason, an answer this cannot read is one it
+ * cannot judge. Silence is the safe direction: a missed disclosure, never a healthy collection
+ * reported broken, and never a disclosure that becomes an exception of its own.
+ */
+async function brokenCollectionsInAnswer(captured: CapturedDavAnswer, homeUrl: string): Promise<BrokenCollections> {
+  let entries: DAVResponse[];
+  try {
+    entries = await davRequest({
+      url: homeUrl,
+      // No body is sent anywhere — the replaying fetch below ignores everything — but
+      // `convertIncoming: false` keeps the request builder from serialising an absent one.
+      init: { method: 'PROPFIND', body: undefined },
+      convertIncoming: false,
+      fetch: async () => new Response(captured.body, {
+        status: captured.status,
+        headers: captured.contentType === null ? {} : { 'content-type': captured.contentType },
+      }),
+    });
+  } catch {
+    return [];
+  }
+  return findBrokenCalendarHomeCollections(entries, homeUrl);
+}
+
+/**
+ * The part of the broken-collection disclosure that ends "… in the calendar list failed to
+ * list" — the only part of it that is TRUE OF EVERY COUNT (#136).
+ *
+ * Exported so the tool descriptions quote a string a caller will actually see. The subject in
+ * front of it varies with the count ("a collection …" / "3 collections …"), so a description
+ * quoting the singular sentence whole would name a line that never prints on a two-collection
+ * failure — and a model that cannot find the line it was told to look for reads that as "no
+ * note", the one conclusion this disclosure must never produce.
+ */
+export const BROKEN_COLLECTION_PHRASE = 'in the calendar list failed to list';
+
+/** The count-dependent pieces of the disclosure, built once for both places that write it. */
+export interface BrokenCollectionSummary {
+  /** "a collection in the calendar list failed to list" / "3 collections in the calendar …". */
+  subject: string;
+  /** The capped, echoed path list: `"a", "b", …and 2 more`. */
+  paths: string;
+  /** The sentence bounding what the disclosure may claim, agreeing in number with `subject`. */
+  disclaimer: string;
+  /** Whether more than one collection is named — every pronoun beside this follows it. */
+  plural: boolean;
+}
+
+/**
+ * The shared half of the broken-collection disclosure: the subject, the capped path list, and
+ * the sentence bounding what may be claimed (#136).
+ *
+ * ONE BUILDER because there are two surfaces and they must not drift: a returned note (built in
+ * response-formatters.ts, where every other note's wording lives) and a THROWN clause, which
+ * cannot go through a formatter. Maintained as two copies they already disagreed once — both
+ * carried singular pronouns under a plural subject — so the count-dependent wording is written
+ * here and each surface adds only its own framing and consequence.
+ *
+ * WHAT IT MAY CLAIM is fixed by what the answer can support: the failure destroys the display
+ * name and the resourcetype together, so nothing here can tell a broken calendar from a broken
+ * address book. Neither surface upgrades "collection" to "calendar".
+ *
+ * Each path is echoed as a VALUE through the shared echo — scrubbed of the characters that
+ * would forge extra lines, trimmed, cut with a visible marker — and never the finished
+ * sentence. See docs/conventions.md.
+ */
+export function summariseBrokenCollections(broken: BrokenCollections): BrokenCollectionSummary {
+  const shown = broken
+    .slice(0, BROKEN_COLLECTION_LIST_CAP)
+    .map(p => `"${echoCallerText(p, BROKEN_COLLECTION_PATH_ECHO_LIMIT)}"`)
+    .join(', ');
+  const more = broken.length > BROKEN_COLLECTION_LIST_CAP
+    ? `, …and ${broken.length - BROKEN_COLLECTION_LIST_CAP} more`
+    : '';
+  const plural = broken.length !== 1;
+  return {
+    subject: plural
+      ? `${broken.length} collections ${BROKEN_COLLECTION_PHRASE}`
+      : `a collection ${BROKEN_COLLECTION_PHRASE}`,
+    paths: `${shown}${more}`,
+    disclaimer: plural
+      ? 'The failure destroyed their names and their types, so it cannot be said whether they were calendars.'
+      : 'The failure destroyed its name and its type, so it cannot be said whether it was a calendar.',
+    plural,
+  };
+}
+
+/**
+ * The one clause that names the broken collections inside a THROWN message (#136).
+ *
+ * The framing around `summariseBrokenCollections` for an error: it has to read as an aside to
+ * whatever the message was already about, because the caller's own problem — a bad id, a
+ * missing event — is the sentence in front of it and may well be the real one.
+ */
+function describeBrokenCollections(broken: BrokenCollections | undefined): string {
+  if (!broken || broken.length === 0) return '';
+  const s = summariseBrokenCollections(broken);
+  return ` Separately, ${s.subject}, so nothing in ${s.plural ? 'them' : 'it'} could be read: `
+    + `${s.paths}. ${s.disclaimer}`;
+}
+
+/**
  * The display name Fastmail gives the hidden task collection, which `list_calendars` filters
  * out. Named once so every place that hides it hides the same thing — including the
  * not-found error, which must not advertise a calendar the caller cannot see.
@@ -2545,8 +2867,23 @@ function selectableCalendars(calendars: DAVCalendar[]): DAVCalendar[] {
  * the write path had not, so a mistyped id on a create answered with a calendar name that
  * `list_calendars` never shows and no call can obtain. A shared message is only one rule if
  * it is given one input.
+ *
+ * `broken` (#136) is what turns this into the refusal for a caller who named a collection that
+ * FAILED TO LIST. That caller cannot be answered any other way: the failure destroyed the
+ * collection's display name, so a name-based miss is indistinguishable from a typo, and its
+ * path was filtered out of the calendar list, so a path-based miss lands here too. Naming the
+ * broken paths in the same message is what puts the two facts side by side — "that id matched
+ * nothing" and "one collection could not be described" — instead of leaving a caller to read
+ * the first as proof the calendar does not exist. It is also, by construction, the refusal
+ * `create_calendar_event` gives a target on the broken path: a collection that failed to list
+ * never became a `DAVCalendar`, so it can never be the resolved write target, and every route
+ * to it arrives here.
  */
-function calendarNotFoundError(calendarId: unknown, available: DAVCalendar[]): InvalidInputError {
+function calendarNotFoundError(
+  calendarId: unknown,
+  available: DAVCalendar[],
+  broken?: BrokenCollections,
+): InvalidInputError {
   // A nameless calendar is listed by its URL rather than dropped. Filtering it out left the
   // caller a message that silently under-reported what they could name — and the URL is not a
   // consolation prize here, it is a `calendarId` that works, which is exactly what this
@@ -2583,7 +2920,35 @@ function calendarNotFoundError(calendarId: unknown, available: DAVCalendar[]): I
     `Calendar not found: "${echoCallerText(calendarId, CALENDAR_URL_ECHO_LIMIT)}". calendarId takes either a calendar's URL ` +
     '(its `id` from list_calendars) or its display name, and the name is matched CASE-SENSITIVELY; ' +
     'surrounding whitespace is ignored on both sides, and list_calendars reports the trimmed name.' +
-    `${listing}`,
+    `${listing}${describeBrokenCollections(broken)}`,
+  );
+}
+
+/**
+ * The one "no event matched that id" error, raised by get/update/delete alike.
+ *
+ * It gains the broken-collection clause for the same reason the calendar one does (#136): a
+ * collection that failed to list was not searched, so "not found" is a statement about the
+ * collections that answered and nothing else. Left bare, it tells a caller their id is wrong
+ * about a record that may be sitting in the collection nobody could read.
+ *
+ * `eventId` is ECHOED AND QUOTED, the same treatment `calendarNotFoundError` gives the value it
+ * rejects, and for a reason this message acquired when the clause was added: a caller-supplied
+ * id sitting immediately in front of " Separately, a collection …" can write that sentence
+ * itself, and a forged disclosure is worse than a missing one — it names a collection that never
+ * broke, on an account where nothing did.
+ *
+ * THE QUOTES ARE NOT WHAT STOPS THAT — `echoCallerText` is. Quoting alone would have been
+ * decoration: a `"` inside the value closes the span, and the forged sentence walks straight out
+ * of it. The echo turns every `"` in the value into a `'`, so no quote pair in the finished
+ * message comes from the caller's value — the broken-collection clause wraps each path it names
+ * in one of its own — and the whole id stays inside the one pair this line wrote. The quotes
+ * then do the job they are here for: showing where a value with spaces in it ends. Echoed at
+ * the URL bound because the value reaching here is often a calendar-object URL.
+ */
+function eventNotFoundError(eventId: string, broken?: BrokenCollections): InvalidInputError {
+  return new InvalidInputError(
+    `Calendar event not found: "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}"${describeBrokenCollections(broken)}`,
   );
 }
 
@@ -2639,7 +3004,18 @@ function assertDavOk(resp: unknown, action: string): void {
       throw new Error(`Failed to ${action}: server returned no status`);
     }
     if (status < 200 || status >= 300) {
-      throw new Error(`Failed to ${action}: server returned ${status}${(r as any)?.statusText ? ' ' + (r as any).statusText : ''}`);
+      // The reason phrase is SERVER-AUTHORED PROSE landing in a sentence a caller reads back,
+      // so it goes through the shared echo as a value like every other untrusted string here:
+      // scrubbed of the characters that forge extra lines, and bounded so one long phrase
+      // cannot become the whole message. The echo's DEFAULT bound, not one of the calendar
+      // ones: a reason phrase is short prose to be recognised (RFC 9110 says a client may
+      // ignore it outright), never a value anyone pastes back, so nothing here needs the room
+      // a URL offered as a handle needs. See docs/conventions.md.
+      const reason = (r as any)?.statusText;
+      const phrase = typeof reason === 'string' && reason.trim().length > 0
+        ? ` ${echoCallerText(reason)}`
+        : '';
+      throw new Error(`Failed to ${action}: server returned ${status}${phrase}`);
     }
     if (ok === false) {
       throw new Error(`Failed to ${action}: server rejected the request`);
@@ -2679,6 +3055,8 @@ export interface CreateCalendarEventResult {
   eventId: string;
   start: CalendarZoneWriteInfo;
   end: CalendarZoneWriteInfo;
+  /** Collections that failed to list at discovery, so were no possible target here (#136). */
+  brokenCollections?: BrokenCollections;
 }
 
 export interface UpdateCalendarEventResult {
@@ -2686,6 +3064,8 @@ export interface UpdateCalendarEventResult {
   /** Present only when this call actually wrote (touched) that side. */
   start?: CalendarZoneWriteInfo;
   end?: CalendarZoneWriteInfo;
+  /** Collections that failed to list, so were not searched for another copy (#136). */
+  brokenCollections?: BrokenCollections;
 }
 
 function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWriteInfo {
@@ -2871,20 +3251,78 @@ export class CalDAVCalendarClient {
    * often than it means the account genuinely has no calendars. If that ever stops being
    * true of the accounts this server targets, this is the line to revisit.
    */
-  private async discoverCalendars(): Promise<DAVCalendar[]> {
+  private async discoverCalendars(): Promise<DiscoveredCalendars> {
     const client = await this.getClient();
-    if (this.calendars && this.calendars.length > 0) return this.calendars;
+    if (this.calendars && this.calendars.length > 0) {
+      // A cached list is by construction a list with no broken entry beside it — nothing is
+      // cached while one exists — so there is nothing to disclose here. The residual is the
+      // other direction and is stated on the tool surface: a calendar that breaks AFTER a
+      // healthy discovery stays in this list for the life of the process.
+      return { calendars: this.calendars, brokenCollections: [] };
+    }
 
-    const calendars = await client.fetchCalendars();
+    // THE SAME ANSWER TSDAV PARSED, NEVER A SECOND REQUEST (#136). A second PROPFIND could
+    // disagree with the first in either direction — a collection healthy on the re-ask would
+    // be reported broken, and one that broke between the two would be reported healthy — so
+    // the detection is given the very bytes the list was built from, captured by a fetch
+    // handed to `fetchCalendars` for this one call.
+    //
+    // Delegating to the client's OWN fetch (`fetchOverride`, falling back to the global one)
+    // rather than to the global one directly is what keeps this a wrapper rather than a
+    // second transport: the request goes exactly where it would have gone, carrying the init
+    // tsdav built for it — `fetchOptions`, and so the `redirect: 'error'` guard with it.
+    //
+    // The FIRST request is the home PROPFIND: `fetchCalendars` awaits it before it can fan out
+    // to the per-calendar `supported-report-set` reads. Capturing by position rather than by
+    // URL keeps this off any assumption about how the library spells the home URL — and if a
+    // future tsdav ever put a different request first, the entries parsed out of it would not
+    // sit under the calendar home and NOTHING would be flagged. That is the safe direction to
+    // fail in: a missed disclosure on a library change, never a healthy calendar reported
+    // broken.
+    const baseFetch = client.fetchOverride ?? globalThis.fetch;
+    let capturedHomeListing: CapturedDavAnswer | undefined;
+    const capturingFetch: typeof globalThis.fetch = async (input, init) => {
+      const response = await baseFetch(input, init);
+      if (capturedHomeListing === undefined) {
+        // CLONED, because tsdav reads the body itself and a body can only be read once.
+        capturedHomeListing = {
+          body: await response.clone().text(),
+          status: response.status,
+          contentType: response.headers.get('content-type'),
+        };
+      }
+      return response;
+    };
+
+    const calendars = await client.fetchCalendars({ fetch: capturingFetch });
+    // Only what this cannot pass on at all is guarded here: a non-string home URL, and nothing
+    // captured to read. An EMPTY home URL is deliberately not a case of its own —
+    // `findBrokenCalendarHomeCollections` cannot resolve one and reports nothing, which is the
+    // same answer this guard would give, written once where the reasoning for it lives.
+    const homeUrl = (client as any).account?.homeUrl;
+    const brokenCollections = typeof homeUrl === 'string' && capturedHomeListing !== undefined
+      ? await brokenCollectionsInAnswer(capturedHomeListing, homeUrl)
+      : [];
+
     if (calendars.length > 0) {
-      this.calendars = calendars;
-      return calendars;
+      // NEVER CACHED WHILE A COLLECTION IS BROKEN. Caching here is what made #100's empty
+      // discovery permanent, and it would do the same to a partial one: a collection that
+      // failed once would be missing from every later call for the life of the process, with
+      // the note gone as soon as the second call answered from the cache. Re-discovering on
+      // each call is the cost of the failure being transient, and it is paid only while one
+      // is outstanding.
+      if (brokenCollections.length === 0) this.calendars = calendars;
+      return { calendars, brokenCollections };
     }
 
     // Empty. Re-ask with a status-checked PROPFIND, because the status is the one thing
     // fetchCalendars threw away — this is the read-path counterpart to assertDavOk, which
     // exists for the same reason on the write paths. The extra round-trip only ever happens
     // on the already-broken path.
+    //
+    // Reached with NO healthy calendar, so it covers both the request-level failure (#100)
+    // and a listing whose every calendar entry was broken: neither can be answered around,
+    // and an empty result would read as "there are no events" either way.
     await this.assertCalendarHomeReachable();
     throw new Error(
       'Calendar discovery returned no calendars. The CalDAV server answered successfully but listed ' +
@@ -2908,10 +3346,10 @@ export class CalDAVCalendarClient {
     assertDavOk(responses, 'discover calendars');
   }
 
-  async getCalendars(): Promise<CalendarInfo[]> {
-    const calendars = await this.discoverCalendars();
+  async getCalendars(): Promise<CalendarListResult> {
+    const { calendars, brokenCollections } = await this.discoverCalendars();
 
-    return selectableCalendars(calendars)
+    const listed = selectableCalendars(calendars)
       .map(c => ({
         id: c.url || '',
         displayName: unwrapDisplayName(c.displayName) ?? 'Unnamed',
@@ -2929,11 +3367,12 @@ export class CalDAVCalendarClient {
           ? (c as any).calendarColor.trim()
           : undefined,
       }));
+    return { calendars: listed, brokenCollections: asBrokenCollectionsField(brokenCollections) };
   }
 
   async getCalendarEvents(calendarId?: string, limit: number = 50, startDate?: string, endDate?: string): Promise<CalendarEventQueryResult> {
     const client = await this.getClient();
-    const calendars = await this.discoverCalendars();
+    const { calendars, brokenCollections } = await this.discoverCalendars();
 
     let targetCalendars = selectableCalendars(calendars);
     // Trimmed and tested for PRESENCE, not for truthiness. `calendarId` narrows what the call
@@ -2966,7 +3405,7 @@ export class CalDAVCalendarClient {
       // answered "you are free" because of a typo. Matching is exact, so "work" for "Work"
       // is a plausible first-try miss. The write path has always thrown here; both raise the
       // same error through one helper so a caller sees one rule, not two.
-      if (matched.length === 0) throw calendarNotFoundError(calendarId, targetCalendars);
+      if (matched.length === 0) throw calendarNotFoundError(calendarId, targetCalendars, brokenCollections);
       targetCalendars = matched;
     }
 
@@ -3240,20 +3679,33 @@ export class CalDAVCalendarClient {
       events: allEvents.slice(0, limit),
       total: allEvents.length,
       windowClamp,
+      // The listing is built from the calendars that DID list, and says so (#136). A
+      // collection that failed at discovery is a different failure class from a calendar
+      // that listed and then failed when its events were read: that one still fails this
+      // whole call, from `fetchCalendarObjects` above, because the collection answered for
+      // itself and then broke — there is no "the rest of it" to answer from.
+      brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }
 
   /**
    * Find the raw DAVCalendarObject by UID or URL.
    * Needed for update/delete which require the original object with url/etag.
+   *
+   * Hands back what discovery could NOT search alongside the object (#136), because "no object
+   * matched" and "one collection could not be looked in" are two different answers and every
+   * caller of this needs both: the not-found errors say so, and the write paths that DO find a
+   * copy report the path they could not check.
    */
-  private async findCalendarObjectByUID(eventId: string): Promise<DAVCalendarObject | null> {
+  private async findCalendarObjectByUID(
+    eventId: string,
+  ): Promise<{ object: DAVCalendarObject | null; brokenCollections: BrokenCollections }> {
     const client = await this.getClient();
     // Routed through discovery so a failed lookup can only mean "no object matched". A
     // discovery failure throws here instead, which is what keeps getCalendarEventById from
     // telling the caller their event id is wrong about a call that never reached a
     // calendar (#100).
-    const calendars = await this.discoverCalendars();
+    const { calendars, brokenCollections } = await this.discoverCalendars();
 
     // The SELECTABLE calendars, matching the read path. Searching the unfiltered list let
     // get/update/delete reach a collection `list_calendars` never shows and
@@ -3268,16 +3720,16 @@ export class CalDAVCalendarClient {
         // the same exact-match category as the TZID substring check.
         const uid = parseICalValue(vevent, 'UID')?.trim();
         if (uid === eventId || obj.url === eventId) {
-          return obj;
+          return { object: obj, brokenCollections };
         }
       }
     }
 
-    return null;
+    return { object: null, brokenCollections };
   }
 
-  async getCalendarEventById(eventId: string): Promise<CalendarEvent> {
-    const obj = await this.findCalendarObjectByUID(eventId);
+  async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
+    const { object: obj, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     // Throw rather than return null so the MCP tool surfaces a real not-found
     // error — matches updateCalendarEvent/deleteCalendarEvent below. A null
     // here used to reach callers as a successful "null" tool response.
@@ -3285,9 +3737,12 @@ export class CalDAVCalendarClient {
     // so it must reach the boundary as InvalidParams ("re-form the call") rather
     // than InternalError ("server-side, a bare retry might work").
     if (!obj) {
-      throw new InvalidInputError(`Calendar event not found: ${eventId}`);
+      throw eventNotFoundError(eventId, brokenCollections);
     }
-    return parseCalendarObject(obj, { includeParticipants: true, configuredZone: resolveUsableTimezone(getDefaultTimezone()) });
+    return {
+      event: parseCalendarObject(obj, { includeParticipants: true, configuredZone: resolveUsableTimezone(getDefaultTimezone()) }),
+      brokenCollections: asBrokenCollectionsField(brokenCollections),
+    };
   }
 
   async createCalendarEvent(event: {
@@ -3308,7 +3763,7 @@ export class CalDAVCalendarClient {
     timeZone?: string | null;
   }): Promise<CreateCalendarEventResult> {
     const client = await this.getClient();
-    const calendars = await this.discoverCalendars();
+    const { calendars, brokenCollections } = await this.discoverCalendars();
 
     // RESOLVED like the read path, but not identically, and the difference is worth naming:
     // the read path `filter`s and queries EVERY calendar a name matches, while this `find`s
@@ -3336,7 +3791,14 @@ export class CalDAVCalendarClient {
       // A calendarId that matches no calendar is caller-fixable: they re-issue the call
       // with an id or name from list_calendars. Shared with the read path so both state
       // the same rule — see calendarNotFoundError.
-      throw calendarNotFoundError(event.calendarId, selectable);
+      //
+      // THIS IS ALSO THE REFUSAL FOR A TARGET ON A BROKEN PATH (#136), and it is one by
+      // construction rather than by a check of its own: a collection that failed to list never
+      // becomes a `DAVCalendar`, so it is never in `selectable` and can never be `targetCal`.
+      // The write therefore cannot land in a collection this server could not describe, and
+      // the caller is told which collection could not be described rather than being left to
+      // read "not found" as "that calendar does not exist".
+      throw calendarNotFoundError(event.calendarId, selectable, brokenCollections);
     }
 
     const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@fastmail-mcp`;
@@ -3435,6 +3897,7 @@ export class CalDAVCalendarClient {
       eventId: uid,
       start: classifyWrittenLine(startFormatted),
       end: classifyWrittenLine(endFormatted),
+      brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }
 
@@ -3454,11 +3917,22 @@ export class CalDAVCalendarClient {
     timeZone?: string | null;
   }): Promise<UpdateCalendarEventResult> {
     const client = await this.getClient();
-    const obj = await this.findCalendarObjectByUID(eventId);
+    // PROCEEDS ON THE COPY IT FOUND, and names the collection it could not check (#136).
+    //
+    // The alternative — refusing every write while any collection is unhealthy — was weighed
+    // and rejected, and the reasoning has to survive because "refuse when unsure" reads as the
+    // safe default and is not one here. Refusing would block EVERY calendar write for as long
+    // as one borrowed or shared collection stays unhealthy, and it would do so to guard a case
+    // that needs two things at once: a DUPLICATE UID across collections, AND the failure
+    // landing on the very collection holding the other copy. Against that, nothing is ever
+    // left half-done by proceeding — this path searches first and writes exactly once, to the
+    // one resource it resolved — so the worst outcome is that a second copy elsewhere goes
+    // unpatched, which the note names the path of.
+    const { object: obj, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     if (!obj) {
       // Caller-fixable bad id, same as getCalendarEventById: InvalidParams, not the
       // InternalError a plain Error maps to.
-      throw new InvalidInputError(`Calendar event not found: ${eventId}`);
+      throw eventNotFoundError(eventId, brokenCollections);
     }
 
     // Stays a plain Error: the event was found, but the server handed back an object with
@@ -3678,15 +4152,18 @@ export class CalDAVCalendarClient {
       eventId: existingUid,
       start: newStartFormatted ? classifyWrittenLine(newStartFormatted) : undefined,
       end: newEndFormatted ? classifyWrittenLine(newEndFormatted) : undefined,
+      brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }
 
-  async deleteCalendarEvent(eventId: string): Promise<void> {
+  async deleteCalendarEvent(eventId: string): Promise<DeleteCalendarEventResult> {
     const client = await this.getClient();
-    const obj = await this.findCalendarObjectByUID(eventId);
+    // Acts on the copy it found and names the path it could not check — the same call as
+    // update's, made for the same reasons; see the comment there (#136).
+    const { object: obj, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     if (!obj) {
       // Caller-fixable bad id, matching getCalendarEventById/updateCalendarEvent.
-      throw new InvalidInputError(`Calendar event not found: ${eventId}`);
+      throw eventNotFoundError(eventId, brokenCollections);
     }
 
     // Raised AFTER the lookup and BEFORE the delete, so it covers both ways an id resolves:
@@ -3700,5 +4177,6 @@ export class CalDAVCalendarClient {
 
     const deleteResp = await client.deleteCalendarObject({ calendarObject: obj });
     assertDavOk(deleteResp, 'delete calendar event');
+    return { brokenCollections: asBrokenCollectionsField(brokenCollections) };
   }
 }

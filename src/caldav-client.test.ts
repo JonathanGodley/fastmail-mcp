@@ -36,10 +36,14 @@ import {
   describeUpdateCalendarEventResult,
   unwrapDisplayName,
   CALENDAR_MAX_OCCURRENCES_PER_SERIES,
+  BROKEN_COLLECTION_PATH_ECHO_LIMIT,
+  isBrokenCalendarHomeEntry,
+  findBrokenCalendarHomeCollections,
 } from './caldav-client.js';
 // A value import, not `import type`: the redirect test below stubs a method on the
 // prototype, which needs the class itself. It still serves the type positions.
-import { DAVClient } from 'tsdav';
+import { DAVClient, fetchCalendars as tsdavFetchCalendars, propfind as tsdavPropfind } from 'tsdav';
+import type { DAVAccount, DAVResponse } from 'tsdav';
 import { callArguments } from './testing/mock-calls.js';
 // The calendar window's local-day resolution reads the deployment's configured zone from
 // the single place it is stored, so a test that asserts on a window has to pin that zone.
@@ -47,7 +51,7 @@ import { setDefaultTimezone } from './email-formatter.js';
 // For the timeZone/endTimeZone serialisation check: `toolJson` is the seam get_calendar_event
 // renders through, `formatQueryResult` is the one list_calendar_events renders through.
 import { toolJson, isUsableTimezone, resolveCalendarInstantMs, InvalidInputError } from './coerce.js';
-import { formatQueryResult } from './response-formatters.js';
+import { buildBrokenCollectionNote, formatQueryResult } from './response-formatters.js';
 
 // The mocked DAVClient methods below declare these parameter lists rather than
 // taking no arguments. A `mock.fn(async () => …)` stub records its arguments as an
@@ -81,6 +85,124 @@ function makeMockDAVClient<Calendar, Rest extends object & { login?: never; fetc
     ...rest,
   };
 }
+
+// ---- discovery driven by a RAW multistatus, through tsdav's own parser (#136) ----
+//
+// The sibling of makeMockDAVClient above, for the one thing a list of hand-shaped
+// DAVCalendar objects cannot exercise: the broken-entry detection reads the RAW PROPFIND
+// body tsdav parsed, and an entry that failed never becomes a DAVCalendar at all — tsdav
+// drops it on `resourcetype`, which is exactly how the failure used to vanish. So these
+// fixtures are XML, fed to the library's REAL `fetchCalendars` through a fake fetch, and the
+// detection under test reads the same answer the list was built from.
+//
+// Invented host and paths throughout: no account value belongs in a fixture.
+const HOME_LISTING_HOME_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/';
+const HOME_LISTING_ROOT_URL = 'https://caldav.example.invalid/';
+
+// What the per-calendar `supported-report-set` PROPFIND that tsdav's fetchCalendars fires
+// after the home listing gets back. It reads the answer tolerantly (no reports = an empty
+// array), so an empty multistatus is a complete, honest reply rather than a stub.
+const EMPTY_MULTISTATUS = '<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"></D:multistatus>';
+
+function davXmlResponse(body: string, status = 207): Response {
+  return new Response(body, {
+    status,
+    statusText: status === 207 ? 'Multi-Status' : 'OK',
+    headers: { 'content-type': 'application/xml; charset=utf-8' },
+  });
+}
+
+/**
+ * A stand-in DAVClient whose `fetchCalendars` is tsdav's REAL one, driven by a fake fetch
+ * that answers the calendar-home PROPFIND with `homeListingXml`.
+ *
+ * `fetchOverride` is the client's own published fetch seam (the same field the redirect test
+ * uses), and it is what discovery's capturing wrapper delegates to — so the capture, the
+ * parse and the library's own list all come off these bytes and nothing reaches a network.
+ */
+function makeHomeListingDAVClient<Rest extends object & { login?: never; fetchCalendars?: never; account?: never }>(
+  homeListingXml: string,
+  rest: Rest,
+  options?: { homeResponse?: () => Response },
+) {
+  // The two fields tsdav's fetchCalendars actually requires, plus the two its DAVAccount type
+  // demands. `serverUrl`/`accountType` are never read on this path — the fake fetch below
+  // answers every request — so they are named for the type and nothing else.
+  const account: DAVAccount = {
+    homeUrl: HOME_LISTING_HOME_URL,
+    rootUrl: HOME_LISTING_ROOT_URL,
+    serverUrl: HOME_LISTING_ROOT_URL,
+    accountType: 'caldav',
+  };
+  const requestedUrls: string[] = [];
+  const fetchOverride = (async (input: unknown) => {
+    const url = typeof input === 'string' ? input : String((input as { url?: string })?.url ?? input);
+    requestedUrls.push(url);
+    if (url === HOME_LISTING_HOME_URL) {
+      return options?.homeResponse ? options.homeResponse() : davXmlResponse(homeListingXml);
+    }
+    return davXmlResponse(EMPTY_MULTISTATUS);
+  }) as typeof globalThis.fetch;
+
+  return {
+    login: mock.fn(async () => {}),
+    account,
+    fetchOverride,
+    requestedUrls,
+    fetchCalendars: mock.fn(async (params?: { fetch?: typeof globalThis.fetch }) =>
+      tsdavFetchCalendars({ account, headers: {}, fetch: params?.fetch ?? fetchOverride })),
+    // The status-checked re-ask discovery makes when the list came back empty. tsdav's real
+    // propfind, so a failing home answer reaches assertDavOk exactly as it does in production.
+    propfind: mock.fn(async (params: { url: string; props: Record<string, unknown>; depth?: '0' | '1' | 'infinity' }) =>
+      tsdavPropfind({ ...params, fetch: fetchOverride })),
+    ...rest,
+  };
+}
+
+/** A `<D:response>` element for one collection in the home listing. */
+function homeListingEntry(href: string, body: string): string {
+  return `<D:response><D:href>${href}</D:href>${body}</D:response>`;
+}
+
+/** A healthy collection: a 200 propstat carrying resourcetype and a display name. */
+function healthyCalendarEntry(href: string, displayName: string): string {
+  return homeListingEntry(
+    href,
+    '<D:propstat><D:prop>' +
+      '<D:resourcetype><D:collection/><C:calendar/></D:resourcetype>' +
+      `<D:displayname>${displayName}</D:displayname>` +
+      '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>',
+  );
+}
+
+function homeListing(...entries: string[]): string {
+  return (
+    '<?xml version="1.0" encoding="utf-8"?>' +
+    '<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">' +
+    homeListingEntry(
+      '/dav/calendars/user/probe/',
+      '<D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype>' +
+        '<D:displayname>Calendars</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>',
+    ) +
+    entries.join('') +
+    '</D:multistatus>'
+  );
+}
+
+/** The failure form where the whole response element failed: an href and a status, nothing else. */
+const FAILED_RESPONSE_ENTRY = homeListingEntry(
+  '/dav/calendars/user/probe/wobbly/',
+  '<D:status>HTTP/1.1 507 Insufficient Storage</D:status>',
+);
+
+/** The other failure form: the element succeeded, its propstat did not, so the props are gone. */
+const FAILED_PROPSTAT_ENTRY = homeListingEntry(
+  '/dav/calendars/user/probe/wobbly/',
+  '<D:propstat><D:prop><D:resourcetype/><D:displayname/></D:prop>' +
+    '<D:status>HTTP/1.1 403 Forbidden</D:status></D:propstat>',
+);
+
+const BROKEN_COLLECTION_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/wobbly/';
 
 // requireNonEmpty / validateClearFields are owned by src/coerce.ts and covered
 // there (including the InvalidInputError class the calendar tools depend on for
@@ -1010,7 +1132,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
     const { client } = createMockedClientWithUpdateDelete([]);
     await assert.rejects(
       () => client.updateCalendarEvent('nonexistent@fm', { title: 'X' }),
-      /Calendar event not found: nonexistent@fm/
+      /Calendar event not found: "nonexistent@fm"/
     );
   });
 
@@ -1023,7 +1145,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
       () => client.updateCalendarEvent('nonexistent@fm', { title: 'X' }),
       (err: Error) => {
         assert.equal(err.name, 'InvalidInputError');
-        assert.match(err.message, /Calendar event not found: nonexistent@fm/);
+        assert.match(err.message, /Calendar event not found: "nonexistent@fm"/);
         return true;
       },
     );
@@ -1078,7 +1200,7 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
     const { client } = createMockedClientWithDelete([]);
     await assert.rejects(
       () => client.deleteCalendarEvent('nonexistent@fm'),
-      /Calendar event not found: nonexistent@fm/
+      /Calendar event not found: "nonexistent@fm"/
     );
   });
 
@@ -1090,7 +1212,7 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
       () => client.deleteCalendarEvent('nonexistent@fm'),
       (err: Error) => {
         assert.equal(err.name, 'InvalidInputError');
-        assert.match(err.message, /Calendar event not found: nonexistent@fm/);
+        assert.match(err.message, /Calendar event not found: "nonexistent@fm"/);
         return true;
       },
     );
@@ -1119,7 +1241,7 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
     ].join('\r\n');
     const { client } = createMockedClientWithObjects([{ data: ical, url: '/cal/get1.ics', etag: '"etag1"' }]);
 
-    const event = await client.getCalendarEventById('get1@fm');
+    const { event } = await client.getCalendarEventById('get1@fm');
     assert.equal(event.id, 'get1@fm');
     assert.equal(event.title, 'Findable');
   });
@@ -1139,7 +1261,7 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
     ].join('\r\n');
     const { client } = createMockedClientWithObjects([{ data: ical, url: '/cal/padded.ics' }]);
 
-    const event = await client.getCalendarEventById('padded-uid');
+    const { event } = await client.getCalendarEventById('padded-uid');
     assert.equal(event.id, 'padded-uid');
   });
 
@@ -1163,7 +1285,7 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
       ].join('\r\n');
       const { client } = createMockedClientWithObjects([{ data: ical, url: '/cal/stored.ics' }]);
 
-      const event = await client.getCalendarEventById('stored@fm');
+      const { event } = await client.getCalendarEventById('stored@fm');
       // The wall clock as stored — not converted, not stamped with an offset — and the TZID
       // alongside it, because it differs from the configured zone.
       assert.equal(event.start, '2026-03-20T08:30:00');
@@ -1181,7 +1303,7 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
     const { client } = createMockedClientWithObjects([]);
     await assert.rejects(
       () => client.getCalendarEventById('nonexistent@fm'),
-      /Calendar event not found: nonexistent@fm/
+      /Calendar event not found: "nonexistent@fm"/
     );
   });
 
@@ -6034,6 +6156,805 @@ describe('CalDAVCalendarClient calendar discovery failures', () => {
   });
 });
 
+// A broken entry inside the calendar home's own listing (#136). Every fixture here is RAW
+// multistatus XML run through tsdav's real parser: the entry the detection has to catch is one
+// the library DROPS from its calendar list (it keeps only entries that still look like
+// calendars), so a fixture of hand-shaped DAVCalendar objects could not contain the case at all
+// — which is precisely how the failure used to go unnoticed.
+describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
+  const EVENT_ICAL = [
+    'BEGIN:VCALENDAR',
+    'BEGIN:VEVENT',
+    'UID:borrowed@fm',
+    'DTSTART:20270305T090000Z',
+    'DTEND:20270305T100000Z',
+    'SUMMARY:Standup',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+
+  function clientWith(homeListingXml: string, rest: Record<string, unknown> = {}) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const dav = makeHomeListingDAVClient(homeListingXml, {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+      ...rest,
+    } as any);
+    (client as any).client = dav;
+    return { client, dav };
+  }
+
+  const ONE_HEALTHY_ONE_FAILED_RESPONSE = homeListing(
+    healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal'),
+    FAILED_RESPONSE_ENTRY,
+  );
+  const ONE_HEALTHY_ONE_FAILED_PROPSTAT = homeListing(
+    healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal'),
+    FAILED_PROPSTAT_ENTRY,
+  );
+
+  // ---- the two forms a failure takes in the parsed entries ----
+
+  it('names a collection whose response element came back non-2xx', async () => {
+    const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE);
+
+    const listed = await client.getCalendars();
+    assert.deepEqual(listed.calendars.map(c => c.displayName), ['Personal']);
+    assert.deepEqual(listed.brokenCollections, [BROKEN_COLLECTION_URL]);
+  });
+
+  it('names a collection whose propstat failed, leaving it with no resourcetype', async () => {
+    // The OTHER shape, and the reason the predicate is not just a status test: this element is
+    // 207/200 at the response level. tsdav's reducer takes properties from 2xx propstats only,
+    // so a 403 propstat leaves the entry with its properties gone — the same information loss
+    // as an outright failed response, arriving with a healthy-looking status.
+    const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_PROPSTAT);
+
+    const listed = await client.getCalendars();
+    assert.deepEqual(listed.calendars.map(c => c.displayName), ['Personal']);
+    assert.deepEqual(listed.brokenCollections, [BROKEN_COLLECTION_URL]);
+  });
+
+  // ---- the false-positive pin ----
+
+  it('flags nothing on a healthy listing carrying non-calendar collections and a 404 propstat', async () => {
+    // Everything a real Fastmail calendar home holds beside its calendars, plus the one shape
+    // most likely to be misread as a failure: a multi-propstat element where the 200 half
+    // carries resourcetype and the 404 half reports a property the server does not have. If any
+    // of these tripped the detection, every account would carry a note on every call.
+    const healthyEverything = homeListing(
+      healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal'),
+      // A hidden task collection: a real calendar that list_calendars filters out by name.
+      healthyCalendarEntry('/dav/calendars/user/probe/tasks/', 'DEFAULT_TASK_CALENDAR_NAME'),
+      // Scheduling inbox/outbox: collections with a resourcetype that is not `calendar`.
+      homeListingEntry(
+        '/dav/calendars/user/probe/inbox/',
+        '<D:propstat><D:prop><D:resourcetype><D:collection/><C:schedule-inbox/></D:resourcetype>' +
+          '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>',
+      ),
+      homeListingEntry(
+        '/dav/calendars/user/probe/outbox/',
+        '<D:propstat><D:prop><D:resourcetype><D:collection/><C:schedule-outbox/></D:resourcetype>' +
+          '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>',
+      ),
+      // An ordinary calendar whose ctag the server does not carry: 200 for the properties it
+      // has, 404 for the one it does not. A per-property miss is not a failed collection.
+      homeListingEntry(
+        '/dav/calendars/user/probe/shared/',
+        '<D:propstat><D:prop><D:resourcetype><D:collection/><C:calendar/></D:resourcetype>' +
+          '<D:displayname>Shared</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>' +
+          '<D:propstat><D:prop><CS:getctag/></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>',
+      ),
+    );
+    const { client } = clientWith(healthyEverything);
+
+    const listed = await client.getCalendars();
+    assert.deepEqual(listed.calendars.map(c => c.displayName), ['Personal', 'Shared']);
+    assert.equal(listed.brokenCollections, undefined);
+  });
+
+  // ---- caching ----
+
+  it('does not cache a list built while a collection was broken', async () => {
+    const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE);
+
+    const first = await client.getCalendars();
+    const second = await client.getCalendars();
+
+    assert.deepEqual(first.brokenCollections, [BROKEN_COLLECTION_URL]);
+    // The SECOND call still discloses it, which is the point: caching would have answered
+    // from the short list with no note at all, for the life of the process.
+    assert.deepEqual(second.brokenCollections, [BROKEN_COLLECTION_URL]);
+    assert.equal(dav.fetchCalendars.mock.callCount(), 2);
+  });
+
+  it('still caches a healthy list', async () => {
+    // The other half of the rule. Re-discovering on every call is the cost of a broken entry,
+    // not the new normal.
+    const { client, dav } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+    );
+
+    await client.getCalendars();
+    const second = await client.getCalendars();
+
+    assert.equal(dav.fetchCalendars.mock.callCount(), 1);
+    // And the cached answer discloses nothing, because nothing was broken when it was built —
+    // a cached list is by construction a list with no broken entry beside it.
+    assert.equal(second.brokenCollections, undefined);
+  });
+
+  it('reads the home listing tsdav parsed rather than asking a second time', async () => {
+    // The premise the whole mechanism rests on: one PROPFIND of the calendar home, whose
+    // answer serves both the calendar list and the detection. A second request could disagree
+    // with the first in either direction.
+    const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE);
+
+    const listed = await client.getCalendars();
+
+    assert.deepEqual(listed.brokenCollections, [BROKEN_COLLECTION_URL]);
+    assert.deepEqual(
+      dav.requestedUrls.filter((u: string) => u === HOME_LISTING_HOME_URL),
+      [HOME_LISTING_HOME_URL],
+      'the calendar home was requested more than once, so the detection is not reading the answer the list was built from',
+    );
+  });
+
+  // ---- the read tools ----
+
+  it('lists events from the calendars that did list, carrying the broken path', async () => {
+    const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+      ]),
+    });
+
+    const { events, total, brokenCollections } = await client.getCalendarEvents(
+      undefined, 50, '2027-03-01T00:00:00Z', '2027-03-10T00:00:00Z',
+    );
+
+    assert.equal(total, 1);
+    assert.equal(events[0].title, 'Standup');
+    assert.deepEqual(brokenCollections, [BROKEN_COLLECTION_URL]);
+  });
+
+  it('returns an event found elsewhere, carrying the broken path', async () => {
+    const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+      ]),
+    });
+
+    const { event, brokenCollections } = await client.getCalendarEventById('borrowed@fm');
+
+    assert.equal(event.title, 'Standup');
+    assert.deepEqual(brokenCollections, [BROKEN_COLLECTION_URL]);
+  });
+
+  it('names the broken path in a not-found error, so the id is not blamed alone', async () => {
+    const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE);
+
+    await assert.rejects(
+      () => client.getCalendarEventById('missing@fm'),
+      (err: Error) => {
+        assert.match(err.message, /Calendar event not found: "missing@fm"/);
+        assert.match(err.message, /a collection in the calendar list failed to list/);
+        assert.ok(err.message.includes(BROKEN_COLLECTION_URL), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('answers a caller who names the broken collection with the healthy names and that path', async () => {
+    // The name is destroyed by the failure, so there is nothing to match on and no way to tell
+    // this from a typo — which is why the not-found error has to carry both facts.
+    const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE);
+
+    await assert.rejects(
+      () => client.getCalendarEvents(BROKEN_COLLECTION_URL, 50, '2027-03-01', '2027-03-10'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Calendar not found/);
+        assert.match(err.message, /Available calendars: "Personal"/);
+        assert.match(err.message, /a collection in the calendar list failed to list/);
+        assert.ok(err.message.includes(BROKEN_COLLECTION_URL), err.message);
+        return true;
+      },
+    );
+  });
+
+  // ---- the write tools ----
+
+  it('refuses a create targeting the broken path, naming it', async () => {
+    const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
+      createCalendarObject: mock.fn(async (_p: CreateObjectParams) => ({ ok: true, status: 201 })),
+    });
+
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        calendarId: BROKEN_COLLECTION_URL,
+        title: 'Nope',
+        start: '2027-03-05T09:00:00Z',
+        end: '2027-03-05T10:00:00Z',
+      }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /a collection in the calendar list failed to list/);
+        assert.ok(err.message.includes(BROKEN_COLLECTION_URL), err.message);
+        return true;
+      },
+    );
+    assert.equal((dav as any).createCalendarObject.mock.callCount(), 0, 'nothing may be written to a collection that failed to list');
+  });
+
+  it('writes to a healthy calendar and reports the broken path', async () => {
+    const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
+      createCalendarObject: mock.fn(async (_p: CreateObjectParams) => ({ ok: true, status: 201 })),
+    });
+
+    const result = await client.createCalendarEvent({
+      calendarId: 'Personal',
+      title: 'Standup',
+      start: '2027-03-05T09:00:00Z',
+      end: '2027-03-05T10:00:00Z',
+    });
+
+    assert.ok(result.eventId);
+    assert.deepEqual(result.brokenCollections, [BROKEN_COLLECTION_URL]);
+    assert.equal((dav as any).createCalendarObject.mock.callCount(), 1);
+  });
+
+  it('updates the copy it found and names the collection it could not check', async () => {
+    const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+      ]),
+      updateCalendarObject: mock.fn(async (_p: UpdateObjectParams) => ({ ok: true, status: 204 })),
+    });
+
+    const result = await client.updateCalendarEvent('borrowed@fm', { title: 'Renamed' });
+
+    assert.equal(result.eventId, 'borrowed@fm');
+    assert.equal((dav as any).updateCalendarObject.mock.callCount(), 1, 'a broken collection must not block every calendar write');
+    assert.deepEqual(result.brokenCollections, [BROKEN_COLLECTION_URL]);
+  });
+
+  it('deletes the copy it found and names the collection it could not check', async () => {
+    const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+      ]),
+      deleteCalendarObject: mock.fn(async (_p: DeleteObjectParams) => ({ ok: true, status: 204 })),
+    });
+
+    const result = await client.deleteCalendarEvent('borrowed@fm');
+
+    assert.equal((dav as any).deleteCalendarObject.mock.callCount(), 1);
+    assert.deepEqual(result.brokenCollections, [BROKEN_COLLECTION_URL]);
+  });
+
+  // ---- what is NOT this failure class ----
+
+  it('still throws on a non-multistatus body, rather than blaming one collection', async () => {
+    // #100's case: the home itself did not answer. tsdav turns a non-multistatus body into ONE
+    // pseudo-entry whose href is the request URL — the home, not a child of it — so this must
+    // reach the whole-discovery failure and never be reported as one broken child.
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = makeHomeListingDAVClient(
+      '',
+      { fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []) },
+      {
+        homeResponse: () => new Response('<html>gateway timeout</html>', {
+          status: 504,
+          statusText: 'Gateway Timeout',
+          headers: { 'content-type': 'text/html' },
+        }),
+      },
+    );
+
+    await assert.rejects(
+      () => client.getCalendars(),
+      /discover calendars: server returned 504/,
+    );
+  });
+
+  it('still throws when the failed entry IS the calendar home', async () => {
+    // A multistatus whose one failed element is the home's own href. The home is not a
+    // collection inside itself, so this is a whole-discovery failure, not one broken child.
+    const { client } = clientWith(
+      '<?xml version="1.0" encoding="utf-8"?>' +
+      '<D:multistatus xmlns:D="DAV:">' +
+      '<D:response><D:href>/dav/calendars/user/probe/</D:href>' +
+      '<D:status>HTTP/1.1 503 Service Unavailable</D:status></D:response>' +
+      '</D:multistatus>',
+    );
+
+    await assert.rejects(
+      () => client.getCalendars(),
+      /discover calendars: server returned 503/,
+    );
+  });
+
+  it('still throws on a response element carrying no href at all', async () => {
+    // Nothing places such an entry anywhere, least of all under the calendar home, so it is not
+    // attributable to one collection — and it leaves no calendars, so discovery fails whole.
+    const { client } = clientWith(
+      '<?xml version="1.0" encoding="utf-8"?>' +
+      '<D:multistatus xmlns:D="DAV:">' +
+      '<D:response><D:status>HTTP/1.1 500 Internal Server Error</D:status></D:response>' +
+      '</D:multistatus>',
+    );
+
+    await assert.rejects(
+      () => client.getCalendars(),
+      /discover calendars: server returned 500/,
+    );
+  });
+
+  it('still throws when the home listing carries only a broken collection', async () => {
+    // Zero healthy calendars is not something to answer around: it goes through the existing
+    // empty-list guard, because an empty result would read as "there are no events". That
+    // guard's status-checked re-ask is depth 1, so what surfaces is the broken child's own
+    // status rather than the generic "listed no calendar collections" sentence — which is the
+    // sharper of the two, and the point is only that it throws.
+    const { client } = clientWith(homeListing(FAILED_RESPONSE_ENTRY));
+
+    await assert.rejects(
+      () => client.getCalendars(),
+      /discover calendars: server returned 507/,
+    );
+  });
+
+  it('still fails the whole call when a calendar that LISTED then fails on read', async () => {
+    // The other failure class, and it is deliberately unchanged: a collection that answered for
+    // itself and then broke has no "rest of it" to answer from, so the call errors rather than
+    // returning a partial listing under a note.
+    const { client } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+      {
+        fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => {
+          throw new Error('calendar-query failed: 503 Service Unavailable');
+        }),
+      },
+    );
+
+    await assert.rejects(
+      () => client.getCalendarEvents(undefined, 50, '2027-03-01', '2027-03-10'),
+      /calendar-query failed: 503 Service Unavailable/,
+    );
+  });
+
+  // ---- the echo bound ----
+
+  it('echoes the server\'s own reason phrase as a value, rather than pasting it into the sentence', async () => {
+    // The discovery re-ask reports the status it got, and the reason phrase beside it is prose
+    // the SERVER wrote — the last unsanitised interpolation on this path. It goes through the
+    // shared echo like every other untrusted value: scrubbed of the separators that would
+    // forge a further line, and BOUNDED — which is the half a fixture can reach, because a
+    // reason phrase carrying a line separator does not survive the status-line parse to get
+    // here in the first place.
+    const hostile = `Insufficient Storage ${'z'.repeat(200)}`;
+    const { client } = clientWith(
+      homeListing(
+        homeListingEntry(
+          '/dav/calendars/user/probe/wobbly/',
+          `<D:status>HTTP/1.1 507 ${hostile}</D:status>`,
+        ),
+      ),
+    );
+
+    await assert.rejects(
+      () => client.getCalendars(),
+      (err: Error) => {
+        assert.match(err.message, /server returned 507/);
+        assert.ok(err.message.length < 200, err.message);
+        assert.ok(!err.message.includes('z'.repeat(200)), err.message);
+        assert.ok(err.message.includes('…'), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('will not let a caller id close its own quotes and write a second disclosure', async () => {
+    // The id is rendered inside a quoted span immediately in front of the broken-collection
+    // clause, so a `"` in the value would close that span and let the rest of the id read as
+    // the server's own sentence — a disclosure naming a collection that never broke, on an
+    // account where nothing did. Bounding and control-character scrubbing do not stop this:
+    // the payload is short and contains nothing that forges a line.
+    const forged = 'x" Separately, a collection in the calendar list failed to list, '
+      + 'so nothing in it could be read: "/dav/calendars/user/j/private';
+    const { client } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+    );
+
+    await assert.rejects(
+      () => client.getCalendarEventById(forged),
+      (err: Error) => {
+        // Exactly the one pair the SERVER wrote. Any more and the value has punctuation of
+        // its own in the sentence's grammar.
+        assert.equal(
+          (err.message.match(/"/g) ?? []).length,
+          2,
+          `the echoed id kept a quote of its own: ${err.message}`,
+        );
+        assert.ok(
+          !err.message.includes('could be read: "'),
+          `a forged disclosure survived into the message: ${err.message}`,
+        );
+        return true;
+      },
+    );
+  });
+
+  it('adds no dangling separator when the server sent no reason phrase worth printing', async () => {
+    // The other half of the same interpolation, and not a contrived one: HTTP/2 carries no
+    // reason phrase at all, so `statusText` on a real fetch Response is routinely the empty
+    // string. The message must not end in the space a phrase would have sat after, and must
+    // not print the echo's own rendering of nothing in its place.
+    const { client } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+      {
+        createCalendarObject: mock.fn(async (_p: CreateObjectParams) => ({
+          ok: false,
+          status: 500,
+          statusText: '   ',
+        })),
+      },
+    );
+
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        title: 'Standup',
+        start: '2027-03-05T09:00:00',
+        end: '2027-03-05T10:00:00',
+        calendarId: 'Personal',
+      }),
+      (err: Error) => {
+        assert.equal(err.message, 'Failed to create calendar event: server returned 500');
+        return true;
+      },
+    );
+  });
+
+  it('cuts an over-long broken path with a visible marker', async () => {
+    const longSegment = 'w'.repeat(400);
+    const { client } = clientWith(
+      homeListing(
+        healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal'),
+        homeListingEntry(
+          `/dav/calendars/user/probe/${longSegment}/`,
+          '<D:status>HTTP/1.1 507 Insufficient Storage</D:status>',
+        ),
+      ),
+    );
+
+    const listed = await client.getCalendars();
+    assert.equal(listed.brokenCollections?.length, 1);
+    // The STRUCTURE carries the path whole — it is a fact about the account, not a message —
+    // and the bound is applied where it is rendered.
+    assert.ok(listed.brokenCollections![0].length > BROKEN_COLLECTION_PATH_ECHO_LIMIT);
+
+    const note = buildBrokenCollectionNote(listed.brokenCollections, 'read');
+    assert.ok(note.includes('…'), note.slice(0, 300));
+    assert.ok(!note.includes(longSegment), 'the whole path reached the note, so the bound did nothing');
+
+    // The thrown message is bounded by the same constant, so one hostile path cannot become
+    // the error on either surface.
+    await assert.rejects(
+      () => client.getCalendarEventById('missing@fm'),
+      (err: Error) => {
+        assert.ok(!err.message.includes(longSegment), err.message.slice(0, 300));
+        assert.ok(err.message.includes('…'), err.message);
+        return true;
+      },
+    );
+  });
+
+  // ---- the thrown clause: the counterpart to the returned note, and its own bounds ----
+
+  function brokenEntries(count: number): string[] {
+    return Array.from({ length: count }, (_, i) =>
+      homeListingEntry(
+        `/dav/calendars/user/probe/wobbly${i}/`,
+        '<D:status>HTTP/1.1 507 Insufficient Storage</D:status>',
+      ));
+  }
+
+  const brokenUrl = (i: number) => `https://caldav.example.invalid/dav/calendars/user/probe/wobbly${i}/`;
+
+  it('writes the whole clause for a single broken collection, with nothing left dangling', async () => {
+    // Asserted verbatim rather than by phrase: this clause is the only place the disclosure
+    // reaches a caller who gets an ERROR instead of a result, so a half-written one is as bad
+    // as a missing one.
+    const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE);
+
+    await assert.rejects(
+      () => client.getCalendarEventById('missing@fm'),
+      (err: Error) => {
+        assert.equal(
+          err.message,
+          'Calendar event not found: "missing@fm"'
+            + ' Separately, a collection in the calendar list failed to list, so nothing in it could be read: '
+            + `"${BROKEN_COLLECTION_URL}". `
+            + 'The failure destroyed its name and its type, so it cannot be said whether it was a calendar.',
+        );
+        return true;
+      },
+    );
+  });
+
+  it('names every broken collection up to the cap, then counts the rest', async () => {
+    // Two counts, because the cap is a boundary: five is the last one named in full.
+    const atCap = clientWith(homeListing(
+      healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal'),
+      ...brokenEntries(5),
+    )).client;
+
+    await assert.rejects(
+      () => atCap.getCalendarEventById('missing@fm'),
+      (err: Error) => {
+        assert.match(err.message, /5 collections in the calendar list failed to list/);
+        for (let i = 0; i < 5; i += 1) assert.ok(err.message.includes(brokenUrl(i)), err.message);
+        assert.ok(!err.message.includes('…and'), err.message);
+        // The paths are separated, so five cannot read as one.
+        assert.ok(err.message.includes(`"${brokenUrl(0)}", "${brokenUrl(1)}"`), err.message);
+        // PAST THE SUBJECT LINE: every pronoun downstream of it agrees in number too. Both
+        // copies of this wording once said "5 collections … The failure destroyed ITS name",
+        // which reads as one collection and undercounts what was lost.
+        assert.ok(
+          err.message.includes(
+            `"${brokenUrl(4)}". The failure destroyed their names and their types, `
+            + 'so it cannot be said whether they were calendars.',
+          ),
+          err.message,
+        );
+        assert.ok(err.message.includes('so nothing in them could be read'), err.message);
+        assert.ok(!err.message.includes('nothing in it could be read'), err.message);
+        return true;
+      },
+    );
+
+    const overCap = clientWith(homeListing(
+      healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal'),
+      ...brokenEntries(7),
+    )).client;
+
+    await assert.rejects(
+      () => overCap.getCalendarEventById('missing@fm'),
+      (err: Error) => {
+        assert.match(err.message, /7 collections in the calendar list failed to list/);
+        assert.ok(err.message.includes(`, …and 2 more`), err.message);
+        assert.ok(err.message.includes(brokenUrl(4)), err.message);
+        assert.ok(!err.message.includes(brokenUrl(5)), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('adds no such clause when every collection in the home answered', async () => {
+    // The other direction of the same rule: a healthy account must not carry a broken-
+    // collection sentence on its ordinary not-found errors.
+    const { client } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+    );
+
+    // Asserted as the WHOLE message, because "does not contain the phrase" would pass on any
+    // other stray clause the healthy path might append.
+    await assert.rejects(
+      () => client.getCalendarEventById('missing@fm'),
+      (err: Error) => {
+        assert.equal(err.message, 'Calendar event not found: "missing@fm"');
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      () => client.getCalendarEvents('nope', 50, '2027-03-01', '2027-03-10'),
+      (err: Error) => {
+        assert.match(err.message, /Calendar not found/);
+        assert.ok(!err.message.includes('failed to list'), err.message);
+        assert.ok(!err.message.includes('Separately'), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('reports nothing when the library resolved no calendar home', async () => {
+    // Without a home URL there is no inside to be inside of: an empty string resolves to no
+    // URL, so `findBrokenCalendarHomeCollections` takes its `home === undefined` guard and
+    // returns nothing at all, rather than judging every href against a home with no segments
+    // — which every href would sit under. A missed disclosure is the safe direction to fail
+    // in; reading a whole healthy account as broken is not.
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const dav = {
+      login: mock.fn(async () => {}),
+      account: {
+        homeUrl: '',
+        rootUrl: HOME_LISTING_ROOT_URL,
+        serverUrl: HOME_LISTING_ROOT_URL,
+        accountType: 'caldav',
+      } as DAVAccount,
+      fetchOverride: (async () => davXmlResponse(ONE_HEALTHY_ONE_FAILED_RESPONSE)) as typeof globalThis.fetch,
+      // Still reads an answer through the capturing fetch, so the capture happens and it is
+      // only the home URL that is missing.
+      fetchCalendars: mock.fn(async (params?: { fetch?: typeof globalThis.fetch }) => {
+        await (params?.fetch ?? globalThis.fetch)(HOME_LISTING_HOME_URL, { method: 'PROPFIND' });
+        return [{ url: `${HOME_LISTING_HOME_URL}personal/`, displayName: 'Personal' }];
+      }),
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []),
+    };
+    (client as any).client = dav;
+
+    const listed = await client.getCalendars();
+    assert.deepEqual(listed.calendars.map(c => c.displayName), ['Personal']);
+    assert.equal(listed.brokenCollections, undefined);
+  });
+});
+
+// The predicate on its own, because through discovery both failure forms arrive with their
+// properties already gone — so the status half of the rule is never the sole reason an entry
+// is flagged there, and a fixture cannot reach the boundaries at all (#136).
+describe('isBrokenCalendarHomeEntry', () => {
+  const RESOURCETYPE = { collection: '', calendar: '' };
+  const entry = (over: Record<string, unknown>) => over as unknown as DAVResponse;
+
+  it('flags a non-2xx entry even when it still carries a resourcetype', () => {
+    // The status half standing alone: this entry describes itself perfectly well and the
+    // server still said it failed.
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: 507, props: { resourcetype: RESOURCETYPE } })), true);
+  });
+
+  it('accepts a 200 entry that describes itself', () => {
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: 200, props: { resourcetype: RESOURCETYPE } })), false);
+  });
+
+  it('flags a 1xx entry: a provisional status is not an answer', () => {
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: 199, props: { resourcetype: RESOURCETYPE } })), true);
+  });
+
+  it('flags 300, the first code that is not success', () => {
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: 300, props: { resourcetype: RESOURCETYPE } })), true);
+  });
+
+  it('flags an entry nothing observed a status for', () => {
+    assert.equal(isBrokenCalendarHomeEntry(entry({ props: { resourcetype: RESOURCETYPE } })), true);
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: '207', props: { resourcetype: RESOURCETYPE } })), true);
+  });
+
+  it('flags a malformed entry rather than throwing inside a disclosure', () => {
+    assert.equal(isBrokenCalendarHomeEntry(undefined as unknown as DAVResponse), true);
+  });
+
+  it('flags a 2xx entry whose properties are gone', () => {
+    // The failed-propstat form: healthy at the response level, described by nothing.
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: 207 })), true);
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: 207, props: {} })), true);
+  });
+
+  it('reads an EMPTY resourcetype as an answer, not an absence', () => {
+    // `<resourcetype/>` is a real answer — an ordinary non-collection resource — and flagging
+    // it would put a note on every healthy account.
+    assert.equal(isBrokenCalendarHomeEntry(entry({ status: 207, props: { resourcetype: {} } })), false);
+  });
+});
+
+// The positional half of the rule, which decides what counts as being INSIDE the calendar home
+// — the part that keeps a request-level failure out of the list (#136).
+describe('findBrokenCalendarHomeCollections', () => {
+  const HOME = 'https://caldav.example.invalid/dav/calendars/user/probe/';
+  const broken = (href: string) => ({ href, status: 507 }) as unknown as DAVResponse;
+
+  it('never reports the calendar home itself', () => {
+    // A home that failed is a whole-discovery failure, reported by the empty-list guard — not
+    // one broken child among healthy ones.
+    assert.deepEqual(findBrokenCalendarHomeCollections([broken('/dav/calendars/user/probe/')], HOME), []);
+    assert.deepEqual(findBrokenCalendarHomeCollections([broken(HOME)], HOME), []);
+  });
+
+  it('ignores a broken collection that sits outside the calendar home', () => {
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections([broken('/dav/addressbooks/user/probe/cards/')], HOME),
+      [],
+    );
+  });
+
+  it('does not read a sibling as being inside a home URL written without a trailing slash', () => {
+    // Both sides are compared as SEGMENT ARRAYS for exactly this: "probes" is not "probe", so
+    // the sibling is excluded on the segment that differs, and whether either URL happened to
+    // carry a trailing slash never enters into it. A prefix test over the joined paths would
+    // have swallowed every sibling whose name merely starts with the home's.
+    const slashless = 'https://caldav.example.invalid/dav/calendars/user/probe';
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections([broken('/dav/calendars/user/probes/')], slashless),
+      [],
+    );
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections([broken('/dav/calendars/user/probe/wobbly/')], slashless),
+      ['https://caldav.example.invalid/dav/calendars/user/probe/wobbly/'],
+    );
+  });
+
+  it('skips an entry with no href at all, rather than inventing a path for it', () => {
+    // The null-response-element shape. There is nothing to name, and naming the home would
+    // report a request-level failure as a broken child.
+    assert.deepEqual(findBrokenCalendarHomeCollections([{ status: 507 } as unknown as DAVResponse], HOME), []);
+    assert.deepEqual(findBrokenCalendarHomeCollections([undefined as unknown as DAVResponse], HOME), []);
+    assert.deepEqual(findBrokenCalendarHomeCollections([broken('   ')], HOME), []);
+    // And an href no URL parser can make sense of is skipped rather than thrown on: a
+    // disclosure must not become an exception of its own.
+    assert.deepEqual(findBrokenCalendarHomeCollections([broken('http://[')], HOME), []);
+  });
+
+  it('does not carry whitespace around an href into the path it reports', () => {
+    // A non-breaking space survives URL parsing, so without the trim it would become part of
+    // the collection path and name somewhere that does not exist.
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections([broken('/dav/calendars/user/probe/wobbly/ ')], HOME),
+      ['https://caldav.example.invalid/dav/calendars/user/probe/wobbly/'],
+    );
+  });
+
+  it('names a repeated collection once', () => {
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections(
+        [broken('/dav/calendars/user/probe/wobbly/'), broken('/dav/calendars/user/probe/wobbly/')],
+        HOME,
+      ),
+      ['https://caldav.example.invalid/dav/calendars/user/probe/wobbly/'],
+    );
+  });
+
+  it('ignores an absolute href on a FOREIGN host, however well its path lines up', () => {
+    // A multistatus href may be an absolute URL on any host — legal, and how a server points
+    // at a collection it does not itself hold. Judged on the path alone it reads as a
+    // collection inside this account, and the note then echoes a stranger's URL back to the
+    // caller as one of their own.
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections(
+        [broken('https://elsewhere.example.invalid/dav/calendars/user/probe/wobbly/')],
+        HOME,
+      ),
+      [],
+    );
+    // Same path, this account's host: reported, so the origin is what made the difference.
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections(
+        [broken('https://caldav.example.invalid/dav/calendars/user/probe/wobbly/')],
+        HOME,
+      ),
+      ['https://caldav.example.invalid/dav/calendars/user/probe/wobbly/'],
+    );
+  });
+
+  it('does not read an encoded slash inside one segment as a path separator', () => {
+    // `%2F` decodes to a character that was never a separator here. Decoded whole, this href
+    // reads as `/dav/calendars/user/probe/wobbly/` — a child of the home — when the collection
+    // it names is a sibling of it with an odd name.
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections([broken('/dav/calendars/user/probe%2Fwobbly/')], HOME),
+      [],
+    );
+  });
+
+  it('matches the two sides through their percent-encoding, not their spelling', () => {
+    // The home URL is the one tsdav resolved at login; each href is whatever the server wrote.
+    // Fastmail's home path carries an email address, so one side spelling `@` as `%40` would
+    // put every child somewhere else.
+    const encodedHome = 'https://caldav.example.invalid/dav/calendars/user/probe%40example.invalid/';
+    assert.deepEqual(
+      findBrokenCalendarHomeCollections(
+        [broken('/dav/calendars/user/probe@example.invalid/wobbly/')],
+        encodedHome,
+      ),
+      ['https://caldav.example.invalid/dav/calendars/user/probe@example.invalid/wobbly/'],
+    );
+  });
+
+  it('reports nothing when every collection inside the home answered', () => {
+    const healthy = { href: '/dav/calendars/user/probe/personal/', status: 200, props: { resourcetype: {} } };
+    assert.deepEqual(findBrokenCalendarHomeCollections([healthy as unknown as DAVResponse], HOME), []);
+  });
+});
+
 // Component splitting runs on FOLDED text — RFC 5545 unfolding happens later, per property —
 // so the markers that bound a VEVENT have to be line-anchored or the payload can name its own
 // boundaries. Calendar content here is authored by anyone who can send an invitation.
@@ -6856,7 +7777,7 @@ describe('calendar display names that are not strings', () => {
     );
     (client as any).client = mockDAVClient;
 
-    const calendars = await client.getCalendars();
+    const { calendars } = await client.getCalendars();
 
     assert.equal(calendars.length, 3);
     for (const cal of calendars) {
@@ -6880,7 +7801,7 @@ describe('calendar display names that are not strings', () => {
       { fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []) },
     );
 
-    const calendars = await client.getCalendars();
+    const { calendars } = await client.getCalendars();
 
     assert.equal(calendars.find(c => c.id === '/cal/personal/')!.color, undefined);
     assert.equal(calendars.find(c => c.id === '/cal/work/')!.color, '#aabbcc');
@@ -6905,7 +7826,7 @@ describe('calendar display names that are not strings', () => {
       { fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => []) },
     );
 
-    const calendars = await client.getCalendars();
+    const { calendars } = await client.getCalendars();
 
     assert.deepEqual(calendars.map(c => c.id), ['/cal/personal/', '/cal/nameless/']);
   });
@@ -6932,7 +7853,7 @@ describe('calendar display names that are not strings', () => {
     assert.equal(params.calendar.url, '/cal/year/');
     // And the name it reports back is one that resolves, which is the invariant the
     // stringifying half of the helper exists to keep.
-    const listed = await client.getCalendars();
+    const { calendars: listed } = await client.getCalendars();
     assert.equal(listed.find(c => c.id === '/cal/year/')!.displayName, '2026');
   });
 
@@ -7058,7 +7979,7 @@ describe('calendar display names that are not strings', () => {
     const [params] = callArguments(fetchCalendarObjects, 0);
     assert.equal(params.calendar.url, '/cal/boolish/');
     // And it is listed under the name that resolves it.
-    const listed = await client.getCalendars();
+    const { calendars: listed } = await client.getCalendars();
     assert.equal(listed.find(c => c.id === '/cal/boolish/')!.displayName, 'true');
   });
 });

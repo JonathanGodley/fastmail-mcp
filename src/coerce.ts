@@ -332,6 +332,20 @@ const DATE_ECHO_LIMIT = 60;
  *     a string that is not what was judged.
  *   SCRUB the control characters — and U+2028/U+2029 with them — that would otherwise forge
  *     extra lines in the message. A raw ESC in an echoed argument reaches a terminal intact.
+ *   NEUTRALISE the double quote, turning it into a single one, so that a value can never close
+ *     the `"…"` span at the callers that render one. Trimming, scrubbing and bounding all leave
+ *     that open: a short, control-character-free value carrying one `"` CLOSES the server's own
+ *     quoted span, and everything after it in the value reads as the server's next sentence.
+ *     Measured, not theorised — an event id shaped
+ *     `x" Separately, a collection in the calendar list failed to list, so nothing in it
+ *     could be read: "/dav/…` rendered a complete, well-formed broken-collection disclosure
+ *     inside "Calendar event not found", naming a collection that never broke on an account
+ *     where nothing had. Not every caller quotes: the two default-zone notes, the DAV reason
+ *     phrase, and the id and calendar in the repeating-event refusal render the value bare,
+ *     where there is no span to close and the swap only changes how the value prints; one
+ *     timezone message renders it inside `'…'`, a span this swap does not protect. The rule
+ *     lives here rather than at each quoting call site so a new one cannot be written without
+ *     it. `describePart`, the other echo helper, applies the same rule for the same reason.
  *   BOUND it, with a VISIBLE truncation marker, so a pasted blob does not become the error
  *     and a reader can tell a cut value from a short one.
  *
@@ -342,7 +356,7 @@ const DATE_ECHO_LIMIT = 60;
  */
 export function echoCallerText(value: unknown, limit: number = DATE_ECHO_LIMIT): string {
   const text = typeof value === 'string' ? value : String(value);
-  const clean = text.replace(/[\u0000-\u001F\u007F\u2028\u2029]/g, ' ').trim();
+  const clean = text.replace(/[\u0000-\u001F\u007F\u2028\u2029]/g, ' ').replace(/"/g, "'").trim();
   return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
 }
 

@@ -1,9 +1,9 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
-import { describeUntrusted, toolJson } from './coerce.js';
+import { describeUntrusted, echoCallerText, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
-import { CALENDAR_OPEN_WINDOW_DAYS } from './caldav-client.js';
+import { CALENDAR_OPEN_WINDOW_DAYS, summariseBrokenCollections } from './caldav-client.js';
 import type { CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 
@@ -254,6 +254,52 @@ export function buildCalendarWindowNote(clamp?: CalendarWindowClamp): string {
     }
   }
   return notes.length ? `\n\n${notes.join('\n')}` : '';
+}
+
+/**
+ * The disclosure for a collection that came back broken inside the calendar-home listing (#136).
+ *
+ * Beside `buildCalendarWindowNote` and for the same division of labour: the client returns the
+ * paths as structure, this owns the wording AND the blank-line separator, and the handler only
+ * concatenates. Silence means every collection in the calendar home answered.
+ *
+ * The subject, the path list and the sentence bounding what may be claimed all come from
+ * `summariseBrokenCollections`, shared with the thrown clause so the two surfaces cannot drift
+ * (they already had, on the pronouns). What is owned HERE is the `Note:` prefix, the blank-line
+ * separator and the consequence — the parts that only make sense on a returned result.
+ *
+ * `context` picks that consequence, and it is the only part that differs by caller:
+ *   - READ answered around the failure, so the thing to say is that this answer is not complete;
+ *   - CREATE wrote to a calendar it could see, so the thing to say is only that the failed
+ *     collection was not among them. It must NOT claim a copy was looked for: a create searches
+ *     for nothing and has no prior record to find;
+ *   - WRITE (update/delete) resolved an existing record by searching the collections that
+ *     listed, so the copy search is exactly what a caller needs told about.
+ */
+export function buildBrokenCollectionNote(
+  paths: string[] | undefined,
+  context: 'read' | 'create' | 'write',
+): string {
+  if (!paths || paths.length === 0) return '';
+  const summary = summariseBrokenCollections(paths);
+  const subjectPronoun = summary.plural ? 'They were' : 'It was';
+  const objectPronoun = summary.plural ? 'them' : 'it';
+  const consequence = context === 'read'
+    ? 'This answer was built from the collections that did list, so anything held in '
+      + `${summary.plural ? 'those' : 'that one'} is missing from it and an empty or quiet result `
+      + 'is not proof of a free day.'
+    : context === 'create'
+      ? `${subjectPronoun} not among the collections this call could see, so nothing in `
+        + `${objectPronoun} was read or written.`
+      : `${subjectPronoun} not among the collections this call could see, so nothing in `
+        + `${objectPronoun} was read, written, or checked for another copy of this event.`;
+  return (
+    `\n\nNote: ${summary.subject}: ${summary.paths}. ${summary.disclaimer} ${consequence} `
+    // Names the calendar LIST rather than a pronoun: what is re-asked is the whole listing,
+    // not the failed collection on its own, and a pronoun here would have to agree in number
+    // with the subject — which is how this clause came to say "about it" under a plural one.
+    + 'Nothing was cached: the next calendar call re-asks the server for the whole calendar list.'
+  );
 }
 
 // Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the
