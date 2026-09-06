@@ -3738,9 +3738,19 @@ function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start'
   if (strandedLines.length === 0) return;
   const desc = describeDateProperty(strandedLines[0]);
   if (desc.frame === 'zoned' && desc.tzid && !zoneNamesEqual(desc.tzid, callerZone)) {
+    // THE TWO ZONE NAMES IN THIS SENTENCE ARE NOT THE SAME KIND OF VALUE, which is why they are
+    // quoted differently rather than by oversight. `callerZone` is ICU's own canonical spelling,
+    // produced by `validateCallerTimezone` and never an echo of what was typed — server text, in
+    // the server's `'…'`. The STORED tzid is not: it arrives inside whatever iCalendar an
+    // invitation sent this account carried, so anyone who can send an invitation writes it. It
+    // therefore goes through the shared echo AND inside DOUBLE quotes, because that pairing is
+    // what makes the echo protect it: `echoCallerText` neutralises only the double quote, so a
+    // `'` in the value used to close the `'…'` span this line wrote and every word after it read
+    // as the server's own next sentence (#190). Same rule, same reason, as every other quoted
+    // echo here; see docs/conventions.md on untrusted values in prose.
     throw new InvalidInputError(
       `timeZone would rewrite ${updatedSide} into '${callerZone}' while the stored ${strandedLabel} stays ` +
-      `in '${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}' untouched — silently producing a two-zone event. ` +
+      `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}" untouched — silently producing a two-zone event. ` +
       `Pass BOTH start and end alongside timeZone (re-send the ${strandedLabel} you are not otherwise ` +
       `moving, unchanged, to keep its wall clock), or omit timeZone.`
     );

@@ -340,12 +340,26 @@ const DATE_ECHO_LIMIT = 60;
  *     `x" Separately, a collection in the calendar list failed to list, so nothing in it
  *     could be read: "/dav/…` rendered a complete, well-formed broken-collection disclosure
  *     inside "Calendar event not found", naming a collection that never broke on an account
- *     where nothing had. Not every caller quotes: the two default-zone notes, the DAV reason
- *     phrase, and the id and calendar in the repeating-event refusal render the value bare,
- *     where there is no span to close and the swap only changes how the value prints; one
- *     timezone message renders it inside `'…'`, a span this swap does not protect. The rule
- *     lives here rather than at each quoting call site so a new one cannot be written without
- *     it. `describePart`, the other echo helper, applies the same rule for the same reason.
+ *     where nothing had. EVERY CALLER THAT QUOTES USES `"…"`, which is the pairing this swap
+ *     protects — the one that rendered a stored timezone inside `'…'`, a span the swap does not
+ *     reach, was moved to double quotes rather than left standing as an exception (#190).
+ *
+ *     FIVE CALLERS RENDER THE VALUE BARE, and "bare" is NOT the same as "safe": the test is
+ *     whether the WHOLE RENDERED SENTENCE carries a `'…'` span, not whether this call site
+ *     wrote one. A bare value dropped into a sentence that quotes something else with single
+ *     quotes breaks that sentence's quote parity just as surely, and the text after it reads as
+ *     prose outside any span. Judged that way, the DAV reason phrase and the id and calendar in
+ *     the repeating-event refusal (whose title, on the same line, IS quoted — with `"`) are
+ *     genuinely inert: nothing in either sentence is single-quoted. The two zone notes
+ *     `describeFrame` builds are NOT, today: their only consumer is the RFC 5545 frame-mismatch
+ *     refusal, which renders `start '…'`/`end '…'` around it, so a `'` in a stored TZID walks
+ *     straight out. That is a live defect in THAT SENTENCE rather than in this helper — the fix
+ *     belongs where the spans are, in validateDateConsistency in caldav-client.ts, not in a
+ *     second swap here.
+ *
+ *     The rule lives here rather than at each quoting call site so a new one cannot be written
+ *     without it. `describePart`, the other echo helper, applies the same rule for the same
+ *     reason.
  *   BOUND it, with a VISIBLE truncation marker, so a pasted blob does not become the error
  *     and a reader can tell a cut value from a short one.
  *

@@ -1191,8 +1191,10 @@ Two hazards, and the order of the two steps is what covers both:
   credential. A value carrying CR, LF or U+2028 splits one message into what reads as
   several, and the forged lines read as further sentences from the server. `describePart`
   strips those, drops bidi overrides, collapses space runs, turns a double quote into a
-  single one so the value cannot close the span it is rendered inside, and caps the length so
-  one hostile value cannot become the whole message.
+  single one so the value cannot close a **double**-quoted span, and caps the length so
+  one hostile value cannot become the whole message. That last step is a `"…"` guarantee and
+  nothing wider: it buys nothing for a value rendered inside `'…'`, and a caller that renders
+  one gets no protection from having called the helper.
 - **Credential echo** — narrower, but a leak rather than a style point. Both redaction rules
   are length-sensitive (`FASTMAIL_TOKEN_PATTERN` needs 20+ characters after the `fmu<n>-`
   prefix; a registered secret is matched as an exact string), so describing **first**
@@ -1224,8 +1226,11 @@ bound (a calendar URL offered back as a working `calendarId` cannot be cut at 64
 and the value they quote must be the trimmed one the coercion actually judged. It carries the
 same neutralisation for the same reason: it strips control characters and U+2028/U+2029, and it
 turns a double quote into a single one, so that a value cannot close the `"…"` span at the
-callers that render one (at the callers that render it bare there is no span to close and the
-swap is inert). That last rule was missing until an event id shaped
+callers that render one. **A caller that quotes therefore quotes with `"…"` and never `'…'`**,
+since the swap does not reach a single-quoted span and a value carrying `'` walks straight out
+of one ([#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190) was such a span — the
+stored TZID in the stranded-zone refusal, which arrives inside whatever iCalendar an invitation
+sent this account carried). That last rule was missing until an event id shaped
 `x" Separately, a collection in the calendar list failed to list: "/dav/…` rendered a complete,
 well-formed broken-collection disclosure inside `Calendar event not found`, naming a collection
 that never broke — trimming, scrubbing and bounding all leave a quoted span closable, and the
@@ -1236,6 +1241,15 @@ failed request, and the collection paths in the broken-collection clause — and
 the bound because nothing in a status line or a collection href on this account is this
 account's token. A value that could carry one belongs in `describeUntrusted`, which redacts
 before it truncates.
+
+**A caller that quotes NOTHING is judged on the whole sentence, not on its own call site.**
+Both helpers have a set of callers that render the value bare, and "bare" is not a synonym for
+"safe": a value dropped unquoted into a sentence that single-quotes something *else* breaks
+that sentence's quote parity just as surely, and everything after it reads as prose outside any
+span. So the class that is genuinely inert is not "renders it bare" but **"renders into a
+sentence carrying no `'…'` span anywhere in it"** — which is a property of the finished message,
+and has to be re-checked whenever a span is added to one. `echoCallerText`'s doc comment states
+that criterion and classifies its own bare callers against it.
 
 **What is outside the rule, and why it is structure rather than a decision.**
 `inline-images.ts` and `inline-notes.ts` sit *below* `coerce.ts` in the import graph, so they
