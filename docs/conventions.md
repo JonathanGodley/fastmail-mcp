@@ -129,6 +129,73 @@ non-string body, an entirely HTML-escaped `htmlBody`, and a CDATA-wrapped body a
 by `assertBodyInputs` (`src/body-format.ts`) rather than repaired, because unescaping or
 unwrapping would guess at what the caller meant to send. See `docs/email-bodies.md`.
 
+### An ambiguous `eventId`: the writes refuse, the read answers and discloses
+
+The fail-closed posture above is about a value the server could not *read*. This is the same
+posture one step later, about a value it read perfectly well and that turned out to name more
+than one thing ([#101](https://github.com/JonathanGodley/fastmail-mcp/issues/101)).
+
+A CalDAV `UID` is unique within one **collection**, not across an account, so two calendars can
+hold the same event id, and `findCalendarObjectByUID` queries every selectable calendar and
+keeps every match rather than stopping at the first. What the three tools then do with a
+two-copy result differs by tool, and the split is the whole convention:
+
+- **`update_calendar_event` / `delete_calendar_event` refuse.** `ambiguousEventIdError`
+  (`src/caldav-client.ts`) names each copy by its calendar and its own resource `url`, and
+  nothing is written. This is the narrowing-argument rule in its sharpest form: acting on
+  whichever copy discovery reached first would be a write to a record the caller did not
+  choose, reported as a success, with nothing said about the copy left alone — and on the
+  delete path that is irreversible and mails the wrong event's attendees.
+- **`get_calendar_event` answers.** It returns the FIRST copy in the lookup's stated order
+  (`CalendarObjectLookup` documents that order, which is what makes "which one did I get" a
+  testable promise rather than an accident), sets `otherCopies` on its result, and appends
+  `buildAmbiguousEventNote`'s trailing line.
+
+**Addressing a record is not naming it, and only the first is ambiguous.** Both forms of
+`eventId` are always tried, so a record whose UID literally spells another record's resource
+`url` puts two records in one result — and if that counted as an ambiguity, the refusal would
+tell a caller who had passed an exact address to "pass the `url` of the copy you mean", which
+is what they just did. There is no next call, and the escape hatch the whole convention rests
+on closes. So the disambiguation is made on the RESULT rather than on the look of the string:
+where a match's own `url` is one the lookup resolved from the caller's text, the caller
+**addressed** that record. At most one match can be, since a resource url resolves to a single
+href. That match leads the order, the writes act on it instead of refusing, and the read's
+trailing note says which record they will touch rather than announcing a refusal that will not
+come. A url-shaped id with no resource at that address is unaffected: nothing is addressed, and
+it resolves by UID exactly as any other id does.
+
+**Why they differ, stated so it is not read as an inconsistency.** The fail-closed rule is
+about a caller mistaking a wrong outcome for a legitimate one, and a read cannot produce a
+wrong outcome here: it damages nothing, and the disclosure makes the ambiguity visible in the
+same response. Refusing on the read would be strictly worse — the `url` of each copy is the
+only thing that makes the ambiguity fixable, and `get_calendar_event` is the only tool that can
+hand it over. So the read is the *escape hatch* for the write's refusal, and refusing on both
+would leave a duplicated id with no route out of this server at all.
+
+**The refusal is ordered before the repeating-series refusal.** Both can apply to one id. Told
+"this is a repeating event", a caller goes to the web interface and never learns a second
+record exists; told the id is ambiguous, they can pass a url and get the repeating answer for
+the copy they meant.
+
+**The echo bounds are the ambiguity's own**, not a share of the calendar ones:
+`AMBIGUOUS_COPY_LIST_CAP` and `AMBIGUOUS_COPY_URL_ECHO_LIMIT` are exported constants beside
+`CALENDAR_URL_ECHO_LIMIT`, and each states its reason where it is defined. The short version:
+these values are a caller's only handle out of the refusal, and a *resource* url — unlike the
+*collection* url that `CALENDAR_URL_ECHO_LIMIT` bounds — cannot be read back off
+`list_calendars` once it is truncated. The url bound governs the **calendar** field too, and
+that is not laziness: that field holds a display name *or*, for a collection that has none, the
+collection's own url, and nothing at the render site can tell which. Under the 60-character
+default every nameless calendar in an account would cut to the same prefix, so the one field
+distinguishing the copies would stop distinguishing them. Both messages render every calendar
+name and url through `echoCallerText` inside **double** quotes, which is what the echo's quote-neutralisation
+requires to protect them (see [Untrusted values in prose](#untrusted-values-in-prose-describeuntrusted)).
+
+**The accepted consequence, recorded rather than mitigated.** Whoever sends this account an
+invitation chooses the `UID` it arrives under, so a stranger who knows an event's id can freeze
+its writes by minting a duplicate in a shared calendar. The refusal is still the right answer —
+the alternative is a destructive call that guesses — and the `url` form is the guaranteed way
+through, which is why it is named on the tool surface and not merely in the error.
+
 ### Coercing is only half of it: the schema has to declare the lenient shape
 
 A handler that runs `coerceBool` on a parameter the schema declares as `type: 'boolean'`

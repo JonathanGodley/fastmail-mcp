@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
-import { BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, buildCalendarWindowNote, buildBrokenCollectionNote } from './response-formatters.js';
+import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -1821,3 +1821,196 @@ describe('buildBrokenCollectionNote', () => {
     assert.equal(note.split('\n').length, 3, JSON.stringify(note));
   });
 });
+
+// ---------- buildAmbiguousEventNote ----------
+
+// The disclosure get_calendar_event carries when the id it was given named more than one
+// record (#101). The client returns the copies; this owns the wording, the separator, and the
+// bounds on what one copy can add to a message.
+describe('buildAmbiguousEventNote', () => {
+  const PERSONAL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/dup.ics';
+  const WORK = 'https://caldav.example.invalid/dav/calendars/user/probe/work/dup.ics';
+
+  it('says nothing when the id named exactly one record', () => {
+    // Silence is the published "this id is unambiguous" signal, the same discipline the
+    // broken-collection and window notes follow. An empty list is the same statement as none.
+    assert.equal(buildAmbiguousEventNote(undefined), '');
+    assert.equal(buildAmbiguousEventNote([]), '');
+  });
+
+  it('counts every record, names each other copy, and opens with its own blank line', () => {
+    const note = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }]);
+    assert.ok(note.startsWith('\n\n'), JSON.stringify(note.slice(0, 8)));
+    // TWO records, from a list of ONE other: the copy that was returned is counted too, or a
+    // caller reads "1 record" on the response that proves there are two.
+    assert.match(note, /names 2 records in this account/);
+    // The rendered list WHOLE, name and url and the punctuation between them, so nothing can
+    // be appended to a single-entry list without this failing — an overflow clause that fires
+    // unconditionally would read "…and -11 more" right here.
+    assert.ok(note.includes(`also names one other record: "Work" ("${WORK}"). `), note);
+  });
+
+  it('says the copy above is the first rather than a chosen one', () => {
+    // The distinction is the whole reason a read may answer where a write refuses: the caller
+    // has to know they are holding an arbitrary copy, not the server's judgement of the right
+    // one, or the disclosure reads as trivia.
+    const note = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }]);
+    assert.match(note, /FIRST copy this server finds, not a chosen one/);
+  });
+
+  it('names the refusal the caller is about to walk into, and the url that avoids it', () => {
+    // Told only that there are two, a caller reads it as a curiosity and calls
+    // delete_calendar_event next. The point of the note is that the next call will not work.
+    const note = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }]);
+    assert.match(note, /update_calendar_event and delete_calendar_event REFUSE/);
+    assert.match(note, /pass the `url` of the copy you mean/);
+    // Where to put it, not just what to reach for: the url replaces the id in the same
+    // parameter, which is the half a caller has to be told or they look for a new one.
+    // ADDRESSES, not "names": this very note is printed because an id NAMED two records, so
+    // promising that a url "names exactly one" would contradict the list beside it.
+    assert.match(note, /which they accept wherever they accept an id and which ADDRESSES exactly one record\.$/);
+  });
+
+  it('agrees in number when several other copies are named', () => {
+    const note = buildAmbiguousEventNote([
+      { calendar: 'Work', url: WORK },
+      { calendar: 'Shared', url: PERSONAL },
+    ]);
+    assert.match(note, /names 3 records in this account/);
+    assert.match(note, /2 other records/);
+    // Both spellings are asserted, on the two sides: a singular that never varies reads
+    // correctly on the commonest case and wrongly on every other.
+    assert.doesNotMatch(note, /other record[^s]/);
+  });
+
+  it('renders a calendar name in double quotes, so the echo can neutralise a quote in it', () => {
+    // echoCallerText turns a `"` in a value into a `'` precisely so the value cannot close the
+    // span it sits in. That protection only exists where the span is a DOUBLE-quoted one, so a
+    // name carrying a quote is the case that proves the pairing (#190).
+    const note = buildAmbiguousEventNote([
+      { calendar: 'Work" and this is not a sentence the server wrote', url: WORK },
+    ]);
+    assert.doesNotMatch(note, /Work" and/);
+    assert.ok(note.includes("Work' and this is not a sentence the server wrote"), note);
+  });
+
+  it('caps the list and counts the overflow rather than dropping it silently', () => {
+    const many = Array.from({ length: 15 }, (_, i) => ({ calendar: `Cal ${i}`, url: `${WORK}?n=${i}` }));
+    const note = buildAmbiguousEventNote(many);
+    assert.match(note, /names 16 records in this account/);
+    assert.ok(note.includes('"Cal 11"'), note);
+    assert.ok(!note.includes('"Cal 12"'), note);
+    assert.match(note, /…and 3 more/);
+  });
+
+  it('bounds one copy url with a visible marker, well past a Fastmail collection url', () => {
+    const long = `${WORK}?pad=${'w'.repeat(400)}`;
+    const note = buildAmbiguousEventNote([{ calendar: 'Work', url: long }]);
+    // The whole url did not reach the note...
+    assert.ok(!note.includes('w'.repeat(400)), 'the whole url reached the note');
+    // ...but the bound is generous enough that a real resource url survives intact: the
+    // collection prefix plus a UUID-length resource name is nowhere near it.
+    assert.ok(note.includes(WORK), note.slice(0, 300));
+    assert.ok(note.includes('…'), note.slice(0, 300));
+  });
+  it('separates the copies it lists, so two urls cannot run together', () => {
+    const note = buildAmbiguousEventNote([
+      { calendar: 'Work', url: WORK },
+      { calendar: 'Shared', url: PERSONAL },
+    ]);
+    assert.ok(note.includes(`"${WORK}"), "Shared"`), note);
+  });
+
+  it('says nothing about an overflow when the list is exactly the cap', () => {
+    // The boundary, not a number near it: an off-by-one here reads as "…and 0 more", which
+    // tells a caller there are copies they were not shown when there are none.
+    const exactly = Array.from(
+      { length: AMBIGUOUS_COPY_LIST_CAP },
+      (_, i) => ({ calendar: `Cal ${i}`, url: `${WORK}?n=${i}` }),
+    );
+    const note = buildAmbiguousEventNote(exactly);
+    assert.ok(note.includes(`"Cal ${AMBIGUOUS_COPY_LIST_CAP - 1}"`), note);
+    assert.doesNotMatch(note, /…and/);
+  });
+
+  it('never counts an overflow on a list well under the cap', () => {
+    // The same guard read from the other side: a list of one must not report a negative
+    // remainder, which is what an unconditional overflow clause produces.
+    assert.doesNotMatch(buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }]), /…and/);
+  });
+
+  // An id that ADDRESSED a record resolved to exactly one, and the other records merely carry
+  // that url as their UID text. The write tools act on the addressed record rather than
+  // refusing it, so the note that describes a refusal is the wrong note here.
+  it('does not send a caller who addressed a record hunting for the url they already passed', () => {
+    const note = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }], true);
+    // The dead loop this branch exists to remove: told the writes REFUSE this id and to pass
+    // a url instead, a caller who passed a url has nothing left to try.
+    assert.doesNotMatch(note, /REFUSE/);
+    assert.doesNotMatch(note, /pass the `url` of the copy you mean/);
+    assert.doesNotMatch(note, /FIRST copy this server finds/);
+  });
+
+  it('says which record the writes will act on, and that it is the addressed one', () => {
+    const note = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }], true);
+    assert.ok(note.startsWith('\n\n'), JSON.stringify(note.slice(0, 8)));
+    assert.match(note, /the record AT that url, not one picked from the set/);
+    assert.match(note, /update_calendar_event and delete_calendar_event act on that same record/);
+    // Still counted and still listed: the other copies exist, and the addressed reading
+    // changes what the note SAYS about them rather than hiding them.
+    assert.match(note, /2 records answer to it in all/);
+    assert.ok(note.includes(`"Work" ("${WORK}")`), note);
+    // And the way out is named, since a caller may have addressed the wrong copy.
+    assert.match(note, /To reach one of the others, pass its own `url`\.$/);
+  });
+
+  // ASSERTED WITH ITS VERB, both arms. Here `others` is the SUBJECT of a sentence, unlike the
+  // other arm where it is an object — so counting the noun alone leaves the agreement that
+  // actually reads wrong ("one other record ... carry that same text") completely unpinned.
+  it('agrees in number on the addressed branch too, verb included', () => {
+    const one = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }], true);
+    assert.match(one, /one other record in this account carries that same text as a UID/);
+    assert.match(one, /2 records answer to it in all/);
+    assert.doesNotMatch(one, /record in this account carry/);
+    const two = buildAmbiguousEventNote(
+      [{ calendar: 'Work', url: WORK }, { calendar: 'Shared', url: PERSONAL }],
+      true,
+    );
+    assert.match(two, /2 other records in this account carry that same text as a UID/);
+    assert.doesNotMatch(two, /other record[^s]/);
+    assert.doesNotMatch(two, /records in this account carries/);
+  });
+
+  it('stays silent on an addressed id that named exactly one record', () => {
+    // The flag is about which note to write, never about whether there is one to write: an
+    // ordinary read by url is the commonest call this tool takes and says nothing.
+    assert.equal(buildAmbiguousEventNote(undefined, true), '');
+    assert.equal(buildAmbiguousEventNote([], true), '');
+  });
+});
+
+
+// ---------- calendarEventBody ----------
+
+// The JSON body get_calendar_event serialises (#101). It is a branch, and it lives here rather
+// than in the CallTool switch precisely so it can be exercised without a live account.
+describe('calendarEventBody', () => {
+  const EVENT = { id: 'dup@fm', url: 'https://caldav.example.invalid/dav/x/dup.ics', title: 'Standup' };
+
+  it('returns the event untouched when the id named one record', () => {
+    // Not `{ ...event, otherCopies: undefined }`: a key present and undefined serialises
+    // differently from an absent one, and silence is the "unambiguous" signal.
+    assert.deepEqual(calendarEventBody(EVENT), EVENT);
+    assert.ok(!('otherCopies' in calendarEventBody(EVENT)));
+    assert.ok(!('otherCopies' in calendarEventBody(EVENT, [])));
+  });
+
+  it('carries the other copies inside the event body when there are some', () => {
+    const copies = [{ calendar: 'Work', url: 'https://caldav.example.invalid/dav/y/dup.ics' }];
+    const body = calendarEventBody(EVENT, copies);
+    assert.deepEqual(body, { ...EVENT, otherCopies: copies });
+    // The event's own fields survive the merge — this is the JSON a caller reads.
+    assert.equal((body as typeof EVENT).title, 'Standup');
+  });
+});
+

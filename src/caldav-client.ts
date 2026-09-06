@@ -195,6 +195,30 @@ export interface CalendarListResult {
  */
 export interface CalendarEventResult {
   event: CalendarEvent;
+  /**
+   * The OTHER records this id named, when it named more than one (#101). Absent — never an
+   * empty array — when the id named exactly one, so silence reads as "this id is unambiguous".
+   *
+   * `event` is the FIRST copy in the lookup's stated order (see `CalendarObjectLookup`) and
+   * carries its own `url`, so between the two a caller holds a handle for every copy.
+   *
+   * It hangs off the RESULT rather than off `CalendarEvent`, because `CalendarEvent` is the
+   * shared row type `list_calendar_events` also serialises and the list path resolves no id at
+   * all: a field there would be permanently absent on every row and would mean nothing by its
+   * absence. This is a property of the LOOKUP, and only a lookup has one.
+   */
+  otherCopies?: CalendarEventCopy[];
+  /**
+   * Did the caller reach this record by its own ADDRESS — a resource url that resolved to it —
+   * rather than by a UID that several records answer to?
+   *
+   * Only ever meaningful alongside `otherCopies`, and it changes what those copies MEAN. An
+   * ambiguous UID leaves `update_calendar_event`/`delete_calendar_event` refusing the id, so the
+   * note tells the caller to pick a copy by url. An addressed id has already picked one: the
+   * writes will act on THIS record, and telling the caller they will be refused would send them
+   * looking for a url they had already passed. See `CalendarObjectLookup` for the rule itself.
+   */
+  addressedByUrl?: boolean;
   brokenCollections?: BrokenCollections;
 }
 
@@ -2468,7 +2492,7 @@ const CALENDAR_NAME_LIST_CAP = 20;
 // Deliberately HERE rather than in coerce.ts beside DATE_ECHO_LIMIT and ZONE_ECHO_LIMIT: this
 // one has a single consumer, and it belongs next to CALENDAR_NAME_LIST_CAP, which bounds the
 // other half of the same message.
-const CALENDAR_URL_ECHO_LIMIT = 200;
+export const CALENDAR_URL_ECHO_LIMIT = 200;
 
 /**
  * The bound on ONE broken collection's path wherever it is echoed (#136) — the trailing note
@@ -2490,6 +2514,35 @@ export const BROKEN_COLLECTION_PATH_ECHO_LIMIT = 160;
  * that failed wholesale would otherwise put every path it holds into the note.
  */
 export const BROKEN_COLLECTION_LIST_CAP = 5;
+
+/**
+ * How many copies the ambiguity messages name before the rest are counted (#101).
+ *
+ * Higher than `BROKEN_COLLECTION_LIST_CAP` above, and deliberately so: that list is told to a
+ * caller who can do nothing with it, while THIS list is the caller's only way out of the
+ * refusal — a copy that is not named cannot be chosen. It is set well past the number of
+ * calendars a real account holds, so the cap is a bound on a pathological account rather than a
+ * limit a normal one meets, and the overflow is still counted so a truncated list can never read
+ * as the whole set.
+ */
+export const AMBIGUOUS_COPY_LIST_CAP = 12;
+
+/**
+ * The bound on ONE copy's calendar AND resource URL wherever the ambiguity is reported (#101).
+ *
+ * Its own constant rather than `CALENDAR_URL_ECHO_LIMIT`'s 200, because the two bound different
+ * URLs. That one bounds a COLLECTION url. This one bounds a url inside a collection — the same
+ * value plus a resource name, and Fastmail names the resource after the event's UID, which is
+ * written by whoever sent the invitation and is routinely a 36-character UUID and sometimes far
+ * longer on an imported event. 320 leaves 120 characters for that name on top of a collection
+ * url already sized generously.
+ *
+ * Sized to survive rather than merely to be recognised, and that is the whole reason it is not
+ * a share of anything: this url is THE handle that tells two copies of one id apart, it is the
+ * value the refusal tells the caller to pass back, and a resource url — unlike a collection
+ * url — cannot be read off `list_calendars` afterwards. Truncated, it is not recoverable.
+ */
+export const AMBIGUOUS_COPY_URL_ECHO_LIMIT = 320;
 
 /**
  * Is this entry of the calendar-home listing BROKEN — i.e. did the server fail to describe it?
@@ -2655,9 +2708,9 @@ type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjec
  * That last fact is why the caller's own exact-equality check on the PARSED UID is LOAD-BEARING
  * rather than belt-and-braces, and it is stated there too: this filter narrows what the server
  * sends, and a server matching more loosely than it was asked to still cannot manufacture a
- * copy past a client-side `===`. A loose match that got past it would not merely widen the
- * result — it would put a record the caller never named into the set these lookups hand back,
- * for the tools reading them to act on.
+ * copy past a client-side `===`. Two destructive tools count these copies, so a loose match
+ * that reached them would not degrade the lookup — it would invent an ambiguity that is not
+ * there, and freeze the writes on an id that names one record in the account (#101).
  *
  * xml-js compact form, which is what tsdav forwards verbatim into the REPORT body:
  * `_attributes` for attributes, `_text` for character data, unprefixed names taking the CalDAV
@@ -2705,15 +2758,35 @@ interface CalendarObjectMatch {
 }
 
 /**
- * What a lookup hands back: every copy the id resolved to, and what discovery could not search.
+ * What a lookup hands back: every copy the id resolved to, whether the caller ADDRESSED one of
+ * them, and what discovery could not search.
  *
  * `matches` IS ORDERED, and the order is part of the contract rather than an accident of the
- * loop: the UID matches come first, in calendar discovery order, and any copy resolved from the
- * url form follows them. `get_calendar_event` returns `matches[0]` and says so on its tool
- * surface, which is only a testable promise because the order is stated here.
+ * loop. In discovery order: the ADDRESSED copy first when there is one (see `addressed`), then
+ * the UID matches, then anything else the url form resolved. `get_calendar_event` returns
+ * `matches[0]` and says so on its tool surface, which is only a testable promise because the
+ * order is stated here.
+ *
+ * `addressed` says the caller's string was the ADDRESS of `matches[0]` — a href this code
+ * resolved against a discovered collection and then fetched by name — and not merely a value
+ * some record carries as its UID. The distinction is the whole reason the field exists.
+ *
+ * WHY IT DECIDES AMBIGUITY. A UID is written by whoever created the event, so anyone who can
+ * send this account an invitation can mint a record whose UID is the literal resource url of an
+ * event they want to freeze. Under a plain union that decoy joined the addressed record and
+ * both write tools refused, offering as the remedy the very url the caller had just passed — a
+ * dead loop, and it made `url` (which every one of these tools offers as the way OUT of an
+ * ambiguity) itself ambiguous. Addressing cannot be imitated: a record answers to its own url
+ * and no other, so when one was addressed, that is the record the id names and the write tools
+ * act on it however many others spell it as a UID. At most one copy can be addressed, because
+ * the url form resolves ONE href and the matches dedupe on resource url.
+ *
+ * A url-shaped id that addresses NOTHING is unchanged by any of this: nothing was addressed, so
+ * the UID matches are all there is, and two of them are still an ambiguity.
  */
 interface CalendarObjectLookup {
   matches: CalendarObjectMatch[];
+  addressed: boolean;
   brokenCollections: BrokenCollections;
 }
 
@@ -2774,6 +2847,15 @@ function isAddressedResourceMissing(err: unknown): boolean {
 function calendarLabel(calendar: DAVCalendar): string {
   return unwrapDisplayName(calendar.displayName)
     ?? (typeof calendar.url === 'string' ? calendar.url.trim() : '');
+}
+
+/**
+ * The resolved copies as a caller sees them (#101), for the write refusal and the read
+ * disclosure alike. `isResolvedCalendarObject` is what makes `object.url` safe to read here: a
+ * match with no usable url is not a match at all.
+ */
+function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
+  return matches.map(m => ({ calendar: m.calendarLabel, url: m.object.url }));
 }
 
 /**
@@ -3188,6 +3270,94 @@ function calendarNotFoundError(
 function eventNotFoundError(eventId: string, broken?: BrokenCollections): InvalidInputError {
   return new InvalidInputError(
     `Calendar event not found: "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}"${describeBrokenCollections(broken)}`,
+  );
+}
+
+/**
+ * One copy of an event as a CALLER sees it: the calendar it is in, and the url that names it.
+ *
+ * The url is the point of the pair. A duplicated id names every copy equally, so the only thing
+ * that picks one out is its own resource url — which is why this type exists at all rather than
+ * a bare list of calendar names.
+ */
+export interface CalendarEventCopy {
+  /** The calendar's display name, falling back to its url where the collection has none. */
+  calendar: string;
+  /** This copy's own resource url — the handle that names it and no other. */
+  url: string;
+}
+
+/**
+ * The copies an id resolved to, rendered for a message a caller reads.
+ *
+ * Shared by the write refusal and the read disclosure so the two cannot drift into describing
+ * one account two ways. Every value in it is untrusted — a calendar display name is written by
+ * whoever owns the calendar, and a resource url by the server — so both go through
+ * `echoCallerText`, and both are rendered inside DOUBLE quotes, which is the pairing that
+ * makes the echo's quote-neutralisation protect them: it turns a `"` in a value into a `'`, so
+ * a value cannot close the span it sits in and write the rest of the sentence itself (#190).
+ */
+export function describeEventCopies(copies: CalendarEventCopy[]): string {
+  const listed = copies
+    .slice(0, AMBIGUOUS_COPY_LIST_CAP)
+    // BOTH fields at the url bound, not just the url. `calendar` holds a display name OR, for
+    // a collection that has none, that collection's own url — and nothing here can tell which
+    // without re-deriving it. `echoCallerText`'s 60-char default cuts every real Fastmail
+    // collection url, so a nameless calendar would arrive as a truncated prefix identical to
+    // every other nameless calendar in the account: the one field distinguishing the copies
+    // would stop distinguishing them. `calendarNotFoundError` makes the same call for the same
+    // reason; it can afford to decide per entry only because it knows which kind each one is.
+    // The cost — a display name over 320 characters is cut at 320 rather than 60 — is bounded
+    // by AMBIGUOUS_COPY_LIST_CAP on the message as a whole.
+    .map(c => `"${echoCallerText(c.calendar, AMBIGUOUS_COPY_URL_ECHO_LIMIT)}" ("${echoCallerText(c.url, AMBIGUOUS_COPY_URL_ECHO_LIMIT)}")`)
+    .join(', ');
+  const more = copies.length > AMBIGUOUS_COPY_LIST_CAP
+    ? `, …and ${copies.length - AMBIGUOUS_COPY_LIST_CAP} more`
+    : '';
+  return `${listed}${more}`;
+}
+
+/**
+ * The refusal `update_calendar_event` and `delete_calendar_event` raise when an id names more
+ * than one record (#101), written once so the two read as a single rule.
+ *
+ * WHY A REFUSAL RATHER THAN A PICK. A UID is unique per COLLECTION, not per account, so two
+ * calendars can hold one id — and the caller who typed that id named both. Acting on whichever
+ * copy discovery happened to reach first would patch or destroy a record the caller did not
+ * choose and say nothing about the one it left alone; on the delete path that is irreversible
+ * and mails the wrong event's attendees.
+ *
+ * WHY IT IS RAISED BEFORE THE REPEATING-SERIES REFUSAL. The two can both apply, and the order
+ * decides what the caller learns. Told "this is a repeating event" they go to the web interface
+ * and never find out a second record exists; told the id is ambiguous they can pass a url, and
+ * then get the repeating answer for the copy they actually meant.
+ *
+ * THE ACCEPTED CONSEQUENCE. Anyone who can send this account an invitation chooses the UID it
+ * arrives under, so a stranger can freeze an event's writes by minting a duplicate of an id
+ * they already know. That is why the url is offered here and named on the tool surface: it is
+ * the escape hatch, it always exists, and it cannot be made ambiguous — a resource url
+ * ADDRESSES exactly one record, and this lookup acts on the record it addressed however many
+ * others merely NAME that string as their UID. The distinction is load-bearing precisely here:
+ * this message is printed when a url-shaped id named several records, so a sentence saying a
+ * url "names exactly one record" would be contradicted by the very copies listed beside it.
+ */
+export function ambiguousEventIdError(
+  eventId: string,
+  action: 'update' | 'delete',
+  copies: CalendarEventCopy[],
+): InvalidInputError {
+  return new InvalidInputError(
+    // The ID at CALENDAR_URL_ECHO_LIMIT, not the ambiguity's own bound: this is the same value
+    // eventNotFoundError echoes, so it is bounded the same way in both places, and the
+    // ambiguity constant's stated reason is about one COPY's calendar and url — a reason that
+    // does not reach the caller's own argument.
+    `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" names ${copies.length} records `
+    + `in this account, and this server will not ${action} one of them without being told which. `
+    + `The copies are: ${describeEventCopies(copies)}. `
+    + 'Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly '
+    + 'one record, whatever else spells it as a UID, and this tool accepts it wherever it '
+    + 'accepts an id. '
+    + 'get_calendar_event still works on this id: it returns the first copy and lists the others.',
   );
 }
 
@@ -3991,6 +4161,12 @@ export class CalDAVCalendarClient {
       matches.push({ object: obj, calendarLabel: calendarLabel(calendar) });
     };
 
+    // Resolved ONCE, before either loop, because these hrefs are needed twice: to make the
+    // addressed fetches below, and afterwards to say which match — if any — the caller
+    // actually addressed rather than merely named.
+    const urlTargets = resolveEventUrlTargets(wanted, selectable);
+    const addressedHrefs = new Set(urlTargets.map(t => t.objectUrl));
+
     // BOTH FETCHES BELOW INHERIT A tsdav FILTER NOBODY HERE ASKED FOR: `fetchCalendarObjects`
     // defaults `urlFilter` to one that keeps only hrefs containing the lowercase string `.ics`,
     // and applies it to the resource urls BEFORE the multiget — to the hrefs the query returned
@@ -4017,7 +4193,8 @@ export class CalDAVCalendarClient {
         // default `i;ascii-casemap` applies and `equals` was MEASURED matching a case-variant
         // UID on the live account (scripts/probes/calendar-uid-query.probe.mjs, step 5). This
         // is what keeps a server matching more loosely than it was asked to from manufacturing
-        // a copy the caller never named, for the tools reading this lookup to act on.
+        // a copy — which, since two destructive tools now count these copies, would invent an
+        // ambiguity that is not in the account at all and refuse a write that should stand.
         if (uid !== wanted) continue;
         collect(calendar, obj);
       }
@@ -4025,7 +4202,7 @@ export class CalDAVCalendarClient {
 
     // The URL form, resolved by MATCHING and only then fetched — see resolveEventUrlTargets for
     // why the caller's string is never itself a request target.
-    for (const { calendar, objectUrl } of resolveEventUrlTargets(wanted, selectable)) {
+    for (const { calendar, objectUrl } of urlTargets) {
       let objects: DAVCalendarObject[];
       try {
         objects = await client.fetchCalendarObjects({ calendar, objectUrls: [objectUrl] });
@@ -4037,8 +4214,8 @@ export class CalDAVCalendarClient {
         // and genuinely means "no copy at that address": a caller pasting the url of an event
         // since deleted. Anything else is a statement about the COLLECTION, and swallowing it
         // would let a transient outage change which record a destructive call acts on — the
-        // copy in the failing collection would silently drop out of the result, and these tools
-        // act on the first record in it. So it is rethrown.
+        // copy in the failing collection would silently stop counting toward the ambiguity
+        // rule, so a write those two tools should refuse would go through. So it is rethrown.
         //
         // Why the 404 swallow is safe even though a collection-level 404 wears the same
         // message: this collection ANSWERED the UID calendar-query moments earlier, in the loop
@@ -4047,14 +4224,23 @@ export class CalDAVCalendarClient {
         // is no copy at that address now.
         if (!isAddressedResourceMissing(err)) throw err;
         continue;
-      }      for (const obj of objects) collect(calendar, obj);
+      }
+      for (const obj of objects) collect(calendar, obj);
     }
 
-    return { matches, brokenCollections };
+    // The addressed copy LEADS. Not a re-sort: exactly one match can be addressed, so this
+    // moves that one match to the front and leaves every other order untouched. See
+    // CalendarObjectLookup for why addressing beats a UID that merely spells the same string.
+    // `> 0` rather than `>= 0` only to skip a no-op — splicing index 0 out and unshifting it
+    // back is the identity — so the two spellings behave alike and no test can separate them.
+    const addressedIndex = matches.findIndex(m => addressedHrefs.has(m.object.url));
+    if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
+
+    return { matches, addressed: addressedIndex !== -1, brokenCollections };
   }
 
   async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
-    const { matches, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     // The FIRST copy in the lookup's stated order (see CalendarObjectLookup).
     const obj = matches[0]?.object;
     // Throw rather than return null so the MCP tool surfaces a real not-found
@@ -4068,6 +4254,17 @@ export class CalDAVCalendarClient {
     }
     return {
       event: parseCalendarObject(obj, { includeParticipants: true, configuredZone: resolveUsableTimezone(getDefaultTimezone()) }),
+      // ANSWERS AND DISCLOSES, where the write tools refuse (#101). A read cannot damage the
+      // copy it was not asked about, so refusing would withhold the one thing that makes the
+      // ambiguity fixable — the url of each copy — from the only tool that can hand it over.
+      // Omitted entirely for an unambiguous id: an empty list is a disclosure that says nothing.
+      //
+      // Still disclosed when the caller ADDRESSED a copy, because the other records exist and
+      // answer to the same string; what changes is only what the note SAYS about them, since
+      // the write tools will not refuse an addressed id. Hence `addressedByUrl` travelling
+      // beside the list rather than the list being suppressed.
+      otherCopies: matches.length > 1 ? matchesToCopies(matches.slice(1)) : undefined,
+      addressedByUrl: addressed,
       brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }
@@ -4255,12 +4452,22 @@ export class CalDAVCalendarClient {
     // left half-done by proceeding — this path searches first and writes exactly once, to the
     // one resource it resolved — so the worst outcome is that a second copy elsewhere goes
     // unpatched, which the note names the path of.
-    const { matches, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       // Caller-fixable bad id, same as getCalendarEventById: InvalidParams, not the
       // InternalError a plain Error maps to.
       throw eventNotFoundError(eventId, brokenCollections);
+    }
+
+    // BEFORE the repeating-series refusal below and before any argument validation, because
+    // nothing in the arguments can make an ambiguous id legal and the order of the two refusals
+    // decides what the caller learns — see ambiguousEventIdError (#101).
+    //
+    // `addressed` is what keeps the escape hatch open: a caller who passed a resource url named
+    // ONE record, and this acts on it however many others carry that url as their UID.
+    if (!addressed && matches.length > 1) {
+      throw ambiguousEventIdError(eventId, 'update', matchesToCopies(matches));
     }
 
     // UNREACHABLE DEFENCE, not a live case (#137): `isResolvedCalendarObject` already requires
@@ -4496,11 +4703,19 @@ export class CalDAVCalendarClient {
     const client = await this.getClient();
     // Acts on the copy it found and names the path it could not check — the same call as
     // update's, made for the same reasons; see the comment there (#136).
-    const { matches, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       // Caller-fixable bad id, matching getCalendarEventById/updateCalendarEvent.
       throw eventNotFoundError(eventId, brokenCollections);
+    }
+
+    // BEFORE the repeating-series refusal below, the same rule and the same order as update's,
+    // and standing down on an ADDRESSED id for the same reason; see ambiguousEventIdError
+    // (#101). Sharper here than there: this call destroys, and the copy it would have picked is
+    // not the one the caller may have meant.
+    if (!addressed && matches.length > 1) {
+      throw ambiguousEventIdError(eventId, 'delete', matchesToCopies(matches));
     }
 
     // Raised AFTER the lookup and BEFORE the delete, so it covers both ways an id resolves:

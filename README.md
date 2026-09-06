@@ -1005,6 +1005,21 @@ Non-IANA names pass straight through rather than being rejected or resolved. A c
 
 **The response states what was actually written.** Because a caller-named zone, an inherited stored zone, and create's configured-zone default all arrive as the same "no designator" input, only the written result can say which one happened — so both tools' responses report the zone (or `UTC`/all-day/floating, as applicable) that ended up on `start` and `end`.
 
+#### One `eventId` can name more than one record
+
+A `UID` is unique inside **one calendar**, not across the account, so two calendars can hold the same id. The three tools answer that differently, and the split is deliberate ([#101](https://github.com/JonathanGodley/fastmail-mcp/issues/101)).
+
+- **`update_calendar_event` and `delete_calendar_event` refuse it.** The error names every copy - the calendar it sits in and its own resource `url` - and nothing is written or destroyed. Acting on whichever copy discovery reached first would patch or destroy a record you did not choose and say nothing about the one it left alone; on the delete path that is irreversible and mails the wrong event's attendees.
+- **`get_calendar_event` answers, and discloses.** It returns the **first** copy in the lookup's stated order - the copy you addressed if you passed a url, otherwise the first found in discovery order - stated as the rule, not as an accident, so "which one did I get" has an answer. It adds an `otherCopies` array naming each other copy's calendar and `url`, and carries a trailing `Note:` line saying how many records the id names and what the two write tools will do with it. A read cannot damage the copy it was not asked about, and refusing here would withhold the one thing that makes the ambiguity fixable: the `url` of each copy.
+
+**The way through is the `url`.** Every one of these tools accepts a resource `url` wherever it accepts an id, and a url **addresses** exactly one record: it is matched against this account's discovered collections and resolves to a single resource. Where an id is ambiguous, that is what tells the copies apart and what gets a write through.
+
+That holds even in the one case where it looks like it should not. Both forms are always tried, so a record whose UID literally spells another record's `url` puts two records in one result - but the tools disambiguate on the **result**, not on the look of the string: the copy the url actually resolved to is the one you addressed, and it is the copy `get_calendar_event` returns first and the copy the write tools act on. The other records still appear in `otherCopies`, and the trailing `Note:` then says which record a write will touch instead of announcing a refusal. A url-shaped id with no resource at that address addresses nothing and resolves by UID like any other id.
+
+**The accepted consequence.** Whoever sends this account an invitation chooses the `UID` it arrives under, so a stranger who knows an event's id can freeze its writes by minting a duplicate in a calendar you share with them. The refusal is still the right answer - the alternative is a destructive call that guesses - and the `url` form is the guaranteed escape hatch.
+
+The ambiguity refusal is raised **before** the repeating-event refusal below. Told "this is a repeating event" you would go to the web interface and never learn a second record exists; told the id is ambiguous you can pass a url and get the repeating answer for the copy you actually meant.
+
 #### Repeating events cannot be changed or deleted here
 
 `update_calendar_event` and `delete_calendar_event` **refuse** any `eventId` that resolves to a repeating event. There is no flag, parameter or confirmation that overrides this, and the error message says so - if you are looking for one, there isn't one. `get_calendar_event` is read-only and still works on the same id.

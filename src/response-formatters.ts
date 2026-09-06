@@ -3,8 +3,8 @@ import { projectEmail } from './field-projection.js';
 import { describeUntrusted, echoCallerText, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
-import { CALENDAR_OPEN_WINDOW_DAYS, summariseBrokenCollections } from './caldav-client.js';
-import type { CalendarWindowClamp } from './caldav-client.js';
+import { CALENDAR_OPEN_WINDOW_DAYS, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
+import type { CalendarEvent, CalendarEventCopy, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 
 // The query-level summary that heads every list/search response, so the count wording
@@ -300,6 +300,91 @@ export function buildBrokenCollectionNote(
     // with the subject — which is how this clause came to say "about it" under a plural one.
     + 'Nothing was cached: the next calendar call re-asks the server for the whole calendar list.'
   );
+}
+
+/**
+ * The disclosure `get_calendar_event` carries when the id it was given named more than one
+ * record (#101).
+ *
+ * Beside `buildBrokenCollectionNote` and for the same division of labour: the client returns
+ * the copies as structure (`CalendarEventResult.otherCopies`), this owns the wording AND the
+ * blank-line separator, and the handler only concatenates. Silence means the id named exactly
+ * one record.
+ *
+ * THE COPY LIST ITSELF comes from `describeEventCopies`, shared with the write tools' thrown
+ * refusal so the two surfaces cannot describe one account two ways — the same arrangement
+ * `summariseBrokenCollections` has with its own thrown clause above. What is owned HERE is the
+ * `Note:` prefix, the separator, and the things only a returned result can say: which record
+ * the event above is, that the others exist, and what the write tools will do with this id.
+ *
+ * TWO NOTES, because the id was resolved two different ways and the caller's next call differs.
+ *
+ * A bare UID names every copy equally, so the event above is the first FOUND and the writes
+ * refuse the id; the refusal is named because a caller told only "there are two" reads that as
+ * a curiosity and calls delete_calendar_event next, and the point of the note is that the call
+ * they were about to make will not work, and what to pass instead.
+ *
+ * An id that ADDRESSED a record — a resource url, which resolved to exactly one — is a
+ * different situation wearing the same shape: the other records merely carry that url as their
+ * UID text. The event above is the addressed one, and the writes will act on it. Saying they
+ * "REFUSE an id that names more than one record" here would be false and would send the caller
+ * hunting for a url they had already passed (the dead-end this branch exists to remove), so
+ * this note says which record the writes will touch instead of naming a refusal.
+ */
+export function buildAmbiguousEventNote(
+  otherCopies?: CalendarEventCopy[],
+  addressedByUrl?: boolean,
+): string {
+  if (!otherCopies || otherCopies.length === 0) return '';
+  const total = otherCopies.length + 1;
+  const others = otherCopies.length === 1 ? 'one other record' : `${otherCopies.length} other records`;
+  // `others` is the SUBJECT of a verb in the addressed arm and an OBJECT in the other, so the
+  // verb cannot ride inside it. Kept beside it rather than folded in: the singular arm read
+  // "one other record ... carry that same text", the same agreement slip the copy-list clause
+  // above records having been fixed once already.
+  const othersCarry = otherCopies.length === 1 ? 'carries' : 'carry';
+  if (addressedByUrl) {
+    return (
+      `\n\nNote: this event id is a resource url, and ${others} in this account ${othersCarry} `
+      + `that same text as a UID — ${total} records answer to it in all: `
+      + `${describeEventCopies(otherCopies)}. The event above is the record AT that url, not one `
+      + 'picked from the set, and update_calendar_event and delete_calendar_event act on that '
+      + 'same record when given this id. To reach one of the others, pass its own `url`.'
+    );
+  }
+  return (
+    `\n\nNote: this event id names ${total} records in this account. The event above is the FIRST `
+    + 'copy this server finds, not a chosen one, and its `url` field names that copy alone. The id '
+    + `also names ${others}: ${describeEventCopies(otherCopies)}. `
+    + 'update_calendar_event and delete_calendar_event REFUSE an id that names more than one '
+    + 'record — pass the `url` of the copy you mean in place of the id, which they accept '
+    + 'wherever they accept an id and which ADDRESSES exactly one record.'
+  );
+}
+
+/**
+ * The JSON body `get_calendar_event` serialises: the event, carrying `otherCopies` when the id
+ * named more than one record (#101).
+ *
+ * A function rather than an inline spread in the handler, because it is a BRANCH — and the
+ * CallTool switch has no test harness, so a branch left there is exercised only by a live run.
+ * Here it is covered by `npm test` with no credentials.
+ *
+ * `otherCopies` rides inside the JSON body, unlike `brokenCollections`, which is a note only.
+ * The difference is what each is about: a broken collection is a fact about the ACCOUNT and
+ * would read as a property of the event, while the other copies of this id are a fact about
+ * the record being returned — and they carry urls a caller has to be able to lift out
+ * mechanically, which prose does not offer. It is merged in HERE rather than set on
+ * `CalendarEvent` so the shared row type `list_calendar_events` also serialises never grows a
+ * field its own path cannot populate.
+ */
+export function calendarEventBody(
+  event: CalendarEvent,
+  otherCopies?: CalendarEventCopy[],
+): CalendarEvent | (CalendarEvent & { otherCopies: CalendarEventCopy[] }) {
+  // An empty list is the same statement as no list, and emitting `otherCopies: []` on every
+  // ordinary read would make the field's presence meaningless as a signal.
+  return otherCopies && otherCopies.length > 0 ? { ...event, otherCopies } : event;
 }
 
 // Build the trailing Trash/Spam exclusion note from QueryResult.exclusion (the

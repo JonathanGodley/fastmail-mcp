@@ -37,6 +37,8 @@ import {
   unwrapDisplayName,
   CALENDAR_MAX_OCCURRENCES_PER_SERIES,
   BROKEN_COLLECTION_PATH_ECHO_LIMIT,
+  CALENDAR_URL_ECHO_LIMIT,
+  AMBIGUOUS_COPY_URL_ECHO_LIMIT,
   isBrokenCalendarHomeEntry,
   findBrokenCalendarHomeCollections,
 } from './caldav-client.js';
@@ -1584,9 +1586,10 @@ describe('CalDAVCalendarClient event lookup', () => {
   });
 
   // A server that answers a `match-type="equals"` query with everything whose UID merely CONTAINS
-  // the value would put records the caller never named into the set this lookup hands back, for
-  // the tools reading it to act on. The exact-equality check on the parsed UID is what stops
-  // that, so it is pinned against a fake that deliberately matches loosely.
+  // the value would hand back records the caller never named — and, since two destructive tools
+  // count the copies an id resolves to, would invent an ambiguity the account does not have. The
+  // exact-equality check on the parsed UID is what stops that, so it is pinned against a fake
+  // that deliberately matches loosely.
   it('does not accept a copy whose UID merely contains the id asked for', async () => {
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     const stored = { data: eventIcal('abc-123-longer@fm'), url: PERSONAL_URL + 'loose.ics', etag: '"e"' };
@@ -1704,6 +1707,246 @@ describe('CalDAVCalendarClient event lookup', () => {
     const { client } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], byCalendar);
     const { event } = await client.getCalendarEventById(urlShapedUid);
     assert.equal(event.title, 'Imported');
+  });
+
+  // ---- an id that names more than one record (#101) ----
+
+  // A UID is unique per COLLECTION, not per account, and anyone who can send this account an
+  // invitation chooses the UID it arrives under — so two calendars holding one id is a state a
+  // stranger can create. These fixtures are that account.
+  const duplicateInTwoCalendars = (
+    personal: Partial<StoredObject> = {},
+  ): Record<string, StoredObject[]> => ({
+    [PERSONAL_URL]: [{ data: eventIcal('dup@fm', 'Personal copy'), url: PERSONAL_URL + 'dup.ics', etag: '"e1"', ...personal }],
+    [WORK_URL]: [{ data: eventIcal('dup@fm', 'Work copy'), url: WORK_URL + 'dup.ics', etag: '"e2"' }],
+  });
+
+  const twoCalendars = [
+    { displayName: 'Personal', url: PERSONAL_URL },
+    { displayName: 'Work', url: WORK_URL },
+  ];
+
+  // The whole point of counting every copy instead of stopping at the first: a write that picks
+  // one silently patches or destroys a record the caller never chose, and says nothing about the
+  // one it left alone. Both copies are NAMED, because the caller cannot pick between them
+  // without knowing what there is to pick from.
+  it('refuses to update or delete an id that names more than one record, naming each copy', async () => {
+    for (const [tool, call] of [
+      ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent('dup@fm', { title: 'X' })],
+      ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent('dup@fm')],
+    ] as Array<[string, (c: CalDAVCalendarClient) => Promise<unknown>]>) {
+      const { client, mockDAVClient } = makeLookupClient(twoCalendars, duplicateInTwoCalendars());
+      await assert.rejects(
+        () => call(client),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError', tool);
+          assert.match(err.message, /names 2 records/, tool);
+          // The message says which call was refused, in the caller's own verb — "will not
+          // one of them" is what a dropped action word leaves behind, and it reads as a
+          // sentence the server did not finish writing.
+          assert.match(err.message, new RegExp(`will not ${tool} one of them`), tool);
+          // And it names the way through. A refusal that stops at "no" sends an LLM caller
+          // hunting for an override flag, the same failure the repeating refusal met.
+          assert.match(
+            err.message,
+            /Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly one record, whatever else spells it as a UID, and this tool accepts it wherever it accepts an id\./,
+            tool,
+          );
+          assert.match(err.message, /get_calendar_event still works on this id/, tool);
+          // Each copy by the calendar a caller would recognise AND by the url that is the
+          // only handle telling the two apart.
+          for (const span of ['"Personal"', PERSONAL_URL + 'dup.ics', '"Work"', WORK_URL + 'dup.ics']) {
+            assert.ok(err.message.includes(span), `${tool} refusal omitted ${span}`);
+          }
+          return true;
+        },
+      );
+      // Nothing was written or destroyed on the way to the refusal.
+      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
+    }
+  });
+
+  // A calendar with no display name still has to be nameable, or the refusal lists a copy the
+  // caller cannot tell from the others. The url is the fallback because it is the one thing a
+  // collection always has. It is PADDED here because a url is server-authored text arriving in
+  // a multistatus href, and an untrimmed one would put the padding inside the quoted span the
+  // message renders it in.
+  // The caller's OWN id is echoed at CALENDAR_URL_ECHO_LIMIT — the bound eventNotFoundError uses
+  // for the same value — and not at the ambiguity's copy bound, whose stated reason is about one
+  // COPY's calendar and url. Nothing measured that: reverting this echo to the copy bound changed
+  // no test, because every other fixture here uses an id far too short to reach either.
+  it('bounds the caller id it echoes at the calendar url bound, not the wider copy bound', async () => {
+    const longId = `dup@fm${'p'.repeat(400)}`;
+    const { client } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal(longId, 'Personal copy'), url: PERSONAL_URL + 'dup.ics', etag: '"e1"' }],
+      [WORK_URL]: [{ data: eventIcal(longId, 'Work copy'), url: WORK_URL + 'dup.ics', etag: '"e2"' }],
+    });
+    await assert.rejects(
+      () => client.deleteCalendarEvent(longId),
+      (err: Error) => {
+        assert.match(err.message, /names 2 records/);
+        // Cut at the narrower bound...
+        assert.ok(err.message.includes(`dup@fm${'p'.repeat(CALENDAR_URL_ECHO_LIMIT - 6)}…`), err.message);
+        // ...which is the whole point: at the copy bound it would still be carrying these.
+        assert.ok(!err.message.includes('p'.repeat(AMBIGUOUS_COPY_URL_ECHO_LIMIT - 6)), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('names a copy by its collection url, trimmed, when the calendar has no display name', async () => {
+    const padded = `  ${PERSONAL_URL}  `;
+    const { client } = makeLookupClient(
+      [{ displayName: 'Work', url: WORK_URL }, { url: padded }],
+      {
+        [WORK_URL]: [{ data: eventIcal('dup@fm', 'Work copy'), url: WORK_URL + 'dup.ics', etag: '"e2"' }],
+        [padded]: [{ data: eventIcal('dup@fm', 'Personal copy'), url: PERSONAL_URL + 'dup.ics', etag: '"e1"' }],
+      },
+    );
+    await assert.rejects(
+      () => client.deleteCalendarEvent('dup@fm'),
+      (err: Error) => {
+        // The COLLECTION url as the calendar's name, whole and unpadded — not blank, and not
+        // the resource url standing in for it.
+        assert.ok(err.message.includes(`"${PERSONAL_URL}" ("${PERSONAL_URL}dup.ics")`), err.message);
+        return true;
+      },
+    );
+
+    // And the read discloses it the same way, so the two surfaces name one account alike.
+    const { otherCopies } = await client.getCalendarEventById('dup@fm');
+    assert.deepEqual(otherCopies, [{ calendar: PERSONAL_URL, url: PERSONAL_URL + 'dup.ics' }]);
+  });
+
+  // get is read-only, so it answers rather than refusing — but it must not answer as though the
+  // id named one record. The copy it returns is the FIRST in the lookup's stated order, which is
+  // what makes "which one did I get" a testable question rather than an accident of discovery.
+  it('answers a duplicated id with the first copy and discloses the others', async () => {
+    const { client } = makeLookupClient(twoCalendars, duplicateInTwoCalendars());
+    const { event, otherCopies } = await client.getCalendarEventById('dup@fm');
+
+    assert.equal(event.title, 'Personal copy');
+    assert.equal(event.url, PERSONAL_URL + 'dup.ics');
+    assert.deepEqual(otherCopies, [{ calendar: 'Work', url: WORK_URL + 'dup.ics' }]);
+  });
+
+  // Silence on the ordinary single-copy read: a caller who is told nothing has to be able to
+  // read that as "this id names one record", or the disclosure means nothing when it appears.
+  it('says nothing about other copies when the id names one record', async () => {
+    const { client } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url: PERSONAL_URL + 'solo.ics', etag: '"e"' }],
+    });
+    const result = await client.getCalendarEventById('solo@fm');
+    assert.equal(result.otherCopies, undefined);
+  });
+
+  // ORDER MATTERS between the two refusals. A caller told "this is a repeating event" fixes that
+  // by going to the web interface and never learns there is a second record; a caller told the id
+  // is ambiguous can pass a url and get the repeating refusal next, which is the true answer for
+  // the copy they meant. The ambiguity is also the more surprising of the two, and it is the one
+  // a stranger can cause.
+  it('raises the ambiguity refusal before the repeating-event refusal', async () => {
+    // The FIRST copy repeats; the second does not. Under a first-match-wins lookup this id
+    // reaches the repeating refusal, which is the wrong answer to give.
+    const recurringIcal = eventIcal('dup@fm', 'Personal copy').replace(
+      'SUMMARY:Personal copy',
+      'RRULE:FREQ=WEEKLY\r\nSUMMARY:Personal copy',
+    );
+    for (const call of [
+      (c: CalDAVCalendarClient) => c.updateCalendarEvent('dup@fm', { title: 'X' }),
+      (c: CalDAVCalendarClient) => c.deleteCalendarEvent('dup@fm'),
+    ]) {
+      const { client } = makeLookupClient(twoCalendars, duplicateInTwoCalendars({ data: recurringIcal }));
+      await assert.rejects(
+        () => call(client),
+        (err: Error) => {
+          assert.match(err.message, /names 2 records/);
+          assert.doesNotMatch(err.message, /is a repeating event/);
+          return true;
+        },
+      );
+    }
+  });
+
+  // And the refusal is about the RECORDS, not about how the id was spelled. A url resolves the
+  // same resource the UID query already found, and the two paths are UNIONED — so an id that is
+  // both is still one copy, and still writable. Without the dedupe every url-form write in the
+  // account would refuse itself as ambiguous.
+  it('counts a resource reached by both resolution paths once', async () => {
+    // A UID that is ALSO the resource's own url: both loops resolve it, to the same record.
+    const selfUrl = PERSONAL_URL + 'self.ics';
+    const { client, mockDAVClient } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal(selfUrl, 'Self'), url: selfUrl, etag: '"e"' }],
+    });
+    const { event, otherCopies } = await client.getCalendarEventById(selfUrl);
+    assert.equal(event.title, 'Self');
+    assert.equal(otherCopies, undefined);
+    // ...and the write tools act on it rather than refusing.
+    await client.deleteCalendarEvent(selfUrl);
+    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 1);
+  });
+
+  // ---- an exact ADDRESS beats a UID that merely spells it (#101) ----
+
+  // A UID is attacker-authored, so anyone who can send this account an invitation can mint a
+  // record whose UID is the literal resource url of an event they want to freeze. Both lookups
+  // run, so that decoy lands in the union alongside the record the caller actually addressed —
+  // and with UID matches collected first it arrived AHEAD of it. That made the url, which every
+  // one of these tools offers as the way out of an ambiguity, itself ambiguous: get answered
+  // with the decoy, and the writes refused with a remedy the caller had already followed.
+  //
+  // The rule: a match whose OWN url is the href resolved from the caller's string was ADDRESSED
+  // by name, and addressing is not something a UID can imitate. That match leads, and the
+  // lookup is unambiguous for the write tools whatever else carries the string as a UID.
+  const decoyCarryingAnAddress = (realUrl: string): Record<string, StoredObject[]> => ({
+    // Discovered FIRST, so the decoy is collected first under a plain union.
+    [WORK_URL]: [{ data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
+    [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
+  });
+  const decoyCalendars = [
+    { displayName: 'Work', url: WORK_URL },
+    { displayName: 'Personal', url: PERSONAL_URL },
+  ];
+
+  it('answers an exact address with the addressed record, not a decoy that spells it as a UID', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    const { event, otherCopies } = await client.getCalendarEventById(realUrl);
+
+    assert.equal(event.title, 'Real');
+    assert.equal(event.url, realUrl);
+    // The decoy is still disclosed — it exists, and a caller reading this response should know
+    // a record in another calendar answers to the same string — but it is not what was asked for.
+    assert.deepEqual(otherCopies, [{ calendar: 'Work', url: WORK_URL + 'decoy.ics' }]);
+  });
+
+  it('updates and deletes the addressed record rather than refusing it as ambiguous', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+
+    const up = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    await up.client.updateCalendarEvent(realUrl, { title: 'Renamed' });
+    const upCalls = up.mockDAVClient.updateCalendarObject.mock.calls.map(c => c.arguments);
+    assert.equal(upCalls.length, 1);
+    assert.equal((upCalls[0][0].calendarObject as { url: string }).url, realUrl);
+
+    const del = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    await del.client.deleteCalendarEvent(realUrl);
+    const delCalls = del.mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
+    assert.equal(delCalls.length, 1);
+    assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
+  });
+
+  // The other side of the rule, so it is not read as "a url-shaped id always wins". Where the
+  // string is url-shaped but names no resource in this account, nothing was addressed and the
+  // UID matches are all there is — including the ambiguity refusal if there are two of them.
+  it('still refuses a url-shaped id that addresses nothing and names two records by UID', async () => {
+    const phantom = PERSONAL_URL + 'never-existed.ics';
+    const { client } = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [{ data: eventIcal(phantom, 'Decoy A'), url: WORK_URL + 'a.ics', etag: '"ea"' }],
+      [PERSONAL_URL]: [{ data: eventIcal(phantom, 'Decoy B'), url: PERSONAL_URL + 'b.ics', etag: '"eb"' }],
+    });
+    await assert.rejects(() => client.deleteCalendarEvent(phantom), /names 2 records/);
   });
 
   // ---- the addressed fetch's failures are not all the same failure ----
@@ -1898,6 +2141,8 @@ describe('CalDAVCalendarClient event lookup', () => {
     }
   });
 });
+
+
 
 // ============================================================
 // New tests for calendar attendee support & non-destructive updates
