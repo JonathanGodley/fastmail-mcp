@@ -634,6 +634,43 @@ hosts — `phl.www.fastmail.com` is still rejected.
 drops host checking wholesale. It is not the answer to a regional Fastmail host, and using it
 for that would disable the check for every URL in the session response.
 
+### Where the CalDAV app password may be sent
+
+The JMAP half of this model is an allowlist over the URLs *session discovery* hands back. The
+CalDAV half has a different problem: one of its request URLs can come from the **caller**. An
+`eventId` may be given as a resource `url` (that is how `list_calendar_events` rows name their
+records), and the CalDAV client carries HTTP Basic — the app password — on **every** request it
+makes. Nothing else confines where those requests point.
+
+So a url-shaped `eventId` is **resolved by matching, never by fetching what the caller typed**
+(`resolveEventUrlTargets`, `src/caldav-client.ts`, [#137](https://github.com/JonathanGodley/fastmail-mcp/issues/137)):
+
+1. the string is parsed as a URL, and compared against the calendar collections **discovery
+   already found** — the same set the read tools search;
+2. it must share a collection's **origin**, and its path must sit **underneath** that
+   collection's path on a **path-segment boundary**;
+3. only then is a fetch issued, and it is issued **addressed to that known collection**.
+
+A string that matches nothing is never requested. It resolves to no copy, and the caller gets
+the ordinary "Calendar event not found" — the same answer a wrong UID gets.
+
+**Why segments rather than a prefix.** The comparison is over decoded path *segments*, each
+decoded on its own, for the reason the calendar-home detection met first
+([#136](https://github.com/JonathanGodley/fastmail-mcp/issues/136)): `%2F` inside a segment
+decodes to a separator that was never one, so a decode-then-rejoin makes
+`/dav/…/personal%2Fevil.ics` read as a child of `/dav/…/personal/`. A plain string prefix has a
+second failure of its own — `/dav/…/personal-archive/x.ics` starts with `/dav/…/personal` — and
+while discovered collection urls do end in `/`, so a prefix test would in fact hold on every
+real value today, the segment rule is what makes "underneath" mean underneath regardless.
+
+**Origin, not just path.** A multistatus href may name any host; a path-only comparison would
+read a foreign URL as a resource inside this account and then send the app password to it.
+
+**What this does NOT confine.** The server the client talks to at all is fixed by configuration
+(`serverUrl`), and the collections it discovers come from that server. This rule is about the
+one url the *caller* supplies; it is not a defence against a hostile CalDAV server, which is
+already trusted with the credential by virtue of being the configured one.
+
 ### No request follows a redirect
 
 An allowlist that only checks the URL the client *aims at* is defeated by a 302: the

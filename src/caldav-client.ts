@@ -2559,11 +2559,250 @@ function collectionPathSegments(pathname: string): string[] {
     });
 }
 
-/** Is `entry` a path strictly BELOW `home` — inside it, and not the home itself? */
-function isPathInsideHome(home: string[], entry: string[]): boolean {
-  if (entry.length <= home.length) return false;
-  return home.every((segment, i) => entry[i] === segment);
+/**
+ * Is `entry` a path strictly BELOW `container` — inside it, and not the container itself?
+ *
+ * SEGMENT ARRAYS on both sides, never joined strings, for the `%2F` reason spelled out on
+ * `collectionPathSegments`. Two callers ask it the same question about different containers:
+ * the broken-collection detection asks it about the calendar home (#136), and the url form of
+ * an event id asks it about one calendar collection (#137). A plain string-prefix test would
+ * answer both wrongly — `/dav/…/personal-archive/x.ics` starts with `/dav/…/personal` — and
+ * the segment comparison is what makes "underneath" mean underneath.
+ */
+function isPathStrictlyInside(container: string[], entry: string[]): boolean {
+  if (entry.length <= container.length) return false;
+  return container.every((segment, i) => entry[i] === segment);
 }
+
+/**
+ * The base a relative CalDAV url is resolved against before the confinement test below.
+ *
+ * It is NEVER a request target and no request is ever made to it: it exists so that both sides
+ * of the comparison — a discovered calendar's url and the caller's event id — land on ONE
+ * origin when either is written as a relative reference, which is the only way a comparison of
+ * origins means anything for both. In production both sides are absolute (tsdav absolutises
+ * every href it hands back), so this base is ignored on both; it is what test fixtures written
+ * with relative collection paths compare under, and it is what makes a bare relative id like
+ * `meeting.ics` resolve OUTSIDE every discovered calendar rather than inside all of them.
+ *
+ * `.invalid` is the RFC 2606 reserved TLD, so the value cannot name a real host even by
+ * accident.
+ */
+const CALDAV_URL_MATCH_BASE = 'https://caldav.invalid/';
+
+/**
+ * The calendars a caller-supplied URL-shaped event id sits inside, and the resource url to ask
+ * each of them for (#137).
+ *
+ * THE CALLER'S STRING IS NEVER ITSELF A REQUEST TARGET. This client carries the CalDAV app
+ * password on every request it makes and nothing else confines where it points, so an id that
+ * looks like a URL is resolved by MATCHING it against the collections discovery already found
+ * — origin, then path segments — and only a string that lands underneath one of them produces
+ * an addressed fetch, made against that known collection. A url that matches nothing is not
+ * fetched at all; it simply resolves to no copy, and the caller gets the ordinary not-found.
+ *
+ * The match is on a SEGMENT BOUNDARY (`isPathStrictlyInside`), and each segment is decoded on
+ * its own (`collectionPathSegments`), for the `%2F` reason #136 already had to handle: decoded
+ * whole, `/dav/…/personal%2Fevil/x.ics` reads as a child of `/dav/…/personal/` when it is
+ * nothing of the kind. Discovered collection urls end in `/`, so a plain prefix test would in
+ * fact hold on every real value — the segment rule is defensive, and its test is a pin on that
+ * defence rather than a reproduction of a bug anyone saw.
+ *
+ * A list rather than a single target because nothing forbids two discovered collections from
+ * nesting; the caller of this dedupes what comes back by resource url either way.
+ */
+function resolveEventUrlTargets(
+  eventId: string,
+  calendars: DAVCalendar[],
+): Array<{ calendar: DAVCalendar; objectUrl: string }> {
+  const candidate = resolveCollectionUrl(eventId, CALDAV_URL_MATCH_BASE);
+  if (candidate === undefined) return [];
+  const candidateSegments = collectionPathSegments(candidate.pathname);
+  const targets: Array<{ calendar: DAVCalendar; objectUrl: string }> = [];
+  for (const calendar of calendars) {
+    const collectionUrl = typeof calendar.url === 'string' ? calendar.url.trim() : '';
+    if (collectionUrl.length === 0) continue;
+    const collection = resolveCollectionUrl(collectionUrl, CALDAV_URL_MATCH_BASE);
+    if (collection === undefined) continue;
+    if (collection.origin !== candidate.origin) continue;
+    if (!isPathStrictlyInside(collectionPathSegments(collection.pathname), candidateSegments)) continue;
+    targets.push({ calendar, objectUrl: candidate.href });
+  }
+  return targets;
+}
+
+/**
+ * The `filters` tsdav forwards verbatim into a calendar-query REPORT body, taken from the
+ * library's own signature so a tsdav upgrade that changes the shape lands here rather than in
+ * a cast that has quietly become a lie.
+ */
+type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjects']>[0]['filters']>;
+
+/**
+ * The CalDAV `calendar-query` filter that asks one collection for the resources whose VEVENT
+ * carries exactly this UID (#137).
+ *
+ * The shape is the one MEASURED against the live account, not one read off a spec — see
+ * `scripts/probes/calendar-uid-query.probe.mjs`, which settled every fact this filter rests on:
+ *
+ *   - `match-type` is a CardDAV attribute (RFC 6352 §10.5.1); RFC 4791's own `text-match` has
+ *     no such attribute and defaults to CONTAINS semantics. Fastmail's Cyrus honours it on
+ *     CalDAV all the same, and the probe's substring query returns zero resources, which is
+ *     what says so;
+ *   - NO `collation` attribute, so RFC 4791's default `i;ascii-casemap` applies — which is
+ *     ASCII case-INSENSITIVE. `equals` under it was measured matching a case-variant UID.
+ *
+ * That last fact is why the caller's own exact-equality check on the PARSED UID is LOAD-BEARING
+ * rather than belt-and-braces, and it is stated there too: this filter narrows what the server
+ * sends, and a server matching more loosely than it was asked to still cannot manufacture a
+ * copy past a client-side `===`. A loose match that got past it would not merely widen the
+ * result — it would put a record the caller never named into the set these lookups hand back,
+ * for the tools reading them to act on.
+ *
+ * xml-js compact form, which is what tsdav forwards verbatim into the REPORT body:
+ * `_attributes` for attributes, `_text` for character data, unprefixed names taking the CalDAV
+ * namespace.
+ *
+ * WHAT THE SERIALISER DOES AND DOES NOT NEUTRALISE, MEASURED against the xml-js build this repo
+ * pins: `<`, `>` and `&` inside `_text` are escaped, so a UID cannot close this element and
+ * write filter markup of its own — the caller's string reaches the server as character data,
+ * whatever it spells. Those three are ALL it escapes; everything else is copied through as
+ * written, the characters XML 1.0's `Char` production excludes included. What is left after the
+ * UTF-8 encoder downstream repairs the surrogates (to U+FFFD, a legal `Char`) is the rest of
+ * `Char`'s exclusions: the C0 characters other than tab, CR and LF, and the noncharacters
+ * U+FFFE and U+FFFF. Those travel into the body raw, the document is ill-formed, and the server
+ * answers 400. That class is closed at the top of `findCalendarObjectByUID` instead of here,
+ * because the honest answer to an unsendable value is to refuse the ARGUMENT rather than to
+ * send it and report the server's complaint — see XML_UNSENDABLE_CHARS, which also records what
+ * stays sendable and why.
+ */
+function uidEqualsFilter(uid: string): CalendarQueryFilters {
+  return [{
+    'comp-filter': {
+      _attributes: { name: 'VCALENDAR' },
+      'comp-filter': {
+        _attributes: { name: 'VEVENT' },
+        'prop-filter': {
+          _attributes: { name: 'UID' },
+          'text-match': { _attributes: { 'match-type': 'equals' }, _text: uid },
+        },
+      },
+    },
+  }] as unknown as CalendarQueryFilters;
+}
+
+/**
+ * One copy of an event that a lookup RESOLVED, and the calendar it was found in.
+ *
+ * The calendar is carried as a label rather than the collection, because every consumer wants
+ * the same thing from it — a name a caller would recognise, falling back to the url when the
+ * collection has no display name — and that fallback is decided once here instead of at each
+ * message that names it.
+ */
+interface CalendarObjectMatch {
+  object: DAVCalendarObject;
+  calendarLabel: string;
+}
+
+/**
+ * What a lookup hands back: every copy the id resolved to, and what discovery could not search.
+ *
+ * `matches` IS ORDERED, and the order is part of the contract rather than an accident of the
+ * loop: the UID matches come first, in calendar discovery order, and any copy resolved from the
+ * url form follows them. `get_calendar_event` returns `matches[0]` and says so on its tool
+ * surface, which is only a testable promise because the order is stated here.
+ */
+interface CalendarObjectLookup {
+  matches: CalendarObjectMatch[];
+  brokenCollections: BrokenCollections;
+}
+
+/**
+ * Every unsendable character that SURVIVES TO THE WIRE. That is deliberately NOT the whole of
+ * what XML 1.0's `Char` production excludes: `Char` also excludes the surrogates, and the UTF-8
+ * encoder downstream of the serialiser repairs an unpaired one to U+FFFD before the body is
+ * written, so it never reaches the server as itself (see below). What remains is narrower and
+ * wider than "control characters": the C0 range except tab, LF and CR (those three are legal
+ * character data), AND the two BMP noncharacters U+FFFE and U+FFFF.
+ *
+ * Why this is a REJECT rather than a value that simply matches nothing: tsdav's xml-js
+ * serialiser escapes `<`, `>` and `&` in a text node — MEASURED, see `uidEqualsFilter` — so a
+ * hostile UID cannot inject markup into the REPORT. What it does not escape is this class: the
+ * characters travel into the body RAW, the document is ill-formed, the server answers 400, and
+ * a plain `Error` maps to `InternalError` — "server-side, a bare retry might work" — for a
+ * value only the caller can fix. The full scan this replaced never sent the value anywhere, so
+ * it came back not-found.
+ *
+ * THE NONCHARACTERS ARE NOT AN AFTERTHOUGHT, they are the case a C0-only guard got wrong. They
+ * are not control characters, they encode to ordinary UTF-8 bytes (`EF BF BE`, `EF BF BF`), and
+ * nothing between here and the wire alters them — so they reproduce exactly the 400 this guard
+ * exists to prevent while looking nothing like the values it was first written for.
+ *
+ * WHAT IS DELIBERATELY NOT HERE, because each of these IS sendable and the server answers it:
+ *   - tab, CR and LF — legal `Char`, so a value carrying one is sent and comes back not-found,
+ *     which is the right answer for an id that is merely wrong rather than unsendable;
+ *   - U+FDD0–U+FDEF — noncharacters that XML 1.0 nonetheless admits, unlike U+FFFE/U+FFFF;
+ *   - lone surrogates — MEASURED: `TextEncoder` emits `EF BF BD` for an unpaired U+D800, so
+ *     what reaches the wire is U+FFFD and the body stays well-formed. The encoder already
+ *     neutralises them, and rejecting here would refuse an id the server would have answered.
+ */
+const XML_UNSENDABLE_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
+
+/**
+ * Did this throw from an addressed multiget mean "there is no resource at that href"?
+ *
+ * tsdav collapses every failure into one message shape — `Collection query failed: <status>
+ * <statusText>. …` — so the status is the ONLY signal, and this reads it rather than pretending
+ * the failures are alike. 404 and 410 are the two that name an absent resource; every other
+ * status, and a network-level throw carrying no such message at all, is about the collection or
+ * the connection and belongs to the caller. See the call site for why reading 404 as "absent"
+ * stays safe when a whole collection returns it.
+ *
+ * READS AN `Error`'s MESSAGE AND NOTHING ELSE, so a throw that is not an Error — which nothing
+ * promises tsdav or a fetch polyfill will avoid — falls on the rethrow side rather than being
+ * stringified into a match. The trailing `\b` is belt-and-braces against a longer number: an
+ * HTTP status is three digits and this message interpolates one, so no reachable value reaches
+ * it. It stays because the anchor costs nothing and the reason it is unreachable is a property
+ * of tsdav's message, not of this function.
+ */
+function isAddressedResourceMissing(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : '';
+  return /^Collection query failed: 4(?:04|10)\b/.test(message);
+}
+
+/** The calendar name a message shows, with the url as the handle that always exists. */
+function calendarLabel(calendar: DAVCalendar): string {
+  return unwrapDisplayName(calendar.displayName)
+    ?? (typeof calendar.url === 'string' ? calendar.url.trim() : '');
+}
+
+/**
+ * Did this resource come back COMPLETE enough to be acted on?
+ *
+ * A resolved copy has to carry all three of a url, a parseable VEVENT and an etag, and the rule
+ * is one rule for all three tools and both resolution paths rather than a per-tool test,
+ * because the strictest consumer sets it and the others gain nothing by being laxer:
+ *
+ *   - the URL is what the write is addressed to;
+ *   - the DATA is what `isRecurringSeriesResource` reads, and that check is the only thing
+ *     standing between `delete_calendar_event` and a cancellation mailed to every attendee of a
+ *     series — a payload-less resource would sail past it as "not recurring";
+ *   - the ETAG is the `If-Match` of the write. tsdav runs its delete headers through
+ *     `cleanupFalsy`, so an object with no etag is sent with NO `If-Match` at all and the
+ *     resource is destroyed unconditionally — whatever it has become since it was read.
+ *
+ * A server that answers with a resource this incomplete has not described the record, so the
+ * honest answer is that nothing resolved, not that something did and is missing its parts. The
+ * live account was measured returning both data and a non-empty etag on every matched resource
+ * (`scripts/probes/calendar-uid-query.probe.mjs`, step 2).
+ */
+function isResolvedCalendarObject(obj: DAVCalendarObject): boolean {
+  if (typeof obj.url !== 'string' || obj.url.trim().length === 0) return false;
+  if (typeof obj.etag !== 'string' || obj.etag.trim().length === 0) return false;
+  if (typeof obj.data !== 'string' || obj.data.length === 0) return false;
+  return extractVEventBlocks(obj.data).length > 0;
+}
+
 
 /**
  * The collections inside `homeUrl`'s own PROPFIND answer that failed to list (#136).
@@ -2600,7 +2839,7 @@ export function findBrokenCalendarHomeCollections(entries: DAVResponse[], homeUr
     const resolved = resolveCollectionUrl(href, homeUrl);
     if (resolved === undefined) continue;
     if (resolved.origin !== home.origin) continue;
-    if (!isPathInsideHome(homeSegments, collectionPathSegments(resolved.pathname))) continue;
+    if (!isPathStrictlyInside(homeSegments, collectionPathSegments(resolved.pathname))) continue;
     if (!isBrokenCalendarHomeEntry(entry)) continue;
     if (seen.has(resolved.href)) continue;
     seen.add(resolved.href);
@@ -3689,17 +3928,42 @@ export class CalDAVCalendarClient {
   }
 
   /**
-   * Find the raw DAVCalendarObject by UID or URL.
-   * Needed for update/delete which require the original object with url/etag.
+   * Find every stored copy of the event this id names, by UID or by URL (#137).
    *
-   * Hands back what discovery could NOT search alongside the object (#136), because "no object
+   * ONE TARGETED QUERY PER SELECTABLE CALENDAR, not a download of every event in the account.
+   * The filter (`uidEqualsFilter`) asks the server for the resources whose VEVENT carries this
+   * UID; the exact-equality check below is what turns the server's answer into an answer this
+   * code is willing to act on. There is deliberately NO FALLBACK to the old full scan when the
+   * server refuses the filter: tsdav throws on a refused query, that throw reaches the caller,
+   * and the caller sees a failed call rather than a quietly slower one that may have searched
+   * a different set of records than it says it did.
+   *
+   * BOTH FORMS OF THE ID ARE TRIED, AND THE RESULTS UNIONED — never branched between on the
+   * shape of the string. UIDs here are attacker-authored (anyone who can send this account an
+   * invitation writes one), so a UID can perfectly well be url-shaped, and dispatching on shape
+   * would make such an event unfindable by its own id. Both run; the results dedupe by resource
+   * url.
+   *
+   * Hands back what discovery could NOT search alongside the copies (#136), because "no object
    * matched" and "one collection could not be looked in" are two different answers and every
    * caller of this needs both: the not-found errors say so, and the write paths that DO find a
    * copy report the path they could not check.
    */
-  private async findCalendarObjectByUID(
-    eventId: string,
-  ): Promise<{ object: DAVCalendarObject | null; brokenCollections: BrokenCollections }> {
+  private async findCalendarObjectByUID(eventId: string): Promise<CalendarObjectLookup> {
+    // Before any query is built, and here rather than in the handler: the handler's guard is
+    // falsy-only, so a whitespace-only id used to reach the lookup and come back as "Calendar
+    // event not found" — a statement about the account, for a call that never named an event.
+    // All three tools inherit the rejection by going through this one method.
+    const wanted = requireNonEmpty(eventId, 'eventId', 'pass an event id or url from list_calendar_events');
+    // Beside the empty check and for the same reason: a value this call can never send is a
+    // fact about the ARGUMENT, and saying so beats letting the server reject the request and
+    // reporting that as a server-side failure. See XML_UNSENDABLE_CHARS for the bound.
+    if (XML_UNSENDABLE_CHARS.test(wanted)) {
+      throw new InvalidInputError(
+        'eventId contains a character that no XML request can carry, which no calendar id or '
+        + 'url holds either. Pass an event id or url from list_calendar_events.',
+      );
+    }
     const client = await this.getClient();
     // Routed through discovery so a failed lookup can only mean "no object matched". A
     // discovery failure throws here instead, which is what keeps getCalendarEventById from
@@ -3711,25 +3975,88 @@ export class CalDAVCalendarClient {
     // get/update/delete reach a collection `list_calendars` never shows and
     // `list_calendar_events` answers "Calendar not found" for — a record this server would
     // destroy but would not let you look at.
-    for (const cal of selectableCalendars(calendars)) {
-      const objects = await client.fetchCalendarObjects({ calendar: cal });
+    const selectable = selectableCalendars(calendars);
+
+    const matches: CalendarObjectMatch[] = [];
+    const seenUrls = new Set<string>();
+    const collect = (calendar: DAVCalendar, obj: DAVCalendarObject) => {
+      // A copy COUNTS only when the resource came back whole — see isResolvedCalendarObject
+      // for why the same bar binds both resolution paths and all three tools.
+      if (!isResolvedCalendarObject(obj)) return;
+      // Deduped on the resource url, which is what makes the union of the two resolution paths a
+      // union: an id that is both a valid UID and a valid url resolves the same resource twice.
+      const url = obj.url;
+      if (seenUrls.has(url)) return;
+      seenUrls.add(url);
+      matches.push({ object: obj, calendarLabel: calendarLabel(calendar) });
+    };
+
+    // BOTH FETCHES BELOW INHERIT A tsdav FILTER NOBODY HERE ASKED FOR: `fetchCalendarObjects`
+    // defaults `urlFilter` to one that keeps only hrefs containing the lowercase string `.ics`,
+    // and applies it to the resource urls BEFORE the multiget — to the hrefs the query returned
+    // on the UID path, and to the caller's own resolved href on the addressed path, which is
+    // then not requested at all. A resource stored under any other name (no extension, `.ICS`,
+    // a bare UUID) is therefore invisible to every path in this file: it cannot be read, cannot
+    // be updated or deleted, and cannot be one of the copies this lookup reports. That is not this
+    // lookup's judgement about the account but a library default sitting under it, and it binds
+    // `getCalendarEvents` in exactly the same way.
+    //
+    // EVERY selectable calendar is queried and every match kept: the scan does not stop at the
+    // first hit. A UID is unique per COLLECTION and not per account, so stopping early answered
+    // a two-copy account with whichever copy happened to be discovered first and said nothing
+    // about the other (#101).
+    for (const calendar of selectable) {
+      const objects = await client.fetchCalendarObjects({ calendar, filters: uidEqualsFilter(wanted) });
       for (const obj of objects) {
         const vevent = extractVEvent(obj.data || '');
         if (!vevent) continue;
         // Trimmed here because this is an exact-match comparison against the caller's id,
         // the same exact-match category as the TZID substring check.
         const uid = parseICalValue(vevent, 'UID')?.trim();
-        if (uid === eventId || obj.url === eventId) {
-          return { object: obj, brokenCollections };
-        }
+        // LOAD-BEARING, not belt-and-braces. The query carries no `collation`, so RFC 4791's
+        // default `i;ascii-casemap` applies and `equals` was MEASURED matching a case-variant
+        // UID on the live account (scripts/probes/calendar-uid-query.probe.mjs, step 5). This
+        // is what keeps a server matching more loosely than it was asked to from manufacturing
+        // a copy the caller never named, for the tools reading this lookup to act on.
+        if (uid !== wanted) continue;
+        collect(calendar, obj);
       }
     }
 
-    return { object: null, brokenCollections };
+    // The URL form, resolved by MATCHING and only then fetched — see resolveEventUrlTargets for
+    // why the caller's string is never itself a request target.
+    for (const { calendar, objectUrl } of resolveEventUrlTargets(wanted, selectable)) {
+      let objects: DAVCalendarObject[];
+      try {
+        objects = await client.fetchCalendarObjects({ calendar, objectUrls: [objectUrl] });
+      } catch (err) {
+        // NOT-FOUND ONLY IS SWALLOWED. tsdav turns EVERY failure of an addressed multiget into
+        // the same throw — a per-href 404 inside a 207, a collection 500, a 401 — and the only
+        // thing separating them is the status in the message (MEASURED against real tsdav; the
+        // pin test drives it through a fetch override). The 404/410 class is the ordinary case
+        // and genuinely means "no copy at that address": a caller pasting the url of an event
+        // since deleted. Anything else is a statement about the COLLECTION, and swallowing it
+        // would let a transient outage change which record a destructive call acts on — the
+        // copy in the failing collection would silently drop out of the result, and these tools
+        // act on the first record in it. So it is rethrown.
+        //
+        // Why the 404 swallow is safe even though a collection-level 404 wears the same
+        // message: this collection ANSWERED the UID calendar-query moments earlier, in the loop
+        // above, so a collection that is genuinely gone or unreachable would already have
+        // thrown there. What is left is a race, and its honest reading is the same one — there
+        // is no copy at that address now.
+        if (!isAddressedResourceMissing(err)) throw err;
+        continue;
+      }      for (const obj of objects) collect(calendar, obj);
+    }
+
+    return { matches, brokenCollections };
   }
 
   async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
-    const { object: obj, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    // The FIRST copy in the lookup's stated order (see CalendarObjectLookup).
+    const obj = matches[0]?.object;
     // Throw rather than return null so the MCP tool surfaces a real not-found
     // error — matches updateCalendarEvent/deleteCalendarEvent below. A null
     // here used to reach callers as a successful "null" tool response.
@@ -3928,15 +4255,24 @@ export class CalDAVCalendarClient {
     // left half-done by proceeding — this path searches first and writes exactly once, to the
     // one resource it resolved — so the worst outcome is that a second copy elsewhere goes
     // unpatched, which the note names the path of.
-    const { object: obj, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const obj = matches[0]?.object;
     if (!obj) {
       // Caller-fixable bad id, same as getCalendarEventById: InvalidParams, not the
       // InternalError a plain Error maps to.
       throw eventNotFoundError(eventId, brokenCollections);
     }
 
-    // Stays a plain Error: the event was found, but the server handed back an object with
-    // no usable iCal payload. Nothing in the caller's arguments can change that.
+    // UNREACHABLE DEFENCE, not a live case (#137): `isResolvedCalendarObject` already requires
+    // a payload holding a parseable VEVENT before a resource is collected as a match at all, so
+    // a payload-less object never reaches here — it resolves to nothing and the not-found above
+    // fires instead. Kept because it is the last statement of an invariant two destructive
+    // paths depend on, and because it costs nothing; do not read its presence as evidence that
+    // the lookup can hand back an empty payload.
+    //
+    // Stays a plain Error rather than an InvalidInputError: were it ever reached, the event was
+    // found and the server handed back an object with no usable iCal payload, and nothing in
+    // the caller's arguments could change that.
     // Structural, not a substring test: `includes('BEGIN:VEVENT')` is true of a payload whose
     // only occurrence of that text sits inside a DESCRIPTION, which then fell through to a
     // different error message about the same condition.
@@ -4160,7 +4496,8 @@ export class CalDAVCalendarClient {
     const client = await this.getClient();
     // Acts on the copy it found and names the path it could not check — the same call as
     // update's, made for the same reasons; see the comment there (#136).
-    const { object: obj, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const obj = matches[0]?.object;
     if (!obj) {
       // Caller-fixable bad id, matching getCalendarEventById/updateCalendarEvent.
       throw eventNotFoundError(eventId, brokenCollections);

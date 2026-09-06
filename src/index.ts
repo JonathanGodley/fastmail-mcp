@@ -368,6 +368,22 @@ const CALENDAR_ID_MATCHING_DESC =
   'the available calendars rather than answered with an empty result, and an empty or whitespace-only string is ' +
   'such a value. Calendars list_calendars does not show cannot be named here either, on a read or on a write.';
 
+/**
+ * What `eventId` accepts, on all three tools that take one, written once (#137).
+ *
+ * The three descriptions had said different amounts about the same parameter — get_calendar_event
+ * said only "ID of the event to retrieve" — and the rules below hold identically for all of them,
+ * because all three resolve the id through one lookup. Appended to each tool's own eventId text
+ * rather than replacing it: what a WRONG id costs differs per tool, and that part stays local.
+ */
+const CALENDAR_EVENT_ID_DESC =
+  ' Accepts the event\'s `id` (its UID) or the `url` from a list_calendar_events row. BOTH FORMS ARE ALWAYS TRIED, ' +
+  'never chosen between by the look of the value, so an event whose UID happens to be URL-shaped still resolves by its own id. ' +
+  'A url is only ever resolved against THIS account\'s calendars: one pointing anywhere else names no record here, is never ' +
+  'fetched, and comes back as not-found. An empty or whitespace-only value is rejected outright rather than searched for. ' +
+  'And a record the server describes incompletely — no payload, or no entity tag to write against — resolves to nothing and ' +
+  'also reads as not-found, because this server will not change or destroy a record it could not read whole.';
+
 function getTimezone(): string | undefined {
   return findEnvValue([
     'FASTMAIL_TIMEZONE',
@@ -1486,7 +1502,7 @@ const TOOLS = [
           properties: {
             eventId: {
               type: 'string',
-              description: 'ID of the event to retrieve',
+              description: 'ID of the event to retrieve.' + CALENDAR_EVENT_ID_DESC,
             },
           },
           required: ['eventId'],
@@ -1553,7 +1569,7 @@ const TOOLS = [
           properties: {
             eventId: {
               type: 'string',
-              description: 'ID of the event to update, or equivalently the `url` from a list_calendar_events row — both resolve to the same record and both are refused when it repeats. An id taken from an occurrence row of a repeating event is the SERIES id, which is why this tool refuses it.',
+              description: 'ID of the event to update, or equivalently the `url` from a list_calendar_events row — both resolve to the same record and both are refused when it repeats. An id taken from an occurrence row of a repeating event is the SERIES id, which is why this tool refuses it.' + CALENDAR_EVENT_ID_DESC,
             },
             title: {
               type: 'string',
@@ -1608,7 +1624,7 @@ const TOOLS = [
           properties: {
             eventId: {
               type: 'string',
-              description: 'ID of the event to delete, or equivalently the `url` from a list_calendar_events row — the two name the same record, destroy the same amount, and are both refused when it repeats. The id is checked only for whether it repeats: a wrong id that names a real single event still deletes it and mails its attendees.',
+              description: 'ID of the event to delete, or equivalently the `url` from a list_calendar_events row — the two name the same record, destroy the same amount, and are both refused when it repeats. The id is checked only for whether it repeats: a wrong id that names a real single event still deletes it and mails its attendees.' + CALENDAR_EVENT_ID_DESC,
             },
           },
           required: ['eventId'],

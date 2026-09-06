@@ -42,7 +42,7 @@ import {
 } from './caldav-client.js';
 // A value import, not `import type`: the redirect test below stubs a method on the
 // prototype, which needs the class itself. It still serves the type positions.
-import { DAVClient, fetchCalendars as tsdavFetchCalendars, propfind as tsdavPropfind } from 'tsdav';
+import { DAVClient, fetchCalendars as tsdavFetchCalendars, propfind as tsdavPropfind, calendarQuery as tsdavCalendarQuery, calendarMultiGet as tsdavCalendarMultiGet } from 'tsdav';
 import type { DAVAccount, DAVResponse } from 'tsdav';
 import { callArguments } from './testing/mock-calls.js';
 // The calendar window's local-day resolution reads the deployment's configured zone from
@@ -78,6 +78,19 @@ type DeleteObjectParams = Parameters<DAVClient['deleteCalendarObject']>[0];
 // Everything else the test needs from the client is passed in `rest` and returned untouched,
 // so an assertion about what the client was asked to do — a call count, a recorded argument —
 // reads the very mock function the test handed in.
+// A stand-in etag for a fixture that predates the rule requiring one. A lookup resolves a copy
+// only when the resource came back whole - url, payload AND etag - because the etag is the write
+// path's `If-Match` and tsdav sends a delete with no `If-Match` at all when it is missing (#137).
+// A real CalDAV server returns `getetag` on every resource it describes, so a fixture without one
+// describes a server that does not exist; `withEtags` supplies it rather than each fixture
+// restating it. Tests that are ABOUT the missing-etag case build their objects without this.
+const FIXTURE_ETAG = '"fixture-etag"';
+
+function withEtags<T extends object>(objects: T[]): Array<T & { etag: string }> {
+  // Spread LAST, so a fixture that states its own etag keeps it.
+  return objects.map(o => ({ etag: FIXTURE_ETAG, ...o }) as T & { etag: string });
+}
+
 function makeMockDAVClient<Calendar, Rest extends object & { login?: never; fetchCalendars?: never }>(calendars: Calendar[], rest: Rest) {
   return {
     login: mock.fn(async () => {}),
@@ -870,7 +883,7 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     // Override the private getClient method to return a mock DAVClient
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
     });
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1087,7 +1100,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
   function createMockedClientWithUpdateDelete(calendarObjects: Array<{ data: string; url: string; etag?: string }>) {
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
       deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status: 200 })),
     });
@@ -1169,7 +1182,7 @@ describe('CalDAVCalendarClient.deleteCalendarEvent', () => {
   function createMockedClientWithDelete(calendarObjects: Array<{ data: string; url: string; etag?: string }>) {
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
       deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -1223,7 +1236,7 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
   function createMockedClientWithObjects(calendarObjects: Array<{ data: string; url: string; etag?: string }>) {
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
     });
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
@@ -1319,6 +1332,570 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
         return true;
       },
     );
+  });
+});
+
+// ============================================================
+// Targeted event lookup (#137)
+// ============================================================
+
+describe('CalDAVCalendarClient event lookup', () => {
+  // ABSOLUTE collection URLs throughout this block, unlike the '/cal/personal/' shorthand the
+  // older fixtures use, because the url form of an event id is resolved by MATCHING it against
+  // a discovered calendar — on origin AND path segments — rather than by fetching what the
+  // caller typed. Neither half of that comparison exists for a bare relative path, so a
+  // shorthand fixture cannot exercise the confinement at all. Invented host, per the fixture
+  // rule the home-listing block above states: no account value belongs in a test.
+  const PERSONAL_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+  const WORK_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/work/';
+  const TASKS_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/tasks/';
+
+  type StoredObject = { data?: string; url: string; etag?: string };
+
+  function eventIcal(uid: string, summary = 'Meeting'): string {
+    return [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:' + uid,
+      'DTSTART:20260401T100000Z',
+      'DTEND:20260401T110000Z',
+      'SUMMARY:' + summary,
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  /** The UID a `fetchCalendarObjects({ filters })` call is asking for, read off the filter. */
+  function uidInFilter(filters: unknown): string | undefined {
+    const first = Array.isArray(filters) ? (filters as any[])[0] : undefined;
+    return first?.['comp-filter']?.['comp-filter']?.['prop-filter']?.['text-match']?._text;
+  }
+
+  /**
+   * A `fetchCalendarObjects` stand-in that answers the way a CalDAV server does, so one fake
+   * serves both halves of the lookup: a FILTERED query returns the objects in that collection
+   * whose UID equals the filter's text — matched ASCII-case-INSENSITIVELY, which is what the
+   * live account was measured doing under the default collation (see
+   * scripts/probes/calendar-uid-query.probe.mjs) — and an ADDRESSED fetch returns whichever of
+   * them sit at the urls asked for.
+   *
+   * A call carrying NEITHER is answered with the whole collection, which is what the unfiltered
+   * full scan used to ask for. That is deliberate: it lets a test written against this fake run
+   * unchanged on the code before and after the targeted query landed.
+   */
+  function makeObjectStore(byCalendarUrl: Record<string, StoredObject[]>) {
+    return mock.fn(async (params: FetchObjectsParams) => {
+      const objects = byCalendarUrl[(params.calendar as { url?: string })?.url ?? ''] ?? [];
+      const objectUrls = (params as { objectUrls?: string[] }).objectUrls;
+      if (objectUrls) return objects.filter(o => objectUrls.includes(o.url));
+      const uid = uidInFilter((params as { filters?: unknown }).filters);
+      if (uid === undefined) return objects;
+      return objects.filter(o => {
+        const stored = /^UID:(.*)$/m.exec(o.data ?? '')?.[1]?.trim() ?? '';
+        return stored.toLowerCase() === uid.toLowerCase();
+      });
+    });
+  }
+
+  function makeLookupClient(
+    calendars: Array<{ displayName?: unknown; url?: unknown }>,
+    byCalendarUrl: Record<string, StoredObject[]>,
+  ) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const fetchCalendarObjects = makeObjectStore(byCalendarUrl);
+    const mockDAVClient = makeMockDAVClient(calendars, {
+      fetchCalendarObjects,
+      updateCalendarObject: mock.fn(async (_p: UpdateObjectParams) => ({ status: 200 })),
+      deleteCalendarObject: mock.fn(async (_p: DeleteObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient, fetchCalendarObjects };
+  }
+
+  const onePersonalEvent = (): Record<string, StoredObject[]> => ({
+    [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url: PERSONAL_URL + 'solo.ics', etag: '"etag-solo"' }],
+  });
+
+  // The handler's own guard is falsy-only, so a whitespace-only id used to reach the lookup and
+  // come back as "Calendar event not found" — an answer about the account, for a call that never
+  // named an event. Rejected here, in the client, so all three tools inherit it.
+  it('rejects an eventId that is only whitespace, before any query is built', async () => {
+    for (const call of [
+      (c: CalDAVCalendarClient) => c.getCalendarEventById('   '),
+      (c: CalDAVCalendarClient) => c.updateCalendarEvent('   ', { title: 'X' }),
+      (c: CalDAVCalendarClient) => c.deleteCalendarEvent('   '),
+    ]) {
+      const { client, fetchCalendarObjects } = makeLookupClient(
+        [{ displayName: 'Personal', url: PERSONAL_URL }],
+        onePersonalEvent(),
+      );
+      await assert.rejects(
+        () => call(client),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          // The hint is asserted with the subject: a rejection that says only "cannot be empty"
+          // leaves a caller no better off than the not-found answer this replaced.
+          assert.match(err.message, /eventId cannot be empty; pass an event id or url from list_calendar_events/);
+          return true;
+        },
+      );
+      assert.equal(fetchCalendarObjects.mock.callCount(), 0);
+    }
+  });
+
+  // tsdav's delete runs its headers through `cleanupFalsy`, so an object with no etag is sent
+  // with no If-Match at all and the resource is destroyed UNCONDITIONALLY — whatever it has
+  // become since it was read. A resource the server did not describe fully is therefore not a
+  // resolved copy at all, on any of the three tools.
+  it('does not resolve a copy the server returned without an etag', async () => {
+    const noEtag: Record<string, StoredObject[]> = {
+      [PERSONAL_URL]: [{ data: eventIcal('noetag@fm'), url: PERSONAL_URL + 'noetag.ics' }],
+    };
+    const { client, mockDAVClient } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], noEtag);
+    await assert.rejects(() => client.deleteCalendarEvent('noetag@fm'), /Calendar event not found/);
+    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
+  });
+
+  // The other half of the same rule: no payload means nothing could be read off the resource —
+  // including whether it is a repeating series, which is the check that stands between a delete
+  // and a cancellation mailed to every attendee.
+  it('does not resolve a copy the server returned without data', async () => {
+    const noData: Record<string, StoredObject[]> = {
+      [PERSONAL_URL]: [{ url: PERSONAL_URL + 'nodata.ics', etag: '"etag-nodata"' }],
+    };
+    const { client, mockDAVClient } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], noData);
+    await assert.rejects(
+      () => client.deleteCalendarEvent(PERSONAL_URL + 'nodata.ics'),
+      /Calendar event not found/,
+    );
+    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
+  });
+
+
+  // Each of these is a resource the server described but did not describe WHOLE, and each is
+  // reached through the path that can actually deliver it: a blank url or a blank etag still
+  // parses to a VEVENT, so the UID query hands it back; an empty or VEVENT-less payload cannot be
+  // matched by UID at all, so only the addressed url fetch reaches it. None of them resolves.
+  it('does not resolve a resource the server described incompletely', async () => {
+    const cases: Array<[string, StoredObject, string]> = [
+      ['a blank url', { data: eventIcal('blank@fm'), url: '   ', etag: '"e"' }, 'blank@fm'],
+      ['a whitespace-only etag', { data: eventIcal('wsetag@fm'), url: PERSONAL_URL + 'ws.ics', etag: '   ' }, 'wsetag@fm'],
+      ['an empty payload', { data: '', url: PERSONAL_URL + 'empty.ics', etag: '"e"' }, PERSONAL_URL + 'empty.ics'],
+      [
+        'a payload holding no VEVENT',
+        { data: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR', url: PERSONAL_URL + 'novevent.ics', etag: '"e"' },
+        PERSONAL_URL + 'novevent.ics',
+      ],
+    ];
+    for (const [label, stored, lookupId] of cases) {
+      const { client, mockDAVClient } = makeLookupClient(
+        [{ displayName: 'Personal', url: PERSONAL_URL }],
+        { [PERSONAL_URL]: [stored] },
+      );
+      await assert.rejects(
+        () => client.deleteCalendarEvent(lookupId),
+        /Calendar event not found/,
+        `${label} resolved to a copy`,
+      );
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, label);
+    }
+  });
+
+  // A collection can only contain a url if it HAS one that parses. Each entry below is a calendar
+  // the confinement test has to skip rather than trip over — and skipping it must not turn into
+  // matching everything, which is what a container with no path of its own would do.
+  it('never treats a calendar with an unusable url as a container', async () => {
+    const odd = [
+      { displayName: 'No url at all', url: '' },
+      // tsdav types displayName loosely and a url can arrive typed away from string too.
+      { displayName: 'Numeric url', url: 12345 },
+      { displayName: 'Unparseable url', url: 'http://[' },
+      { displayName: 'Personal', url: PERSONAL_URL },
+    ];
+    const { client, fetchCalendarObjects } = makeLookupClient(odd, onePersonalEvent());
+
+    // A url on the base that relative values resolve against: the one string an empty-url
+    // calendar would swallow if it were allowed to act as a container.
+    await assert.rejects(
+      () => client.getCalendarEventById('https://caldav.invalid/dav/anything.ics'),
+      /Calendar event not found/,
+    );
+    for (const [params] of fetchCalendarObjects.mock.calls.map(c => c.arguments)) {
+      assert.equal((params as { objectUrls?: string[] }).objectUrls, undefined);
+    }
+
+    // And the healthy calendar in the same list still resolves its own resource.
+    const { event } = await client.getCalendarEventById(PERSONAL_URL + 'solo.ics');
+    assert.equal(event.id, 'solo@fm');
+  });
+
+  // ---- the targeted query itself ----
+
+  it('asks each selectable calendar for the UID rather than downloading the collection', async () => {
+    const byCalendar: Record<string, StoredObject[]> = {
+      [PERSONAL_URL]: [{ data: eventIcal('wanted@fm', 'Found'), url: PERSONAL_URL + 'wanted.ics', etag: '"e1"' }],
+      [WORK_URL]: [{ data: eventIcal('other@fm'), url: WORK_URL + 'other.ics', etag: '"e2"' }],
+    };
+    const { client, fetchCalendarObjects } = makeLookupClient(
+      [
+        { displayName: 'Personal', url: PERSONAL_URL },
+        { displayName: 'Work', url: WORK_URL },
+        // Filtered out before any query is built, the same set the read path searches.
+        { displayName: 'DEFAULT_TASK_CALENDAR_NAME', url: TASKS_URL },
+      ],
+      byCalendar,
+    );
+
+    const { event } = await client.getCalendarEventById('wanted@fm');
+    assert.equal(event.title, 'Found');
+
+    // One query per SELECTABLE calendar, and no unfiltered fetch anywhere: the hidden task
+    // collection is never asked, and neither call went out without a filter.
+    const calls = fetchCalendarObjects.mock.calls.map(c => c.arguments);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls.map(c => (c[0].calendar as { url: string }).url), [PERSONAL_URL, WORK_URL]);
+    for (const [params] of calls) {
+      assert.ok(params.filters, 'every lookup query carries a UID filter');
+      assert.equal((params as { objectUrls?: string[] }).objectUrls, undefined);
+    }
+  });
+
+  // The filter shape is the one MEASURED against the live account, not one read off a spec:
+  // `match-type` is a CardDAV attribute that Cyrus honours on CalDAV, and the absence of a
+  // `collation` attribute is what leaves RFC 4791's default in force. Both facts are load-bearing
+  // (see uidEqualsFilter and scripts/probes/calendar-uid-query.probe.mjs), so both are pinned.
+  it('sends a UID prop-filter with match-type="equals" and no collation', async () => {
+    const { client, fetchCalendarObjects } = makeLookupClient(
+      [{ displayName: 'Personal', url: PERSONAL_URL }],
+      onePersonalEvent(),
+    );
+    await client.getCalendarEventById('solo@fm');
+
+    const filters = callArguments(fetchCalendarObjects)[0].filters as any;
+    const vcalendar = filters[0]['comp-filter'];
+    assert.equal(vcalendar._attributes.name, 'VCALENDAR');
+    const vevent = vcalendar['comp-filter'];
+    assert.equal(vevent._attributes.name, 'VEVENT');
+    const propFilter = vevent['prop-filter'];
+    assert.equal(propFilter._attributes.name, 'UID');
+    assert.deepEqual(propFilter['text-match']._attributes, { 'match-type': 'equals' });
+    assert.equal(propFilter['text-match']._text, 'solo@fm');
+  });
+
+  // A server that answers a `match-type="equals"` query with everything whose UID merely CONTAINS
+  // the value would put records the caller never named into the set this lookup hands back, for
+  // the tools reading it to act on. The exact-equality check on the parsed UID is what stops
+  // that, so it is pinned against a fake that deliberately matches loosely.
+  it('does not accept a copy whose UID merely contains the id asked for', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const stored = { data: eventIcal('abc-123-longer@fm'), url: PERSONAL_URL + 'loose.ics', etag: '"e"' };
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: PERSONAL_URL }], {
+      // A LOOSE server: it ignores match-type and answers with everything containing the value.
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [stored]),
+      deleteCalendarObject: mock.fn(async (_p: DeleteObjectParams) => ({ status: 200 })),
+    });
+    await assert.rejects(
+      () => client.getCalendarEventById('abc-123'),
+      /Calendar event not found: "abc-123"/,
+    );
+  });
+
+  // ---- no fallback when the server refuses the query ----
+
+  // The premise the no-fallback design rests on, pinned against tsdav itself rather than
+  // described: a non-2xx entry anywhere in the multistatus makes the query THROW, so a server
+  // that refuses the UID filter can never read as "this calendar holds no such event". A tsdav
+  // upgrade that softened this would take the refusal with it, silently.
+  it('tsdav throws on a calendar-query the server refused, rather than returning no rows', async () => {
+    const refusal =
+      '<?xml version="1.0" encoding="utf-8"?>' +
+      '<D:multistatus xmlns:D="DAV:"><D:response>' +
+      '<D:href>/dav/calendars/user/probe/personal/</D:href>' +
+      '<D:status>HTTP/1.1 403 Forbidden</D:status>' +
+      '</D:response></D:multistatus>';
+    await assert.rejects(
+      () => tsdavCalendarQuery({
+        url: PERSONAL_URL,
+        props: { 'd:getetag': {} },
+        depth: '1',
+        fetch: (async () => davXmlResponse(refusal)) as typeof globalThis.fetch,
+      }),
+      /Collection query failed: 403/,
+    );
+  });
+
+  // And the consequence for this client: the refusal reaches the caller. There is deliberately no
+  // second, unfiltered pass — a lookup that quietly fell back would answer from a different set of
+  // records than the one it says it searched.
+  it('lets a refused query reach the caller instead of falling back to a full scan', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const fetchCalendarObjects = mock.fn(async (_p: FetchObjectsParams) => {
+      throw new Error('Collection query failed: 403 Forbidden. ');
+    });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: PERSONAL_URL }], {
+      fetchCalendarObjects,
+    });
+    await assert.rejects(() => client.getCalendarEventById('solo@fm'), /Collection query failed: 403/);
+    assert.equal(fetchCalendarObjects.mock.callCount(), 1);
+  });
+
+  // ---- the url form is resolved by matching, never by fetching what the caller typed ----
+
+  it('fetches a url that sits inside a discovered calendar, addressed to that collection', async () => {
+    const { client, fetchCalendarObjects } = makeLookupClient(
+      [{ displayName: 'Personal', url: PERSONAL_URL }],
+      onePersonalEvent(),
+    );
+    const { event } = await client.getCalendarEventById(PERSONAL_URL + 'solo.ics');
+    assert.equal(event.id, 'solo@fm');
+
+    // Two calls: the UID query (which matches nothing, since no UID equals that url) and the
+    // addressed fetch against the collection the url was matched to.
+    const calls = fetchCalendarObjects.mock.calls.map(c => c.arguments);
+    assert.equal(calls.length, 2);
+    assert.deepEqual((calls[1][0] as { objectUrls?: string[] }).objectUrls, [PERSONAL_URL + 'solo.ics']);
+    assert.equal((calls[1][0].calendar as { url: string }).url, PERSONAL_URL);
+  });
+
+  // This client sends the CalDAV app password on every request it makes, and nothing else
+  // confines where those requests point — so a url-shaped id that does not sit under a discovered
+  // collection is REFUSED rather than fetched. Each case below is a string that a prefix test, or
+  // a decode-then-rejoin, would have let through.
+  it('never fetches a url outside the discovered calendars', async () => {
+    for (const outside of [
+      // Another host entirely.
+      'https://attacker.example/dav/calendars/user/probe/personal/solo.ics',
+      // A sibling collection whose name merely STARTS with a discovered one's.
+      'https://caldav.example.invalid/dav/calendars/user/probe/personal-archive/solo.ics',
+      // One level up: the collection itself is not a resource inside it.
+      PERSONAL_URL,
+      // %2F, which decodes to a separator that was never a separator. Compared as decoded
+      // SEGMENTS this is one segment called "personal/solo.ics" sitting beside the calendars,
+      // not a child of "personal" (#136 met the same trap on the calendar home).
+      'https://caldav.example.invalid/dav/calendars/user/probe/personal%2Fsolo.ics',
+      // A bare relative reference, which has no origin and no path to sit under.
+      'solo.ics',
+      // A string that is not a URL at all: it resolves to nothing and matches nothing, rather
+      // than throwing out of the lookup.
+      'http://[',
+    ]) {
+      const { client, fetchCalendarObjects } = makeLookupClient(
+        [{ displayName: 'Personal', url: PERSONAL_URL }],
+        onePersonalEvent(),
+      );
+      await assert.rejects(() => client.getCalendarEventById(outside), /Calendar event not found/);
+      // Exactly one call — the UID query. No addressed fetch was made at all, so the app
+      // password never went anywhere the caller's string chose.
+      const calls = fetchCalendarObjects.mock.calls.map(c => c.arguments);
+      assert.equal(calls.length, 1, `an addressed fetch was made for ${outside}`);
+      assert.equal((calls[0][0] as { objectUrls?: string[] }).objectUrls, undefined);
+    }
+  });
+
+  // A UID is attacker-authored — anyone who can send this account an invitation writes one — so a
+  // UID can be url-shaped. Both forms are tried and the results unioned, never branched between on
+  // the shape of the string, or an event with a url-shaped UID would be unfindable by its own id.
+  it('finds an event whose UID is itself url-shaped', async () => {
+    const urlShapedUid = 'https://calendar.example.com/import/9f3.ics';
+    const byCalendar: Record<string, StoredObject[]> = {
+      [PERSONAL_URL]: [{ data: eventIcal(urlShapedUid, 'Imported'), url: PERSONAL_URL + 'imported.ics', etag: '"e"' }],
+    };
+    const { client } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], byCalendar);
+    const { event } = await client.getCalendarEventById(urlShapedUid);
+    assert.equal(event.title, 'Imported');
+  });
+
+  // ---- the addressed fetch's failures are not all the same failure ----
+
+  // The premise, pinned against real tsdav rather than described: every failure of an addressed
+  // multiget arrives as a throw, and the ONLY thing separating "that resource is not there" from
+  // "this collection is broken" is the status in the message. A narrowing that reads the message
+  // is therefore reading the one signal there is, and this test is what would notice a tsdav
+  // upgrade rewording it.
+  it('tsdav reports a per-resource 404 and a collection 500 through the same throw, differing only in status', async () => {
+    const multiget = (respond: () => Response) => tsdavCalendarMultiGet({
+      url: PERSONAL_URL,
+      // The props fetchCalendarObjects asks for on this same call, so the request this drives
+      // is the one production makes rather than a reduced stand-in.
+      props: { 'd:getetag': {}, 'c:calendar-data': {} },
+      objectUrls: [PERSONAL_URL + 'gone.ics'],
+      depth: '1',
+      fetch: (async () => respond()) as typeof globalThis.fetch,
+    });
+
+    await assert.rejects(
+      () => multiget(() => davXmlResponse(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        + '<D:multistatus xmlns:D="DAV:"><D:response>'
+        + '<D:href>/dav/calendars/user/probe/personal/gone.ics</D:href>'
+        + '<D:status>HTTP/1.1 404 Not Found</D:status>'
+        + '</D:response></D:multistatus>',
+      )),
+      /^Error: Collection query failed: 404 /,
+    );
+    await assert.rejects(
+      () => multiget(() => new Response('exploded', { status: 500, statusText: 'Internal Server Error' })),
+      /^Error: Collection query failed: 500 /,
+    );
+  });
+
+  // A resource that is not there is the ordinary case — a caller pasting the url of an event
+  // since deleted — and it is the ONE failure that means "no copy at that address".
+  it('reads a 404 or a 410 on the addressed fetch as no copy there', async () => {
+    // BOTH statuses, because both are in the swallowed class and only one of them is the case
+    // anyone thinks of. A 410 is what a server says about a resource it knows was deleted, which
+    // is exactly the "url of an event since removed" this swallow exists for — and with only the
+    // 404 pinned, dropping 410 from the classifier changed nothing any test could see.
+    for (const status of ['404 Not Found', '410 Gone']) {
+      const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+      const fetchCalendarObjects = mock.fn(async (params: FetchObjectsParams) => {
+        if ((params as { objectUrls?: string[] }).objectUrls) {
+          throw new Error(`Collection query failed: ${status}. Raw response: [object Object]`);
+        }
+        return [];
+      });
+      (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: PERSONAL_URL }], {
+        fetchCalendarObjects,
+      });
+      await assert.rejects(
+        () => client.getCalendarEventById(PERSONAL_URL + 'gone.ics'),
+        /Calendar event not found/,
+        status,
+      );
+    }
+  });
+
+  // Every other failure is a statement about the COLLECTION, and swallowing it would let a
+  // transient outage change which record a destructive call acts on: the copy in the collection
+  // that failed would silently stop counting. It reaches the caller instead.
+  it('lets any other addressed-fetch failure reach the caller', async () => {
+    for (const thrown of [
+      new Error('Collection query failed: 500 Internal Server Error. Raw response: exploded'),
+      new Error('Collection query failed: 401 Unauthorized. Raw response: nope'),
+      new TypeError('fetch failed'),
+      // tsdav's message QUOTED inside a wider one. Only the failure tsdav itself raised says
+      // "that resource is not there"; an outer error that happens to carry those words is some
+      // other layer's report, and reading it as a not-found would swallow it.
+      new Error('Calendar sync aborted. Collection query failed: 404 Not Found'),
+    ]) {
+      const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+      (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: PERSONAL_URL }], {
+        fetchCalendarObjects: mock.fn(async (params: FetchObjectsParams) => {
+          if ((params as { objectUrls?: string[] }).objectUrls) throw thrown;
+          return [];
+        }),
+        deleteCalendarObject: mock.fn(async (_p: DeleteObjectParams) => ({ status: 200 })),
+      });
+      await assert.rejects(
+        () => client.deleteCalendarEvent(PERSONAL_URL + 'x.ics'),
+        (err: Error) => {
+          assert.equal(err.message, thrown.message);
+          return true;
+        },
+        thrown.message,
+      );
+    }
+  });
+
+  // A throw that is not an Error at all. Nothing promises tsdav or a fetch polyfill rejects
+  // with one, and the reader that classifies these failures has to have a message to read —
+  // so the no-message case must fall on the RETHROW side, never be swallowed as "not there".
+  it('rethrows an addressed-fetch failure that is not an Error and carries no message', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: PERSONAL_URL }], {
+      fetchCalendarObjects: mock.fn(async (params: FetchObjectsParams) => {
+        if ((params as { objectUrls?: string[] }).objectUrls) throw 'Collection query failed: 404 Not Found';
+        return [];
+      }),
+    });
+    // The string SPELLS the swallowed class, so only reading the message off a real Error can
+    // tell the two apart: a reader that stringified whatever it was handed would swallow this
+    // and answer not-found.
+    await assert.rejects(
+      () => client.getCalendarEventById(PERSONAL_URL + 'x.ics'),
+      (err: unknown) => {
+        assert.equal(err, 'Collection query failed: 404 Not Found');
+        return true;
+      },
+    );
+  });
+
+  // ---- a value the REPORT body cannot carry ----
+
+  // xml-js escapes `<` and `&` in a text node (MEASURED — see uidEqualsFilter), so an
+  // attacker-authored UID cannot inject markup into the query. What it does NOT escape is
+  // everything XML 1.0's `Char` production excludes: the C0 characters other than tab, CR and
+  // LF, and the two BMP noncharacters U+FFFE and U+FFFF. Those travel RAW, the document is
+  // ill-formed, the server answers 400 — and that reached the caller as an InternalError telling
+  // them to retry a call that can never work. Rejected here instead, before anything is sent.
+  it('rejects an eventId carrying a character XML cannot carry, before any query is built', async () => {
+    for (const hostile of [
+      'a\u0000b', 'a\u0007b', 'a\u001Fb', 'a\u000Bb',
+      // The noncharacters. Not control characters at all, which is why a C0-only guard let them
+      // through — and they encode to real UTF-8 bytes, so unlike a lone surrogate nothing on the
+      // way to the wire turns them into something legal.
+      'a\uFFFEb', 'a\uFFFFb',
+    ]) {
+      const { client, fetchCalendarObjects } = makeLookupClient(
+        [{ displayName: 'Personal', url: PERSONAL_URL }],
+        onePersonalEvent(),
+      );
+      await assert.rejects(
+        () => client.getCalendarEventById(hostile),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, /eventId contains a character/);
+          // The remedy too, not just the diagnosis: a message that names the fault and stops
+          // leaves the caller with nowhere to go, and this is the one id that no retry fixes.
+          assert.match(err.message, /Pass an event id or url from list_calendar_events\.$/);
+          return true;
+        },
+        JSON.stringify(hostile),
+      );
+      // The value never reached the wire.
+      assert.equal(fetchCalendarObjects.mock.callCount(), 0, JSON.stringify(hostile));
+    }
+  });
+
+  // Tab, CR and LF are legal XML characters, so a value carrying one is a request the server
+  // ANSWERS — with nothing, because no UID contains them. That stays a not-found, which is what
+  // a wrong-but-sendable id has always been: the rejection above is scoped to what the request
+  // cannot carry, not to every value that will not match.
+  it('sends an eventId carrying a tab, and reports the ordinary not-found', async () => {
+    const { client, fetchCalendarObjects } = makeLookupClient(
+      [{ displayName: 'Personal', url: PERSONAL_URL }],
+      onePersonalEvent(),
+    );
+    await assert.rejects(() => client.getCalendarEventById('a\tb'), /Calendar event not found/);
+    assert.equal(fetchCalendarObjects.mock.callCount(), 1);
+  });
+
+  // The characters NEXT to the rejected ones, so the class is pinned on both sides. A guard
+  // written to "everything that looks unusual" would take these too, and each is a value the
+  // request can carry perfectly well:
+  //   U+FFFD  the replacement character — inside `Char`, and the very thing a lone surrogate
+  //           BECOMES, so rejecting it would refuse the sanitised form of a legal input;
+  //   U+FDD0  a noncharacter that XML 1.0 nonetheless admits, unlike U+FFFE;
+  //   U+D800  a lone surrogate. MEASURED: `TextEncoder` emits EF BF BD for it, so what reaches
+  //           the wire is U+FFFD and the body stays well-formed — the encoder fixes this one,
+  //           and a reject here would refuse an id the server would have answered;
+  //   U+1F600 a valid surrogate PAIR, whose two code units are both in the surrogate range and
+  //           must not be taken for something rejected. The guard holds no surrogate at all, so
+  //           this is a property of the class rather than of how the pattern reads the string.
+  it('sends the characters either side of the rejected class, rather than refusing them', async () => {
+    for (const sendable of ['a\uFFFDb', 'a\uFDD0b', 'a\uD800b', 'a\u{1F600}b']) {
+      const { client, fetchCalendarObjects } = makeLookupClient(
+        [{ displayName: 'Personal', url: PERSONAL_URL }],
+        onePersonalEvent(),
+      );
+      await assert.rejects(
+        () => client.getCalendarEventById(sendable),
+        /Calendar event not found/,
+        JSON.stringify(sendable),
+      );
+      assert.equal(fetchCalendarObjects.mock.callCount(), 1, JSON.stringify(sendable));
+    }
   });
 });
 
@@ -2160,7 +2737,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
   function createMockedPatchClient(calendarObjects: Array<{ data: string; url: string; etag?: string }>) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -2453,27 +3030,31 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.ok(updatedData.includes('DTSTART;VALUE=DATE:20260405'));
   });
 
-  it('throws on event with no VEVENT', async () => {
-    // Simulate an object found by URL but with no VEVENT block
+  // A resource carrying no VEVENT does not RESOLVE at all now (#137): a copy counts only when it
+  // came back whole, and a payload with nothing to read is not a record this server can act on.
+  // So the answer is the ordinary not-found rather than a message about the resource's contents —
+  // the caller's id matched nothing usable, which is what "not found" says.
+  it('does not resolve an event whose payload holds no VEVENT', async () => {
     const noVeventIcal = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR';
     const objects = [{ data: noVeventIcal, url: '/cal/bad.ics' }];
     const { client } = createMockedPatchClient(objects);
 
     await assert.rejects(
-      () => client.updateCalendarEvent('/cal/bad.ics', { title: 'X' }),
-      /no iCal data|not found/
+      () => client.updateCalendarEvent('bad@fm', { title: 'X' }),
+      /Calendar event not found/
     );
   });
 
-  it('throws when VEVENT block is malformed (BEGIN without END)', async () => {
-    // Has BEGIN:VEVENT (passes string check) but no END:VEVENT (extractVEvent returns null)
+  it('does not resolve an event whose VEVENT block is malformed (BEGIN without END)', async () => {
+    // Has BEGIN:VEVENT (passes a string check) but no END:VEVENT, so nothing parses out of it —
+    // the same class as the no-VEVENT case above, and answered the same way.
     const brokenIcal = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:broken@fm\r\nEND:VCALENDAR';
     const objects = [{ data: brokenIcal, url: '/cal/broken.ics' }];
     const { client } = createMockedPatchClient(objects);
 
     await assert.rejects(
-      () => client.updateCalendarEvent('/cal/broken.ics', { title: 'X' }),
-      /not found|no VEVENT/
+      () => client.updateCalendarEvent('broken@fm', { title: 'X' }),
+      /Calendar event not found/
     );
   });
 
@@ -2514,7 +3095,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     // Use non-email username
     const client = new CalDAVCalendarClient({ username: 'not-an-email', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(objects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -2547,7 +3128,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       password: 'test',
     });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(objects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -2784,11 +3365,17 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     'END:VCALENDAR',
   ].join('\r\n');
 
-  function createMockedRecurringClient(ical: string, url = '/cal/recur.ics') {
+  // ABSOLUTE, and the default resource url sits UNDER it, because the url form of an event id
+  // resolves by matching against a discovered collection (#137) — a resource url that is not
+  // inside one of them names nothing this client will fetch.
+  const RECURRING_CALENDAR_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+  const RECURRING_EVENT_URL = RECURRING_CALENDAR_URL + 'recur.ics';
+
+  function createMockedRecurringClient(ical: string, url = RECURRING_EVENT_URL) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     const objects = [{ data: ical, url }];
-    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => objects),
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: RECURRING_CALENDAR_URL }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(objects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
       deleteCalendarObject: mock.fn(async (_params: any) => ({ status: 200 })),
     });
@@ -2841,11 +3428,15 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
   // findCalendarObjectByUID matches `obj.url` interchangeably with the UID, and `url` is on
   // every row this server serialises — so a guard keyed on the argument rather than on the
   // resolved resource would be bypassed by passing the row's url instead of its id.
+  //
+  // The message is asserted, not just the error class: a url that resolved to NOTHING would also
+  // raise an InvalidInputError, so a class-only assertion passes just as well when the url form
+  // has stopped resolving at all — which is exactly what this test exists to catch.
   it('refuses the same series when the id given is the row url', async () => {
-    for (const eventId of ['recur@fm', '/cal/recur.ics']) {
+    for (const eventId of ['recur@fm', RECURRING_EVENT_URL]) {
       const { client, mockDAVClient } = createMockedRecurringClient(makeRecurringIcal());
-      await assert.rejects(() => client.deleteCalendarEvent(eventId), isInvalidInput);
-      await assert.rejects(() => client.updateCalendarEvent(eventId, { title: 'New' }), isInvalidInput);
+      await assert.rejects(() => client.deleteCalendarEvent(eventId), /is a repeating event/);
+      await assert.rejects(() => client.updateCalendarEvent(eventId, { title: 'New' }), /is a repeating event/);
       assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
     }
@@ -3410,7 +4001,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
   function createMockedClient(calendarObjects: Array<{ data: string; url: string }>) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => calendarObjects),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -3631,7 +4222,7 @@ describe('updateCalendarEvent — a hostile recurrence rule is never expanded', 
   function mockClient(icalData: string) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/dos.ics' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/dos.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 207 })),
     });
     (client as any).client = mockDAVClient;
@@ -3681,7 +4272,7 @@ describe('CalDAV write status checking (assertDavOk)', () => {
     ].join('\r\n');
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status })),
       deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status })),
     });
@@ -3721,7 +4312,7 @@ describe('CalDAV write status checking (assertDavOk)', () => {
     ].join('\r\n');
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => response),
       deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => response),
     });
@@ -3804,7 +4395,7 @@ describe('ORGANIZER display name comes from the client config', () => {
       displayName,
     });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: NO_ORGANIZER_ICAL, url: '/cal/noorg-cn.ics' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: NO_ORGANIZER_ICAL, url: '/cal/noorg-cn.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -4085,7 +4676,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   function mockClient(icalData: string) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -4348,7 +4939,7 @@ describe('timeZone parameter (#157)', () => {
   function updateClient(icalData: string) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -4705,7 +5296,7 @@ describe('calendar write result classification, driven from real create/update c
   function updateClient(icalData: string) {
     const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
-      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics' }]),
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
     });
     (client as any).client = mockDAVClient;
@@ -6304,7 +6895,7 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
   it('lists events from the calendars that did list, carrying the broken path', async () => {
     const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
-        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics', etag: FIXTURE_ETAG },
       ]),
     });
 
@@ -6320,7 +6911,7 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
   it('returns an event found elsewhere, carrying the broken path', async () => {
     const { client } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
-        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics', etag: FIXTURE_ETAG },
       ]),
     });
 
@@ -6406,7 +6997,7 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
   it('updates the copy it found and names the collection it could not check', async () => {
     const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
-        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics', etag: FIXTURE_ETAG },
       ]),
       updateCalendarObject: mock.fn(async (_p: UpdateObjectParams) => ({ ok: true, status: 204 })),
     });
@@ -6421,7 +7012,7 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
   it('deletes the copy it found and names the collection it could not check', async () => {
     const { client, dav } = clientWith(ONE_HEALTHY_ONE_FAILED_RESPONSE, {
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
-        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics' },
+        { data: EVENT_ICAL, url: '/dav/calendars/user/probe/personal/borrowed.ics', etag: FIXTURE_ETAG },
       ]),
       deleteCalendarObject: mock.fn(async (_p: DeleteObjectParams) => ({ ok: true, status: 204 })),
     });
