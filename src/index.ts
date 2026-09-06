@@ -350,14 +350,14 @@ function participantsSchemaProperty(leadIn: string) {
 /**
  * How `calendarId` is matched, said ONCE for the two tools that take one.
  *
- * The read and the write path share how the parameter RESOLVES — same filtered calendar list,
- * same trim, same fail-closed treatment of an empty value, and literally the same not-found
- * error — though not what they do with a tie: the read path queries every calendar a name
- * matches and the create path takes the first (issue #173). Only the descriptions had
- * diverged: 394 characters on the read side against 41 on the write side ("ID of the calendar
- * to create the event in"), so a caller reading the write tool could not learn that a display
- * name works, that it is matched case-sensitively with surrounding whitespace ignored on both
- * sides, or that a miss is rejected rather than answered emptily.
+ * The read and the write path resolve it through ONE function, so everything below holds
+ * identically on both: the same filtered calendar list, the same trim, the same fail-closed
+ * treatment of an empty value, the same not-found error, and — since issue #173 — the same
+ * answer to a tie. Only the descriptions had diverged: 394 characters on the read side against
+ * 41 on the write side ("ID of the calendar to create the event in"), so a caller reading the
+ * write tool could not learn that a display name works, that it is matched case-sensitively
+ * with surrounding whitespace ignored on both sides, or that a miss is rejected rather than
+ * answered emptily.
  *
  * `update_calendar_event` takes no calendarId, so these two are the whole set.
  */
@@ -366,7 +366,12 @@ const CALENDAR_ID_MATCHING_DESC =
   'surrounding whitespace is ignored on both sides, and list_calendars reports the trimmed name. ' +
   'A value matching no calendar is rejected naming ' +
   'the available calendars rather than answered with an empty result, and an empty or whitespace-only string is ' +
-  'such a value. Calendars list_calendars does not show cannot be named here either, on a read or on a write.';
+  'such a value. Calendars list_calendars does not show cannot be named here either, on a read or on a write. ' +
+  'A DISPLAY NAME IS NOT UNIQUE: two calendars can carry one name (a shared calendar is named by whoever owns it), ' +
+  'and a name matching more than one is REFUSED — on a read exactly as on a write — naming each match with its URL, ' +
+  'rather than picking one or reading both. Pass that calendar\'s `id`/URL to get past it: a URL addresses exactly ' +
+  'one collection, so the URL form is never ambiguous, even where some other calendar\'s display name is spelled as ' +
+  'that URL.';
 
 /**
  * What `eventId` accepts, on all three tools that take one, written once (#137).
@@ -1474,7 +1479,7 @@ const TOOLS = [
           'Every calendar the account listed is queried before the results are sorted and trimmed, so `limit` is a genuine "earliest N" across all of them (a collection the server failed to list is not in that set, and the response names it — see the discovery clause below). The response opens with a summary line stating how many events matched in total; when that total exceeds the returned count, `limit` cut the rest off and there is no paging, so raise `limit` (up to 500) to see more, or narrow the window if the total is larger than that. ' +
           `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET. \`start\`/\`end\` is a bare local wall clock (2026-04-20T10:00:00), a Z-designated UTC instant, or a date-only (all-day) value — this server never puts an offset in either and never asks you to compute one. READ THE VALUE'S OWN DESIGNATOR FIRST: \`timeZone\` only QUALIFIES a value that carries neither Z nor a date-only marker, so "absent means the configured zone" applies to a bare wall-clock \`start\` and nothing else. \`timeZone\` names the IANA zone a wall-clock \`start\` is in, but ONLY when it differs from this server's configured zone (${CONFIGURED_TIMEZONE}): an ABSENT \`timeZone\` means ${CONFIGURED_TIMEZONE}, and \`timeZone: null\` means \`start\` is genuinely FLOATING (RFC 5545 §3.3.5 — no TZID, no Z, a different instant for every reader), which is a different fact from "in the configured zone". A Z-designated value or an all-day value never carries \`timeZone\` at all, because both already name themselves; \`null\` there would wrongly assert "floating". \`endTimeZone\` describes \`end\` the same way but ONLY relative to \`start\` — it appears only when \`end\`'s zone differs from \`start\`'s, which is legal (a flight departing one zone and landing in another), and is omitted whenever \`end\` is absent or shares \`start\`'s zone. ` +
           'WHICH ROWS MAY SIT OUTSIDE THE WINDOW. Rows are filtered EXACTLY against the window you asked for, and all-day events are your account\'s LOCAL days: a date-only value covers that whole day in the configured zone, and an all-day event on a neighbouring day is not returned. Behind that, the range this server REQUESTS of Fastmail is deliberately up to 14 hours wider at each edge than the window you gave, because the server matches an all-day value on its UTC day and reads a floating time as UTC — without the widening it would withhold both from a window narrower than a day, and no filter can keep what was never sent. The extra rows that widening pulls in are then trimmed. TWO KINDS OF ROW CAN STILL SIT OUTSIDE IT. A block that still carries its own recurrence (`recurrenceRule` or `recurrenceDates`) is never dropped whatever its dates say — its start is the series\' ORIGINAL date, which may be years away, and judging it on that would delete a real event rather than misdate it. And a FLOATING timed event comes back from expansion stamped as UTC with the floating marker destroyed, so nothing downstream can move it to your clock; it is judged on UTC and can therefore land in the wrong day for an account far from UTC. THE TWO FAIL IN OPPOSITE DIRECTIONS. A recurrence carrier only ever ADDS a row, so check each `start` against the window you asked for rather than assuming every row is inside it. A floating timed event can be ABSENT from the window it really belongs to, judged into a neighbouring day instead, which is how an account far from UTC loses a row it asked for. A THIRD CASE IS NOT A ROW SITTING OUTSIDE THE WINDOW BUT A ROW THAT NEVER ARRIVES: a series that lists its occurrences as RDATEs and states no RRULE is matched by Fastmail\'s own filter over the series start alone, so a window covering one of its listed dates and not that start returns nothing for it, and no filter on this side can keep what the server never sent. So an empty result is NOT proof of a free day on ANY account, and a "nothing on then" answer built from this call alone can be wrong in the direction that matters; confirm in the Fastmail web interface, or widen the window until it reaches the series start (fork issue #167). ' +
-          'A TOTAL calendar-discovery failure is reported as an error, never as an empty list, and a calendarId matching no calendar is an error too — never an empty result. An empty or whitespace-only calendarId is that same error, not "every calendar". ' +
+          'A TOTAL calendar-discovery failure is reported as an error, never as an empty list, and a calendarId matching no calendar is an error too — never an empty result. An empty or whitespace-only calendarId is that same error, not "every calendar". A calendarId whose display NAME matches more than one calendar is an error as well, naming each match with its URL: WHEN A calendarId IS GIVEN this call reads that one calendar or none, never a union of the calendars sharing a name. (Omitting calendarId still reads every calendar — that is the one case where more than one is read, and it is not ambiguous because nothing was named.) ' +
           'A PARTIAL failure has THREE distinct forms and they behave differently. (1) A collection that comes back BROKEN INSIDE THE CALENDAR-HOME LISTING is detected when that list is built: this call answers from the calendars that did list and adds a trailing "Note:" line whose subject ends "' + BROKEN_COLLECTION_PHRASE + '" (the subject counts them: "a collection …", or "N collections …"; the line itself continues past the path) naming its path. The failure destroys the collection\'s name and type, so nothing can say whether it was a calendar — but if it was, its events are missing from these results AND from the total, so an empty or quiet answer is not proof of a free day. A list built while one was broken is never cached, so the next call re-asks. (2) A calendar that LISTED and then fails when its events are read fails this WHOLE call with an error — there is no "rest of it" to answer from, so no partial result is returned. (3) A collection this account cannot see at all is invisible: the server omits it from the listing entirely, leaving no trace for anything here to report. Fork issue #136.',
         inputSchema: {
           type: 'object',

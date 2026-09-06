@@ -2477,7 +2477,7 @@ const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
 
 // Calendar display names are server/user data of unbounded length, so a listing of them is
 // capped the way every other echoed list in this server is.
-const CALENDAR_NAME_LIST_CAP = 20;
+export const CALENDAR_NAME_LIST_CAP = 20;
 
 // A calendar URL offered in the not-found error has to arrive USABLE, because it is offered
 // as a `calendarId` to paste straight back — and `echoCallerText`'s default limit of 60 cuts
@@ -3246,6 +3246,166 @@ function calendarNotFoundError(
 }
 
 /**
+ * The refusal BOTH calendar paths raise when a `calendarId` NAMES more than one calendar
+ * (#173), written once so a read and a write state a single rule.
+ *
+ * WHY A REFUSAL RATHER THAN A PICK OR A UNION. A CalDAV display name is not unique per
+ * account — a shared calendar is named by whoever owns it, and nothing stops a second one
+ * carrying a name an existing calendar already has — so a name can resolve to two collections.
+ * The two paths used to disagree about that, and both answers were wrong in their own
+ * direction: the read UNIONED the matches, so "what is on my Work calendar" answered from two
+ * calendars at once and named neither, while the create took the FIRST, writing the event into
+ * whichever collection discovery happened to reach first and reporting success under the name
+ * the caller had asked for, with nothing in the answer saying a choice had been made.
+ *
+ * THE WAY OUT IS THE URL, AND IT CANNOT BE MADE AMBIGUOUS. A calendar's url ADDRESSES exactly
+ * one collection; a name merely NAMES whatever carries it. So the resolver tries the url form
+ * FIRST and stands down on ambiguity entirely once a url has matched — including against a
+ * calendar whose display NAME is spelled as another calendar's url, which is a decoy anyone who
+ * shares a calendar with this account can plant. Without that ordering the remedy this message
+ * offers would be circular: the caller passes the url it asked for and is told again that their
+ * value is ambiguous, with no next call to make. Same distinction, same reason, as the event-id
+ * ambiguity (`ambiguousEventIdError`, #101); see docs/conventions.md.
+ *
+ * EVERY MATCH HAS A NAME, by construction: a calendar reaches this list only by its unwrapped
+ * display name equalling the caller's, so the nameless-calendar fallback `calendarNotFoundError`
+ * needs has nothing to do here. The name is still printed per entry rather than once, because
+ * it is what the caller recognises the row by, and the pairing is what the event-id refusal
+ * already prints.
+ */
+function ambiguousCalendarNameError(
+  calendarId: unknown,
+  matches: DAVCalendar[],
+  broken?: BrokenCollections,
+): InvalidInputError {
+  // The SAME caps and bounds `calendarNotFoundError` uses on its own list, because this is the
+  // same class of list — the account's calendars, echoed back at a caller — and two messages
+  // naming calendars must not cut them at two different lengths. CALENDAR_NAME_LIST_CAP bounds
+  // how many are named; the url gets CALENDAR_URL_ECHO_LIMIT because it is offered as a handle to
+  // paste straight back and a truncated one fails again silently, while the name keeps the shared
+  // echo's default because a name is offered to be recognised, not pasted. The overflow is
+  // counted, so a cut list can never read as the whole set.
+  //
+  // NOT `AMBIGUOUS_COPY_URL_ECHO_LIMIT`, though this is an ambiguity message and that constant is
+  // the wider one. Its stated reason does not reach here: it bounds a RESOURCE url, which cannot
+  // be read back off any tool once truncated, so it has to survive intact. These are COLLECTION
+  // urls, and `list_calendars` hands every one of them back unconditionally — a caller who gets a
+  // truncated url here has a listing that gives them the whole one. Same value class as
+  // `calendarNotFoundError` offers, so the same bound. (Considered and declined deliberately;
+  // do not "align" it with the event ambiguity's 320.)
+  const shown = matches
+    .slice(0, CALENDAR_NAME_LIST_CAP)
+    .map(c => `"${echoCallerText(unwrapDisplayName(c.displayName), undefined)}" ("${echoCallerText(c.url, CALENDAR_URL_ECHO_LIMIT)}")`)
+    .join(', ');
+  const more = matches.length > CALENDAR_NAME_LIST_CAP
+    ? `, …and ${matches.length - CALENDAR_NAME_LIST_CAP} more`
+    : '';
+  // QUOTED, and that is the pairing rather than the decoration: every name and url here is
+  // written by whoever owns the calendar, `echoCallerText` neutralises the double quote, and a
+  // DOUBLE-quoted span is the only kind that swap protects. Echoed at the same bound
+  // `calendarNotFoundError` gives the same value for the same reason — one value class, one
+  // policy. (The reasons THAT message gives for quoting its own rejected value do not carry over:
+  // to reach here the value matched two display names exactly, so it is never empty and never a
+  // mistyped url.)
+  //
+  // THE BROKEN-COLLECTION CLAUSE IS NOT OPTIONAL HERE (#136). This message makes an ACCOUNT-WIDE
+  // count — "names N calendars in this account" — and a collection that failed to list was never
+  // searched, so it may hold an N+1th calendar of that name. Left off, the count reads as
+  // complete when it is a statement about the collections that answered. Never silently drop a
+  // promised field; see CLAUDE.md.
+  return new InvalidInputError(
+    `The calendarId "${echoCallerText(calendarId, CALENDAR_URL_ECHO_LIMIT)}" names ${matches.length} calendars ` +
+    'in this account, and this server will not guess which one you mean. ' +
+    `The calendars are: ${shown}${more}. ` +
+    "Pass that calendar's URL (its `id` from list_calendars) as calendarId instead — a calendar URL " +
+    'ADDRESSES exactly one collection, whatever else carries that display name, and this parameter ' +
+    `accepts a URL wherever it accepts a name.${describeBrokenCollections(broken)}`,
+  );
+}
+
+/**
+ * Resolve a `calendarId` to EXACTLY ONE calendar, or refuse — the one rule the read path and the
+ * write path both state (#173).
+ *
+ * It is one function rather than two agreeing implementations because the two had already drifted
+ * once: they shared the filtered list, the trim, the fail-closed treatment of an empty value and
+ * the not-found error, and still disagreed about a tie. Anything either path needs to decide about
+ * which calendar a string means is decided here, so the next difference has nowhere to appear.
+ *
+ * The read path's no-`calendarId` branch — read EVERY calendar — is deliberately outside this
+ * function: that is not a resolution, and folding it in would mean returning "all of them" from a
+ * helper whose whole promise is "exactly one".
+ *
+ * FAIL-CLOSED ON AN EMPTY VALUE, and only HALF of that falls out of the order. `''` and `'   '`
+ * both trim to a value `unwrapDisplayName` answers undefined for, so the NAME arm can never match
+ * one — that half needs no check. The URL arm is not free the same way: `c.url === requested` is a
+ * raw comparison, so a calendar whose own url is the empty string would be ADDRESSED by an empty
+ * `calendarId`, narrowing a read onto a calendar nobody named and, on the write path, creating an
+ * event in it. Nothing here can promise a collection always has a usable url — this file's
+ * neighbours already refuse that assumption (`calendarNotFoundError` reads it as
+ * `typeof c.url === 'string' ? c.url.trim() : ''`, `getCalendars` writes `c.url || ''`) — so the
+ * comparison is GUARDED rather than the claim re-worded. A calendar with no usable url cannot be
+ * addressed by one; it is still nameable, and still listed by the not-found error.
+ *
+ * The caller that must NOT let an empty value through at all is the read path's presence test,
+ * which decides between "resolve this" and "read everything" before ever calling here.
+ */
+function resolveCalendarTarget(
+  calendarId: unknown,
+  selectable: DAVCalendar[],
+  broken?: BrokenCollections,
+): DAVCalendar {
+  const requested = typeof calendarId === 'string' ? calendarId.trim() : calendarId;
+  // BOTH SIDES through the same normaliser, so the comparison cannot drift. tsdav types a
+  // calendar's name away from string (a calendar called "2026" arrives as the number 2026), and
+  // normalising only the stored side turned a `calendarId` of 2026 — which matched by raw
+  // equality before — into "Calendar not found".
+  // Accepted knowingly: because the CALLER's value comes through here too, a property object such
+  // as `{_cdata: 'Work'}` resolves where it was rejected before. The inputSchema types
+  // `calendarId` as a string so no normal MCP call can produce that shape, and lenient coercion of
+  // what a caller sends is this repo's documented posture (docs/conventions.md) — so this is left
+  // as a widening, not guarded against.
+  const requestedName = unwrapDisplayName(requested);
+
+  // ADDRESSED BEATS NAMED, AND IT IS A SEPARATE PASS, which is the whole of the fix on the write
+  // path and not merely a tidier spelling of it. Both paths used to test url-or-name in ONE
+  // predicate, so nothing expressed a preference: the read path kept every match, and the write
+  // path's `find` returned whichever calendar DISCOVERY ORDER put first. Give the account a
+  // calendar whose display NAME is spelled as another calendar's url — a decoy anyone who shares
+  // a calendar with this account can plant, since they write its name — and list it before the
+  // calendar it imitates, and `create_calendar_event` handed the caller's exact url to the decoy
+  // BY NAME and wrote the event into it, reported as a success under the calendar the caller had
+  // asked for. Trying url first, alone, is what makes an address an address.
+  //
+  // It is also why the refusal below can offer "pass the url" without the remedy being circular.
+  // For the read path this changes one further case, deliberately: a string matching calendar A
+  // by url and calendar B by name used to answer from both, and now reads A alone — the calendar
+  // the caller addressed.
+  //
+  // The url must be a usable one on BOTH sides. See the fail-closed note above: an empty stored
+  // url would otherwise be addressed by an empty `calendarId`.
+  const addressed = selectable.find(
+    c => typeof c.url === 'string' && c.url.length > 0 && c.url === requested,
+  );
+  if (addressed) return addressed;
+
+  const named = requestedName === undefined
+    ? []
+    : selectable.filter(c => unwrapDisplayName(c.displayName) === requestedName);
+  // A calendarId that matches nothing used to leave the read path's list empty, so its loop never
+  // ran and the tool answered "Showing 0 of 0 results." — an availability question answered "you
+  // are free" because of a typo. Matching is exact, so "work" for "Work" is a plausible first-try
+  // miss. Both paths raise the same error through one helper so a caller sees one rule, not two,
+  // and this is also where a target on a BROKEN collection path lands (#136): a collection that
+  // failed to list never became a `DAVCalendar`, so it is never in `selectable`.
+  if (named.length === 0) throw calendarNotFoundError(calendarId, selectable, broken);
+  // `broken` reaches BOTH refusals, not just the not-found one: see ambiguousCalendarNameError on
+  // why an account-wide count needs it too.
+  if (named.length > 1) throw ambiguousCalendarNameError(calendarId, named, broken);
+  return named[0]!;
+}
+
+/**
  * The one "no event matched that id" error, raised by get/update/delete alike.
  *
  * It gains the broken-collection clause for the same reason the calendar one does (#136): a
@@ -3345,6 +3505,7 @@ export function ambiguousEventIdError(
   eventId: string,
   action: 'update' | 'delete',
   copies: CalendarEventCopy[],
+  broken?: BrokenCollections,
 ): InvalidInputError {
   return new InvalidInputError(
     // The ID at CALENDAR_URL_ECHO_LIMIT, not the ambiguity's own bound: this is the same value
@@ -3357,7 +3518,14 @@ export function ambiguousEventIdError(
     + 'Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly '
     + 'one record, whatever else spells it as a UID, and this tool accepts it wherever it '
     + 'accepts an id. '
-    + 'get_calendar_event still works on this id: it returns the first copy and lists the others.',
+    + 'get_calendar_event still works on this id: it returns the first copy and lists the others.'
+    // NAMES THE COLLECTION THAT COULD NOT BE SEARCHED (#136), for the same reason the calendar
+    // ambiguity does and the same reason eventNotFoundError already did: the count in the first
+    // sentence is ACCOUNT-WIDE, and a collection that failed to list was never searched, so it
+    // may hold a further copy. Both refusals in this file that count records across the account
+    // therefore carry the clause; a caller told "2 copies" while a third was unreachable is
+    // being given a complete-sounding answer to a question nothing could answer completely.
+    + describeBrokenCollections(broken),
   );
 }
 
@@ -3784,38 +3952,21 @@ export class CalDAVCalendarClient {
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
     let targetCalendars = selectableCalendars(calendars);
-    // Trimmed and tested for PRESENCE, not for truthiness. `calendarId` narrows what the call
-    // touches, so it fails CLOSED: an empty or whitespace-only value is a value that matched
-    // no calendar, never "read every calendar". Under the old truthiness test `''` skipped the
-    // filter entirely and quietly widened the query to the whole account while `'   '` was
-    // correctly rejected — two spellings of the same mistake answered from two different
-    // calendars. See docs/conventions.md on arguments that narrow a call.
-    const requested = typeof calendarId === 'string' ? calendarId.trim() : calendarId;
-    if (requested !== undefined && requested !== null) {
-      // BOTH SIDES through the same normaliser, so the comparison cannot drift. tsdav types a
-      // calendar's name away from string (a calendar called "2026" arrives as the number
-      // 2026), and normalising only the stored side turned a `calendarId` of 2026 — which
-      // matched by raw equality before — into "Calendar not found". Note this is computed
-      // separately from `requested` rather than replacing it: `requested` is what the
-      // fail-closed presence test above reads, and an empty string must stay a value that
-      // matches nothing, never one that widens the call to every calendar.
-      // Accepted knowingly: because the CALLER's value comes through here too, a property
-      // object such as `{_cdata: 'Work'}` now resolves where it was rejected before. The
-      // inputSchema types `calendarId` as a string so no normal MCP call can produce that
-      // shape, and lenient coercion of what a caller sends is this repo's documented posture
-      // (docs/conventions.md) — so this is left as a widening, not guarded against.
-      const requestedName = unwrapDisplayName(requested);
-      const matched = targetCalendars.filter(
-        c => c.url === requested ||
-          (requestedName !== undefined && unwrapDisplayName(c.displayName) === requestedName)
-      );
-      // A calendarId that matches nothing used to leave the list empty, so the loop below
-      // never ran and the tool answered "Showing 0 of 0 results." — an availability question
-      // answered "you are free" because of a typo. Matching is exact, so "work" for "Work"
-      // is a plausible first-try miss. The write path has always thrown here; both raise the
-      // same error through one helper so a caller sees one rule, not two.
-      if (matched.length === 0) throw calendarNotFoundError(calendarId, targetCalendars, brokenCollections);
-      targetCalendars = matched;
+    // Tested for PRESENCE, not for truthiness. `calendarId` narrows what the call touches, so it
+    // fails CLOSED: an empty or whitespace-only value is a value that matched no calendar, never
+    // "read every calendar". Under the old truthiness test `''` skipped the filter entirely and
+    // quietly widened the query to the whole account while `'   '` was correctly rejected — two
+    // spellings of the same mistake answered from two different calendars. This test is on the
+    // RAW argument and the trim happens inside the resolver, which is the same decision spelled
+    // one way instead of two: trimming cannot turn a present value absent, so nothing an empty
+    // string does here differs from what it did before. See docs/conventions.md on arguments
+    // that narrow a call.
+    if (calendarId !== undefined && calendarId !== null) {
+      // EXACTLY ONE calendar or a refusal, resolved by the rule the write path states through
+      // the same function (#173) — a url addresses one collection, a name that matches two is
+      // refused rather than unioned. This branch used to keep every match, so a name two
+      // calendars carried listed both of them and named neither in the answer.
+      targetCalendars = [resolveCalendarTarget(calendarId, targetCalendars, brokenCollections)];
     }
 
     // The window is normalised ONCE and then used for two different things — the server's
@@ -4289,41 +4440,31 @@ export class CalDAVCalendarClient {
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
-    // RESOLVED like the read path, but not identically, and the difference is worth naming:
-    // the read path `filter`s and queries EVERY calendar a name matches, while this `find`s
-    // and writes to the FIRST. A display name is unique per account in practice, so the two
-    // agree on every real input — but where they would not, a read unions the matches and a
-    // create silently picks one. What an ambiguous write should do (refuse, or say which it
-    // chose) is open; see issue #173. Do not "align" these by changing either behaviour here.
+    // RESOLVED BY LITERALLY THE SAME FUNCTION AS THE READ PATH, which is what makes the parity
+    // this comment claims a property of the code rather than of two implementations agreeing.
+    // They share the filtered calendar list, the trim, the fail-closed treatment of an empty
+    // value, the not-found error — and, since #173, what happens on a tie: a url addresses one
+    // collection and wins alone, a name matching two calendars is refused on a read and on a
+    // write alike. They once shared only the error message, so an event could be written into —
+    // and later deleted from — a collection no read tool would show, `" Work "` failed here
+    // while succeeding on a list, and a create silently wrote into the first of two calendars
+    // sharing a name while a list answered from both.
     //
-    // What the two DO share, and what this comment used to be about: the same filtered
-    // calendar list, the same trim, the same fail-closed treatment of an empty value, and the
-    // same not-found error. They once shared only the error message, so an event could be
-    // written into — and later deleted from — a collection no read tool would show, and
-    // `" Work "` failed here while succeeding on a list.
-    const requested = typeof event.calendarId === 'string' ? event.calendarId.trim() : event.calendarId;
-    // Both sides normalised, for the reason spelled out on the read path: tsdav can type a
-    // calendar's name away from string, so normalising only the stored side would reject a
-    // numeric or boolean `calendarId` that used to match by raw equality.
-    const requestedName = unwrapDisplayName(requested);
+    // THE SHARPEST THING THAT CHANGED IS ON THIS PATH, not the read one. url-or-name used to be
+    // ONE predicate here, resolved with `find`, so DISCOVERY ORDER decided rather than any
+    // preference for an address: a calendar whose display NAME was spelled as another calendar's
+    // url, listed first, took a create aimed by that exact url and received the event itself.
+    // A display name is written by whoever owns the calendar, so on a shared account that decoy
+    // is plantable. Resolving the url in its own pass, first, is what closes it.
+    //
+    // THE NOT-FOUND ARM IS ALSO THE REFUSAL FOR A TARGET ON A BROKEN PATH (#136), and it is one
+    // by construction rather than by a check of its own: a collection that failed to list never
+    // becomes a `DAVCalendar`, so it is never in `selectable` and can never be the resolved
+    // target. The write therefore cannot land in a collection this server could not describe,
+    // and the caller is told which collection could not be described rather than being left to
+    // read "not found" as "that calendar does not exist".
     const selectable = selectableCalendars(calendars);
-    const targetCal = selectable.find(
-      c => c.url === requested ||
-        (requestedName !== undefined && unwrapDisplayName(c.displayName) === requestedName)
-    );
-    if (!targetCal) {
-      // A calendarId that matches no calendar is caller-fixable: they re-issue the call
-      // with an id or name from list_calendars. Shared with the read path so both state
-      // the same rule — see calendarNotFoundError.
-      //
-      // THIS IS ALSO THE REFUSAL FOR A TARGET ON A BROKEN PATH (#136), and it is one by
-      // construction rather than by a check of its own: a collection that failed to list never
-      // becomes a `DAVCalendar`, so it is never in `selectable` and can never be `targetCal`.
-      // The write therefore cannot land in a collection this server could not describe, and
-      // the caller is told which collection could not be described rather than being left to
-      // read "not found" as "that calendar does not exist".
-      throw calendarNotFoundError(event.calendarId, selectable, brokenCollections);
-    }
+    const targetCal = resolveCalendarTarget(event.calendarId, selectable, brokenCollections);
 
     const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@fastmail-mcp`;
     const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
@@ -4467,7 +4608,7 @@ export class CalDAVCalendarClient {
     // `addressed` is what keeps the escape hatch open: a caller who passed a resource url named
     // ONE record, and this acts on it however many others carry that url as their UID.
     if (!addressed && matches.length > 1) {
-      throw ambiguousEventIdError(eventId, 'update', matchesToCopies(matches));
+      throw ambiguousEventIdError(eventId, 'update', matchesToCopies(matches), brokenCollections);
     }
 
     // UNREACHABLE DEFENCE, not a live case (#137): `isResolvedCalendarObject` already requires
@@ -4715,7 +4856,7 @@ export class CalDAVCalendarClient {
     // (#101). Sharper here than there: this call destroys, and the copy it would have picked is
     // not the one the caller may have meant.
     if (!addressed && matches.length > 1) {
-      throw ambiguousEventIdError(eventId, 'delete', matchesToCopies(matches));
+      throw ambiguousEventIdError(eventId, 'delete', matchesToCopies(matches), brokenCollections);
     }
 
     // Raised AFTER the lookup and BEFORE the delete, so it covers both ways an id resolves:

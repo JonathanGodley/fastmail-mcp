@@ -129,11 +129,20 @@ non-string body, an entirely HTML-escaped `htmlBody`, and a CDATA-wrapped body a
 by `assertBodyInputs` (`src/body-format.ts`) rather than repaired, because unescaping or
 unwrapping would guess at what the caller meant to send. See `docs/email-bodies.md`.
 
-### An ambiguous `eventId`: the writes refuse, the read answers and discloses
+### An id that names more than one thing: address it, or be refused
 
 The fail-closed posture above is about a value the server could not *read*. This is the same
 posture one step later, about a value it read perfectly well and that turned out to name more
-than one thing ([#101](https://github.com/JonathanGodley/fastmail-mcp/issues/101)).
+than one thing ([#101](https://github.com/JonathanGodley/fastmail-mcp/issues/101),
+[#173](https://github.com/JonathanGodley/fastmail-mcp/issues/173)).
+
+**One rule, in one sentence: a url ADDRESSES exactly one thing; a name merely NAMES whatever
+carries it.** So an identifier that resolves to several records is refused rather than guessed
+between, and the escape hatch is always the url. It applies at two levels — an `eventId` naming
+two events, and a `calendarId` naming two calendars — and the levels differ only in what a
+*read* is allowed to do, for the reason stated under each.
+
+#### An ambiguous `eventId`: the writes refuse, the read answers and discloses
 
 A CalDAV `UID` is unique within one **collection**, not across an account, so two calendars can
 hold the same event id, and `findCalendarObjectByUID` queries every selectable calendar and
@@ -195,6 +204,65 @@ invitation chooses the `UID` it arrives under, so a stranger who knows an event'
 its writes by minting a duplicate in a shared calendar. The refusal is still the right answer —
 the alternative is a destructive call that guesses — and the `url` form is the guaranteed way
 through, which is why it is named on the tool surface and not merely in the error.
+
+#### An ambiguous `calendarId`: the read refuses too
+
+A calendar's display name is not unique per account either — a shared calendar is named by
+whoever owns it, and nothing stops a second one carrying a name an existing calendar already
+has. `resolveCalendarTarget` (`src/caldav-client.ts`) is the one function
+`getCalendarEvents` and `createCalendarEvent` both resolve through, and it returns **exactly
+one** calendar or raises: zero matches keeps the shared `calendarNotFoundError`, more than one
+raises `ambiguousCalendarNameError`, which names each match with its url.
+
+**Here the READ refuses as well, and that is not an inconsistency with the `eventId` split
+above — it is the same test applied to a different fact.** The `eventId` read is allowed to
+answer because it damages nothing *and* because it is the only tool that can hand back the
+`url` that makes the ambiguity fixable; refusing there would close the escape hatch. Neither
+holds for a calendar. `list_calendars` already hands back every calendar's url unconditionally,
+so the way out exists without this call, and a read that answered would have to answer from
+*both* calendars — which is what `getCalendarEvents` used to do. That union is a wrong outcome,
+not a harmless one: "what is on my Work calendar" came back as two calendars' events with
+nothing in the response saying so, and the caller cannot tell it from one calendar's day.
+
+**A url wins alone, and is tried first — and that half of the change is a WRITE fix, not a read
+one.** Both paths used to test url-or-name in a *single* predicate. The read path kept every
+match; the write path's `find` returned whichever calendar came first in **discovery order**, so
+nothing in the code expressed a preference for an address over a name. Plant a calendar whose
+display *name* is spelled as another calendar's *url* — a display name is written by whoever owns
+the calendar, so on a shared account a stranger writes it — have it listed first, and
+`create_calendar_event` aimed at that exact url matched the decoy **by name** and wrote the event
+into the stranger's calendar, reported as a success under the calendar the caller had asked for.
+Resolving `url` in its own pass, first, is what makes an address an address; only when nothing was
+addressed do names get compared.
+
+The same ordering is what keeps the refusal's remedy ("pass the url") from being circular, which
+is the decoy shape the `eventId` work closed one level down. On the read path it changes one
+further case, deliberately: a string matching calendar A by url and calendar B by name used to be
+read as both, and is now read as A alone — the calendar the caller addressed.
+
+**An empty `calendarId` cannot address an empty url.** The name arm is fail-closed for free
+(`unwrapDisplayName` answers undefined for `''` and `'   '`, so nothing matches), but `url` is
+compared raw, and a collection whose url is the empty string would have been *addressed* by an
+empty `calendarId` — narrowing a read onto a calendar nobody named, and on the write path
+creating an event in it. The comparison requires a non-empty string url rather than the claim
+being re-worded: nothing here can promise a collection has a usable url, and this file's own
+neighbours already refuse that assumption.
+
+**The echo bounds are the calendar ones**, not the ambiguity's: `CALENDAR_NAME_LIST_CAP` bounds
+how many matches are named, the url gets `CALENDAR_URL_ECHO_LIMIT` because it is offered as a
+handle to paste back, and the name keeps the shared echo's default because a name is offered to
+be recognised. That is the opposite call from the `eventId` message above, and for the stated
+reason: these are *collection* urls, the exact values `calendarNotFoundError` already offers, so
+two messages naming the account's calendars cut them at one length rather than two. Every name
+and url renders through `echoCallerText` inside **double** quotes, the pairing the echo's
+quote-neutralisation requires (see
+[Untrusted values in prose](#untrusted-values-in-prose-describeuntrusted)).
+
+**Both refusals carry the broken-collection clause**, because both make an **account-wide count**
+("names N calendars/records in this account") and a collection that failed to list was never
+searched — so it may hold the N+1th. Left off, a count that could not be complete reads as though
+it were. Same rule as the not-found errors beside them ([#136](https://github.com/JonathanGodley/fastmail-mcp/issues/136)):
+never let a promised qualification vanish with no trace.
 
 ### Coercing is only half of it: the schema has to declare the lenient shape
 
