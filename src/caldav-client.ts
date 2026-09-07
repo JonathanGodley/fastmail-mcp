@@ -2033,12 +2033,32 @@ function describeFrame(d: DatePropertyFrame): string {
  * pair such as `DTSTART:20260320T093000` (floating) beside
  * `DTEND:20260320T093000Z` (UTC) has no single duration; it renders as a
  * different length for every reader, and in some zones ends before it starts.
+ *
+ * EVERY DTSTART/DTEND VALUE THESE THREE REFUSALS RENDER GOES THROUGH `echoCallerText`, INSIDE
+ * DOUBLE QUOTES, and that is not decoration. Only a side the caller actually supplied is their
+ * own validated input; a side they left alone is read straight from the stored VEVENT, and
+ * `describeDateProperty`'s `display` falls back through `formatICalDate`, which hands back
+ * anything outside the two forms it parses. So a DTSTART or DTEND that an invitation wrote
+ * arrives here verbatim. Two of the three rendered it inside `'…'`, where its own quote closed
+ * the span and everything after read as the server's next clause; the all-day refusal rendered
+ * it BARE, into a sentence that single-quoted the suggested day (#190).
+ *
+ * The other two values on these lines are covered differently, and neither is an oversight:
+ *
+ *   - `describeFrame`'s zone note carries a stored TZID — untrusted for the same reason — and
+ *     goes through the SAME echo, but BARE. That is inert here and only here, because these
+ *     sentences single-quote nothing: the whole-sentence criterion in `echoCallerText`'s own
+ *     comment is what makes it so, and adding a `'…'` span to any of them reopens it.
+ *   - `suggestion` is server-computed, and `nextDay` returns it only when it matches
+ *     `^\d{4}-\d{2}-\d{2}$`, so no echo can add anything to a value already constrained to
+ *     ten characters of digits and hyphens.
  */
 function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFrame): void {
   if (start.frame !== end.frame) {
     throw new InvalidInputError(
       `DTSTART and DTEND must use the same date/time form per RFC 5545 §3.6.1 — ` +
-      `start '${start.display}' is ${describeFrame(start)} but end '${end.display}' is ${describeFrame(end)}. ` +
+      `start "${echoCallerText(start.display)}" is ${describeFrame(start)} ` +
+      `but end "${echoCallerText(end.display)}" is ${describeFrame(end)}. ` +
       `Pass start and end in the same form: both date-only (2026-03-20), both with a zone designator ` +
       `(2026-03-20T09:30:00Z or 2026-03-20T09:30:00+10:00), or both without one (2026-03-20T09:30:00).`
     );
@@ -2058,21 +2078,47 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
 
   if (start.frame === 'date') {
     const startDate = formatICalDate(start.value) ?? start.value;
+    const suggestion = nextDay(startDate);
     throw new InvalidInputError(
-      `DTEND is exclusive per RFC 5545 — for a one-day event on ${startDate}, ` +
-      `pass end: '${nextDay(startDate)}'`
+      `DTEND is exclusive per RFC 5545 — for a one-day event on "${echoCallerText(startDate)}", ` +
+      (suggestion === undefined ? 'pass an end one day later.' : `pass end: "${suggestion}"`)
     );
   }
   throw new InvalidInputError(
-    `DTEND must be later than DTSTART per RFC 5545 §3.8.2.2 — start '${start.display}' ` +
-    `is not before end '${end.display}'. Pass an end later than the start.`
+    `DTEND must be later than DTSTART per RFC 5545 §3.8.2.2 — start "${echoCallerText(start.display)}" ` +
+    `is not before end "${echoCallerText(end.display)}". Pass an end later than the start.`
   );
 }
 
-function nextDay(dateStr: string): string {
+// Returns undefined unless the RESULT is a plain `YYYY-MM-DD`, and both halves of that are
+// load-bearing. The input is not always a date: a stored all-day DTSTART reaches here through
+// `formatICalDate`, which hands back anything outside the two forms it parses. But checking the
+// INPUT alone is not the check — the arithmetic can leave a perfectly valid date outside the
+// range `toISOString` renders in four digits:
+//
+//   9999-12-31   -> `+010000-01-01T…`, sliced to `+010000-01`
+//   275760-09-12 -> `+275760-09-13T…`, sliced to `+275760-09`
+//   275760-09-13 -> past the maximum representable date; `toISOString` THROWS
+//
+// The first two are the worse pair: they returned quietly, and the caller was handed a
+// malformed value in a sentence that says to pass it back. The third turned an entirely
+// caller-fixable refusal into an internal error. So the validity test moves AFTER the
+// increment, and the formatted result is matched against the shape it promises; the refusal
+// then drops its suggestion rather than the sentence.
+//
+// The shape test runs on the WHOLE ISO string and slices after, not the other way round.
+// Slicing first gives ten characters, and `^…$` over a ten-character string is two anchors
+// that cannot do anything: no substring of it could pass the test either way, so neither
+// anchor can be turned red and both read as tested while carrying nothing. Anchored against
+// the full string, the leading `+` an expanded year renders is exactly what the `^` rejects —
+// drop that anchor and `+010000-01-01T…` matches on `0000-01-01T`, handing back the malformed
+// `+010000-01` this function exists to withhold.
+function nextDay(dateStr: string): string | undefined {
   const d = new Date(dateStr);
   d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
+  if (Number.isNaN(d.getTime())) return undefined;
+  const iso = d.toISOString();
+  return /^\d{4}-\d{2}-\d{2}T/.test(iso) ? iso.slice(0, 10) : undefined;
 }
 
 /**
@@ -4650,11 +4696,15 @@ export class CalDAVCalendarClient {
     // Validate date inputs early before any processing
     const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+    // The value echoed here is by definition one nothing has validated — that is what the check
+    // just decided — so it goes through `echoCallerText` inside double quotes like every other
+    // echo in this file. Rendered bare, a CRLF in it split one refusal into what read as two
+    // lines of server output.
     if (fields.start !== undefined && !datePattern.test(fields.start) && !dateTimePattern.test(fields.start)) {
-      throw new InvalidInputError(`Invalid start date format: ${fields.start}. Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
+      throw new InvalidInputError(`Invalid start date format: "${echoCallerText(fields.start)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
     if (fields.end !== undefined && !datePattern.test(fields.end) && !dateTimePattern.test(fields.end)) {
-      throw new InvalidInputError(`Invalid end date format: ${fields.end}. Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
+      throw new InvalidInputError(`Invalid end date format: "${echoCallerText(fields.end)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
 
     // Validate clearFields: only the optional, string-settable, not-otherwise-

@@ -348,14 +348,15 @@ const DATE_ECHO_LIMIT = 60;
  *     whether the WHOLE RENDERED SENTENCE carries a `'…'` span, not whether this call site
  *     wrote one. A bare value dropped into a sentence that quotes something else with single
  *     quotes breaks that sentence's quote parity just as surely, and the text after it reads as
- *     prose outside any span. Judged that way, the DAV reason phrase and the id and calendar in
- *     the repeating-event refusal (whose title, on the same line, IS quoted — with `"`) are
- *     genuinely inert: nothing in either sentence is single-quoted. The two zone notes
- *     `describeFrame` builds are NOT, today: their only consumer is the RFC 5545 frame-mismatch
- *     refusal, which renders `start '…'`/`end '…'` around it, so a `'` in a stored TZID walks
- *     straight out. That is a live defect in THAT SENTENCE rather than in this helper — the fix
- *     belongs where the spans are, in validateDateConsistency in caldav-client.ts, not in a
- *     second swap here.
+ *     prose outside any span. Judged that way all five are inert, but two of them only became
+ *     so by fixing the SENTENCE: the zone notes `describeFrame` builds land in the RFC 5545
+ *     frame-mismatch refusal, which rendered `start '…'`/`end '…'` around them, so a `'` in a
+ *     stored TZID walked straight out. That was fixed where the spans were, in
+ *     `validateDateConsistency` in caldav-client.ts, rather than by a second swap here — the
+ *     other three (the DAV reason phrase, and the id and calendar in the repeating-event
+ *     refusal, whose title on the same line IS quoted, with `"`) sit in sentences that
+ *     single-quote nothing and needed no change. Adding a `'…'` span to any of those three
+ *     sentences reopens this, which is why the criterion is written down rather than the list.
  *
  *     The rule lives here rather than at each quoting call site so a new one cannot be written
  *     without it. `describePart`, the other echo helper, applies the same rule for the same

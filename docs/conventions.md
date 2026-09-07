@@ -1249,7 +1249,13 @@ that sentence's quote parity just as surely, and everything after it reads as pr
 span. So the class that is genuinely inert is not "renders it bare" but **"renders into a
 sentence carrying no `'…'` span anywhere in it"** — which is a property of the finished message,
 and has to be re-checked whenever a span is added to one. `echoCallerText`'s doc comment states
-that criterion and classifies its own bare callers against it.
+that criterion and classifies its own bare callers against it. Applying it is what caught the
+three refusals `validateDateConsistency` raises: each rendered a DTSTART/DTEND through no echo
+at all — two of them inside `'…'`, the third bare into a sentence that single-quoted the
+suggested day — and only a side the caller actually supplied is the caller's own validated
+input. A side they left alone is read from the stored VEVENT, where `formatICalDate` hands
+back anything outside the two forms it parses, so a value an invitation wrote arrives verbatim
+([#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190)).
 
 **What is outside the rule, and why it is structure rather than a decision.**
 `inline-images.ts` and `inline-notes.ts` sit *below* `coerce.ts` in the import graph, so they
