@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 
 describe('coerceStringArray', () => {
   it('returns undefined for undefined input', () => {
@@ -2001,5 +2006,93 @@ describe('describeTimezone names the zone that actually resolved', () => {
 
   it('says nothing extra about a zone that resolves', () => {
     assert.equal(describeTimezone('America/New_York'), 'America/New_York');
+  });
+});
+
+// ---------- drift guard: an echoed value is quoted with `"`, never `'` ----------
+//
+// Both echo helpers neutralise a value by turning a DOUBLE quote into a single one, so the
+// span they protect is `"…"` and only `"…"`. Rendered inside `'…'` the neutralisation buys
+// nothing: the value's own `'` closes the span and everything after it reads as the server's
+// next sentence, on one line, with no control character involved. That is not a hypothetical —
+// it shipped twice, in a stored timezone (#190) and in eleven mailbox-resolver messages.
+//
+// A convention that lives only in a doc comment is the one that drifts, because the wrong
+// spelling looks exactly as careful as the right one at the call site. This reads the sources
+// as TEXT rather than importing them, for the same reason the env-resolution guard does:
+// `npm test` runs tsx over src/ and never builds, so a check over dist/ would read whatever
+// was compiled last and miss a module added since.
+//
+// WHAT IT DOES NOT CATCH, stated so the next reader does not over-trust it: it sees the direct
+// `'${helper(...)}'` spelling only. A value described into a local and rendered inside `'…'` on
+// another line passes, and so does a value rendered BARE into a sentence that single-quotes
+// something else — which breaks the same quote parity just as surely. That second case is the
+// criterion the helpers' own doc comments carry; this guard is the mechanical half of it, not
+// the whole of it.
+describe('echo-quoting convention', () => {
+  const ECHO_HELPERS = ['echoCallerText', 'describeUntrusted', 'describePart'];
+
+  // Recursive, so the claim the helpers' doc comments make — a bad render fails this guard
+  // anywhere under src/ — is true of every source file rather than of the top level only.
+  // src/testing/ holds one today; a directory added later is covered without touching this.
+  function sourceFiles(dir: string = SRC_DIR, prefix = ''): string[] {
+    const found: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) found.push(...sourceFiles(join(dir, entry.name), rel));
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && !entry.name.endsWith('.d.ts')) {
+        found.push(rel);
+      }
+    }
+    return found.sort();
+  }
+
+  // Comments are dropped before scanning, exactly as the env-resolution guard does: a doc
+  // comment has to be able to quote the wrong spelling in order to warn against it, and both
+  // helpers' comments now do. A "//" inside a string literal would blank the rest of that
+  // line, so a protocol-relative "://" is left alone; the residual risk is a render sitting
+  // after a string literal on the same line, which is a far smaller hole than being unable to
+  // name the anti-pattern anywhere in the sources.
+  function stripComments(source: string): string {
+    return source
+      .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+      .split('\n')
+      .map((line) => line.replace(/(^|[^:])\/\/.*$/, '$1'))
+      .join('\n');
+  }
+
+  function findRenders(quote: '"' | "'"): string[] {
+    const pattern = new RegExp(`${quote}\\$\\{\\s*(?:${ECHO_HELPERS.join('|')})\\s*\\(`, 'g');
+    const found: string[] = [];
+    for (const file of sourceFiles()) {
+      stripComments(readFileSync(join(SRC_DIR, file), 'utf8')).split('\n').forEach((line, i) => {
+        for (const match of line.matchAll(pattern)) found.push(`${file}:${i + 1} ${match[0]}`);
+      });
+    }
+    return found;
+  }
+
+  it('renders no echoed value inside a single-quoted span', () => {
+    assert.deepEqual(findRenders("'"), []);
+  });
+
+  // The scan's reach, pinned separately from what it finds: a non-recursive read still finds
+  // plenty of renders and still passes the floor below, so nothing else here would notice it
+  // silently stopping at the top level.
+  it('scans nested source directories, not just the top level', () => {
+    const files = sourceFiles();
+    assert.ok(files.includes('coerce.ts'), 'expected the top-level sources to be scanned');
+    assert.ok(
+      files.some((f) => f.includes('/')),
+      `expected a nested source file to be scanned, found only ${files.length} top-level files`
+    );
+  });
+
+  // A floor, so a regex that silently stops matching cannot make the assertion above pass
+  // vacuously. The number is deliberately well below the real count: it exists to prove the
+  // pattern still finds renders at all, not to be re-tuned every time one is added.
+  it('still finds the double-quoted renders it is scanning for', () => {
+    const quoted = findRenders('"');
+    assert.ok(quoted.length >= 40, `expected the scan to still find echo renders, found ${quoted.length}`);
   });
 });

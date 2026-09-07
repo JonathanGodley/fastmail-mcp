@@ -181,8 +181,21 @@ const DESCRIBE_PART_MAX = 64;
  * control and format characters (which can reorder or hide the text around them) are
  * removed, line and paragraph separators with them, runs of space separators collapse
  * to one plain space, and a double quote becomes a single quote so the value cannot
- * close the quoted span the caller renders it inside. Every call site wraps the result
- * in double quotes, so hostile text reads as quoted data, never as the server speaking.
+ * close a DOUBLE-quoted span. That swap is the whole of the guarantee, and it is worth
+ * stating what it is not: it does not reach a single-quoted span, so a caller that renders
+ * the result inside `'…'` gets no protection at all from having called this — the value's
+ * own `'` closes the span and everything after it reads as the server speaking. Eleven
+ * mailbox-resolver messages did exactly that, and this comment used to assert the opposite
+ * ("every call site wraps the result in double quotes") while they did it (#190).
+ *
+ * So: A CALLER THAT QUOTES QUOTES WITH `"…"`. A caller that quotes NOTHING is judged on the
+ * whole rendered SENTENCE rather than on its own interpolation — a bare value dropped into a
+ * sentence that single-quotes something else breaks that sentence's parity just as surely, so
+ * A NEW `'…'` SPAN IN ANY SENTENCE THAT RENDERS A BARE ONE REOPENS THIS. No list of the bare
+ * callers is kept here or in `describeUntrusted`'s comment, deliberately: the one that was
+ * kept went stale immediately while reading as a completed audit. The mechanical half of this
+ * is a drift guard in coerce.test.ts, which fails on a `'${describePart(…)}'` anywhere under
+ * src/; the whole-sentence half is a reading, done at the sentence you are editing.
  *
  * Truncation is marked with an ellipsis rather than being silent: two long values that
  * differ only past the cap must not print identically.

@@ -1220,7 +1220,7 @@ function mailboxListHint(mailboxes: any[]): string {
 }
 
 function formatMailboxNotFound(input: string, mailboxes: any[]): string {
-  return `Mailbox '${describeUntrusted(input)}' not found. ${mailboxListHint(mailboxes)}`;
+  return `Mailbox "${describeUntrusted(input)}" not found. ${mailboxListHint(mailboxes)}`;
 }
 
 // A name shared by several mailboxes is NOT a typo, so it must never render as
@@ -1231,7 +1231,7 @@ function formatMailboxNotFound(input: string, mailboxes: any[]): string {
 // as it is rendered. Contrast formatMailboxNameVsPath below, whose candidates arrive already
 // composed.
 function formatMailboxAmbiguous(input: string, candidates: string[]): string {
-  return `Mailbox '${describeUntrusted(input)}' is ambiguous: ${candidates.length} mailboxes share that name. ` +
+  return `Mailbox "${describeUntrusted(input)}" is ambiguous: ${candidates.length} mailboxes share that name. ` +
     `Retry with one of their full paths, or with an id. Candidates: ${joinCapped(candidates.map(describeUntrusted))}`;
 }
 
@@ -1245,7 +1245,7 @@ function formatMailboxAmbiguous(input: string, candidates: string[]): string {
 // own sentences by the time they arrive, and re-describing them would truncate a whole
 // description at 64 code points and strip the punctuation it uses to stay readable.
 function formatMailboxNameVsPath(input: string, candidates: string[]): string {
-  return `Mailbox '${describeUntrusted(input)}' is ambiguous: it is both the name of one folder and the path to a different ` +
+  return `Mailbox "${describeUntrusted(input)}" is ambiguous: it is both the name of one folder and the path to a different ` +
     `mailbox, and a path cannot tell those apart. Retry with the id of the one you mean. ` +
     `Candidates: ${joinCapped(candidates)}`;
 }
@@ -1257,7 +1257,7 @@ function formatMailboxNameVsPath(input: string, candidates: string[]): string {
 // one form that picks either of them. Unlike the candidates of a duplicated name, these are
 // descriptions rather than pasteable input; the id inside each one is what gets pasted back.
 function describeFlatCandidate(mb: any): string {
-  return `folder named '${describeUntrusted(normalizeMailboxSegment(mb?.name))}' (id: ${describeUntrusted(mb?.id)})`;
+  return `folder named "${describeUntrusted(normalizeMailboxSegment(mb?.name))}" (id: ${describeUntrusted(mb?.id)})`;
 }
 
 function describeNestedCandidate(mb: any, paths: Map<string, string>): string {
@@ -1275,7 +1275,7 @@ function describeNestedCandidate(mb: any, paths: Map<string, string>): string {
 // path input can be resolved at all. Says which mailbox broke the walk and which input
 // forms still work.
 function formatMailboxUnwalkable(input: string, id: string): string {
-  return `Mailbox '${describeUntrusted(input)}' could not be resolved as a path: mailbox '${describeUntrusted(id)}' has a parent chain that never reaches ` +
+  return `Mailbox "${describeUntrusted(input)}" could not be resolved as a path: mailbox "${describeUntrusted(id)}" has a parent chain that never reaches ` +
     `a top-level mailbox (a loop, or a parent missing from the mailbox list), so full paths cannot be computed. ` +
     `Refer to the mailbox by id, role, or name instead.`;
 }
@@ -1306,7 +1306,7 @@ function joinCapped(items: string[], separator = ', '): string {
 }
 
 function formatMailboxesNotFound(unresolved: string[], mailboxes: any[]): string {
-  const listed = joinCapped(unresolved.map(v => `'${describeUntrusted(v)}'`));
+  const listed = joinCapped(unresolved.map(v => `"${describeUntrusted(v)}"`));
   return `Mailbox(es) not found: ${listed}. ${mailboxListHint(mailboxes)}`;
 }
 
@@ -1324,21 +1324,21 @@ export interface MailboxResolutionFailures {
 function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailboxes: any[]): string {
   const parts: string[] = [];
   if (failures.notFound.length > 0) {
-    const listed = joinCapped(failures.notFound.map(v => `'${describeUntrusted(v)}'`));
+    const listed = joinCapped(failures.notFound.map(v => `"${describeUntrusted(v)}"`));
     parts.push(`Mailbox(es) not found: ${listed}.`);
   }
   if (failures.ambiguous.length > 0) {
     // `candidates` are raw mailbox paths, so each is described; the nameVsPath block below
     // takes composed descriptions and deliberately does not re-describe them.
     const listed = joinCapped(
-      failures.ambiguous.map(a => `'${describeUntrusted(a.input)}' matches ${joinCapped(a.candidates.map(describeUntrusted))}`),
+      failures.ambiguous.map(a => `"${describeUntrusted(a.input)}" matches ${joinCapped(a.candidates.map(describeUntrusted))}`),
       '; ',
     );
     parts.push(`Ambiguous mailbox name(s) — retry with a full path or an id: ${listed}.`);
   }
   if (failures.nameVsPath.length > 0) {
     const listed = joinCapped(
-      failures.nameVsPath.map(a => `'${describeUntrusted(a.input)}' matches ${joinCapped(a.candidates)}`),
+      failures.nameVsPath.map(a => `"${describeUntrusted(a.input)}" matches ${joinCapped(a.candidates)}`),
       '; ',
     );
     parts.push(
@@ -1348,7 +1348,7 @@ function formatMailboxesNotResolved(failures: MailboxResolutionFailures, mailbox
   }
   if (failures.unwalkable.length > 0) {
     const listed = joinCapped(
-      failures.unwalkable.map(u => `'${describeUntrusted(u.input)}' (blocked by mailbox '${describeUntrusted(u.id)}')`),
+      failures.unwalkable.map(u => `"${describeUntrusted(u.input)}" (blocked by mailbox "${describeUntrusted(u.id)}")`),
     );
     parts.push(
       `Mailbox path(s) unresolvable because a parent chain never reaches a top-level mailbox: ${listed}. ` +
@@ -1396,7 +1396,7 @@ function findNonLabelMailboxes(resolvedIds: string[], mailboxes: any[]): string[
     const name = mailbox && typeof mailbox.name === 'string' && mailbox.name.trim() !== ''
       ? mailbox.name
       : id;
-    named.push(`'${describeUntrusted(name)}' (${describeUntrusted(role)})`);
+    named.push(`"${describeUntrusted(name)}" (${describeUntrusted(role)})`);
   }
   return named;
 }
