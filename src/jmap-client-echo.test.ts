@@ -110,15 +110,28 @@ describe('a caller-supplied value cannot close the span a refusal renders it in'
     assertSpanHolds(message, /invalid contentType "/);
   });
 
+  // Both refusals end by listing the blob ids the caller should have used instead. Those are
+  // server-minted and need no echo, but they are the actionable half of the message, so each
+  // pin asserts the listing as well as the span it follows.
   it('refuses a removeAttachments ref that names several parts', () => {
     const parts = [{ blobId: 'b1', name: HOSTILE }, { blobId: 'b2', name: HOSTILE }];
     const plan = resolveAttachmentRemovals(parts, [HOSTILE], false);
     assertSpanHolds(plan.error!.message, /removeAttachments ref "/);
+    assert.match(plan.error!.message, /matches 2 attachments by name; pass the blobId instead \(one of: b1, b2\)\./);
   });
 
   it('refuses a removeAttachments ref that names nothing', () => {
     const plan = resolveAttachmentRemovals([{ blobId: 'b1', name: 'a.png' }], [HOSTILE], false);
     assertSpanHolds(plan.error!.message, /removeAttachments ref "/);
+    assert.match(plan.error!.message, /Carried blobIds: b1\.$/);
+  });
+
+  // The draft carries nothing at all, so the listing has to say so rather than trail off after
+  // the colon — the one branch the two pins above never reach.
+  it('says so plainly when the draft it refused against carries no attachments', () => {
+    const plan = resolveAttachmentRemovals([], [HOSTILE], false);
+    assertSpanHolds(plan.error!.message, /removeAttachments ref "/);
+    assert.match(plan.error!.message, /Carried blobIds: \(none\)\.$/);
   });
 
   it('refuses an email id the server reports as not found', async () => {
