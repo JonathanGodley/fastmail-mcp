@@ -528,8 +528,13 @@ export function recurringSeriesRefusal(
   const consequence = action === 'delete'
     ? 'Deleting it would remove every occurrence, past and future, and the server would mail a cancellation to every attendee.'
     : 'Changing it would move every occurrence, and where single occurrences have already been edited on their own there is no agreed answer for what should happen to them.';
+  // The title is read off the stored resource and unescaped on the way here, so an iCal `\n`
+  // in its SUMMARY arrives as a real newline: whoever wrote the event — an invitation sender
+  // included — chooses what this sentence opens with. It goes through the shared echo, inside
+  // the double quotes that echo's neutralisation protects (docs/conventions.md, untrusted
+  // values in prose), like every other value this file quotes back.
   return new InvalidInputError(
-    `"${title}" is a repeating event, and this server will not ${action} it. `
+    `"${echoCallerText(title)}" is a repeating event, and this server will not ${action} it. `
     + `${consequence} `
     + 'There is no parameter, flag or confirmation that overrides this, so do not look for one: '
     + 'this server cannot CREATE a repeating event (create_calendar_event writes single events only), '
@@ -825,9 +830,11 @@ export function toICalUTC(isoString: string): string {
     return isoString.replace(/[-:]/g, '');
   }
   const d = new Date(isoString);
-  // The value reaching here is the start/end the tool caller passed (via
-  // formatDateTimeProperty), so an unparseable one is caller-fixable input.
-  if (isNaN(d.getTime())) throw new InvalidInputError(`Invalid date: ${isoString}`);
+  // The value this takes is a caller-supplied start/end, so an unparseable one is
+  // caller-fixable input — and it is quoted back through the shared echo rather than pasted,
+  // because nothing upstream of this seam has screened it for the line separators that would
+  // split the refusal into what reads as several sentences from the server.
+  if (isNaN(d.getTime())) throw new InvalidInputError(`Invalid date: "${echoCallerText(isoString)}"`);
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 }
 
@@ -1690,7 +1697,14 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
   // Datetime forms: floating, UTC (Z), or with offset (+/-HH:MM, +/-HHMM, +/-HH)
   const dtMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(Z|[+-]\d{2}:?\d{0,2})?$/.exec(trimmed);
   if (!dtMatch) {
-    throw new InvalidInputError(`${fieldName} must be ISO-8601 date or datetime (got: ${trimmed.slice(0, 60)})`);
+    // The one rejection in this function that quotes back a value nothing has constrained:
+    // it fires precisely BECAUSE the value matched neither anchored shape, and the control
+    // guard above screens `\x00-\x1F\x7F` only — U+2028 is neither, and `.trim()` strips it
+    // just from the ends. Every other rejection that quotes this value reaches its throw only
+    // after the value has matched an anchored digits-and-punctuation shape, which is why they
+    // read as bare slices and this one does not. `echoCallerText` bounds at the same 60 the
+    // slice did, and scrubs.
+    throw new InvalidInputError(`${fieldName} must be ISO-8601 date or datetime (got: "${echoCallerText(trimmed)}")`);
   }
   const [, datePart, timePart, tz] = dtMatch;
   // Probe the calendar date on its own rather than the whole value: an offset
@@ -1743,8 +1757,13 @@ export function validateAttendeeEmail(email: string): void {
   if (!email || typeof email !== 'string') {
     throw new InvalidInputError('Participant email is required');
   }
+  // Both refusals below quote the address back through the shared echo. Neither guard is a
+  // screen for what a MESSAGE can carry: the addr-spec shape here says nothing about line
+  // separators, and the criterion below detects U+2028 (JS `\s` matches it) and would then
+  // have printed the very character it had just refused. Double quotes, because that is what
+  // the echo's neutralisation protects (docs/conventions.md, untrusted values in prose).
   if (!/^[^@]+@[^@]+$/.test(email)) {
-    throw new InvalidInputError(`Invalid participant email: ${email}`);
+    throw new InvalidInputError(`Invalid participant email: "${echoCallerText(email)}"`);
   }
   // This is a CRITERION, not a character whitelist: reject the RFC 5322 specials that would
   // let a bare addr-spec smuggle a route, a display name, a second address, or (via a stray
@@ -1755,7 +1774,7 @@ export function validateAttendeeEmail(email: string): void {
   // Everything else — including `.` for dot-atoms, `+` for tagged locals, and `-` in a
   // domain — stays allowed.
   if (/[()<>[\]:;\\,"]|\s|\p{C}/u.test(email)) {
-    throw new InvalidInputError(`Invalid participant email (contains illegal characters): ${email}`);
+    throw new InvalidInputError(`Invalid participant email (contains illegal characters): "${echoCallerText(email)}"`);
   }
 }
 
@@ -1775,6 +1794,11 @@ function validateOrganizerUsername(username: string): void {
     // The shared validator words its message for a participant address. Say whose
     // address this actually is, or an operator with a bad CalDAV username spends the
     // failure hunting a participant who is fine.
+    //
+    // `detail` is that validator's finished sentence, and it is re-rendered whole on purpose:
+    // the only untrusted span inside it has already been echoed at the throw that built it,
+    // and passing a finished sentence through an echo would neutralise the server's own words
+    // along with it (docs/conventions.md — sanitise the value, never the sentence).
     const detail = e instanceof Error ? e.message : String(e);
     throw new Error(`The configured CalDAV username is not usable as an ORGANIZER address. ${detail}`);
   }

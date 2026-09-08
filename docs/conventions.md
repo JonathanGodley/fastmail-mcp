@@ -1312,11 +1312,23 @@ roots, drive-relative forms and the ADS colon; `resolve`/`normalize` preserve U+
 filename carrying one is creatable on both platforms, and `open()` on it returns ENOENT, so
 `File not found: <path>` arrived at the consumer as two lines.
 
-Every unhelped interpolation under `src/` was traced back to where its value comes from once
-([#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190)); the ones fed by a caller
-argument, by stored data an invitation or a message wrote, or by an id, path or hostname minted
-outside this server now render through an echo inside `"…"`, and the ones left render this
-server's own text. **That sweep is not repeatable by a guard, and the reason is worth stating
+**What has actually been traced back to its origin is bounded, and the bound is part of the
+rule** ([#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190)): every
+single-quoted interpolation under `src/`, and then — because the quoting frame above hides
+exactly the case it cannot see — every bare unhelped render in `jmap-client.ts`'s path
+refusals and every caller-controlled value a `caldav-client.ts` refusal quotes back. Inside
+that boundary the values fed by a caller argument, by stored data an invitation or a message
+wrote, or by an id, path or hostname minted outside this server now render through an echo
+inside `"…"`; the ones left render this server's own text, or a value an anchored shape has
+already constrained to digits and punctuation before the message quotes it.
+
+**Outside that boundary, bare renders have not been traced.** The expectation is that most are
+server text — a status line, a count, a field name, an action verb — but an expectation is not
+a finding, and it is the first thing to settle when adding a message elsewhere. The sweep also
+stopped at refusals, so a value rendered into a SUCCESS sentence has not been traced either;
+it is the same defect wearing a friendlier frame.
+
+**That sweep is not repeatable by a guard, and the reason is worth stating
 rather than re-deriving.** A surviving `'…'` span is not a defect waiting to be found: it holds
 a mode enum `readMode` has already validated, a field name a coercion refuses by, the
 ICU-canonical zone `validateCallerTimezone` produces — and at the stranded-zone refusal the
@@ -1328,8 +1340,8 @@ stale while reading as a completed audit. So this half is a trace, done at the v
 adding, and what makes it stick is a pin per message rather than a scan. Each newly-echoed
 refusal has one, next to the harness that reaches it — `jmap-client-echo.test.ts` for the
 client's own, `url-validation.test.ts` for the rejected hostname, `caldav-client.test.ts` for
-the two `timeZone` conflicts — and each drives the real message with a value built to close the
-span or forge a line, then asserts it could not.
+the dates, addresses and event titles its refusals quote back — and each drives the real
+message with a value built to close the span or forge a line, then asserts it could not.
 
 **What is outside the rule, and why it is structure rather than a decision.**
 `inline-images.ts` and `inline-notes.ts` sit *below* `coerce.ts` in the import graph, so they
