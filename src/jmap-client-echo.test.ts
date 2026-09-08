@@ -256,7 +256,16 @@ describe('a path-confinement refusal bounds and quotes the paths it names', () =
   async function escapeFixture(t: any) {
     const root = await mkdtemp(join(tmpdir(), 'fm-echo-'));
     const allowed = join(root, 'allowed');
-    const deep = join(root, 'o'.repeat(55), 'u'.repeat(55), 't'.repeat(55));
+    // A fixed segment length assumes a platform's temp path length, and platforms disagree:
+    // tmpdir() is short on Linux CI (e.g. /tmp/fm-echo-XXXXXX) and long under Windows' AppData
+    // temp, so three fixed-length segments clear the bound on one and fall short on the other.
+    // Deriving the segment length from the actual root length instead makes the total clear
+    // PATH_ECHO_LIMIT by a small, deliberate margin on any platform, while keeping each segment
+    // well under the 255-character filesystem name limit and the whole path comfortably under
+    // Windows' default 260-character MAX_PATH.
+    const target = PATH_ECHO_LIMIT + 20;
+    const segmentLength = Math.min(255, Math.max(1, Math.ceil((target - root.length - 3) / 3)));
+    const deep = join(root, 'o'.repeat(segmentLength), 'u'.repeat(segmentLength), 't'.repeat(segmentLength));
     await mkdir(allowed, { recursive: true });
     await mkdir(deep, { recursive: true });
     try {
