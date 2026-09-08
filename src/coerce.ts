@@ -582,6 +582,14 @@ export function isUsableTimezone(zone: string): boolean {
 // number that could quietly drift from this one.
 export const ZONE_ECHO_LIMIT = 40;
 
+// The bound for a filesystem path echoed back by a path-confinement refusal. Deliberately far
+// wider than `describePart`'s 64 code points: such a refusal names the resolved path AND the
+// allowed directory in one sentence, and two paths that share a long ancestor truncate to the
+// same prefix at 64 — leaving "path resolves to X which is outside the allowed directory X",
+// which tells the caller nothing and cannot be acted on. A path also has to stay pasteable to
+// be fixable, the same reason `CALENDAR_URL_ECHO_LIMIT` is wide.
+export const PATH_ECHO_LIMIT = 200;
+
 const zoneCanonicalizationCache = new Map<string, string>();
 
 /**

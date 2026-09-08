@@ -2014,7 +2014,7 @@ describe('getThread', () => {
     await assert.rejects(
       () => client.getThread('e1'),
       (err: Error) => {
-        assert.match(err.message, /Thread with ID 'thread-gone' not found/);
+        assert.match(err.message, /Thread with ID "thread-gone" not found/);
         // the get_thread index local catch re-raises this BARE so the top-level maps it to InvalidParams
         assert.equal(err.name, 'InvalidInputError');
         return true;
@@ -5568,7 +5568,7 @@ describe('downloadAttachment — the URL is re-validated after substitution', ()
       (error: unknown) => {
         assert.match(
           (error as Error).message,
-          /downloadUrl host 'attacker\.example\.com' is not in the Fastmail allowlist/,
+          /downloadUrl host "attacker\.example\.com" is not in the Fastmail allowlist/,
         );
         return true;
       },

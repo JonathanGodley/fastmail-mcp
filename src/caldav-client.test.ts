@@ -5254,6 +5254,36 @@ describe('timeZone parameter (#157)', () => {
       );
     });
 
+    // Both refusals quote the caller's own start/end back. The value has already been through
+    // `validateAndFormatICalDate`, which looks safe until you notice it tests `value.trim()`
+    // while the message quotes `value`: JS `.trim()` strips U+2028/U+2029 as well as spaces, so
+    // a run of line separators in front of a well-formed date passes validation untouched and
+    // then splits the refusal into what reads as several sentences from the server. The echo
+    // is what closes that, and this is the payload that proves it ran.
+    async function refusalFor(start: string, end: string): Promise<string> {
+      const { client } = createClient();
+      try {
+        await client.createCalendarEvent({
+          calendarId: 'Personal', title: 'T', start, end, timeZone: 'America/New_York',
+        });
+      } catch (err) {
+        return (err as Error).message;
+      }
+      return assert.fail('expected the call to be refused');
+    }
+
+    it('forges no line when a date-only start arrives padded with line separators', async () => {
+      const message = await refusalFor(`${'\u2028'.repeat(40)}2026-03-20`, '2026-03-21');
+      assert.ok(!/[\u2028\u2029\r\n]/.test(message), 'a line separator survived into the refusal');
+      assert.match(message, /date-only start \("2026-03-20"\)/);
+    });
+
+    it('forges no line when a Z-designated start arrives padded with line separators', async () => {
+      const message = await refusalFor(`${'\u2029'.repeat(40)}2026-03-20T08:30:00Z`, '2026-03-20T09:30:00Z');
+      assert.ok(!/[\u2028\u2029\r\n]/.test(message), 'a line separator survived into the refusal');
+      assert.match(message, /UTC offset \("2026-03-20T08:30:00Z"\)/);
+    });
+
     it('rejects a null timeZone (no way to force a floating write)', async () => {
       const { client } = createClient();
       await assert.rejects(

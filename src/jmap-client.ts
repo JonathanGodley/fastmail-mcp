@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, describeUntrusted, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, describeUntrusted, echoCallerText, PATH_ECHO_LIMIT, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { signatureBlock } from './reply-quote.js';
@@ -163,7 +163,9 @@ const MIME_TYPE_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+\/[A-Za-z0-9!#$%&'*+.^_`|
 function validateContentType(value: string, index: number): string {
   const v = value.trim();
   if (v.length > 255 || !MIME_TYPE_PATTERN.test(v)) {
-    throw new PathAccessError(`attachments[${index}] has an invalid contentType '${value}'. Use a MIME type like application/pdf.`);
+    // The value is whatever the caller sent and it just failed the token grammar, so it is
+    // arbitrary text: echoed, and inside the double quotes the echo's neutralisation protects.
+    throw new PathAccessError(`attachments[${index}] has an invalid contentType "${describeUntrusted(value)}". Use a MIME type like application/pdf.`);
   }
   return v;
 }
@@ -662,7 +664,7 @@ export function resolveAttachmentRemovals(
         removed,
         survivors,
         error: new PathAccessError(
-          `removeAttachments ref '${ref}' matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${survivors.map((p) => p.blobId).join(', ')}).`,
+          `removeAttachments ref "${describeUntrusted(ref)}" matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${survivors.map((p) => p.blobId).join(', ')}).`,
         ),
       };
     }
@@ -670,7 +672,7 @@ export function resolveAttachmentRemovals(
       removed,
       survivors,
       error: new PathAccessError(
-        `removeAttachments ref '${ref}' matched no attachment on this draft. Carried blobIds: ${storedParts.map((p) => p.blobId).join(', ') || '(none)'}.`,
+        `removeAttachments ref "${describeUntrusted(ref)}" matched no attachment on this draft. Carried blobIds: ${storedParts.map((p) => p.blobId).join(', ') || '(none)'}.`,
       ),
     };
   }
@@ -1614,7 +1616,7 @@ export function filterMailboxesByParent(mailboxes: any[], parent?: string): any[
 export function assertLeafMailboxName(name: string): void {
   if (name.includes(MAILBOX_PATH_SEPARATOR)) {
     throw new InvalidInputError(
-      `Mailbox name must not contain "${MAILBOX_PATH_SEPARATOR}": '${name}'. ` +
+      `Mailbox name must not contain "${MAILBOX_PATH_SEPARATOR}": "${describeUntrusted(name)}". ` +
       'Pass the leaf name and nest it with the parent parameter (e.g. name: "2026", parent: "Archive").',
     );
   }
@@ -2306,12 +2308,12 @@ export class JmapClient {
     const result = this.getMethodResult(response, 0);
 
     if (result.notFound && result.notFound.includes(id)) {
-      throw new InvalidInputError(`Email with ID '${id}' not found`);
+      throw new InvalidInputError(`Email with ID "${describeUntrusted(id)}" not found`);
     }
 
     const email = result.list?.[0];
     if (!email) {
-      throw new InvalidInputError(`Email with ID '${id}' not found or not accessible`);
+      throw new InvalidInputError(`Email with ID "${describeUntrusted(id)}" not found or not accessible`);
     }
 
     attachMailboxInfo([email], buildMailboxInfoMap(this.readListResultIfPresent(response, 1)));
@@ -2595,7 +2597,7 @@ export class JmapClient {
     const getResponse = await this.makeRequest(getRequest);
     const existingEmail = this.getListResult(getResponse, 0)[0];
     if (!existingEmail) {
-      throw new InvalidInputError(`Email with ID '${emailId}' not found`);
+      throw new InvalidInputError(`Email with ID "${describeUntrusted(emailId)}" not found`);
     }
 
     // Verify it's a draft
@@ -3577,7 +3579,7 @@ export class JmapClient {
             // problem at all — the re-read did not come back as the draft we wrote. Raising
             // it lands on the read-failure note below, which is the honest description, and
             // stops the promised field vanishing with no trace.
-            throw new Error(`the saved draft '${newEmailId}' did not read back as a draft`);
+            throw new Error(`the saved draft "${describeUntrusted(newEmailId)}" did not read back as a draft`);
           }
           if ('bodyHash' in outcome) {
             issuedBodyHash = outcome.bodyHash;
@@ -3644,7 +3646,7 @@ export class JmapClient {
       ]
     });
     const email = this.getListResult(response, 0)[0];
-    if (!email) throw new Error(`the saved draft '${emailId}' could not be read back`);
+    if (!email) throw new Error(`the saved draft "${describeUntrusted(emailId)}" could not be read back`);
     return email;
   }
 
@@ -3669,7 +3671,7 @@ export class JmapClient {
       ]
     });
     const email = this.getListResult(response, 0)[0];
-    if (!email) throw new Error(`Email with ID '${emailId}' not found`);
+    if (!email) throw new Error(`Email with ID "${describeUntrusted(emailId)}" not found`);
     return buildUnionParts(email).map((u: UnionPart) => u.part);
   }
 
@@ -3710,7 +3712,7 @@ export class JmapClient {
     const getResponse = await this.makeRequest(getRequest);
     const email = this.getListResult(getResponse, 0)[0];
     if (!email) {
-      throw new InvalidInputError(`Email with ID '${emailId}' not found`);
+      throw new InvalidInputError(`Email with ID "${describeUntrusted(emailId)}" not found`);
     }
 
     if (!email.keywords?.$draft) {
@@ -5325,7 +5327,7 @@ export class JmapClient {
     const canonicalAncestor = await realpath(ancestor);
     if (canonicalAncestor !== canonicalAllowed && !canonicalAncestor.startsWith(canonicalAllowed + sep)) {
       throw new PathAccessError(
-        `path resolves to '${canonicalAncestor}' which is outside the allowed directory '${canonicalAllowed}'. ` +
+        `path resolves to "${echoCallerText(redactBearerTokens(canonicalAncestor), PATH_ECHO_LIMIT)}" which is outside the allowed directory "${echoCallerText(redactBearerTokens(canonicalAllowed), PATH_ECHO_LIMIT)}". ` +
         `Refusing to follow symlink escape.`,
       );
     }
@@ -5417,7 +5419,7 @@ export class JmapClient {
       const canonicalTarget = await realpath(lexical);
       if (!isPathContained(canonicalTarget, canonicalAllowed, caseInsensitive)) {
         throw new PathAccessError(
-          `path resolves to '${canonicalTarget}' which is outside the allowed directory '${canonicalAllowed}'. Refusing to follow symlink escape.`
+          `path resolves to "${echoCallerText(redactBearerTokens(canonicalTarget), PATH_ECHO_LIMIT)}" which is outside the allowed directory "${echoCallerText(redactBearerTokens(canonicalAllowed), PATH_ECHO_LIMIT)}". Refusing to follow symlink escape.`
         );
       }
       return { handle, size: st.size };
@@ -6052,7 +6054,7 @@ export class JmapClient {
 
     // Check if thread was found
     if (threadResult.notFound && threadResult.notFound.includes(actualThreadId)) {
-      throw new InvalidInputError(`Thread with ID '${actualThreadId}' not found`);
+      throw new InvalidInputError(`Thread with ID "${describeUntrusted(actualThreadId)}" not found`);
     }
 
     // Resolve mailbox names onto the FULL list before filtering, so the draft

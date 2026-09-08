@@ -3751,15 +3751,21 @@ export function describeUpdateCalendarEventResult(result: UpdateCalendarEventRes
 function rejectTimezoneConflict(value: string, label: 'start' | 'end', callerZone: string): void {
   const propName = label === 'start' ? 'DTSTART' : 'DTEND';
   const serialized = validateAndFormatICalDate(value, propName);
+  // Both refusals echo `value`, even though `validateAndFormatICalDate` has already accepted it.
+  // That check tests `value.trim()` while these quote `value` itself, and JS `.trim()` strips
+  // U+2028/U+2029 as well as spaces — so an unbounded run of line separators in front of a
+  // well-formed date passes validation and then forges lines in the message. Same treatment as
+  // every other date this file quotes back: the shared echo, inside the double quotes its
+  // neutralisation protects (docs/conventions.md, untrusted values in prose).
   if (/^\d{8}$/.test(serialized)) {
     throw new InvalidInputError(
-      `timeZone cannot be combined with a date-only ${label} ('${value}') — an all-day value has ` +
+      `timeZone cannot be combined with a date-only ${label} ("${echoCallerText(value)}") — an all-day value has ` +
       `no time zone. Drop timeZone, or pass ${label} with a time component for it to qualify.`
     );
   }
   if (serialized.endsWith('Z')) {
     throw new InvalidInputError(
-      `timeZone cannot be combined with a ${label} that already carries Z or a UTC offset ('${value}') ` +
+      `timeZone cannot be combined with a ${label} that already carries Z or a UTC offset ("${echoCallerText(value)}") ` +
       `— that value already names a fixed instant of its own. Drop timeZone, or pass ${label} as a ` +
       `bare wall-clock value (no Z, no offset) for timeZone to qualify.`
     );

@@ -1,5 +1,6 @@
 // Validates URLs that will receive the bearer token. Restricts to approved
 // Fastmail origins by default, with an explicit opt-out for self-hosted JMAP.
+import { describeUntrusted } from './coerce.js';
 
 // Fastmail's session discovery hands back region-pinned endpoints, so the
 // allowlist matches host *shapes*, not a fixed list of names. Observed live:
@@ -51,8 +52,12 @@ export function validateFastmailUrl(input: string, fieldName: string, allowUnsaf
     );
   }
   if (!allowUnsafe && !isAllowedFastmailHost(parsed.hostname)) {
+    // The hostname is not this server's own text: it is parsed either from FASTMAIL_BASE_URL or
+    // from the endpoints the JMAP session response hands back, and the URL parser does not treat
+    // an apostrophe as a forbidden host code point. So it is echoed like every other value of
+    // that kind, inside the double quotes the neutralisation protects (docs/conventions.md).
     throw new Error(
-      `${fieldName} host '${parsed.hostname}' is not in the Fastmail allowlist ` +
+      `${fieldName} host "${describeUntrusted(parsed.hostname)}" is not in the Fastmail allowlist ` +
       `(api.fastmail.com and www.fastmailusercontent.com, each with an optional ` +
       `regional prefix such as phl.api.fastmail.com). ` +
       `Set FASTMAIL_ALLOW_UNSAFE_BASE_URL=true to opt in for self-hosted JMAP servers.`,

@@ -204,3 +204,33 @@ describe('validateFastmailUrl (allowUnsafe=true)', () => {
     );
   });
 });
+
+// The rejected hostname is not this server's own text: it comes from FASTMAIL_BASE_URL, or from
+// the endpoints the JMAP session response hands back — which is the case this check exists for,
+// so the value it quotes is exactly the one an attacker would have chosen.
+describe('the rejected hostname is echoed, not pasted', () => {
+  function messageOf(url: string): string {
+    try {
+      validateFastmailUrl(url, 'session.downloadUrl');
+    } catch (err) {
+      return (err as Error).message;
+    }
+    return assert.fail('expected the host to be rejected');
+  }
+
+  // The URL parser forbids a double quote in a host but NOT an apostrophe, so `'…'` was the
+  // span this value could close and `"…"` is the one it cannot.
+  it('renders a host carrying an apostrophe inside a double-quoted span', () => {
+    const message = messageOf("https://evil'.example.com/jmap/download/");
+    assert.match(message, /session\.downloadUrl host "evil'\.example\.com" is not in the Fastmail allowlist/);
+  });
+
+  // A host cannot carry a control character either, so LENGTH is what proves the echo ran:
+  // without it an arbitrarily long name becomes most of the message.
+  it('bounds a host too long to quote whole', () => {
+    const host = `${'a'.repeat(70)}.example.com`;
+    const message = messageOf(`https://${host}/jmap/download/`);
+    assert.ok(!message.includes(host), `the whole host became the message: ${message}`);
+    assert.match(message, /host "a+…" is not in the Fastmail allowlist/);
+  });
+});
