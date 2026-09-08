@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -601,7 +601,7 @@ describe('describeUntrusted', () => {
   it('neutralises carriage return, U+2028 and U+2029 as well', () => {
     assert.ok(!describeUntrusted('a\r\nb').includes('\r'));
     assert.equal(describeUntrusted('a\r\nb'), 'ab');
-    assert.equal(describeUntrusted('a b c'), 'abc');
+    assert.equal(describeUntrusted('a\u2028b\u2029c'), 'abc');
   });
 
   it('neutralises the closing quote so a value cannot escape the span it is rendered in', () => {
@@ -649,6 +649,39 @@ describe('describeUntrusted', () => {
     assert.equal(describeUntrusted(undefined), '');
     assert.equal(describeUntrusted(null), '');
     assert.equal(describeUntrusted(42), '42');
+  });
+});
+
+describe('echoPath', () => {
+  // The two properties a path refusal loses when it interpolates the path directly, which is
+  // what every one of them used to do: a separator in a filename forges a second line that
+  // reads as the server's own prose, and an unbounded path lets a caller push that prose past
+  // anything the message says first. Quoting the span answers neither.
+  it('neutralises a quote and a line separator, so a path cannot forge server prose', () => {
+    assert.equal(echoPath('/tmp/a"b\u2028c'), "/tmp/a'b c");
+    assert.equal(echoPath('/tmp/a\u2029b'), '/tmp/a b');
+    assert.equal(echoPath('/tmp/a\r\nb'), '/tmp/a  b');
+  });
+
+  it('caps at 200 with a visible ellipsis, wide enough that two sibling paths stay distinct', () => {
+    assert.equal(echoPath('/' + 'z'.repeat(300)), '/' + 'z'.repeat(199) + '…');
+  });
+
+  // The bound is wide, so a credential pasted into a path has 200 code points to hide in
+  // rather than 64. Redaction runs first for the same reason it does in `describeUntrusted`:
+  // truncating first leaves the surviving prefix in clear.
+  it('redacts a token that straddles the truncation point (redact BEFORE bound)', () => {
+    // Synthetic token shape only — never a real value.
+    const value = '/tmp/' + 'x'.repeat(175) + 'fmu7-aaaaaaaaaabbbbbbbbbbcccccccccc'; // allowlist-secret (synthetic)
+    const out = echoPath(value);
+    assert.ok(out.includes('fmu[REDACTED]'), 'the token must be redacted, not truncated through');
+    assert.ok(!out.includes('fmu7-'), 'no prefix of the token may survive');
+  });
+
+  it('renders a non-string without throwing', () => {
+    assert.equal(echoPath(undefined), '');
+    assert.equal(echoPath(null), '');
+    assert.equal(echoPath(42), '42');
   });
 });
 

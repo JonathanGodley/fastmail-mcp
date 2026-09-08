@@ -425,7 +425,9 @@ describe('a path refusal scrubs and bounds the path it names', () => {
 
   // Whether a directory raises EISDIR on open or opens and then fails the isFile() check is a
   // platform difference; both branches render the same sentence, so one pin covers whichever
-  // one fires here.
+  // one fires here. On Windows `open()` on a directory succeeds, so it is the isFile() branch
+  // this exercises and the EISDIR twin that a mutation run reports as unreached — the same
+  // sentence built the same way, not a second behaviour left unmeasured.
   it('names the path when it is a directory rather than a file', async () => {
     const root = await fixtureRoot();
     try {
