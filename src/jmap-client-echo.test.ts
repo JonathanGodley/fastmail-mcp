@@ -120,10 +120,13 @@ describe('a caller-supplied value cannot close the span a refusal renders it in'
     assert.match(plan.error!.message, /matches 2 attachments by name; pass the blobId instead \(one of: b1, b2\)\./);
   });
 
+  // Two stored parts, so the listing has to separate them: one would pass whatever the join
+  // between them was.
   it('refuses a removeAttachments ref that names nothing', () => {
-    const plan = resolveAttachmentRemovals([{ blobId: 'b1', name: 'a.png' }], [HOSTILE], false);
+    const stored = [{ blobId: 'b1', name: 'a.png' }, { blobId: 'b2', name: 'b.png' }];
+    const plan = resolveAttachmentRemovals(stored, [HOSTILE], false);
     assertSpanHolds(plan.error!.message, /removeAttachments ref "/);
-    assert.match(plan.error!.message, /Carried blobIds: b1\.$/);
+    assert.match(plan.error!.message, /Carried blobIds: b1, b2\.$/);
   });
 
   // The draft carries nothing at all, so the listing has to say so rather than trail off after
