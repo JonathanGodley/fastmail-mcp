@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'fs/promises';
+import { mkdtemp, mkdir, rm, symlink, truncate, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { JmapClient, assertLeafMailboxName, resolveAttachmentRemovals } from './jmap-client.js';
@@ -79,7 +79,7 @@ function stubNothingFound(client: JmapClient, notFound?: string[]) {
   }));
 }
 
-async function messageOf(run: () => Promise<unknown>): Promise<string> {
+async function messageOf(run: () => unknown): Promise<string> {
   try {
     await run();
   } catch (err) {
@@ -305,6 +305,160 @@ describe('a path-confinement refusal bounds and quotes the paths it names', () =
       assert.ok(!message.includes(fixture.deep), 'the whole path became the message');
     } finally {
       await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------- the OTHER half of what an echo does ----------
+
+// The quoting rule is about one failure: whether a value can close the span around it. It says
+// nothing about the two things the helpers also do — scrub control characters and U+2028/U+2029,
+// and bound the length — and a value reaching a message through NO helper loses both of those
+// however it is quoted. So "rendered bare, into a sentence that single-quotes nothing" was never
+// a reason for a path refusal to be safe; it was a different failure being read as none.
+//
+// Nothing here rejects a line separator in a path: `rejectWindowsPathEscapes` covers device
+// namespaces, UNC roots, drive-relative forms and the ADS colon, and `resolve`/`normalize`
+// preserve U+2028 untouched. A filename carrying one is creatable on both platforms, `open()`
+// on it returns ENOENT rather than EINVAL, and the refusal naming it back reaches the consumer
+// as two lines whose second reads as the server's own prose. That is the payload below.
+//
+// One site in this group has NO pin, and the omission is deliberate rather than an oversight:
+// "Could not find an existing ancestor for path" fires only if `stat` reports ENOENT on a
+// filesystem root, which the `mkdir(allowedDir, { recursive: true })` a few lines above it in
+// `safeWritePath` already makes impossible. There is no lever, so no pin is claimed for it.
+
+const SEP = '\u2028';
+const FORGED_IN = 'Separately, the file was accepted';
+const FORGED_DIR = 'Separately, the directory check passed';
+/** Legal filenames on both platforms: no trailing dot, none of the Windows-reserved characters. */
+const PATH_IN = `note${SEP}${FORGED_IN}`;
+const PATH_DIR = `dir${SEP}${FORGED_DIR}`;
+
+/**
+ * No separator survived anywhere in the message, whichever of its values carried one. Asserting
+ * over the whole message rather than one interpolation is what lets a single call cover a
+ * sentence that renders both a caller's path and the configured directory.
+ */
+function assertNoForgedLine(message: string): void {
+  assert.ok(
+    !/[\u2028\u2029\r\n]/.test(message),
+    `a line separator survived into the refusal: ${JSON.stringify(message)}`,
+  );
+}
+
+describe('a path refusal scrubs and bounds the path it names', () => {
+  function fixtureRoot(): Promise<string> {
+    return mkdtemp(join(tmpdir(), 'fm-path-'));
+  }
+
+  it('names the input and the allowed directory when a path escapes lexically', async () => {
+    const root = await fixtureRoot();
+    try {
+      const allowed = join(root, PATH_DIR);
+      await mkdir(allowed, { recursive: true });
+      const message = await messageOf(
+        () => JmapClient.validateSavePath(join(root, 'elsewhere', PATH_IN), allowed),
+      );
+      assertNoForgedLine(message);
+      assert.match(message, /path must be within "/);
+      assert.match(message, /Received: "/);
+      assert.ok(message.includes(FORGED_DIR), message);
+      assert.ok(message.includes(FORGED_IN), message);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('names the target when it refuses to overwrite a link', async (t) => {
+    const root = await fixtureRoot();
+    try {
+      const allowed = join(root, 'allowed');
+      const target = join(root, 'target');
+      await mkdir(allowed, { recursive: true });
+      await mkdir(target, { recursive: true });
+      try {
+        await symlink(target, join(allowed, PATH_IN), 'junction');
+      } catch (err) {
+        if ((err as any)?.code === 'EPERM' || (err as any)?.code === 'EACCES') {
+          t.skip('link creation not permitted on this platform');
+          return;
+        }
+        throw err;
+      }
+      const message = await messageOf(() => JmapClient.safeWritePath(join(allowed, PATH_IN), allowed));
+      assertNoForgedLine(message);
+      assert.match(message, /Refusing to overwrite an existing symlink at the target: "/);
+      assert.ok(message.includes(FORGED_IN), message);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('names the configured attach directory when it does not exist', async () => {
+    const root = await fixtureRoot();
+    try {
+      const message = await messageOf(() => JmapClient.safeReadPath('f.txt', join(root, PATH_DIR)));
+      assertNoForgedLine(message);
+      assert.match(message, /FASTMAIL_ATTACH_DIR \("/);
+      assert.ok(message.includes(FORGED_DIR), message);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('names both the missing file and the directory it looked under', async () => {
+    const root = await fixtureRoot();
+    try {
+      const dir = join(root, PATH_DIR);
+      await mkdir(dir, { recursive: true });
+      const message = await messageOf(() => JmapClient.safeReadPath(PATH_IN, dir));
+      assertNoForgedLine(message);
+      assert.match(message, /File not found: "/);
+      assert.match(message, /resolved under "/);
+      assert.ok(message.includes(FORGED_IN), message);
+      assert.ok(message.includes(FORGED_DIR), message);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Whether a directory raises EISDIR on open or opens and then fails the isFile() check is a
+  // platform difference; both branches render the same sentence, so one pin covers whichever
+  // one fires here.
+  it('names the path when it is a directory rather than a file', async () => {
+    const root = await fixtureRoot();
+    try {
+      const dir = join(root, 'attach');
+      await mkdir(join(dir, PATH_IN), { recursive: true });
+      const message = await messageOf(() => JmapClient.safeReadPath(PATH_IN, dir));
+      assertNoForgedLine(message);
+      assert.match(message, /Not a regular file: "/);
+      assert.ok(message.includes(FORGED_IN), message);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('names the file when it is over the per-attachment size guard', async () => {
+    const root = await fixtureRoot();
+    try {
+      const dir = join(root, 'attach');
+      await mkdir(dir, { recursive: true });
+      const file = join(dir, PATH_IN);
+      await writeFile(file, '');
+      // Extended rather than written: the guard reads the size off the handle, and 25 MiB of
+      // real bytes would make this pin slow for nothing.
+      await truncate(file, JmapClient.MAX_ATTACHMENT_BYTES + 1);
+      const message = await messageOf(
+        () => makeClient().uploadAttachments([{ path: PATH_IN }], dir, false),
+      );
+      assertNoForgedLine(message);
+      assert.match(message, /attachments\[0\] \("/);
+      assert.match(message, /per-file guard/);
+      assert.ok(message.includes(FORGED_IN), message);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

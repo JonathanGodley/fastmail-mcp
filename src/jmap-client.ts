@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, redactBearerTokens, describeUntrusted, echoCallerText, PATH_ECHO_LIMIT, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { signatureBlock } from './reply-quote.js';
@@ -84,7 +84,14 @@ function lexicalContainedPath(inputPath: string, allowedDir: string, caseInsensi
     throw new PathAccessError('path contains null bytes');
   }
   if (!isPathContained(resolved, allowedDir, caseInsensitive)) {
-    throw new PathAccessError(`path must be within ${allowedDir}. Received: ${inputPath}`);
+    // A path is echoed for the same two reasons any other untrusted value is, and NOT quoting
+    // it never covered either of them. Nothing in this file rejects a line separator in a path
+    // — `rejectWindowsPathEscapes` covers device namespaces, UNC roots, drive-relative forms
+    // and the ADS colon, none of which is this — and nothing bounds one, so an unhelped render
+    // hands a caller's own filename the ability to split this refusal into two sentences and
+    // to become the whole of it. `echoPath` scrubs and bounds; the `"…"` is what makes the
+    // quote-swap inside it mean anything (docs/conventions.md, untrusted values in prose).
+    throw new PathAccessError(`path must be within "${echoPath(allowedDir)}". Received: "${echoPath(inputPath)}"`);
   }
   return resolved;
 }
@@ -5317,7 +5324,7 @@ export class JmapClient {
         missingSegments.unshift(basename(ancestor));
         const parent = dirname(ancestor);
         if (parent === ancestor) {
-          throw new PathAccessError(`Could not find an existing ancestor for path: ${lexical}`);
+          throw new PathAccessError(`Could not find an existing ancestor for path: "${echoPath(lexical)}"`);
         }
         ancestor = parent;
       }
@@ -5327,7 +5334,7 @@ export class JmapClient {
     const canonicalAncestor = await realpath(ancestor);
     if (canonicalAncestor !== canonicalAllowed && !canonicalAncestor.startsWith(canonicalAllowed + sep)) {
       throw new PathAccessError(
-        `path resolves to "${echoCallerText(redactBearerTokens(canonicalAncestor), PATH_ECHO_LIMIT)}" which is outside the allowed directory "${echoCallerText(redactBearerTokens(canonicalAllowed), PATH_ECHO_LIMIT)}". ` +
+        `path resolves to "${echoPath(canonicalAncestor)}" which is outside the allowed directory "${echoPath(canonicalAllowed)}". ` +
         `Refusing to follow symlink escape.`,
       );
     }
@@ -5340,7 +5347,7 @@ export class JmapClient {
     try {
       const lst = await lstat(safePath);
       if (lst.isSymbolicLink()) {
-        throw new PathAccessError(`Refusing to overwrite an existing symlink at the target: ${safePath}`);
+        throw new PathAccessError(`Refusing to overwrite an existing symlink at the target: "${echoPath(safePath)}"`);
       }
     } catch (e: any) {
       if (e.code !== 'ENOENT') throw e;
@@ -5391,7 +5398,11 @@ export class JmapClient {
       canonicalAllowed = await realpath(allowedDir);
     } catch (e: any) {
       if (e.code === 'ENOENT') {
-        throw new PathAccessError(`FASTMAIL_ATTACH_DIR (${allowedDir}) does not exist. Create it or fix the path, then restart.`);
+        // The operator set this one, not a caller, so it is the lowest-risk value in this
+        // group — but it is still neither scrubbed nor bounded at its source, and a refusal
+        // that renders it beside a caller's path should not use two different rules for the
+        // two halves of the same sentence.
+        throw new PathAccessError(`FASTMAIL_ATTACH_DIR ("${echoPath(allowedDir)}") does not exist. Create it or fix the path, then restart.`);
       }
       throw e;
     }
@@ -5401,10 +5412,10 @@ export class JmapClient {
       handle = await open(lexical, 'r');
     } catch (e: any) {
       if (e.code === 'ENOENT') {
-        throw new PathAccessError(`File not found: ${inputPath} (resolved under ${allowedDir}).`);
+        throw new PathAccessError(`File not found: "${echoPath(inputPath)}" (resolved under "${echoPath(allowedDir)}").`);
       }
       if (e.code === 'EISDIR') {
-        throw new PathAccessError(`Not a regular file: ${inputPath}.`);
+        throw new PathAccessError(`Not a regular file: "${echoPath(inputPath)}".`);
       }
       throw e;
     }
@@ -5412,14 +5423,14 @@ export class JmapClient {
     try {
       const st = await handle.stat();
       if (!st.isFile()) {
-        throw new PathAccessError(`Not a regular file: ${inputPath}.`);
+        throw new PathAccessError(`Not a regular file: "${echoPath(inputPath)}".`);
       }
       // Re-verify against the canonical full target — this catches a symlinked leaf or
       // an intermediate-dir symlink that escapes the root.
       const canonicalTarget = await realpath(lexical);
       if (!isPathContained(canonicalTarget, canonicalAllowed, caseInsensitive)) {
         throw new PathAccessError(
-          `path resolves to "${echoCallerText(redactBearerTokens(canonicalTarget), PATH_ECHO_LIMIT)}" which is outside the allowed directory "${echoCallerText(redactBearerTokens(canonicalAllowed), PATH_ECHO_LIMIT)}". Refusing to follow symlink escape.`
+          `path resolves to "${echoPath(canonicalTarget)}" which is outside the allowed directory "${echoPath(canonicalAllowed)}". Refusing to follow symlink escape.`
         );
       }
       return { handle, size: st.size };
@@ -5639,7 +5650,9 @@ export class JmapClient {
         prepared.push({ kind: 'file', handle, size, contentType, name: spec.name ?? basename(path), cid: spec.cid });
         if (size > JmapClient.MAX_ATTACHMENT_BYTES) {
           throw new PathAccessError(
-            `attachments[${i}] (${basename(path)}) is ${size} bytes, over the ${JmapClient.MAX_ATTACHMENT_BYTES}-byte per-file guard. Fastmail's own limit ultimately governs.`
+            // `basename` drops the directories, not a line separator and not the length: a
+            // filename is caller text all the way to here, so it is echoed like the rest.
+            `attachments[${i}] ("${echoPath(basename(path))}") is ${size} bytes, over the ${JmapClient.MAX_ATTACHMENT_BYTES}-byte per-file guard. Fastmail's own limit ultimately governs.`
           );
         }
         totalBytes += size;

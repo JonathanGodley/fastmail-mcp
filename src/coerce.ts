@@ -590,6 +590,26 @@ export const ZONE_ECHO_LIMIT = 40;
 // be fixable, the same reason `CALENDAR_URL_ECHO_LIMIT` is wide.
 export const PATH_ECHO_LIMIT = 200;
 
+/**
+ * The path spelling of `echoCallerText`: redact, then neutralise and bound at
+ * `PATH_ECHO_LIMIT`. Not a fourth policy — the same two steps in the same order
+ * `describeUntrusted` runs, at a bound a path can survive.
+ *
+ * It exists as a name rather than as the expression repeated at each refusal for the reason
+ * `echoCallerText` itself does: the path refusals used to render their values through nothing
+ * at all, so what a path echo IS had never been written down anywhere, and a dozen inline
+ * copies of it is a set that can disagree with itself. Callers quote it with `"…"`, like every
+ * other echo (docs/conventions.md, untrusted values in prose).
+ *
+ * The redaction is kept in front rather than argued away as unreachable for a path: it costs
+ * nothing, and the ordering is the half of this rule that still reads correctly when it is
+ * wrong.
+ */
+export function echoPath(value: unknown): string {
+  const source = typeof value === 'string' ? value : value == null ? '' : String(value);
+  return echoCallerText(redactBearerTokens(source), PATH_ECHO_LIMIT);
+}
+
 const zoneCanonicalizationCache = new Map<string, string>();
 
 /**

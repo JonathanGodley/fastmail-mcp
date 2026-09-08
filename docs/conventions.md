@@ -1228,12 +1228,20 @@ agent acts on.
 **The second echo helper: `echoCallerText`.** The date, timezone and calendar rejections echo
 through `echoCallerText` rather than `describeUntrusted`, because they need a *per-message*
 bound (a calendar URL offered back as a working `calendarId` cannot be cut at 64 code points)
-and the value they quote must be the trimmed one the coercion actually judged. The two
-path-confinement refusals in `jmap-client.ts` take it for the bound alone, at
-`PATH_ECHO_LIMIT`, and compose `redactBearerTokens` in front of it by hand to keep the
-redact-then-neutralise order: each names the resolved path AND the allowed directory in one
-sentence, and two paths sharing a long ancestor cut to the same prefix at 64 code points would
-leave a refusal saying a path is outside a directory it cannot be told apart from. It carries the
+and the value they quote must be the trimmed one the coercion actually judged.
+
+**The path spelling: `echoPath`.** A filesystem path needs both halves — the redaction
+`describeUntrusted` runs, and a bound wider than its 64 code points — so `echoPath` is
+`redactBearerTokens` then `echoCallerText` at `PATH_ECHO_LIMIT`. Not a third policy, the same
+two steps in the same order at a bound a path survives: a path refusal names the resolved path
+AND the allowed directory in one sentence, and two paths sharing a long ancestor cut to the
+same prefix at 64 would leave a refusal saying a path is outside a directory it cannot be told
+apart from. It is a name rather than the expression repeated at each refusal because these
+refusals rendered their values through nothing at all until #190, so what a path echo IS had
+never been written down anywhere, and a dozen inline copies is a set that can disagree with
+itself. **A new helper goes into the drift guard's `ECHO_HELPERS` the day it is written** —
+that list is the guard's subject, not an exemption list, so leaving a name off it silently
+narrows the scan rather than excusing a site. It carries the
 same neutralisation for the same reason: it strips control characters and U+2028/U+2029, and it
 turns a double quote into a single one, so that a value cannot close the `"…"` span at the
 callers that render one. **A caller that quotes therefore quotes with `"…"` and never `'…'`**,
@@ -1277,8 +1285,8 @@ back anything outside the two forms it parses, so a value an invitation wrote ar
 `echo-quoting convention` in `src/coerce.test.ts` reads every non-test `.ts` file under `src/`
 as text — **recursively**, so the "anywhere in the sources" the helpers' comments claim is what
 it actually scans — drops comments so a doc can quote the wrong spelling in order to warn
-against it, and fails on a single-quoted `${echoCallerText(…)}`, `${describeUntrusted(…)}` or
-`${describePart(…)}` in any of them. Two assertions sit beside it: a floor, so a pattern that
+against it, and fails on a single-quoted render of any helper it knows — `echoCallerText`,
+`describeUntrusted`, `describePart`, `echoPath` — in any of them. Two assertions sit beside it: a floor, so a pattern that
 silently stops matching cannot make it pass vacuously, and a reach pin, because a scan that
 quietly stopped at the top level would still clear that floor. What it does NOT cover is the
 whole-sentence half above — a
@@ -1287,10 +1295,24 @@ single-quotes something else, both read as clean to it. That half is a reading, 
 the criterion is written into both helpers' doc comments rather than left to the guard.
 
 **Nor can it see a value that reached the message through no helper at all**, which is the
-wider hole and the one the quoting rule was hiding: an unhelped `'${value}'` leaks everything
-the helpers exist to stop — the closing quote, a line terminator, an unbounded length — and
-looks nothing like the pattern the guard scans for. Every such interpolation under `src/` was
-traced back to where its value comes from once
+wider hole and the one the quoting rule was hiding.
+
+**State this one by what the helper DOES, not by how the value is quoted**, because framing it
+as a quoting problem is what let the second half of it survive a sweep. Quoting answers exactly
+one of the three: whether a value can close the span around it. The other two — scrubbing
+control characters and U+2028/U+2029, and bounding the length — are things only the helper
+does, and **a value that reaches a message through no helper loses both of them however it is
+quoted, and whether or not it is quoted at all**. So an unquoted unhelped render is not the
+inert case the whole-sentence criterion above describes; that criterion is about span parity
+and says nothing here. It is the same defect presenting differently: one line of prose becomes
+two, and the second reads as the server's own next sentence. No length is needed and no quote
+is needed. `jmap-client.ts`'s path refusals were the worked example — nothing in this codebase
+rejects a line separator in a path (`rejectWindowsPathEscapes` covers device namespaces, UNC
+roots, drive-relative forms and the ADS colon; `resolve`/`normalize` preserve U+2028), a
+filename carrying one is creatable on both platforms, and `open()` on it returns ENOENT, so
+`File not found: <path>` arrived at the consumer as two lines.
+
+Every unhelped interpolation under `src/` was traced back to where its value comes from once
 ([#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190)); the ones fed by a caller
 argument, by stored data an invitation or a message wrote, or by an id, path or hostname minted
 outside this server now render through an echo inside `"…"`, and the ones left render this
