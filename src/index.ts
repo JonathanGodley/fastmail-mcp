@@ -594,6 +594,26 @@ const CREATE_PARENT_PARAM_DESC =
 const LENIENT_LIST_DESC =
   ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
 
+// The recipient lists (to/cc/bcc/replyTo on draft_email and edit_draft) accept every SHAPE
+// LENIENT_LIST_DESC names, and then FAIL CLOSED on a value that cannot be read as one:
+// coerceRecipients puts all four through coerceStringArrayStrict, so a present-but-unusable
+// value is a refusal naming the parameter rather than a silent undefined. It has to be said
+// on the surface because the two things a dropped recipient field turns into are both
+// plausible outcomes the caller would not question — a reply that quietly reverts to
+// reply-all, an edit that reports success while changing nothing. Its by-index element clause
+// is the one SCOPE_ARRAY_REJECT_DESC carries for the mailbox scope arrays, in a recipient
+// list's vocabulary; the whole-value clause has no counterpart there.
+//
+// WHAT AN EMPTY WHOLE VALUE MEANS IS NOT SAID HERE, and must not be: this string is appended
+// to all eight parameters, and the answer differs between them. On draft_email an empty value
+// reads as absence, so on mode:'reply' an empty to/cc/bcc leaves the reply-all defaults
+// RUNNING; on every edit_draft recipient field an empty value is refused outright
+// (updateDraft, "cannot be empty; ... clearFields"). All this says is that an empty value is
+// not a TYPE refusal — the coercion reads it — and each parameter's own description states
+// what it then means.
+const RECIPIENT_LIST_STRICT_DESC =
+  ' A value that is present but cannot be read as a list of addresses (a number, an object, a boolean) rejects the whole call naming this parameter; it is never ignored, because a field dropped here would read as one you never passed. Every entry must be a non-empty string, and a non-string or blank entry is rejected by index. An empty or whitespace-only value for the WHOLE parameter — [], "" or " " — is read as the empty list rather than refused as a bad type, which a blank ENTRY is. What an empty list then MEANS is each tool\'s own rule rather than a shared one.';
+
 // The denial is spelled out rather than left to be inferred from what this sentence omits: a
 // caller who has just read the comma-separated form on a sibling parameter is exactly the one
 // who will try it here, and the rejection names the parameter without naming the shape to use.
@@ -952,17 +972,17 @@ const TOOLS = [
             to: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Recipient email addresses. REQUIRED on mode:\'forward\' — a forward has no default recipient; optional on mode:\'reply\' (defaults to the original\'s Reply-To when it has one, else its From) and on mode:\'new\'. NAMING IT ON A REPLY TURNS REPLY-ALL OFF: the draft then goes only where you said, with no cc carried from the original — pass it when you mean to answer one person, and omit it to answer everyone. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'Recipient email addresses. REQUIRED on mode:\'forward\' — a forward has no default recipient; optional on mode:\'reply\' (defaults to the original\'s Reply-To when it has one, else its From) and on mode:\'new\'. NAMING IT ON A REPLY TURNS REPLY-ALL OFF: the draft then goes only where you said, with no cc carried from the original — pass it when you mean to answer one person, and omit it to answer everyone. Naming it means naming somebody: an empty value — [] or "" — is treated as omitted, so the reply-to/from default picks the recipient and the cc carry still runs. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             cc: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'CC email addresses (optional). On mode:\'reply\' it defaults to REPLY-ALL — the original\'s To and CC, minus your own verified identities and minus whoever the reply is already addressed to, deduplicated by address — and is omitted when nothing is left. That default applies only when you pass neither to nor cc; naming either one makes the recipients wholly yours. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'CC email addresses (optional). On mode:\'reply\' it defaults to REPLY-ALL — the original\'s To and CC, minus your own verified identities and minus whoever the reply is already addressed to, deduplicated by address — and is omitted when nothing is left. That default applies only when you pass neither to nor cc; naming either one makes the recipients wholly yours. What suppresses it is a name, not a keystroke: an empty value — [] or "" — is treated as omitted here too, on this parameter and on to alike, and leaves the carry running. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             bcc: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'BCC email addresses (optional). On mode:\'reply\' it defaults to the original\'s own Bcc list, carried whole and in order, deduplicated by address — nothing is dropped for being one of your identities or for already being in the reply\'s to or cc, because that is what pressing Reply in Fastmail stores. The carry runs whenever the original carries a Bcc header and on nothing else — there is no provenance check. Mail you received normally carries none, so a reply to it usually carries nothing; an imported or migrated message that does carry one has its list carried like any other, so read the BCC the result reports. That default applies only when you pass neither to nor cc; naming this parameter replaces the carried list and leaves the to and cc defaults running, and an empty value — [] or "" — is treated as omitted. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'BCC email addresses (optional). On mode:\'reply\' it defaults to the original\'s own Bcc list, carried whole and in order, deduplicated by address — nothing is dropped for being one of your identities or for already being in the reply\'s to or cc, because that is what pressing Reply in Fastmail stores. The carry runs whenever the original carries a Bcc header and on nothing else — there is no provenance check. Mail you received normally carries none, so a reply to it usually carries nothing; an imported or migrated message that does carry one has its list carried like any other, so read the BCC the result reports. That default applies only when you pass neither to nor cc; naming this parameter replaces the carried list and leaves the to and cc defaults running, and an empty value — [] or "" — is treated as omitted. Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             from: {
               type: 'string',
@@ -971,7 +991,7 @@ const TOOLS = [
             replyTo: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             mailbox: {
               type: 'string',
@@ -1025,17 +1045,17 @@ const TOOLS = [
             to: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated recipient email addresses (optional, keeps existing if omitted). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'Updated recipient email addresses (optional, keeps existing if omitted). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             cc: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated CC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'Updated CC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             bcc: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Updated BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'Updated BCC email addresses (optional). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             from: {
               type: 'string',
@@ -1060,7 +1080,7 @@ const TOOLS = [
             replyTo: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC,
+              description: 'Reply-To email addresses (replies go here instead of to the sender). Each entry may be "Name <email>" or a bare address.' + LENIENT_LIST_DESC + RECIPIENT_LIST_STRICT_DESC,
             },
             expandSignature: {
               type: ['boolean', 'string'],

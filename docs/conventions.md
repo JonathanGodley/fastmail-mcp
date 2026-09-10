@@ -76,15 +76,34 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   not-found error. A narrowing argument's failure mode is always this shape: the caller reads
   a wider answer as though it were the narrow one it asked for.
 
+  The four recipient fields — `to` / `cc` / `bcc` / `replyTo` on **both** `draft_email` and
+  `edit_draft`, fanned out by `coerceRecipients` — are the widest user of it, and the
+  clearest case of that broader rule, because the legitimate outcome a dropped value is
+  mistaken for is a *different* one on each tool. On `draft_email` `mode:'reply'`, `to` is a
+  narrowing argument in the ordinary sense: coerced away it reads as omitted, so the
+  reply-all default fills `to` and `cc` from the original and carries the original's `Bcc`
+  list with them — a caller answering one person would have written to everyone the original
+  touched. On `edit_draft` nothing is narrowed at all; a dropped field reads as *"leave this
+  one unchanged"*, so the draft keeps the recipients the caller was replacing and the edit
+  reports success. Both are silent, and both look exactly like a call that did what it was
+  told.
+
   Strictness is per element, and covers the **empty string** as well as the wrong type. That
   is not pedantry: `['']` passes a `typeof entry !== 'string'` check, and the plain coercer's
   `.filter(Boolean)` runs only on the comma-split branch, so without an explicit check a
   blank element reaches the lookup as a real value and returns the same misleading
   "not found". Blanks are still dropped on the comma-split branch, where they are a separator
   artefact (`"a,,b"`) rather than something a caller wrote down.
-- `coerceRecipients` — fans `coerceStringArray` over `to` / `cc` / `bcc` / `replyTo` so
+- `coerceRecipients` — fans `coerceStringArrayStrict` over `to` / `cc` / `bcc` / `replyTo` so
   no recipient field can reach `.map(parseAddress)` as a bare string (the original
-  `cc:""` / `bcc:""` crash class).
+  `cc:""` / `bcc:""` crash class). **Strict**, on all four fields and both compose tools, for
+  the reason set out under `coerceStringArrayStrict` above. The whole-value spellings are
+  unchanged: `null`/`undefined` read as absent, `""` and `[]` coerce to the empty list (which
+  `draft_email`'s `bcc` documents as "treated as omitted"), and a comma-separated string
+  still splits. What changed with it is the ELEMENT reading: `[""]` used to survive `trimAll`
+  with length 1, so it read as a real, present list — shipping a blank recipient and
+  suppressing the reply `Bcc` carry — and is now refused by index like any other unusable
+  entry.
 - `coerceParticipants` — the `participants` array on the calendar write tools to
   `{ email, name? }[]` (or `undefined`). Accepts a real array or a JSON-string array; a
   bare string entry is read as the address, matching the recipient lists. Every other

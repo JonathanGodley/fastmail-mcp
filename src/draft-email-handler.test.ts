@@ -1936,22 +1936,39 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
     }
   });
 
-  it("a bcc of [''] is one blank recipient, not an omitted bcc — a documented limit", async () => {
-    // NOT the desired outcome, and pinned so it cannot change unnoticed. coerceStringArray
-    // filters empties only on the comma-split string path, so [''] survives trimAll with
-    // length 1: it reads as a caller bcc, suppresses the carry, and ships a blank entry. The
-    // bcc parameter's description therefore promises "treated as omitted" for [] and "" and
-    // for nothing else. Fixing it means filtering empty entries in coerceRecipients, which
-    // reaches to/cc/bcc/replyTo on draft_email AND edit_draft — a cross-cutting change, not
-    // this one's to make.
+  it("a bcc of [''] is refused, not shipped as one blank recipient", async () => {
+    // [''] used to survive trimAll with length 1: it read as a real caller bcc, suppressed
+    // the carry, and shipped a blank entry. The recipient fields now fail closed per element,
+    // so the caller is told which entry is unusable instead of a reply quietly going out to a
+    // different set of people than either reading intended.
     const { client, calls } = plainClient(selfBccOriginal());
-    const r = await compose(
-      { mode: 'reply', originalEmailId: 'o1', textBody: 'x', bcc: [''] },
-      client,
+    await assert.rejects(
+      compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x', bcc: [''] }, client),
+      (e: any) => e instanceof InvalidInputError && e.message === 'bcc[0] must be a non-empty string.',
     );
-    assert.deepEqual(calls.draft.bcc, ['']);
-    assert.deepEqual(r.bcc, ['']);
-    assert.equal(r.notes?.includes(NOTE_BCC_CARRIED) ?? false, false);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('refuses an uncoercible to on a reply rather than falling back to reply-all', async () => {
+    // The failure this closes: `to: 123` coerced to undefined, the handler read that as "no
+    // to was passed", and the reply-all default filled to/cc from the original AND carried
+    // its Bcc list — so a caller narrowing a reply to one person silently sent it to everyone
+    // the original touched. No draft may be created on that input.
+    const { client, calls } = plainClient(selfBccOriginal());
+    await assert.rejects(
+      compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x', to: 123 }, client),
+      (e: any) => e instanceof InvalidInputError && /^to must be an array of strings/.test(e.message),
+    );
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('refuses an uncoercible cc ELEMENT on a reply, naming its index', async () => {
+    const { client, calls } = plainClient(selfBccOriginal());
+    await assert.rejects(
+      compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x', cc: [{}] }, client),
+      (e: any) => e instanceof InvalidInputError && e.message === 'cc[0] must be a string; received object.',
+    );
+    assert.equal(calls.draft, undefined);
   });
 
   it('does not carry a Bcc on a forward — the carry is a reply rule', async () => {

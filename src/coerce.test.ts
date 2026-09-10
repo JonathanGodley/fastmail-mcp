@@ -204,13 +204,33 @@ describe('coerceRecipients', () => {
     });
   });
 
-  it('returns undefined for non-string, non-array values', () => {
-    assert.deepEqual(coerceRecipients({ to: 123, cc: {}, bcc: true, replyTo: null } as any), {
-      to: undefined,
-      cc: undefined,
-      bcc: undefined,
-      replyTo: undefined,
+  it('returns undefined for omitted and null fields, but refuses every other uncoercible value', () => {
+    // `null` is a statement of absence from a lenient client that fills every declared key;
+    // a number, an object or a boolean is a value that cannot be read, and dropping it would
+    // run the call as though the field had never been passed.
+    assert.deepEqual(coerceRecipients({ replyTo: null } as any), {
+      to: undefined, cc: undefined, bcc: undefined, replyTo: undefined,
     });
+    assert.throws(() => coerceRecipients({ to: 123 } as any), (e: any) =>
+      e instanceof InvalidInputError && /^to must be an array of strings/.test(e.message));
+    assert.throws(() => coerceRecipients({ cc: {} } as any), (e: any) =>
+      e instanceof InvalidInputError && /^cc must be an array of strings/.test(e.message));
+    assert.throws(() => coerceRecipients({ bcc: true } as any), (e: any) =>
+      e instanceof InvalidInputError && /^bcc must be an array of strings/.test(e.message));
+    assert.throws(() => coerceRecipients({ replyTo: 7 } as any), (e: any) =>
+      e instanceof InvalidInputError && /^replyTo must be an array of strings/.test(e.message));
+  });
+
+  it('refuses a bad ELEMENT by index, naming the recipient field it came from', () => {
+    assert.throws(() => coerceRecipients({ cc: [{}] } as any), (e: any) =>
+      e instanceof InvalidInputError && e.message === 'cc[0] must be a string; received object.');
+    assert.throws(() => coerceRecipients({ to: ['a@b.example', null] } as any), (e: any) =>
+      e instanceof InvalidInputError && e.message === 'to[1] must be a string; received null.');
+    // [''] used to survive as one blank recipient (it reads as a real, present list and
+    // suppresses the reply Bcc carry). It is now refused by index like any other unusable
+    // element; '' and [] as the WHOLE value still coerce to the empty list.
+    assert.throws(() => coerceRecipients({ bcc: [''] } as any), (e: any) =>
+      e instanceof InvalidInputError && e.message === 'bcc[0] must be a non-empty string.');
   });
 });
 

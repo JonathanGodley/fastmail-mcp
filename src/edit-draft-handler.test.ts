@@ -53,6 +53,33 @@ describe('editDraft — coercion and delegation', () => {
     assert.equal(calls.upload, undefined);
   });
 
+  it('refuses an uncoercible recipient field rather than reading it as "leave unchanged"', async () => {
+    // On an edit, a dropped recipient value is indistinguishable from an omitted one: the
+    // draft keeps whatever it already had, and the caller who meant to CHANGE the field is
+    // told the edit succeeded. So a present-but-unusable value is refused, naming the field.
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      editDraft({ emailId: 'd1', to: true }, client, undefined, false),
+      (e: any) => e instanceof InvalidInputError && /^to must be an array of strings/.test(e.message),
+    );
+    assert.equal(calls.update, undefined);
+
+    const bad = spyClient();
+    await assert.rejects(
+      editDraft({ emailId: 'd1', bcc: ['a@b.example', 42] }, bad.client, undefined, false),
+      (e: any) => e instanceof InvalidInputError && e.message === 'bcc[1] must be a string; received number.',
+    );
+    assert.equal(bad.calls.update, undefined);
+  });
+
+  it("still reads '' and [] on a recipient field as the empty list, and still splits a comma string", async () => {
+    const { client, calls } = spyClient();
+    await editDraft({ emailId: 'd1', cc: '', bcc: [], to: 'a@b.example, c@d.example' }, client, undefined, false);
+    assert.deepEqual(calls.update.updates.cc, []);
+    assert.deepEqual(calls.update.updates.bcc, []);
+    assert.deepEqual(calls.update.updates.to, ['a@b.example', 'c@d.example']);
+  });
+
   it('never reads a stringified expandSignature as true unless it says true', async () => {
     const { client, calls } = spyClient();
     await editDraft({ emailId: 'd1', subject: 'Hi', expandSignature: 'garbage' }, client, undefined, false);
