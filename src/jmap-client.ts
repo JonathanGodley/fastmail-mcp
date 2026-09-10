@@ -5414,6 +5414,12 @@ export class JmapClient {
       if (e.code === 'ENOENT') {
         throw new PathAccessError(`File not found: "${echoPath(inputPath)}" (resolved under "${echoPath(allowedDir)}").`);
       }
+      // POSIX open() refuses a directory here; Windows open() SUCCEEDS on one, so on Win32
+      // this branch never fires and the isFile() check below is what refuses it. The two are
+      // not one check written twice: isFile() is the guard, and it is the broader one — it
+      // also refuses FIFOs, sockets and devices, which raise no EISDIR on any platform. This
+      // branch only translates the POSIX errno into the same refusal so a raw error does not
+      // escape. Neither can be dropped without losing something.
       if (e.code === 'EISDIR') {
         throw new PathAccessError(`Not a regular file: "${echoPath(inputPath)}".`);
       }
