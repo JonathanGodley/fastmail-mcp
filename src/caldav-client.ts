@@ -141,27 +141,16 @@ export interface CalendarEvent {
   // construction, so there is nothing to disagree about). `null` means end is floating while
   // start is not, or the reverse.
   endTimeZone?: string | null;
-  // ---- free/busy transparency (#194) ----
-  // Whether this event blocks the account's free/busy: `busy` or `free`. THE CALLER'S
-  // VOCABULARY, not the stored one — the iCalendar property behind it is `TRANSP`, whose
-  // values are `OPAQUE` and `TRANSPARENT`; see TRANSPARENCY_VALUES for why the two spellings
-  // are kept apart, and readTransparency for how the value is arrived at. In particular an
-  // ABSENT `TRANSP` is reported as `busy`, derived from RFC 5545 §3.8.2.7 rather than read off
-  // the record, and a stored token matching neither iCal value is reported verbatim rather
-  // than folded into the default.
+  // Whether this event blocks the account's free/busy: `busy` or `free` (#194). The caller's
+  // vocabulary; the stored property is `TRANSP` (`OPAQUE`/`TRANSPARENT`) — see
+  // TRANSPARENCY_VALUES and readTransparency, which derives `busy` for an absent property and
+  // reports a token matching neither iCal value verbatim.
   //
-  // TYPED AS `string`, NOT the closed `Transparency` union the write surface uses, and the
-  // asymmetry is the point: this server writes only the two tokens the RFC defines, but it
-  // READS whatever is in the account, including records written by clients that did not.
+  // `string`, not the closed `Transparency` union the write surface uses: this server writes
+  // only the two tokens the RFC defines but reads whatever is in the account.
   //
-  // PRESENT ON EVERY EVENT FROM `get_calendar_event`, AND ONLY ON A NOT-BUSY ONE FROM
-  // `list_calendar_events` — normally `free`, and a verbatim token where the record holds one
-  // (the `includeDefaultTransparency` option decides which). The split
-  // is a response-simplification call, not a difference in what is known: a listing is the
-  // token-sensitive path where an omitted field is cheap and most events are ordinary busy
-  // ones, so a row that says nothing is busy; the single-event fetch is the "tell me
-  // everything" call, where a caller asking what one event says must not have to read an
-  // absence.
+  // Always present from `get_calendar_event`; from `list_calendar_events` only when it is not
+  // busy, so an ordinary event costs nothing (`includeDefaultTransparency` picks).
   transparency?: string;
 }
 
@@ -1467,17 +1456,12 @@ function parseVEvent(
  * Put `transparency` on an event, or decide not to (#194).
  *
  * BOTH RETURN PATHS OF `parseVEvent` CALL THIS — the DURATION-computed branch as well as the
- * stored-DTEND one. They build two separate event literals, so a property attached in one and
- * not the other is invisible on exactly the resources the Fastmail client writes as a
- * `DURATION` (see docs/fastmail-action-availability.md: it writes both end-shapes from one
- * account, and its all-day events are the ones carrying `TRANSP`). Any field added to one
- * branch belongs in the other.
+ * stored-DTEND one. They build separate event literals, and the Fastmail client writes both
+ * end-shapes from one account (docs/fastmail-action-availability.md), so a field attached in
+ * one branch belongs in the other.
  *
- * `includeDefault` is what separates the two read tools. Absent — the listing path — the field
- * rides only when the value is not the RFC default, so an ordinary busy event costs nothing
- * and a `transparency` in a row means "this one does not block your calendar". Set — the
- * single-event fetch — it is always stated. See `CalendarEvent.transparency` for why the split
- * is drawn there rather than emitting the field everywhere or nowhere.
+ * `includeDefault` off (the listing path) rides the field only when the value is not the RFC
+ * default; on (the single-event fetch) always states it. See `CalendarEvent.transparency`.
  */
 function attachTransparency(event: CalendarEvent, vevent: string, includeDefault?: boolean): void {
   const transparency = readTransparency(vevent);
@@ -1794,20 +1778,13 @@ function assertRealCalendarDate(datePart: string, echo: string, fieldName: strin
 /**
  * FREE/BUSY TRANSPARENCY, IN THE TWO VOCABULARIES IT HAS (#194).
  *
- * `busy`/`free` is what a CALLER says and reads: the `transparency` parameter's two accepted
- * values, and the two this server reports. `OPAQUE`/`TRANSPARENT` is what iCalendar STORES —
- * RFC 5545 §3.8.2.7's `TRANSP` property, whose grammar admits those two tokens and nothing
- * else (unlike most iCalendar properties there is no x-name or IANA-token arm).
+ * `busy`/`free` is what a CALLER says and reads. `OPAQUE`/`TRANSPARENT` is what iCalendar
+ * STORES — RFC 5545 §3.8.2.7's `TRANSP` property, whose grammar admits those two tokens and
+ * nothing else (unlike most iCalendar properties there is no x-name or IANA-token arm).
  *
- * THE TWO SPELLINGS ARE KEPT APART ON PURPOSE, and the boundary is this file. `OPAQUE`/
- * `TRANSPARENT` appear here and in comments explaining the property; a tool description, a
- * parameter enum, a README tool bullet, a response field and a refusal message all say `busy`
- * or `free`. `opaque`/`transparent` is NOT accepted as an alias for the parameter: this
- * server's consumer reads the tool surface fresh on every call, so a second vocabulary is a
- * cost to the reader and buys nothing.
- *
- * The mapping is total in the write direction and not in the read one — see `readTransparency`
- * for what happens to a stored token that is neither.
+ * THE BOUNDARY IS THIS FILE: the iCal spellings appear here and nowhere on the tool surface,
+ * and `opaque`/`transparent` is not accepted as a parameter alias. The mapping is total in the
+ * write direction and not in the read one — see `readTransparency`.
  */
 export const TRANSPARENCY_VALUES = ['busy', 'free'] as const;
 export type Transparency = typeof TRANSPARENCY_VALUES[number];
@@ -1833,31 +1810,15 @@ function transpLine(transparency: Transparency): string {
  * and never the caller's own text — a stronger guarantee than escaping, and the reason an
  * unrecognised value is refused rather than passed through.
  *
- * THE TRIM AND THE CASE-FOLD ARE A BACKSTOP FOR NON-VALIDATING CLIENTS, AND ARE NOT ADVERTISED.
- * `inputSchema` declares this parameter as a closed `enum: ['busy', 'free']`, so a client that
- * validates against the schema — ours does — refuses `" Free "` before the call is dispatched
- * and this function never sees it. docs/conventions.md is explicit that coercion is only half
- * of it and the schema has to declare the lenient shape; the repo has already settled this
- * case the other way once, at `readMode` in draft-email-handler.ts, which keeps its enum and
- * drops the leniency. The coercion stays here because it costs nothing and the whitelist below
- * is load-bearing for a different reason (see above), but no tool description, parameter
- * description or README sentence may promise it: that promise is false for the client that
- * actually calls this server. The same goes for the refusal below — on the normal path the
- * caller is stopped by the schema, naming the same two values, and never reaches it.
- *
- * Leniency about CASE is not leniency about VOCABULARY: `OPAQUE` and `TRANSPARENT` are refused
- * here like any other unrecognised value, naming the two that are accepted.
- *
- * THE REFUSAL ECHOES THROUGH THE SHARED HELPER, inside DOUBLE quotes. The value being quoted
- * is by definition one nothing has validated — that is what this call has just decided — and
- * a raw interpolation of it splits the refusal into what reads as a second sentence from the
- * server when it carries U+2028/U+2029. That is the class #190 swept out of this file, and the
- * reason this is written here rather than carried over from the patch that proposed it.
+ * The trim and case-fold are a backstop for a non-validating client and MUST NOT be advertised:
+ * `inputSchema` declares a closed `enum: ['busy', 'free']`, so a schema-validating client is
+ * stopped before this is reached and the promise would be false for it. Leniency about CASE is
+ * not leniency about VOCABULARY — `OPAQUE`/`TRANSPARENT` are refused here too. The refusal
+ * echoes through `echoCallerText` because the value is by definition unvalidated (#190).
  */
 export function normalizeTransparency(value: unknown, fieldName = 'transparency'): Transparency {
-  // A non-string reaches the same refusal as an unrecognised string rather than a TypeError
-  // out of `.trim()`: the schema declares this parameter a string, but a lenient client can
-  // send anything and this repo's convention is that such a value is refused by name.
+  // A non-string reaches the same refusal rather than a TypeError out of `.trim()`: a lenient
+  // client can send anything, and this repo's convention is that such a value is refused by name.
   const text = typeof value === 'string' ? value.trim().toLowerCase() : undefined;
   const match = TRANSPARENCY_VALUES.find(v => v === text);
   if (!match) {
@@ -1873,63 +1834,34 @@ export function normalizeTransparency(value: unknown, fieldName = 'transparency'
  * What an event's `TRANSP` property says, for the `transparency` response field.
  *
  * THE ABSENT CASE IS DERIVED, NOT READ. RFC 5545 §3.8.2.7 defaults an omitted `TRANSP` to
- * `OPAQUE`, so a record carrying no such property still means busy — and reporting nothing
- * there would leave a caller unable to tell "this event blocks my calendar" from "this server
- * did not look". The two are distinguishable in the response by which tool answered rather
- * than by the value: `get_calendar_event` states it on every event, `list_calendar_events`
- * carries it only when it is not busy. Both tool descriptions say so.
+ * `OPAQUE`, so a record carrying no such property still means busy. An EMPTY value (`TRANSP:`
+ * with nothing after the colon) is read the same way — there is no token there to report.
  *
- * A STORED TOKEN NEITHER SPELLING COVERS IS REPORTED AS IT IS, trimmed and no further. The
- * grammar defines exactly two tokens, so such a value came from something that ignored the
- * spec — and the two honest readings of it are "report what is there" and "refuse". It is NOT
- * `busy`: folding it into the default would state as a fact about the event something that is
- * really this parser giving up, which is the silent-drop this repo's conventions forbid.
- *
- * THAT VERBATIM REPORT CAN COLLIDE WITH THE CALLER VOCABULARY, and the collision is left
- * alone. `TRANSP:free` is not a spec token, so it comes back as `'free'` — indistinguishable
- * in the response from a record holding a real `TRANSPARENT` — and `TRANSP:busy` likewise
- * comes back as `'busy'`, while `TRANSP:BUSY` comes back as `'BUSY'`, so one malformed record
- * reads differently from another by case alone. So a caller comparing against `'busy'`/`'free'`
- * does NOT always see a value matching neither: on these spellings it sees an ordinary answer.
- * It is left because the answer is the semantically correct one every time it collides — a
- * record whose `TRANSP` says `free` means free, and one that says `busy` means busy — so what
- * is lost is the provenance of the value, never its meaning, and provenance is what the
- * `get_calendar_event` description already declines to promise per-value ("an event whose
- * record says nothing is reported as busy, DERIVED"). Case-folding the unrecognised token to
- * make the two malformed spellings agree would be worse: it would invent a form the record
- * does not hold, in the one branch whose whole purpose is to hand back exactly what is there.
- *
- * An EMPTY value (`TRANSP:` with nothing after the colon) is not that case and is read as an
- * absent property, i.e. busy. There is no token there to report, and a property present but
- * empty says exactly as much about free/busy as a property that is not there at all.
+ * A STORED TOKEN NEITHER SPELLING COVERS IS REPORTED AS IT IS, trimmed and no further. Folding
+ * it into `busy` would state as a fact about the event something that is really this parser
+ * giving up, which is the silent-drop this repo's conventions forbid. That verbatim report can
+ * collide with the caller vocabulary — `TRANSP:free` comes back as `'free'` — and is left
+ * alone: what is lost is the value's provenance, never its meaning.
  *
  * CASE-INSENSITIVE ON THE PROPERTY NAME, and unfolded, which is `hasICalProperty`'s treatment
- * rather than `parseICalValue`'s. That difference is deliberate and this read belongs to the
- * same class as that one: see `parseICalValue`'s comment, which leaves the general read
+ * rather than `parseICalValue`'s. The difference is deliberate: `parseICalValue` stays
  * case-sensitive because a lower-cased name there fails CLOSED — the structural scan is
- * case-sensitive too, so the whole record goes invisible rather than being mis-read — and
- * names `hasICalProperty` as the exception, where a miss on a well-formed resource fails OPEN.
- * A lower-cased `transp:transparent` is legal per RFC 5545 §3.1 and sits in a resource that is
- * otherwise perfectly readable, so missing it here does not hide the event: it makes this
- * server report `busy` for an event that is free, which is a confident statement of the
- * opposite of the truth on an availability question. Widening `parseICalValue` itself is the
- * RFC conformance audit's job (#57, #111), not this read's.
+ * case-sensitive too, so the whole record goes invisible rather than being mis-read — while a
+ * miss here fails OPEN, reporting `busy` for an event that is free, a confident statement of
+ * the opposite of the truth on an availability question. A lower-cased `transp:transparent` is
+ * legal per RFC 5545 §3.1. Widening `parseICalValue` itself is the RFC conformance audit's job
+ * (#57, #111), not this read's.
  *
- * IT IS FLAT, THOUGH, WHERE THE WRITE HELPERS ARE NOT, and that is the one axis on which this
- * read and the write path in this same file disagree. `replaceICalProperty` and
- * `removeAllICalProperties` track `nestDepth` and ignore anything inside a sub-component; this
- * read, like `hasICalProperty` and `parseICalValue` before it, sees every line of the VEVENT.
- * So a `TRANSP` inside a `VALARM` is reported here and left untouched by
- * `clearFields: ["transparency"]`. Inherited rather than introduced, and left: `TRANSP` is not
- * a valid `VALARM` property, so the disagreement needs an already-malformed record to appear
- * at all, and the flat read is the same shape every other read in this file has.
+ * IT IS FLAT, where `replaceICalProperty` tracks `nestDepth`, so a `TRANSP` inside a `VALARM`
+ * is reported here and left untouched by `clearFields: ["transparency"]`. Inherited from the
+ * other reads in this file rather than introduced, and left: `TRANSP` is not a valid `VALARM`
+ * property, so the disagreement needs an already-malformed record to appear at all.
  */
 function readTransparency(vevent: string): string {
   const name = /^TRANSP[;:]/i;
   const line = unfoldedICalLines(vevent).find(l => name.test(l));
   const boundary = line === undefined ? -1 : findValueBoundary(line);
-  // §3.1 applies to the VALUE too, which is what the toUpperCase below is for. Both halves of
-  // the property need it; only the value half had it.
+  // §3.1 case-insensitivity applies to the value as well as the property name.
   const raw = boundary === -1 ? undefined : line!.slice(boundary + 1).trim();
   if (!raw) return 'busy';
   return TRANSPARENCY_BY_ICAL_TRANSP[raw.toUpperCase()] ?? raw;
@@ -4681,11 +4613,9 @@ export class CalDAVCalendarClient {
       throw eventNotFoundError(eventId, brokenCollections);
     }
     return {
-      // `includeDefaultTransparency` is the "tell me everything" half of the read split
-      // (#194): this tool states what an event says about free/busy even when the answer is
-      // the RFC default, because a caller who asked about ONE event and got no field back
-      // cannot tell "it blocks your calendar" from "nobody looked". The listing path leaves
-      // the option off and carries the field only when it is not the default.
+      // `includeDefaultTransparency` (#194): a caller who asked about ONE event and got no
+      // field back cannot tell "it blocks your calendar" from "nobody looked", so this tool
+      // states free/busy even when the answer is the RFC default. The listing path does not.
       event: parseCalendarObject(obj, { includeParticipants: true, includeDefaultTransparency: true, configuredZone: resolveUsableTimezone(getDefaultTimezone()) }),
       // ANSWERS AND DISCLOSES, where the write tools refuse (#101). A read cannot damage the
       // copy it was not asked about, so refusing would withhold the one thing that makes the
@@ -4720,8 +4650,8 @@ export class CalDAVCalendarClient {
     timeZone?: string | null;
     /**
      * Free/busy transparency (#194). Supplied, it is written on BOTH frames and overrides the
-     * all-day default below; omitted, that default stands. See the TRANSP block in the payload
-     * assembly for the precedence and why it is written that way round.
+     * all-day default; omitted, that default stands. See the TRANSP block in the payload
+     * assembly.
      */
     transparency?: string;
   }): Promise<CreateCalendarEventResult> {
@@ -4808,45 +4738,25 @@ export class CalDAVCalendarClient {
       foldICalLine(`SUMMARY:${escapeICalText(event.title)}`),
     ];
 
-    // AN ALL-DAY EVENT IS WRITTEN FREE, A TIMED ONE BUSY — the Fastmail client's own defaults,
-    // and the reason a property appears on only one of the two paths (#195).
+    // AN ALL-DAY EVENT IS WRITTEN FREE, A TIMED ONE BUSY — the Fastmail client's own defaults
+    // (#195). RFC 5545 §3.8.2.7 defaults an ABSENT TRANSP to OPAQUE, so writing nothing is not
+    // neutral: it is a positive claim that the account is busy, and every all-day event created
+    // here used to block the whole day in this account's free/busy with nothing showing it.
     //
-    // RFC 5545 §3.8.2.7 defaults an ABSENT TRANSP to OPAQUE, so writing nothing is not neutral:
-    // it is a positive claim that the account is busy. Every all-day event created here blocked
-    // the whole day for anyone querying this account's free/busy, and nothing showed it — the
-    // client renders the event correctly, and the consequence lands on a third party rather than
-    // the account holder.
+    // The timed path therefore emits NOTHING deliberately: the RFC default already says busy,
+    // and a redundant TRANSP:OPAQUE would differ from what the client writes for no gain. The
+    // client is the reference — its all-day fixtures in docs/fastmail-action-availability.md
+    // all carry TRANSP:TRANSPARENT, no timed fixture carries TRANSP at all.
     //
-    // CHOOSING A DEFAULT IS CREATE'S ALONE. This path is deciding an initial value where there
-    // is no prior one to respect, which is why it may pick; `updateCalendarEvent` never writes
-    // TRANSP unless the caller asks it to, because by then the event already holds a value and
-    // an absent property is one of the two ways of holding "busy" rather than a gap to fill.
+    // CHOOSING A DEFAULT IS CREATE'S ALONE. This path picks an initial value where there is no
+    // prior one to respect; `updateCalendarEvent` never writes TRANSP unless asked, because by
+    // then an absent property is one of the two ways of holding "busy", not a gap to fill.
     //
-    // The client is the reference for what this path should author. All three all-day fixtures
-    // in docs/fastmail-action-availability.md carry TRANSP:TRANSPARENT and no timed fixture
-    // carries TRANSP at all; its event editor's busy/free control, read on 10 Sep 2026, defaults
-    // to free on an all-day event and busy on a timed one. So the timed path deliberately emits
-    // NOTHING: the RFC default already says busy, and a redundant TRANSP:OPAQUE would differ from
-    // what the client writes for no gain.
-    //
-    // Keyed on the CLASSIFIED line, not the caller's string, and on the same describeDateProperty
-    // result validateDateConsistency has just accepted — so "all-day" means exactly what every
-    // other decision on this path means by it, including a value that reached date-only form by a
-    // route the raw input does not show.
-    //
-    // AN EXPLICIT `transparency` WINS OVER BOTH ARMS (#194), which is why one branch decides the
-    // whole property rather than the default being written first and overwritten. The caller's
-    // value is a statement about this event; the all-day rule is what to do when nobody made
-    // one. So a caller can create an all-day event that DOES block the day (`transparency:
-    // 'busy'`, which writes `TRANSP:OPAQUE` explicitly rather than leaving the RFC default to
-    // say it, so the choice is legible in the record) and a timed event that does not.
-    //
-    // THE RESULT DOES NOT REPORT WHICH VALUE WAS WRITTEN, unlike the zone, and that is a
-    // decision rather than an omission. The zone is reported because it cannot be recovered
-    // from the call: a designator-less input is stamped with a default the caller never named.
-    // This is the opposite — the rule is deterministic and documented, and its only input is
-    // the caller's own `start`/`end`, so a caller that knows what it passed already knows what
-    // was written. `get_calendar_event` states it if anyone needs it read back off the record.
+    // Keyed on the CLASSIFIED line — the same describeDateProperty result validateDateConsistency
+    // has just accepted — so "all-day" means here what it means everywhere else on this path. An
+    // explicit `transparency` wins over both arms (#194), which is why one branch decides the
+    // whole property: the caller's value is a statement about this event, the all-day rule is
+    // what to do when nobody made one.
     if (callerTransparency !== undefined) {
       icalLines.push(transpLine(callerTransparency));
     } else if (startFrame.frame === 'date') {
@@ -4998,15 +4908,10 @@ export class CalDAVCalendarClient {
     // Validate clearFields: only the optional, string-settable, not-otherwise-
     // clearable fields may be cleared, and a field can't be both set and cleared.
     //
-    // `transparency` joins the set (#194) even though it is an ENUM rather than free text,
-    // because what makes a field clearable here is that the property is OPTIONAL: a stored
-    // TRANSP can be removed, and removing it is the only way back to the shape the Fastmail
-    // client writes for an ordinary busy event, which carries no TRANSP at all.
-    //
-    // It is a change to the RECORD, not to the STATE. `transparency: 'busy'` writes
-    // `TRANSP:OPAQUE`; clearing removes the property; RFC 5545 §3.8.2.7 reads both as busy, and
-    // so does this server's read side, which cannot tell them apart and does not pretend to.
-    // Nothing downstream treats an absent property as an invitation to write one.
+    // `transparency` joins the set (#194) even though it is an ENUM rather than free text: what
+    // makes a field clearable here is that the property is OPTIONAL, and removing TRANSP is the
+    // only way back to the shape the Fastmail client writes for an ordinary busy event. It is a
+    // change to the RECORD, not the STATE — an absent TRANSP and `TRANSP:OPAQUE` both read busy.
     const CLEARABLE_FIELDS = new Set(['description', 'location', 'transparency']);
     const providedStringFields = new Set<string>();
     if (fields.description !== undefined) providedStringFields.add('description');
@@ -5103,21 +5008,16 @@ export class CalDAVCalendarClient {
       timeChanged = true;
     }
 
-    // AN UPDATE CHANGES FREE/BUSY ONLY WHEN ASKED TO. These two blocks are the only things on
-    // this path that touch TRANSP, and both of them are the caller saying so: `transparency`
-    // sets or replaces it, `clearFields` removes it. Nothing else here reads or writes the
-    // property — editing an event's dates, title or attendees leaves it exactly as stored.
+    // AN UPDATE CHANGES FREE/BUSY ONLY WHEN ASKED TO (#195, #194). These two blocks are the only
+    // things on this path that touch TRANSP, and both of them are the caller saying so; editing
+    // an event's dates, title or attendees leaves the property exactly as stored.
     //
-    // That is not an omission, it is the rule (#195, #194). RFC 5545 §3.8.2.7 gives TRANSP
-    // three spellings and two states: absent and `OPAQUE` both mean busy, `TRANSPARENT` means
-    // free. So an event carrying no TRANSP is not silent about free/busy — it SAYS busy — and
-    // there is no gap here for this path to fill on the caller's behalf. Create is the other
-    // case and behaves differently for a reason that does not apply here: it is choosing an
-    // initial value where there is no prior one to respect.
+    // That is the rule, not an omission. RFC 5545 §3.8.2.7 gives TRANSP three spellings and two
+    // states: absent and `OPAQUE` both mean busy, `TRANSPARENT` means free. So an event carrying
+    // no TRANSP is not silent about free/busy — it SAYS busy — and there is no gap here to fill.
     //
-    // Sets or replaces TRANSP from the caller's own value. No folding and no escaping: the
-    // value is one of two literals this file owns by the time it gets here, and the whole line
-    // is shorter than the fold width.
+    // No folding and no escaping below: the value is one of two literals this file owns by the
+    // time it gets here, and the whole line is shorter than the fold width.
     if (callerTransparency !== undefined) {
       data = replaceICalProperty(data, 'TRANSP', transpLine(callerTransparency));
     }
@@ -5125,10 +5025,9 @@ export class CalDAVCalendarClient {
     // Clear requested fields by removing the property line entirely. `validateClearFields` has
     // already rejected any field also passed as a value, so this cannot undo a patch above it.
     //
-    // ONE OCCURRENCE EACH, deliberately left: `replaceICalProperty` removes the first matching
-    // line, and RFC 5545 allows DESCRIPTION, LOCATION and TRANSP at most once per VEVENT, so a
-    // second copy only exists in already-malformed input. `removeAllICalProperties` is the tool
-    // if that ever needs to change — for all three together, since they share this loop.
+    // ONE OCCURRENCE EACH: `replaceICalProperty` removes the first matching line, and RFC 5545
+    // allows DESCRIPTION, LOCATION and TRANSP at most once per VEVENT, so a second copy only
+    // exists in already-malformed input. `removeAllICalProperties` is the tool if that changes.
     if (fields.clearFields && fields.clearFields.length > 0) {
       const KEY_BY_FIELD: Record<string, string> = { description: 'DESCRIPTION', location: 'LOCATION', transparency: 'TRANSP' };
       for (const field of fields.clearFields) {
