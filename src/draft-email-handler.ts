@@ -1,5 +1,5 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted, parseAddress } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
@@ -24,6 +24,7 @@ import {
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
+import { matchSubjectPrefix, noteComposeSubjectPrefix } from './subject-prefix.js';
 
 // ---------------------------------------------------------------------------
 // draft_email — one compose tool, three modes
@@ -132,6 +133,12 @@ export interface ComposeDraftEmailResult {
   subject?: string;
   to?: string[];
   cc?: string[];
+  /**
+   * The bcc actually stored — the caller's own, or the list a reply carried out of the
+   * original. Absent when the draft has none. Reported for the same reason `cc` is: a blind
+   * list the caller never named would otherwise reach recipients with nothing said.
+   */
+  bcc?: string[];
   /** What the tokens did. Absent when the call wrote no token at all. */
   tokens?: DraftEmailReceipt;
   /** What the draft embedded, could not, or was told about. Absent when there is nothing to say. */
@@ -432,6 +439,18 @@ const POOLED_REMEDY_PLACE_IN_HTML =
 const NOTE_REPLY_UNQUOTED =
   'This reply was stored without the original: place {{quote}} in the body to include it.';
 
+/**
+ * A reply that carried the original's own Bcc list into its bcc.
+ *
+ * Said out loud because a blind list is invisible in the composed draft the caller reads
+ * back through the Fastmail UI's reply view, and this is the one recipient field a caller
+ * cannot see it has widened. Both ways out are named: a bcc of your own replaces it, and a
+ * to or a cc turns it off with the cc carry.
+ */
+const NOTE_BCC_CARRIED =
+  "The original's Bcc list was carried into this reply — pass bcc to replace it, or to or " +
+  'cc to reply to fewer people and turn the carry off.';
+
 /** An image the block minted that no part of the expanded body ends up referencing. */
 function noteMintedDropped(names: (string | null | undefined)[], total: number): string {
   const listed = describePartNames(names, total);
@@ -538,6 +557,43 @@ function replyAllCc(
   return out;
 }
 
+/**
+ * The bcc a reply carries: the original's own Bcc entries, in the original's order.
+ *
+ * Measured on Fastmail's mobile app (2026-09-10) against the account's own Sent copy of a
+ * message it had sent to itself with a six-entry Bcc list: Reply and Reply All both produced
+ * the whole list, in order, with the account's own address kept — even though that address
+ * was also in the To the reply defaulted to. So NOTHING is excluded here: not the account's
+ * own identities, and not an address the reply's to or cc already names. A reply to a
+ * self-Bcc'd message therefore puts the operator in `to` and in `bcc`, and an address the
+ * original had in both Cc and Bcc lands in the reply's cc and bcc both. That is what
+ * pressing Reply in the client produces, and matching it is the point.
+ *
+ * There is deliberately no "is this the account's own message" check in front of this. A
+ * message the account RECEIVED does not carry a Bcc header — a submitting server strips it
+ * before delivery — so the field's presence is already what tells the account's own copy
+ * from a received one. That reasoning is derived rather than measured, and the doc row says
+ * so; the check it would justify could only ever refuse an IMPORTED or malformed message,
+ * silently, so an imported message carrying a Bcc header has its list carried too. That
+ * shape is unmeasured, and recorded as unmeasured in docs/fastmail-action-availability.md.
+ *
+ * Built with formatAddress and never through coerceStringArray, for the same reason the `to`
+ * default and the cc carry are (#31): a display name carrying a comma would otherwise
+ * re-split into a bogus second recipient. The dedupe is on the ADDRESS alone, case-folded,
+ * and keeps the whole formatted address met first, exactly as replyAllCc does.
+ */
+function replyBcc(original: any): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of addressList(original.bcc)) {
+    const key = entry.email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(formatAddress(entry));
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // The orchestration
 // ---------------------------------------------------------------------------
@@ -609,6 +665,16 @@ export async function composeDraftEmail(
   assertBodyInputs(a);
 
   const { from, subject: rawSubject, textBody, htmlBody } = a;
+  // `from` may carry a display name (#161), so this handler's two uses of it take the
+  // ADDRESS half. selectIdentity delegates to matchesIdentity, whose wildcard branch accepts
+  // a bare addr-spec and nothing else, so a named `from` would otherwise resolve to no
+  // identity here and lose its signature — while createDraft, which parses, accepted it. The
+  // not-placed note takes the same half, because a message about which identity is signing
+  // should name an address and not a display name.
+  //
+  // `from` itself stays RAW below: it is handed to createDraft whole, and that is what puts
+  // the caller's name into the stored From header.
+  const fromAddress: string | undefined = from ? parseAddress(from).email : from;
   const { to: toArg, cc, bcc, replyTo } = coerceRecipients(a);
   // Coerced before the contentless guard, so an attachment-only stash counts as content; a
   // lenient client may send a JSON-string array, so the guard tests the coerced specs.
@@ -669,7 +735,7 @@ export async function composeDraftEmail(
   // assertion can tell it from the empty list. A client returning no list must not throw the
   // compose away, which is what the test beside it pins.
   const identities = (await client.getIdentities()) ?? [];
-  const identity = selectIdentity(identities, from);
+  const identity = selectIdentity(identities, fromAddress);
   const signature = signatureOf(identity);
 
   // --- 6. The caller's embedded images, read PRE-expansion -----------------
@@ -770,9 +836,24 @@ export async function composeDraftEmail(
   const params: DraftEmailParams = { from, replyTo };
   if (toArg?.length) params.to = toArg;
   if (cc) params.cc = cc;
-  if (bcc) params.bcc = bcc;
+  // Tested on LENGTH, not truthiness: coerceRecipients returns [] for '' and for [], and []
+  // is truthy, so `if (bcc)` put an empty array into the params handed to createDraft and,
+  // now that the result reports the field, into `result.bcc` with it. Nothing was ever
+  // written to a message either way — createDraft guards each recipient list on `.length` of
+  // its own and drops an empty one — so what this fixes is the params and the REPORTED
+  // field, not the stored draft.
+  //
+  // `cc` keeps the truthiness form deliberately, because there it is inert both ways:
+  // createDraft drops its empty array the same way, and although `params.cc = []` does reach
+  // `result.cc`, the only consumer of this result is formatDraftEmailResult, which renders a
+  // recipient line only for a non-empty list. `replyTo` needs no test at all — it is written
+  // into the object literal above unconditionally, is not a field of the result, and is
+  // inert for the createDraft reason alone. `bcc` is the one that had to change, because it
+  // is the one the result now reports.
+  if (bcc?.length) params.bcc = bcc;
 
   let fillerBody: true | undefined;
+  let bccCarried = false;
   params.textBody = expandedText;
   params.htmlBody = expandedHtml;
 
@@ -825,6 +906,20 @@ export async function composeDraftEmail(
       if (!cc?.length) {
         const carried = replyAllCc(original, addressed, identities);
         if (carried.length) params.cc = carried;
+
+        // The original's own Bcc list is carried the same way and under the same condition
+        // (#189): a `to` or a `cc` of the caller's is a narrowed reply, and carrying a BLIND
+        // list behind one is the single outcome nobody could mean. A caller `bcc` is
+        // additive rather than narrowing, so it displaces only its own default and leaves
+        // the `to` fallback and the cc carry above running. An EMPTY caller bcc is no bcc at
+        // all and does not displace the carry — the same test applied to an empty `cc`.
+        if (!bcc?.length) {
+          const carriedBcc = replyBcc(original);
+          if (carriedBcc.length) {
+            params.bcc = carriedBcc;
+            bccCarried = true;
+          }
+        }
       }
     }
   }
@@ -945,6 +1040,22 @@ export async function composeDraftEmail(
   const receipt = buildReceipt(expansions, fillerBody);
   const signaturePlaced = supplied.some((p) => p.scan.counts.signature > 0);
 
+  // A subject a caller typed "Re:" or "Fwd:" into does not thread the message; the headers
+  // this server writes for the other two modes do, and mode:'new' writes none (#188). So the
+  // draft reads as part of a conversation and arrives as a new one, in the caller's client
+  // and in every recipient's. Said out loud and never refused: reusing an old subject for a
+  // fresh conversation is legitimate, and a refusal would leave that caller no way through.
+  //
+  // Silent when the caller passed threading headers of their own, which is the documented
+  // route for replying to a message this account does not hold - there the note's premise
+  // is simply false. That test reads what those parameters COERCED to rather than whether
+  // they were mentioned, because the premise is about the header the draft ends up
+  // carrying: `inReplyTo: []` writes none, so such a draft does not thread and is warned
+  // about like any other.
+  const prefixTyped = mode === 'new' && !params.inReplyTo?.length && !params.references?.length
+    ? matchSubjectPrefix(params.subject)
+    : undefined;
+
   const notes = [
     ...ledger.emit({
       surface: mode === 'forward' ? 'forward' : 'reply',
@@ -968,9 +1079,11 @@ export async function composeDraftEmail(
     // Presence only, on a SUPPLIED body, so a body-less reply and an attachment-only stash
     // are silent.
     ...(!signaturePlaced && signature && supplied.length > 0
-      ? [noteSignatureNotPlaced(identity?.email ?? from)]
+      ? [noteSignatureNotPlaced(identity?.email ?? fromAddress)]
       : []),
     ...(mode === 'reply' && !historyPlaced ? [NOTE_REPLY_UNQUOTED] : []),
+    ...(bccCarried ? [NOTE_BCC_CARRIED] : []),
+    ...(prefixTyped ? [noteComposeSubjectPrefix(prefixTyped)] : []),
   ];
 
   return {
@@ -981,6 +1094,10 @@ export async function composeDraftEmail(
     // Read off `params`, not the caller's argument, so a reply-all carry is reported rather
     // than the draft quietly going to more people than the result names.
     ...(params.cc && { cc: params.cc }),
+    // Read off `params` for the same reason `cc` is, and with more riding on it: a bcc the
+    // caller never named is invisible in the stored draft's reply view, so if the result
+    // did not name it nothing would.
+    ...(params.bcc && { bcc: params.bcc }),
     ...(receipt && { tokens: receipt }),
     ...(notes.length > 0 && { notes }),
   };

@@ -31,6 +31,7 @@ import {
   NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DERIVED_PART, noteBodyHashAfterReRead,
 } from './inline-notes.js';
 import type { AttachmentAvailability } from './inline-notes.js';
+import { matchSubjectPrefix, noteEditSubjectPrefix } from './subject-prefix.js';
 // unlink is a security control, not a convenience: the exclusive-create download
 // path removes the file it just refused to trust before rewriting it.
 import { writeFile, mkdir, realpath, stat, lstat, open, unlink } from 'fs/promises';
@@ -2388,9 +2389,17 @@ export class JmapClient {
       throw new Error('No sending identities found');
     }
 
+    // `from` takes the same "Name <address>" form the recipient fields take (#161), so it is
+    // split BEFORE anything looks at it. Every check below sees the address half only, which
+    // is what keeps matchesIdentity's contract intact: a wildcard identity deliberately
+    // matches a bare addr-spec and nothing else (see its own comment — do not widen it), so
+    // handing it an angle-addr would refuse a perfectly good sender as unverified. The name
+    // half is never validated, because nothing on the platform reads it.
+    const parsedFrom = email.from ? parseAddress(email.from) : undefined;
+
     let selectedIdentity;
     if (email.from) {
-      selectedIdentity = identities.find(id => matchesIdentity(id.email, email.from!));
+      selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedFrom!.email));
       if (!selectedIdentity) {
         throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
       }
@@ -2406,7 +2415,13 @@ export class JmapClient {
       throw new InvalidInputError(rejectWildcardIdentityFrom(selectedIdentity.email));
     }
 
-    const fromEmail = email.from || selectedIdentity.email;
+    const fromEmail = parsedFrom?.email || selectedIdentity.email;
+    // The display name that goes out beside it: the caller's own if they wrote one, else the
+    // name configured on the identity that verified the address. A bare `from` is therefore
+    // unchanged from before #161. This is where a wildcard identity gains most — one
+    // configured name stands behind every address in the domain, so without a name of your
+    // own that single name is the only sender name any of those addresses can carry.
+    const fromName = parsedFrom?.name ?? selectedIdentity.name;
 
     // Resolve the save target. Fetch the mailbox list unconditionally now (a name/role
     // needs it, and an explicit id is validated against it too) and share it. An unknown
@@ -2443,7 +2458,7 @@ export class JmapClient {
     const emailObject: any = {
       mailboxIds,
       keywords: { $draft: true },
-      from: [{ name: selectedIdentity.name, email: fromEmail }],
+      from: [{ name: fromName, email: fromEmail }],
     };
 
     if (email.to?.length) emailObject.to = email.to.map(parseAddress);
@@ -2645,9 +2660,15 @@ export class JmapClient {
       throw new Error('No sending identities found');
     }
 
+    // Split "Name <address>" before anything looks at it, for the reason createDraft states
+    // at its own parse (#161): every check here sees the address half, and matchesIdentity
+    // keeps its bare-addr-spec contract. `updates.from` itself stays the caller's raw string,
+    // because the non-empty check below is about what they actually passed.
+    const parsedUpdateFrom = updates.from ? parseAddress(updates.from) : undefined;
+
     let selectedIdentity;
     if (updates.from) {
-      selectedIdentity = identities.find(id => matchesIdentity(id.email, updates.from!));
+      selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedUpdateFrom!.email));
       if (!selectedIdentity) {
         throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
       }
@@ -2789,22 +2810,24 @@ export class JmapClient {
       throw new InvalidInputError(rejectWildcardIdentityFrom(selectedIdentity.email));
     }
     const writtenFromAddress: string | undefined =
-      updates.from || existingEmail.from?.[0]?.email || selectedIdentity.email;
+      parsedUpdateFrom?.email || existingEmail.from?.[0]?.email || selectedIdentity.email;
     const signingIdentity = writtenFromAddress
       ? identities.find((id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, writtenFromAddress))
       : undefined;
-    // The display name written alongside that address, resolved in the OPPOSITE order from
-    // the address itself (#152): the name the stored draft already carries against that
-    // address wins first, and the verified identity's name is only a fallback for a draft
-    // that carries none. `edit_draft`'s contract is that only passed fields change — a
-    // caller who deliberately set a display name on their own address must not have it
-    // silently reverted to the identity's configured name by a later edit that never even
-    // touched `from`. A stored name against a FOREIGN address (signingIdentity undefined)
-    // survives for the same reason: there is no identity name to fall back to, so the
-    // draft's own name is kept. `selectedIdentity.name` is deliberately not a fallback here
-    // either — it is the account default's name, and on the very path the hoisted address
-    // exists for (a stored `from` matching no verified identity) pairing the two would put
-    // the default identity's name in front of a foreign address.
+    // The display name written alongside that address. A name the caller wrote into THIS
+    // edit's own `from` wins outright (#161) — it is a passed field like any other, and an
+    // edit that states a name means it. Behind that arm the remaining two resolve in the
+    // OPPOSITE order from the address itself (#152): the name the stored draft already
+    // carries against that address beats the verified identity's name, which is only a
+    // fallback for a draft that carries none. `edit_draft`'s contract is that only passed
+    // fields change — a caller who deliberately set a display name on their own address must
+    // not have it silently reverted to the identity's configured name by a later edit that
+    // never even touched `from`. A stored name against a FOREIGN address (signingIdentity
+    // undefined) survives for the same reason: there is no identity name to fall back to, so
+    // the draft's own name is kept. `selectedIdentity.name` is deliberately not a fallback
+    // here either — it is the account default's name, and on the very path the hoisted
+    // address exists for (a stored `from` matching no verified identity) pairing the two
+    // would put the default identity's name in front of a foreign address.
     // Case-folded, not matchesIdentity: both sides here are concrete addresses (a stored
     // `from` is never a `*@` pattern), so only matchesIdentity's case-folding half applies —
     // its wildcard branch would wrongly let a wildcard-shaped stored address match. The
@@ -2823,7 +2846,15 @@ export class JmapClient {
     // it identically). Only the stored arm needed normalising, because #152 is what made
     // that arm load-bearing in the first place; a whitespace-only identity name is a
     // pre-existing, unrelated cosmetic gap, not something this change introduces or fixes.
-    const writtenFromName: string | null = storedFromNameIfPresent ?? signingIdentity?.name ?? null;
+    // The caller's own name is NOT blank-normalised, and needs no arm of its own for the
+    // empty case: parseAddress returns no `name` at all for a `from` whose name half is
+    // blank or absent, so `<addr>` and a bare address both arrive here as undefined and fall
+    // straight through to the stored arm. That is the documented limit this leaves standing
+    // (#161): a display name once stored can be REPLACED by naming a new one, never REMOVED,
+    // because `from` is not clearable and a name-less `from` defers rather than clearing. A
+    // spelling that meant "no name" would give one string a second meaning, and is not taken.
+    const writtenFromName: string | null =
+      parsedUpdateFrom?.name ?? storedFromNameIfPresent ?? signingIdentity?.name ?? null;
     const editSignature = signatureOf(signingIdentity);
 
     // ---- The merge rule, written once and applied twice ----
@@ -3072,6 +3103,33 @@ export class JmapClient {
     if (wroteHtml && !wroteText && !clearedText && !isBlank(existingTextValue)) {
       tokenNotes.push(noteDiscardedTextPart());
     }
+
+    // A reply or forward prefix edited ONTO a draft that cannot thread (#188). The same
+    // matcher compose uses, so the two routes cannot drift on what counts as a prefix.
+    //
+    // THE TRIGGER IS THE SUBJECT THIS EDIT WRITES - `updates.subject`, never the merged
+    // value below, which falls back to the STORED subject. Keying on the merged one would
+    // repeat the warning on every body edit of a draft that already carries a prefix:
+    // noise the caller cannot act on, when the edit that introduced the prefix is the one
+    // that needed telling. An edit that writes no subject, and one that clears it, both
+    // arrive here as `undefined` and the matcher answers for them.
+    //
+    // ALL THREE stored markers are read, because each one shows the draft was made FROM an
+    // original message, which is what earns the prefix, and a draft that earned it must
+    // never be told it did not. A reply draft carries In-Reply-To and References, and
+    // References counts on its own: it is the chain most clients actually thread on, and a
+    // draft can carry it with no In-Reply-To beside it. A FORWARD draft does not thread at
+    // all - it starts its own conversation - and carries the forwarded id instead of any
+    // reply header, so reading only the reply headers would warn on every retitle of a
+    // perfectly well-formed forward. All three are already in this method's fetch, in this
+    // order. The stored draft is what is asked, so an edit that de-forwards a draft in the
+    // same call is not warned: it still has the marker as read, and the note is about the
+    // caller's subject rather than about the shape the edit leaves behind.
+    const storedThreadMarkers =
+      (existingEmail.inReplyTo?.length ?? 0) > 0
+      || (existingEmail.references?.length ?? 0) > 0
+      || (existingEmail['header:X-Forwarded-Message-Id:asMessageIds']?.length ?? 0) > 0;
+    const prefixTyped = storedThreadMarkers ? undefined : matchSubjectPrefix(updates.subject);
 
     // Merge non-body fields: updates override existing; clearFields force the empty value.
     const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));
@@ -3606,6 +3664,7 @@ export class JmapClient {
       // for why these are notes and never refusals.
       ...tokenNotes,
       ...followUpNotes,
+      ...(prefixTyped ? [noteEditSubjectPrefix(prefixTyped)] : []),
     ];
     const touchedInlineImages = tally.embedded > 0 || tally.degraded > 0 || tally.removed > 0;
 

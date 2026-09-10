@@ -8,6 +8,7 @@ import { FastmailAuth } from './auth.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
 import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
+import { noteEditSubjectPrefix } from './subject-prefix.js';
 
 // ---------- helpers ----------
 
@@ -3294,6 +3295,174 @@ describe('recipient name parsing', () => {
 
 });
 
+// ---------- sender name parsing ----------
+
+// `from` takes the same "Name <address>" form the recipient fields take (#161). The address
+// half is what every identity check sees; the name half is never validated, because nothing
+// on the platform reads it.
+//
+// A wildcard identity is the case this matters most for: one configured name stands behind
+// every address in the domain, so without this the only sender name available is that one.
+// Named locally rather than reusing WILDCARD_IDENTITY below so these assertions carry a
+// neutral display name.
+const NAME_PARSE_WILDCARD = { id: 'id-wild-np', name: 'Account Owner', email: '*@example.com', mayDelete: false };
+
+describe('sender name parsing — createDraft', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getIdentities', async () => [NAME_PARSE_WILDCARD]);
+  });
+
+  const stubCreate = (c: JmapClient) => stubRequests(c, async () => ({
+    methodResponses: [['Email/set', { created: { draft: { id: 'd-1' } } }, 'createDraft']],
+  }));
+
+  it('accepts "Name <address>" and writes the explicit name against the address', async () => {
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: 'Ops <ops@example.com>' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Ops', email: 'ops@example.com' }]);
+  });
+
+  it("falls back to the matched identity's name for a bare address", async () => {
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: 'ops@example.com' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Account Owner', email: 'ops@example.com' }]);
+  });
+
+  it('reads the name-less angle form as a bare address, and no longer refuses it', async () => {
+    // The accepted consequence of parsing before matching: `<addr>` used to reach
+    // matchesIdentity whole and be refused as unverified, because a wildcard identity
+    // deliberately matches a bare addr-spec only. It now parses to an address with no name,
+    // so it behaves exactly as that bare address does.
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: '<ops@example.com>' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Account Owner', email: 'ops@example.com' }]);
+  });
+
+  it('still refuses a named from whose ADDRESS matches no identity', async () => {
+    // The name half is never validated; the address half is checked exactly as before.
+    stubCreate(client);
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Hi', from: 'Ops <ops@other.example>' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /not verified for sending/);
+        return true;
+      },
+    );
+  });
+
+  it('keeps a display name carrying a comma whole', async () => {
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: 'Fox, Dana <dana@example.com>' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Fox, Dana', email: 'dana@example.com' }]);
+  });
+});
+
+describe('sender name parsing — updateDraft', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getIdentities', async () => [NAME_PARSE_WILDCARD]);
+  });
+
+  /** Serve `stored` to the Email/get, then accept the recreate. */
+  function stubEdit(c: JmapClient, stored: any) {
+    return stubRequests(c, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [stored] }, 'getEmail']] };
+      }
+      return {
+        methodResponses: [
+          ['Email/set', { created: { draft: { id: 'd-2' } }, destroyed: ['draft-1'] }, 'updateDraft'],
+        ],
+      };
+    });
+  }
+
+  const writtenFrom = (makeReq: RequestMock) =>
+    callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft.from;
+
+  it('writes an explicit name over the name the draft already stored', async () => {
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'Ops <ops@example.com>' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Ops', email: 'ops@example.com' }]);
+  });
+
+  it('passes BOTH identity lookups on a named from, against a different stored address', async () => {
+    // The selection lookup and the sending-identity lookup each match on the address half:
+    // the first would refuse the call as unverified, the second decides what is written.
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'old@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'Ops <ops@example.com>' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Ops', email: 'ops@example.com' }]);
+  });
+
+  it('leaves a stored name in place for a bare from (#152 is unchanged)', async () => {
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'ops@example.com' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Old Name', email: 'ops@example.com' }]);
+  });
+
+  it('cannot REMOVE a stored display name — a name-less from defers to it (documented limit)', async () => {
+    // `from` is not clearable, and a `from` carrying no name means "no name of my own here",
+    // not "clear the one that is stored". A name once set can be replaced, never removed by
+    // this tool; the edit_draft `from` description says so.
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: '<ops@example.com>' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Old Name', email: 'ops@example.com' }]);
+  });
+
+  it("falls back to the identity's name when the draft stores none", async () => {
+    const stored = { ...EXISTING_DRAFT, from: [{ email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'ops@example.com' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Account Owner', email: 'ops@example.com' }]);
+  });
+
+  it('still refuses a named from whose ADDRESS matches no identity', async () => {
+    stubEdit(client, EXISTING_DRAFT);
+
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { from: 'Ops <ops@other.example>' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /not verified for sending/);
+        return true;
+      },
+    );
+  });
+});
+
 // ---------- createDraft replyTo ----------
 
 describe('createDraft replyTo', () => {
@@ -3610,6 +3779,25 @@ describe('updateDraft display name resolution', () => {
     await client.updateDraft('draft-1', { subject: 'New Subject' });
 
     assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Test User', email: 'me@example.com' }]);
+  });
+
+  // A stored draft can carry no From ADDRESS at all, which is a different fixture from the
+  // no-NAME one above, and it arrives in two shapes: JMAP omits `from` entirely on a draft
+  // saved without a sender, and returns an empty list where another client wrote one. Both
+  // must fall through to the verified identity rather than throwing, so both optional links
+  // in `existingEmail.from?.[0]?.email` are load-bearing - dropping the first throws on the
+  // omitted shape, dropping the second throws on the empty-list shape. (Under a WILDCARD
+  // default identity this same case is refused instead, by the #160 guard beside it.)
+  it('falls back to the identity when the stored draft carries no From address at all', async () => {
+    for (const storedFrom of [undefined, []]) {
+      const noFrom = makeClient();
+      const makeReq = mockUpdate(noFrom, { ...EXISTING_DRAFT, from: storedFrom });
+
+      await noFrom.updateDraft('draft-1', { subject: 'New Subject' });
+
+      assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Test User', email: 'me@example.com' }],
+        `stored from: ${JSON.stringify(storedFrom)}`);
+    }
   });
 
   it('falls back to the identity\'s name when the stored name is empty/whitespace-only (#152)', async () => {
@@ -4998,5 +5186,122 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
     const makeReq = mockSrcUpdate(client, { ...rest, id: 'rdraft-1' });
     await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
     assert.equal(draftFromCall(makeReq)[SRC_PROP], undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateDraft: a reply or forward prefix edited onto a draft (#188)
+// ---------------------------------------------------------------------------
+
+describe('updateDraft — a reply or forward prefix written into the subject', () => {
+  const REPLY_NOTE = noteEditSubjectPrefix('reply');
+  const FORWARD_NOTE = noteEditSubjectPrefix('forward');
+
+  // The shapes the trigger reads apart. EXISTING_DRAFT carries none of the three markers,
+  // which is the whole point: a draft made by mode:'new' is what a caller retitles into a
+  // prefix.
+  const REPLY_DRAFT = { ...EXISTING_DRAFT, inReplyTo: ['<orig@x.example>'] };
+  // A reply draft can carry References without In-Reply-To - a client that writes only the
+  // chain, or a draft whose In-Reply-To was dropped somewhere upstream. It threads on the
+  // References chain all the same, so it must not be told it will not.
+  const REFERENCES_ONLY_DRAFT = { ...EXISTING_DRAFT, references: ['<root@x.example>'] };
+  const FORWARD_DRAFT = {
+    ...EXISTING_DRAFT,
+    subject: 'Fwd: pricing',
+    'header:X-Forwarded-Message-Id:asMessageIds': ['<orig@x.example>'],
+  };
+
+  let client: JmapClient;
+  beforeEach(() => { client = makeClient(); });
+
+  const notesOf = (r: any): string[] => r.notes ?? [];
+  const assertNoPrefixNote = (r: any) => {
+    const found = notesOf(r).filter((n) => n === REPLY_NOTE || n === FORWARD_NOTE);
+    assert.deepEqual(found, [], `notes were ${JSON.stringify(r.notes)}`);
+  };
+
+  it('warns when a reply prefix is written onto a draft that carries no threading headers', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Re: pricing' });
+
+    assert.ok(notesOf(r).includes(REPLY_NOTE), `notes were ${JSON.stringify(r.notes)}`);
+    // A note, never a refusal, and the subject is stored exactly as the caller wrote it.
+    assert.equal(draftFromCall(makeReq).subject, 'Re: pricing');
+  });
+
+  it('names the forward mode when the prefix written is a forward one', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Fwd: pricing' });
+
+    assert.ok(notesOf(r).includes(FORWARD_NOTE), `notes were ${JSON.stringify(r.notes)}`);
+    assert.equal(notesOf(r).includes(REPLY_NOTE), false);
+    assert.equal(draftFromCall(makeReq).subject, 'Fwd: pricing');
+  });
+
+  it('says nothing when the draft already carries In-Reply-To, because it really is a reply', async () => {
+    mockUpdate(client, REPLY_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Re: pricing again' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the draft carries References alone, which threads it just as well', async () => {
+    mockUpdate(client, REFERENCES_ONLY_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Re: pricing again' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing about a forward prefix on a References-only draft either', async () => {
+    mockUpdate(client, REFERENCES_ONLY_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Fwd: pricing' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when re-titling a FORWARD draft, which carries the forwarded id instead', async () => {
+    // A forward draft has no reply headers by design, so reading only inReplyTo would warn
+    // on every retitle of a perfectly well-formed forward.
+    mockUpdate(client, FORWARD_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Fwd: pricing, revised' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing on an edit that leaves the subject alone, even on a prefixed header-less draft', async () => {
+    // The trigger is the subject this edit WRITES, not the one the draft ends up with:
+    // hanging it off the merged value would repeat the warning on every body edit of such
+    // a draft, which is noise the caller cannot act on.
+    const prefixed = { ...EXISTING_DRAFT, subject: 'Re: pricing' };
+    const makeReq = mockUpdate(client, prefixed);
+
+    const r = await client.updateDraft('draft-1', { textBody: 'a new body', bodyHash: hashOf(prefixed) });
+
+    assert.equal(draftFromCall(makeReq).subject, 'Re: pricing');
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the subject written carries no prefix', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Rex: pricing' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the subject is cleared rather than written', async () => {
+    const prefixed = { ...EXISTING_DRAFT, subject: 'Re: pricing' };
+    const makeReq = mockUpdate(client, prefixed);
+
+    const r = await client.updateDraft('draft-1', { clearFields: ['subject'] });
+
+    assert.equal(draftFromCall(makeReq).subject, '');
+    assertNoPrefixNote(r);
   });
 });
