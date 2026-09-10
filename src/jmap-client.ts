@@ -723,11 +723,31 @@ function htmlCidRefs(html: string | null | undefined): string[] {
 // refused here because Fastmail issues these identities as patterns, and a recipient would
 // see a literal asterisk as the sender.
 //
-// The refusals therefore sit on a pattern BEING USED AS AN ADDRESS, in exactly the three
-// places that can happen: the two arms that write a selected identity's own `email` into a
-// new or recreated draft (createDraft, updateDraft), and the send path, which reads an
-// address a draft already stores. Every other arm writes an address the caller or the stored
-// draft supplied, and those stay untouched even when the identity behind them is a wildcard.
+// The refusals therefore sit on a pattern BEING USED AS AN ADDRESS, wherever the pattern can
+// reach that position. It arrives from three directions, and each has its own refusal:
+//
+//   PASSED BY THE CALLER as `from`, bare or as the address half of a "Name <address>" —
+//     createDraft and updateDraft, checked straight after parsing and before any identity
+//     match (rejectWildcardFromValue). Nothing further down would catch it: matchesIdentity
+//     opens with a plain equality test, so the pattern matches the very identity it came from
+//     and reads as verified.
+//   SELECTED as the identity's own `email`, on the arms that write it into a new or recreated
+//     draft because no `from` was supplied — createDraft and updateDraft again
+//     (rejectWildcardIdentityFrom, a different sentence: there the fix is to pass a `from` at
+//     all, which would read as nonsense to a caller who just did).
+//   ALREADY STORED on a draft, read by the send path — the heal path for a draft written
+//     before these guards existed, or by another client.
+//
+// WHAT A DRAFT ALREADY STORES IS RE-WRITTEN UNCHANGED, and that is deliberate on both
+// shapes it can take. A stored CONCRETE address is written even when it matches no verified
+// identity and the account default behind it is a wildcard; a stored PATTERN — a draft from
+// before these guards, or from another client — is likewise carried through an edit that
+// passes no `from` of its own, because `writtenFromAddress` prefers the stored value and the
+// guard beside it only fires when there is no stored `from` at all. Refusing either would
+// make such a draft permanently uneditable, which is the opposite of what the caller needs:
+// the fix for a stored pattern is an edit that passes a concrete `from`, and an edit is
+// exactly what a refusal there would block. So an edit is not where a stored pattern is
+// caught. THE SEND PATH IS, and it says so in its own comment: nothing reaches the wire.
 //
 // src/identity.ts is deliberately unchanged. `selectIdentity` there mirrors WHICH identity a
 // compose call resolves to, and a wildcard identity is still the correct selection — it
@@ -743,6 +763,29 @@ function isWildcardIdentityEmail(email: unknown): boolean {
 function rejectWildcardIdentityFrom(identityEmail: string): string {
   return `The default sending identity is the wildcard pattern "${describeUntrusted(identityEmail)}", not an address. ` +
     'Pass from with a concrete address in that domain.';
+}
+
+/**
+ * The refusal both draft-WRITE paths raise for a `from` the CALLER passed whose address half
+ * is the pattern itself.
+ *
+ * A separate sentence from `rejectWildcardIdentityFrom` above, because it is a separate fact:
+ * that one says the account's DEFAULT identity is a wildcard and the fix is to pass a `from`
+ * at all; this one says the `from` that WAS passed is unusable, and telling such a caller to
+ * "pass from" would read as though they had not.
+ *
+ * Nothing downstream catches this. `matchesIdentity` opens with a plain equality test, so the
+ * pattern matches the very identity it came from and reads as verified — the pattern is then
+ * written into the stored draft's From header. `sendDraft` refuses it on the way out, so
+ * nothing is transmitted, but a draft stored with an asterisk for a sender is wrong at the
+ * moment it is written, and the caller learns that only when they try to send.
+ *
+ * The address HALF is what is echoed, not the caller's whole string: `Ops <*@example.com>`
+ * fails on its address, and quoting the display name back would blur which half to fix.
+ */
+function rejectWildcardFromValue(fromAddress: string): string {
+  return `The from address "${describeUntrusted(fromAddress)}" is a wildcard identity's pattern, not an address. ` +
+    'A from needs a concrete address in that domain; the wildcard identity still verifies it and still supplies its signature.';
 }
 
 function partCid(part: any): string {
@@ -2397,6 +2440,14 @@ export class JmapClient {
     // half is never validated, because nothing on the platform reads it.
     const parsedFrom = email.from ? parseAddress(email.from) : undefined;
 
+    // A PASSED `from` whose address half is the pattern, refused BEFORE the identity match
+    // rather than after it — matchesIdentity would accept it (plain equality against the very
+    // identity it came from), and the pattern would be written into the From header. The
+    // omitted-`from` case is a different fact with its own refusal, further down.
+    if (parsedFrom && isWildcardIdentityEmail(parsedFrom.email)) {
+      throw new InvalidInputError(rejectWildcardFromValue(parsedFrom.email));
+    }
+
     let selectedIdentity;
     if (email.from) {
       selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedFrom!.email));
@@ -2665,6 +2716,14 @@ export class JmapClient {
     // keeps its bare-addr-spec contract. `updates.from` itself stays the caller's raw string,
     // because the non-empty check below is about what they actually passed.
     const parsedUpdateFrom = updates.from ? parseAddress(updates.from) : undefined;
+
+    // Same refusal createDraft raises on a passed `from`, and for the same reason: the
+    // pattern would clear matchesIdentity and land in the recreated draft's From header.
+    // Ahead of the identity match, and ahead of the Email/set that does the recreate, so a
+    // refused edit leaves the stored draft exactly as it was.
+    if (parsedUpdateFrom && isWildcardIdentityEmail(parsedUpdateFrom.email)) {
+      throw new InvalidInputError(rejectWildcardFromValue(parsedUpdateFrom.email));
+    }
 
     let selectedIdentity;
     if (updates.from) {
@@ -3827,9 +3886,14 @@ export class JmapClient {
     // syntax but because Fastmail issues `*@` identities as patterns, and a pattern has been
     // written into a message header.
     //
-    // This is the HEAL path. createDraft and updateDraft refuse to WRITE a pattern; this
-    // refuses to SEND one already stored — by this server before those guards existed, or by
-    // another client. The identity check just below does not cover it: matchesIdentity opens
+    // This is the HEAL path, and the ONLY check a stored pattern meets. createDraft and
+    // updateDraft refuse a pattern the caller PASSES as `from` and a pattern they would
+    // SELECT from the account default — but an edit that passes no `from` re-writes whatever
+    // the draft already stores, a stored pattern included, because refusing there would make
+    // the draft uneditable and an edit is how a caller fixes it. So a pattern can still be
+    // sitting in a stored From by the time send is called — written before those guards
+    // existed, by another client, or carried through an edit — and this is what stops it.
+    // The identity check just below does not cover it: matchesIdentity opens
     // with a plain equality test, so a stored `*@example.com` matches the `*@example.com`
     // identity it came from and passes as verified.
     //
