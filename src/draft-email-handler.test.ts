@@ -1583,6 +1583,10 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     // (that is what the original's From says) and the rest of the thread is carried into cc.
     // A caller who means to reply to one person passes `to` explicitly — the drafting
     // workflow does — and that suppresses the carry by the rule above.
+    //
+    // This fixture carries no Bcc header, so the Bcc carry (#189, pinned in its own block
+    // below) has nothing to do here and this case reads exactly as it did before it existed.
+    // The sibling below is the same message WITH one.
     const { client, calls } = plainClient(makeOriginal({
       from: [{ name: 'Test User', email: 'me@example.com' }],
       to: [{ email: 'dana@example.com' }],
@@ -1591,6 +1595,23 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
     assert.deepEqual(calls.draft.to, ['Test User <me@example.com>']);
     assert.deepEqual(calls.draft.cc, ['dana@example.com', 'raj@example.com']);
+    assert.equal('bcc' in calls.draft, false);
+  });
+
+  it("carries the Bcc too when the account's own message had one", async () => {
+    // The same message with a Bcc header: both carries run off the one call, and neither
+    // takes anything from the other. A Bcc header is how the account's own copy is told
+    // from a received one — a received message never carries one.
+    const { client, calls } = plainClient(makeOriginal({
+      from: [{ name: 'Test User', email: 'me@example.com' }],
+      to: [{ email: 'dana@example.com' }],
+      cc: [{ email: 'raj@example.com' }],
+      bcc: [{ name: 'Ada Byron', email: 'ada@example.com' }, { email: 'bo@example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.to, ['Test User <me@example.com>']);
+    assert.deepEqual(calls.draft.cc, ['dana@example.com', 'raj@example.com']);
+    assert.deepEqual(calls.draft.bcc, ['Ada Byron <ada@example.com>', 'bo@example.com']);
   });
 
   it('skips an original address entry that names no address at all', async () => {
@@ -1676,6 +1697,221 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     const withoutId = plainClient(makeOriginal({ id: undefined }));
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, withoutId.client);
     assert.equal(withoutId.calls.draft.sourceEmailId, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Bcc a reply carries
+// ---------------------------------------------------------------------------
+
+/** The note a reply gets when it carried the original's Bcc list. */
+const NOTE_BCC_CARRIED =
+  "The original's Bcc list was carried into this reply — pass bcc to replace it, or to or " +
+  'cc to reply to fewer people and turn the carry off.';
+
+/**
+ * The measured shape, with the addresses replaced by example.com ones: the account's own
+ * Sent copy of a message it sent to itself, carrying a six-entry Bcc list that includes the
+ * account's own address. Pressing Reply (or Reply All) on this in Fastmail produced To = the
+ * account's own address, no Cc, and the whole six-entry Bcc in the original's order.
+ */
+const BCC_SIX = [
+  { email: 'me@example.com' },
+  { name: 'Ada Byron', email: 'ada@example.com' },
+  { email: 'bo@example.com' },
+  { email: 'cleo@example.com' },
+  { name: 'Dev Rao', email: 'dev@example.com' },
+  { email: 'eve@example.com' },
+];
+const BCC_SIX_FORMATTED = [
+  'me@example.com',
+  'Ada Byron <ada@example.com>',
+  'bo@example.com',
+  'cleo@example.com',
+  'Dev Rao <dev@example.com>',
+  'eve@example.com',
+];
+
+/** The measured original: From self, To self, Bcc the six. */
+function selfBccOriginal(over: any = {}) {
+  return makeOriginal({
+    from: [{ name: 'Test User', email: 'me@example.com' }],
+    to: [{ email: 'me@example.com' }],
+    bcc: BCC_SIX,
+    ...over,
+  });
+}
+
+describe("draft_email — mode:'reply' carries the original's Bcc", () => {
+  it('reproduces the measured shape: to self, no cc, the whole Bcc list in order', async () => {
+    const { client, calls } = plainClient(selfBccOriginal());
+    const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.to, ['Test User <me@example.com>']);
+    assert.equal('cc' in calls.draft, false);
+    assert.deepEqual(calls.draft.bcc, BCC_SIX_FORMATTED);
+    // The account's own address is in `to` AND in `bcc`, because that is what the client
+    // stores: nothing is removed for being self, nor for already being addressed.
+    assert.deepEqual(r.bcc, BCC_SIX_FORMATTED);
+    assert.equal('cc' in r, false);
+    assert.ok(r.notes?.includes(NOTE_BCC_CARRIED), `notes were ${JSON.stringify(r.notes)}`);
+  });
+
+  it('keeps display names and never re-splits a name carrying a comma', async () => {
+    // The carry is built with formatAddress and never through coerceStringArray, for the
+    // same reason the `to` default and the cc carry are (#31).
+    const { client, calls } = plainClient(selfBccOriginal({
+      bcc: [{ name: 'Fox, Dana', email: 'dana@example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.bcc, ['Fox, Dana <dana@example.com>']);
+  });
+
+  it('deduplicates by address case-insensitively, keeping the first spelling', async () => {
+    const { client, calls } = plainClient(selfBccOriginal({
+      bcc: [
+        { name: 'Dana Fox', email: 'dana@example.com' },
+        { name: 'D. Fox', email: 'DANA@Example.com' },
+        { email: 'raj@example.com' },
+      ],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.bcc, ['Dana Fox <dana@example.com>', 'raj@example.com']);
+  });
+
+  it('leaves an address in both the cc and the bcc when the original had it in both', async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      from: [{ email: 'jon@example.com' }],
+      to: [{ email: 'me@example.com' }],
+      cc: [{ email: 'raj@example.com' }],
+      bcc: [{ email: 'raj@example.com' }, { email: 'ada@example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.cc, ['raj@example.com']);
+    assert.deepEqual(calls.draft.bcc, ['raj@example.com', 'ada@example.com']);
+  });
+
+  it('skips a Bcc entry that names no address at all', async () => {
+    const { client, calls } = plainClient(selfBccOriginal({
+      bcc: [null, { name: 'Undisclosed recipients' }, { email: '' }, { email: 'ada@example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.bcc, ['ada@example.com']);
+  });
+
+  it('carries nothing, and says nothing, when the original has no Bcc', async () => {
+    const { client, calls } = plainClient(makeOriginal());
+    const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.equal('bcc' in calls.draft, false);
+    assert.equal('bcc' in r, false);
+    assert.equal(r.notes?.includes(NOTE_BCC_CARRIED) ?? false, false);
+  });
+
+  it("a caller's to turns the Bcc carry off along with the cc carry", async () => {
+    const { client, calls } = plainClient(selfBccOriginal());
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'x', to: ['alice@x.example'] },
+      client,
+    );
+    assert.deepEqual(calls.draft.to, ['alice@x.example']);
+    assert.equal('cc' in calls.draft, false);
+    assert.equal('bcc' in calls.draft, false);
+    assert.equal('bcc' in r, false);
+    assert.equal(r.notes?.includes(NOTE_BCC_CARRIED) ?? false, false);
+  });
+
+  it("a caller's cc turns the Bcc carry off, and the to default still runs", async () => {
+    const { client, calls } = plainClient(selfBccOriginal());
+    await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'x', cc: ['bob@x.example'] },
+      client,
+    );
+    assert.deepEqual(calls.draft.to, ['Test User <me@example.com>']);
+    assert.deepEqual(calls.draft.cc, ['bob@x.example']);
+    assert.equal('bcc' in calls.draft, false);
+  });
+
+  it("a caller's bcc replaces the carry and leaves the cc carry running", async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      from: [{ email: 'jon@example.com' }],
+      to: [{ email: 'me@example.com' }, { email: 'dana@example.com' }],
+      bcc: BCC_SIX,
+    }));
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'x', bcc: ['bob@x.example'] },
+      client,
+    );
+    assert.deepEqual(calls.draft.to, ['jon@example.com']);
+    assert.deepEqual(calls.draft.cc, ['dana@example.com']);
+    assert.deepEqual(calls.draft.bcc, ['bob@x.example']);
+    // The caller's own bcc is reported the same way the carried one is.
+    assert.deepEqual(r.bcc, ['bob@x.example']);
+    assert.equal(r.notes?.includes(NOTE_BCC_CARRIED) ?? false, false);
+  });
+
+  it('an empty caller bcc is no bcc at all: the carry still runs', async () => {
+    for (const empty of [[], '']) {
+      const { client, calls } = plainClient(selfBccOriginal());
+      const r = await compose(
+        { mode: 'reply', originalEmailId: 'o1', textBody: 'x', bcc: empty },
+        client,
+      );
+      assert.deepEqual(calls.draft.bcc, BCC_SIX_FORMATTED, `for bcc: ${JSON.stringify(empty)}`);
+      assert.deepEqual(r.bcc, BCC_SIX_FORMATTED);
+    }
+  });
+
+  it('never hands createDraft an empty bcc array, and never reports one', async () => {
+    // coerceRecipients returns [] for '' and for [], and [] is truthy — so a truthiness test
+    // put `bcc: []` into these params and, now that the result reports the field, into the
+    // result. It never reached a message: createDraft guards each recipient list on .length
+    // and drops an empty one. Both surfaces this handler owns, in every mode.
+    for (const empty of [[], '']) {
+      const newDraft = plainClient();
+      const rNew = await compose(
+        { mode: 'new', to: ['a@b.example'], subject: 'Hi', textBody: 'x', bcc: empty },
+        newDraft.client,
+      );
+      assert.equal('bcc' in newDraft.calls.draft, false, `for bcc: ${JSON.stringify(empty)}`);
+      assert.equal('bcc' in rNew, false);
+
+      const fwd = plainClient();
+      const rFwd = await compose(
+        {
+          mode: 'forward', originalEmailId: 'o1', to: ['a@b.example'],
+          textBody: 'x\n{{forward}}', bcc: empty,
+        },
+        fwd.client,
+      );
+      assert.equal('bcc' in fwd.calls.draft, false);
+      assert.equal('bcc' in rFwd, false);
+    }
+  });
+
+  it("a bcc of [''] is one blank recipient, not an omitted bcc — a documented limit", async () => {
+    // NOT the desired outcome, and pinned so it cannot change unnoticed. coerceStringArray
+    // filters empties only on the comma-split string path, so [''] survives trimAll with
+    // length 1: it reads as a caller bcc, suppresses the carry, and ships a blank entry. The
+    // bcc parameter's description therefore promises "treated as omitted" for [] and "" and
+    // for nothing else. Fixing it means filtering empty entries in coerceRecipients, which
+    // reaches to/cc/bcc/replyTo on draft_email AND edit_draft — a cross-cutting change, not
+    // this one's to make.
+    const { client, calls } = plainClient(selfBccOriginal());
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'x', bcc: [''] },
+      client,
+    );
+    assert.deepEqual(calls.draft.bcc, ['']);
+    assert.deepEqual(r.bcc, ['']);
+    assert.equal(r.notes?.includes(NOTE_BCC_CARRIED) ?? false, false);
+  });
+
+  it('does not carry a Bcc on a forward — the carry is a reply rule', async () => {
+    const { client, calls } = plainClient(selfBccOriginal());
+    await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'x\n{{forward}}' },
+      client,
+    );
+    assert.equal('bcc' in calls.draft, false);
   });
 });
 

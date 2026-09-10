@@ -460,6 +460,54 @@ What is still not authored, and so still not known:
 
 These are left explicit rather than blank.
 
+## Authoring: what a reply prefills as recipients
+
+Reading the client's pixels again, this time on the **mobile** app and against a compose form rather
+than an event popup: press a reply action on a message, then read the To, Cc and Bcc the form comes
+up with, against the headers of the message it was pressed on. Measured on **10 September 2026**, one
+message, both reply actions.
+
+**One method only, and why that settles it.** A compose form is not a stored object, so the
+`mailboxIds`-diff method at the top of this file has nothing to read here — there is no second
+reading to agree with the first. What the form displays IS the outcome being measured, in the way
+stored bytes are in the calendar section: the row records what the client put in the field, not an
+inference about what it would send.
+
+**The view.** The account's own **Sent** copy of a message it had sent to itself: `From` the
+account's own address, `To` the account's own address, `Cc` empty, and a **six-entry `Bcc` list that
+included the account's own address**. The message carried **no `Reply-To` header**. Addresses,
+display names and subject are deliberately not recorded here — the row is about the shape.
+
+| Action pressed | To | Cc | Bcc |
+| --- | --- | --- | --- |
+| Reply | the account's own address | empty | the original's six entries, whole, in the original's order, the account's own address among them |
+| Reply All | the account's own address | empty | the original's six entries, whole, in the original's order, the account's own address among them |
+
+Three things follow.
+
+- **A `Bcc` list is carried into the reply, not dropped.** This is the whole reason for the row: a
+  blind list is invisible in the composed draft, so nothing about the reply form says where the
+  message is going unless you already knew.
+- **Nothing is removed for being the account's own address, and nothing for already being
+  addressed.** The account's address was in the `To` the form prefilled *and* in the `Bcc` it
+  prefilled, from a single press. That is the opposite of the rule the client applies to `Cc`, where
+  the account's own identities are dropped.
+- **Reply and Reply All agree.** On this message the two actions produced identical forms, so the
+  Bcc carry is not a property of the "all" variant.
+
+**Unmeasured.**
+
+- **`Reply-To`.** The message carried none, so what a `Reply-To` header does to this shape is
+  `unmeasured`. Nothing here says whether it changes the `Bcc` carry at all.
+- **A message with a `Bcc` header that the account RECEIVED.** Not measured, and not readily
+  measurable: a submitting server strips `Bcc` before delivery, which is *why* the header's presence
+  marks the account's own copy of something it sent. That reasoning is derived, not observed here.
+- **An IMPORTED message carrying a `Bcc` header** — one moved into the account by a migration or an
+  upload rather than written by this account's own submission. Whether the client treats it the same
+  way is `unmeasured`.
+- **The web client.** This row is the mobile app only. Whether the web client prefills the same way
+  was not looked at.
+
 ## Extending this file
 
 Add a row by **measuring the view**, never by inferring from a role's name. A role that has not been

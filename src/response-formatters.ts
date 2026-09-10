@@ -6,6 +6,7 @@ import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo,
 import { CALENDAR_OPEN_WINDOW_DAYS, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
 import type { CalendarEvent, CalendarEventCopy, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
+import type { ComposeDraftEmailResult } from './draft-email-handler.js';
 
 // The query-level summary that heads every list/search response, so the count wording
 // is written once and can't drift between the raw and simplified paths (#51).
@@ -119,6 +120,32 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
 // is about the call rather than part of its summary.
 export function formatInlineNotes(notes?: string[]): string {
   return notes?.length ? notes.map((note) => `\n${note}`).join('') : '';
+}
+
+// The draft_email result text.
+//
+// EVERY recipient field the draft actually stored is named here, because this text is the
+// only place the compose result reaches the caller: a field typed on the result and rendered
+// nowhere is a promised field with no trace. That matters most for `bcc` (#189) — a reply
+// carries the original's Bcc list, and a blind list is by definition invisible in the draft
+// the caller reads back, so if this line did not say so nothing would.
+//
+// The receipt goes out as JSON rather than prose because it is structured per-part data the
+// caller reads back, not a sentence — and it must not be able to claim an expansion that did
+// not happen, which is easier to see when it is the function's return value rendered
+// verbatim. Absent entirely when the call wrote no token at all.
+export function formatDraftEmailResult(result: ComposeDraftEmailResult): string {
+  const summary = [
+    `Draft saved successfully (Email ID: ${result.emailId}, mode: ${result.mode}). Use send_draft to transmit it.`,
+    result.subject ? `Subject: ${result.subject}` : null,
+    result.to?.length ? `To: ${result.to.join(', ')}` : null,
+    result.cc?.length ? `CC: ${result.cc.join(', ')}` : null,
+    result.bcc?.length ? `BCC: ${result.bcc.join(', ')}` : null,
+  ].filter(Boolean).join(' ') + formatInlineNotes(result.notes);
+
+  return result.tokens === undefined
+    ? summary
+    : `${summary}\n\nTokens: ${toolJson(result.tokens)}`;
 }
 
 // The edit_draft result text. An edit recreates the message (JMAP content is immutable),

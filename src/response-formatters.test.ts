@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -19,6 +19,66 @@ describe('formatInlineNotes', () => {
   // the subject and read as part of it.
   it('puts each note on a line of its own', () => {
     assert.equal(formatInlineNotes(['One.', 'Two.']), '\nOne.\nTwo.');
+  });
+});
+
+// ---------- formatDraftEmailResult ----------
+
+describe('formatDraftEmailResult', () => {
+  const SAVED = { emailId: 'draft-9', mode: 'reply' as const };
+
+  it('reports the id, the mode and how to transmit it, with nothing else to say', () => {
+    assert.equal(
+      formatDraftEmailResult(SAVED),
+      'Draft saved successfully (Email ID: draft-9, mode: reply). Use send_draft to transmit it.',
+    );
+  });
+
+  // The stored bcc is the whole point of rendering it (#189): a reply carries the original's
+  // Bcc list, and a blind list is invisible in the draft the caller reads back — so a BCC
+  // line here is the only thing that tells it where the message is going.
+  //
+  // Every list is given TWO entries, so the ", " that separates them is pinned on all three
+  // fields rather than on the two that happened to have a second address.
+  it('names every recipient field the draft actually stored, BCC included', () => {
+    const text = formatDraftEmailResult({
+      ...SAVED,
+      subject: 'Re: Project update',
+      to: ['Test User <me@example.com>', 'alice@example.com'],
+      cc: ['dana@example.com', 'raj@example.com'],
+      bcc: ['ada@example.com', 'bo@example.com'],
+    });
+    assert.equal(
+      text,
+      'Draft saved successfully (Email ID: draft-9, mode: reply). Use send_draft to transmit it. '
+      + 'Subject: Re: Project update To: Test User <me@example.com>, alice@example.com '
+      + 'CC: dana@example.com, raj@example.com BCC: ada@example.com, bo@example.com',
+    );
+  });
+
+  it('omits a recipient line the draft has nothing for, including an empty one', () => {
+    const text = formatDraftEmailResult({
+      ...SAVED, mode: 'new', to: ['a@b.example'], cc: [], bcc: [],
+    });
+    assert.match(text, /To: a@b\.example$/);
+    assert.doesNotMatch(text, /CC:/);
+    assert.doesNotMatch(text, /BCC:/);
+  });
+
+  it('appends the notes one to a line, after the recipients', () => {
+    const text = formatDraftEmailResult({
+      ...SAVED, to: ['a@b.example'], bcc: ['ada@example.com'], notes: ['One.', 'Two.'],
+    });
+    assert.match(text, /BCC: ada@example\.com\nOne\.\nTwo\.$/);
+  });
+
+  it('renders the token receipt as JSON below the summary, and omits it when absent', () => {
+    const withReceipt = formatDraftEmailResult({
+      ...SAVED, to: ['a@b.example'], tokens: { quote: { html: 'expanded' } } as any,
+    });
+    assert.match(withReceipt, /\n\nTokens: \{/);
+    assert.match(withReceipt, /"quote"/);
+    assert.doesNotMatch(formatDraftEmailResult({ ...SAVED, to: ['a@b.example'] }), /Tokens:/);
   });
 });
 
