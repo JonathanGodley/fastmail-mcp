@@ -301,9 +301,11 @@ from that fallback would put one identity's sign-off under another identity's ad
 signature is resolved against the written address instead, and a flagged edit that finds no
 signature there says so rather than expanding the token into nothing.
 
-The **display name** follows the same address, but resolves in the *opposite* order (#152):
-the name the stored draft already carries against that address wins first, and the verified
-identity that owns the address is only a fallback for a draft that carries none.
+A name the caller passes in the edit's own `from` wins outright (#161) — it is a passed field
+like any other, and an edit that states a name means it. Behind that arm the **display name**
+follows the same address, but the two remaining arms resolve in the *opposite* order (#152):
+the name the stored draft already carries against that address beats the verified identity
+that owns the address, which is only a fallback for a draft that carries none.
 `edit_draft`'s contract is that only passed fields change, so a caller who deliberately set a
 display name on their own address must not have it silently reverted to the identity's
 configured name by a later edit that never even touched `from` — a metadata-only edit (say,

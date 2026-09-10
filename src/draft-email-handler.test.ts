@@ -723,6 +723,54 @@ describe('draft_email — {{signature}} expands the FROM identity, not the first
     );
     assert.ok(r.notes!.some((n) => n.startsWith('Identity alias@example.com has a signature')));
   });
+
+  it('resolves the identity from the ADDRESS half of a named `from`', async () => {
+    // A `from` may carry a display name (#161). The address is what selects the identity, so
+    // a named `from` keeps its sign-off; passing the whole string to matchesIdentity would
+    // find nothing and store the draft unsigned with only a note to show for it.
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => IDENTITIES });
+    await compose(
+      {
+        mode: 'new', from: 'Alias User <alias@example.com>', to: ['sam@example.com'],
+        textBody: 'hi\n{{signature}}',
+      },
+      client,
+    );
+    assert.equal(calls.draft.textBody, 'hi\nALIAS SIGN-OFF');
+    // The RAW value goes on to createDraft, which is what puts the name in the From header.
+    assert.equal(calls.draft.from, 'Alias User <alias@example.com>');
+  });
+
+  it('names the ADDRESS, never the display name, in the not-placed warning', async () => {
+    const { client } = spyClient(makeOriginal(), { getIdentities: async () => IDENTITIES });
+    const r = await compose(
+      {
+        mode: 'new', from: 'Alias User <alias@example.com>', to: ['sam@example.com'],
+        textBody: 'hi',
+      },
+      client,
+    );
+    assert.ok(r.notes!.some((n) => n.startsWith('Identity alias@example.com has a signature')));
+    assert.equal(r.notes!.some((n) => n.includes('Alias User')), false);
+  });
+
+  it('says nothing about identities when the named `from` matches none', async () => {
+    // The note's `?? fromAddress` fallback is defensive, not a reachable branch here: the
+    // note only fires when an identity WITH a signature was resolved, and an unverified
+    // `from` resolves none — createDraft raises the real "not verified" refusal a moment
+    // later. Pinned so the silence is deliberate rather than incidental.
+    const { client } = spyClient(makeOriginal(), {
+      getIdentities: async () => [{ id: 'a', email: 'first@example.com', textSignature: 'S' }],
+    });
+    const r = await compose(
+      {
+        mode: 'new', from: 'Nobody <nobody@example.com>', to: ['sam@example.com'],
+        textBody: 'hi',
+      },
+      client,
+    );
+    assert.equal(r.notes?.some((n) => n.includes('has a signature')) ?? false, false);
+  });
 });
 
 // ---------------------------------------------------------------------------

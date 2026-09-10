@@ -3294,6 +3294,174 @@ describe('recipient name parsing', () => {
 
 });
 
+// ---------- sender name parsing ----------
+
+// `from` takes the same "Name <address>" form the recipient fields take (#161). The address
+// half is what every identity check sees; the name half is never validated, because nothing
+// on the platform reads it.
+//
+// A wildcard identity is the case this matters most for: one configured name stands behind
+// every address in the domain, so without this the only sender name available is that one.
+// Named locally rather than reusing WILDCARD_IDENTITY below so these assertions carry a
+// neutral display name.
+const NAME_PARSE_WILDCARD = { id: 'id-wild-np', name: 'Account Owner', email: '*@example.com', mayDelete: false };
+
+describe('sender name parsing — createDraft', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getIdentities', async () => [NAME_PARSE_WILDCARD]);
+  });
+
+  const stubCreate = (c: JmapClient) => stubRequests(c, async () => ({
+    methodResponses: [['Email/set', { created: { draft: { id: 'd-1' } } }, 'createDraft']],
+  }));
+
+  it('accepts "Name <address>" and writes the explicit name against the address', async () => {
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: 'Ops <ops@example.com>' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Ops', email: 'ops@example.com' }]);
+  });
+
+  it("falls back to the matched identity's name for a bare address", async () => {
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: 'ops@example.com' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Account Owner', email: 'ops@example.com' }]);
+  });
+
+  it('reads the name-less angle form as a bare address, and no longer refuses it', async () => {
+    // The accepted consequence of parsing before matching: `<addr>` used to reach
+    // matchesIdentity whole and be refused as unverified, because a wildcard identity
+    // deliberately matches a bare addr-spec only. It now parses to an address with no name,
+    // so it behaves exactly as that bare address does.
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: '<ops@example.com>' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Account Owner', email: 'ops@example.com' }]);
+  });
+
+  it('still refuses a named from whose ADDRESS matches no identity', async () => {
+    // The name half is never validated; the address half is checked exactly as before.
+    stubCreate(client);
+
+    await assert.rejects(
+      () => client.createDraft({ subject: 'Hi', from: 'Ops <ops@other.example>' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /not verified for sending/);
+        return true;
+      },
+    );
+  });
+
+  it('keeps a display name carrying a comma whole', async () => {
+    const makeReq = stubCreate(client);
+
+    await client.createDraft({ subject: 'Hi', from: 'Fox, Dana <dana@example.com>' });
+
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Fox, Dana', email: 'dana@example.com' }]);
+  });
+});
+
+describe('sender name parsing — updateDraft', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getIdentities', async () => [NAME_PARSE_WILDCARD]);
+  });
+
+  /** Serve `stored` to the Email/get, then accept the recreate. */
+  function stubEdit(c: JmapClient, stored: any) {
+    return stubRequests(c, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [stored] }, 'getEmail']] };
+      }
+      return {
+        methodResponses: [
+          ['Email/set', { created: { draft: { id: 'd-2' } }, destroyed: ['draft-1'] }, 'updateDraft'],
+        ],
+      };
+    });
+  }
+
+  const writtenFrom = (makeReq: RequestMock) =>
+    callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft.from;
+
+  it('writes an explicit name over the name the draft already stored', async () => {
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'Ops <ops@example.com>' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Ops', email: 'ops@example.com' }]);
+  });
+
+  it('passes BOTH identity lookups on a named from, against a different stored address', async () => {
+    // The selection lookup and the sending-identity lookup each match on the address half:
+    // the first would refuse the call as unverified, the second decides what is written.
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'old@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'Ops <ops@example.com>' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Ops', email: 'ops@example.com' }]);
+  });
+
+  it('leaves a stored name in place for a bare from (#152 is unchanged)', async () => {
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'ops@example.com' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Old Name', email: 'ops@example.com' }]);
+  });
+
+  it('cannot REMOVE a stored display name — a name-less from defers to it (documented limit)', async () => {
+    // `from` is not clearable, and a `from` carrying no name means "no name of my own here",
+    // not "clear the one that is stored". A name once set can be replaced, never removed by
+    // this tool; the edit_draft `from` description says so.
+    const stored = { ...EXISTING_DRAFT, from: [{ name: 'Old Name', email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: '<ops@example.com>' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Old Name', email: 'ops@example.com' }]);
+  });
+
+  it("falls back to the identity's name when the draft stores none", async () => {
+    const stored = { ...EXISTING_DRAFT, from: [{ email: 'ops@example.com' }] };
+    const makeReq = stubEdit(client, stored);
+
+    await client.updateDraft('draft-1', { from: 'ops@example.com' });
+
+    assert.deepEqual(writtenFrom(makeReq), [{ name: 'Account Owner', email: 'ops@example.com' }]);
+  });
+
+  it('still refuses a named from whose ADDRESS matches no identity', async () => {
+    stubEdit(client, EXISTING_DRAFT);
+
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { from: 'Ops <ops@other.example>' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /not verified for sending/);
+        return true;
+      },
+    );
+  });
+});
+
 // ---------- createDraft replyTo ----------
 
 describe('createDraft replyTo', () => {
@@ -3610,6 +3778,25 @@ describe('updateDraft display name resolution', () => {
     await client.updateDraft('draft-1', { subject: 'New Subject' });
 
     assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Test User', email: 'me@example.com' }]);
+  });
+
+  // A stored draft can carry no From ADDRESS at all, which is a different fixture from the
+  // no-NAME one above, and it arrives in two shapes: JMAP omits `from` entirely on a draft
+  // saved without a sender, and returns an empty list where another client wrote one. Both
+  // must fall through to the verified identity rather than throwing, so both optional links
+  // in `existingEmail.from?.[0]?.email` are load-bearing - dropping the first throws on the
+  // omitted shape, dropping the second throws on the empty-list shape. (Under a WILDCARD
+  // default identity this same case is refused instead, by the #160 guard beside it.)
+  it('falls back to the identity when the stored draft carries no From address at all', async () => {
+    for (const storedFrom of [undefined, []]) {
+      const noFrom = makeClient();
+      const makeReq = mockUpdate(noFrom, { ...EXISTING_DRAFT, from: storedFrom });
+
+      await noFrom.updateDraft('draft-1', { subject: 'New Subject' });
+
+      assert.deepEqual(draftFromCall(makeReq).from, [{ name: 'Test User', email: 'me@example.com' }],
+        `stored from: ${JSON.stringify(storedFrom)}`);
+    }
   });
 
   it('falls back to the identity\'s name when the stored name is empty/whitespace-only (#152)', async () => {

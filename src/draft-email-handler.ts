@@ -1,5 +1,5 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted, parseAddress } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
@@ -664,6 +664,16 @@ export async function composeDraftEmail(
   assertBodyInputs(a);
 
   const { from, subject: rawSubject, textBody, htmlBody } = a;
+  // `from` may carry a display name (#161), so this handler's two uses of it take the
+  // ADDRESS half. selectIdentity delegates to matchesIdentity, whose wildcard branch accepts
+  // a bare addr-spec and nothing else, so a named `from` would otherwise resolve to no
+  // identity here and lose its signature — while createDraft, which parses, accepted it. The
+  // not-placed note takes the same half, because a message about which identity is signing
+  // should name an address and not a display name.
+  //
+  // `from` itself stays RAW below: it is handed to createDraft whole, and that is what puts
+  // the caller's name into the stored From header.
+  const fromAddress: string | undefined = from ? parseAddress(from).email : from;
   const { to: toArg, cc, bcc, replyTo } = coerceRecipients(a);
   // Coerced before the contentless guard, so an attachment-only stash counts as content; a
   // lenient client may send a JSON-string array, so the guard tests the coerced specs.
@@ -724,7 +734,7 @@ export async function composeDraftEmail(
   // assertion can tell it from the empty list. A client returning no list must not throw the
   // compose away, which is what the test beside it pins.
   const identities = (await client.getIdentities()) ?? [];
-  const identity = selectIdentity(identities, from);
+  const identity = selectIdentity(identities, fromAddress);
   const signature = signatureOf(identity);
 
   // --- 6. The caller's embedded images, read PRE-expansion -----------------
@@ -1052,7 +1062,7 @@ export async function composeDraftEmail(
     // Presence only, on a SUPPLIED body, so a body-less reply and an attachment-only stash
     // are silent.
     ...(!signaturePlaced && signature && supplied.length > 0
-      ? [noteSignatureNotPlaced(identity?.email ?? from)]
+      ? [noteSignatureNotPlaced(identity?.email ?? fromAddress)]
       : []),
     ...(mode === 'reply' && !historyPlaced ? [NOTE_REPLY_UNQUOTED] : []),
     ...(bccCarried ? [NOTE_BCC_CARRIED] : []),
