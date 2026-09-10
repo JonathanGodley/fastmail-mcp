@@ -277,6 +277,36 @@ configured zone's local day, a date-only `DTEND` is already exclusive so a `DTST
 read as the full multi-day local span with no day added, and an all-day value is never converted to
 an instant. This server's create path already serialises date-only input the same way.
 
+**An all-day event is free by policy, and the editor is where that is measured.** Read off the
+Fastmail client's event editor on 10 September 2026: the editor offers a **busy/free control**, and
+its default follows the event's frame — **free** on an all-day event, **busy** on a timed one. That
+is the client's pixels rather than its bytes, the same method the "How this server's writes render
+in the client" subsection below uses, and it settles a question the byte fixtures could not settle
+on their own. All three all-day rows in the table above carry `TRANSP:TRANSPARENT` — a single day,
+a three-day span, a daily series — but three resources authored through one all-day UI are equally
+consistent with that UI merely happening to set the property; a control whose default is *keyed on
+the frame* makes it a deliberate policy. It also explains the absence on the other side: **no timed
+row carries `TRANSP` at all** because the timed default is busy and RFC 5545 §3.8.2.7 already reads
+an absent `TRANSP` as `OPAQUE`, so on that path the client has nothing to write. This is the
+measurement this server's create path was changed to match ([#195](https://github.com/JonathanGodley/fastmail-mcp/issues/195)):
+by **default** a date-only write emits `TRANSP:TRANSPARENT` and a timed write emits nothing.
+
+The measurement bears on `create_calendar_event`, which picks that default, and on nothing else.
+Either tool's `transparency` parameter overrides it outright ([#194](https://github.com/JonathanGodley/fastmail-mcp/issues/194)),
+and `update_calendar_event` writes `TRANSP` only when the caller passes `transparency` or clears
+it, so how the client spells busy — as `TRANSP:OPAQUE` or as no property at all, both of which
+§3.8.2.7 reads the same way — never has to be told apart on the update path.
+
+**Still unmeasured about the client, as of 10 September 2026: what the editor writes when the
+busy/free control is moved OFF its default**, in either direction — a timed event set to free, and
+an all-day event set to busy. The all-day case is the sharper one, because it is the only way to
+find out whether the client spells busy as `TRANSP:OPAQUE` or by removing the property, and no
+fixture in the table above was authored that way. This is a gap in what is known about the Fastmail
+client, not an open question in this server: nothing here depends on the answer, since an update
+touches `TRANSP` only when told to and both spellings read identically per §3.8.2.7. Settle it the
+same way the rest of this file is settled — author one of each in the client and read the resource
+off the wire.
+
 **Storage serialisation varies by path, within one account.** Among the six, some resources carry
 `PRODID:-//Fastmail/2020.5/EN` and others `PRODID:-//CyrusIMAP.org/Cyrus …//EN`, and the end of an
 event is spelled sometimes as `DURATION` and sometimes as `DTEND`. Both end-shapes are real on the

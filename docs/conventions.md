@@ -2301,6 +2301,19 @@ still generates every occurrence and still sends every byte; the cap decides wha
 parses into events and shows. That is a real limit, and it is the reason the window bound above
 matters more than this one - the window is the only thing that shrinks the request.
 
+### Free/busy crosses four tools with one vocabulary and one rule
+
+A caller always says `busy` or `free`; the record always stores `TRANSP:OPAQUE`/`TRANSP:TRANSPARENT`,
+and that spelling never crosses the boundary in either direction — not as an accepted parameter
+value, not as a reported one ([#194](https://github.com/JonathanGodley/fastmail-mcp/issues/194)).
+The two read tools split on volume rather than on meaning: `list_calendar_events` carries
+`transparency` only when the event is not busy, `get_calendar_event` states it on every event, and
+either may report a token the spec does not define, verbatim. On the write side **create decides
+and update never does**: `create_calendar_event` picks a default from the event's frame — all-day
+free, timed busy ([#195](https://github.com/JonathanGodley/fastmail-mcp/issues/195)) — while
+`update_calendar_event` touches `TRANSP` only when the caller passes `transparency` or names it in
+`clearFields`, including across a change of frame.
+
 ## iCalendar structure is decided on WHOLE CONTENT LINES, never with a `/m` regex
 
 Two different characters can end a line, and only one of them is a line break.

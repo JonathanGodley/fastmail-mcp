@@ -254,6 +254,16 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
 // advertised schema says what a client will see, which is why this reads tools/list off the
 // real process rather than asserting over the source.
 
+// The element constraint sits in `items`, which applies to array instances only — so it
+// reads the same off a type union (property-level `items`) as off the array branch of a
+// `oneOf`. Module-scoped because two blocks below read an array parameter's element enum,
+// and both want the same indifference to which shape the declaration is written in.
+function arrayItems(declared: any): any {
+  if (declared.items) return declared.items;
+  const branch = (declared.oneOf ?? declared.anyOf ?? []).find((b: any) => b.type === 'array');
+  return branch?.items;
+}
+
 describe('edit_draft advertises the stringified-array form its handler accepts', () => {
   before(() => assertDistIsCurrent());
 
@@ -292,15 +302,6 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
     return [...out].sort();
   }
 
-  // The element constraint sits in `items`, which applies to array instances only — so it
-  // reads the same off a type union (property-level `items`) as off the array branch of a
-  // `oneOf`.
-  function arrayItems(declared: any): any {
-    if (declared.items) return declared.items;
-    const branch = (declared.oneOf ?? declared.anyOf ?? []).find((b: any) => b.type === 'array');
-    return branch?.items;
-  }
-
   // Both parameters run through coerceStringArray in edit-draft-handler.ts, and
   // edit-draft-handler.test.ts pins that the handler reads `clearFields: 'cc'` and
   // `removeAttachments: 'blob-9'`.
@@ -325,6 +326,68 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
     const schema = await toolSchema('edit_draft');
     assert.deepEqual(arrayItems(schema.properties.clearFields).enum, [
       'to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId',
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b-bis. The calendar tools advertise `transparency` (#194)
+// ---------------------------------------------------------------------------
+//
+// Same reason as the block above: only the ADVERTISED schema says what a client will see. A
+// parameter the handler threads but the schema never declares is unreachable through a
+// validating client — the call is rejected before any handler runs — and the caldav-client
+// tests, which call the client methods directly, cannot tell that apart from a wired-up
+// parameter. This is the one assertion that spans the whole path: the `TOOLS` literal in
+// index.ts, the build, and the real process's tools/list response.
+
+describe('the calendar write tools advertise transparency with its closed value set', () => {
+  before(() => assertDistIsCurrent());
+
+  // Both tools off ONE listing: the fact under test is that each declares the parameter, and
+  // spawning the server twice to learn it would double the cost for nothing.
+  async function listedTools(): Promise<any[]> {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+    }
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+
+    const client = createClient({ env });
+    try {
+      await client.init();
+      const result: any = await client.list();
+      return result.tools;
+    } finally {
+      client.close();
+    }
+  }
+
+  it('declares transparency as a string enumerating exactly busy and free, on both tools', async () => {
+    const tools = await listedTools();
+    // Enumerated, not sampled: the claim is about the pair of tools that write an event, and
+    // a parameter on only one of them is the failure this exists to catch.
+    for (const name of ['create_calendar_event', 'update_calendar_event']) {
+      const tool = tools.find((t: any) => t.name === name);
+      assert.ok(tool, `${name} is not in tools/list`);
+      const declared = tool.inputSchema.properties.transparency;
+      assert.ok(declared, `${name} does not advertise transparency, so a validating client cannot send it`);
+      assert.equal(declared.type, 'string', name);
+      // The caller vocabulary, and nothing else. `OPAQUE`/`TRANSPARENT` are the iCalendar
+      // spellings and stay inside caldav-client.ts; finding either here would mean the storage
+      // format had reached the tool surface.
+      assert.deepEqual(declared.enum, ['busy', 'free'], name);
+    }
+  });
+
+  it('lists transparency among the clearable fields on update_calendar_event', async () => {
+    // The other half of the parameter: `clearFields: ["transparency"]` removes the property.
+    // The enum is what turns a bad field name into an error naming the valid ones, so a
+    // missing entry here refuses a documented call rather than silently ignoring it.
+    const tools = await listedTools();
+    const update = tools.find((t: any) => t.name === 'update_calendar_event');
+    assert.deepEqual(arrayItems(update.inputSchema.properties.clearFields).enum, [
+      'description', 'location', 'transparency',
     ]);
   });
 });

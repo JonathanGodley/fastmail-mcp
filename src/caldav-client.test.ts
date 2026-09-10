@@ -5187,6 +5187,586 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   });
 });
 
+// TRANSP ON THE WRITE PATHS: create picks a default, update never does (#195).
+//
+// An all-day event created here must not block the account's free/busy for the whole day. RFC
+// 5545 §3.8.2.7 defaults an absent TRANSP to OPAQUE, so writing nothing means "busy" — and the
+// Fastmail client writes TRANSP:TRANSPARENT on every all-day event it authors, which its event
+// editor confirms is a deliberate default rather than an artifact (the busy/free control
+// defaults to free on an all-day event and to busy on a timed one). A timed event therefore
+// needs no property at all: the RFC default is already what the client means.
+//
+// THE UPDATE PATH TAKES NO SUCH DECISION, and the tests below say so from every direction it
+// could be reached: converting a timed event to all-day, editing an all-day event that carries
+// no TRANSP, editing one that carries TRANSP:OPAQUE, and converting an all-day event back to
+// timed hours all leave the property exactly as stored. The reason is the same §3.8.2.7 that
+// motivates create's default, read the other way round: absent and OPAQUE are two spellings of
+// ONE state, so an event with no TRANSP is not silent about free/busy — it says busy. There is
+// no gap for an update to fill, and writing TRANSPARENT over it because the caller edited the
+// dates would overwrite a value rather than supply a missing one. Create is different only
+// because it is choosing an initial value where no prior one exists. A caller who wants the
+// value changed says so with `transparency` (#194), which the suite after this one covers.
+describe('TRANSP: create writes an all-day event free, update leaves it alone (#195)', () => {
+  function createClient() {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function updateClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function storedEvent(uid: string, lines: string[]): string {
+    return [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      `UID:${uid}`, 'DTSTAMP:20260301T000000Z',
+      ...lines, 'SUMMARY:Stored',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  function writtenBy(mockDAVClient: ReturnType<typeof updateClient>['mockDAVClient']): string {
+    return callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+  }
+
+  it('create writes TRANSP:TRANSPARENT on an all-day event', async () => {
+    const { client, mockDAVClient } = createClient();
+    await client.createCalendarEvent({
+      calendarId: 'Personal', title: 'Leave', start: '2026-10-03', end: '2026-10-06',
+    });
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+    assert.ok(ical.includes('DTSTART;VALUE=DATE:20261003'), ical);
+    assert.ok(ical.includes('\r\nTRANSP:TRANSPARENT\r\n'), ical);
+  });
+
+  it('create writes no TRANSP at all on a timed event', async () => {
+    const { client, mockDAVClient } = createClient();
+    await client.createCalendarEvent({
+      calendarId: 'Personal', title: 'Standup',
+      start: '2026-10-03T09:00:00Z', end: '2026-10-03T09:30:00Z',
+    });
+    const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+    assert.ok(ical.includes('DTSTART:20261003T090000Z'), ical);
+    assert.ok(!ical.includes('TRANSP'), `a timed event must rely on the RFC default:\n${ical}`);
+  });
+
+  it('an update converting a timed event to all-day adds no TRANSP', async () => {
+    // The frame flip, which is the case an update is most tempted to read as a request about
+    // free/busy. It is not one: the caller asked for different dates and said nothing about
+    // availability, and the event already says busy by carrying no TRANSP.
+    const timed = storedEvent('flip@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']);
+    const { client, mockDAVClient } = updateClient(timed);
+    await client.updateCalendarEvent('flip@fm', { start: '2026-10-03', end: '2026-10-06' });
+    const written = writtenBy(mockDAVClient);
+    assert.ok(written.includes('DTSTART;VALUE=DATE:20261003'), written);
+    assert.ok(!written.includes('TRANSP'), `an update must not decide free/busy for the caller:\n${written}`);
+  });
+
+  it('an update leaves an all-day event that carries no TRANSP carrying none', async () => {
+    // Same rule, no frame change involved: an all-day event with no TRANSP says busy, and
+    // editing one of its dates is not an occasion to say something else about it.
+    const allDay = storedEvent('bare@fm', ['DTSTART;VALUE=DATE:20261003', 'DTEND;VALUE=DATE:20261006']);
+    const { client, mockDAVClient } = updateClient(allDay);
+    await client.updateCalendarEvent('bare@fm', { start: '2026-10-04' });
+    const written = writtenBy(mockDAVClient);
+    assert.ok(written.includes('DTSTART;VALUE=DATE:20261004'), written);
+    assert.ok(!written.includes('TRANSP'), written);
+  });
+
+  it('an update leaves a stored TRANSP:OPAQUE on an all-day event alone', async () => {
+    // Someone marked this all-day event busy in a client that stores the property explicitly.
+    // Writing TRANSPARENT over it would reverse their choice — and so would writing it over the
+    // event in the test above, which says the same thing in the other legal spelling. This test
+    // now holds for the general reason rather than because of a guard keyed on the absence.
+    const busyAllDay = storedEvent('busy@fm', [
+      'DTSTART;VALUE=DATE:20261003', 'DTEND;VALUE=DATE:20261006', 'TRANSP:OPAQUE',
+    ]);
+    const { client, mockDAVClient } = updateClient(busyAllDay);
+    await client.updateCalendarEvent('busy@fm', { start: '2026-10-04', end: '2026-10-07' });
+    const written = writtenBy(mockDAVClient);
+    assert.ok(written.includes('TRANSP:OPAQUE'), written);
+    assert.ok(!written.includes('TRANSP:TRANSPARENT'), written);
+  });
+
+  it('an update that leaves a timed event timed adds nothing', async () => {
+    const timed = storedEvent('timed@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']);
+    const { client, mockDAVClient } = updateClient(timed);
+    await client.updateCalendarEvent('timed@fm', { start: '2026-10-03T11:00:00Z', end: '2026-10-03T12:00:00Z' });
+    const written = writtenBy(mockDAVClient);
+    assert.ok(written.includes('DTSTART:20261003T110000Z'), written);
+    assert.ok(!written.includes('TRANSP'), `a timed event must rely on the RFC default:\n${written}`);
+  });
+
+  it('an update converting an all-day event to timed leaves its TRANSP:TRANSPARENT in place', async () => {
+    // The reverse flip, and no longer a special case: this is the same rule as the three tests
+    // above, which is the point of pinning it. The converted event is a real meeting that still
+    // shows this account as free, and that is the caller's to change — `transparency: 'busy'`
+    // in the same call as the new hours (#194) does it, and the transparency suite below pins
+    // that. What an update must not do is decide it for them off the back of a date edit.
+    const allDay = storedEvent('back@fm', [
+      'DTSTART;VALUE=DATE:20261003', 'DTEND;VALUE=DATE:20261006', 'TRANSP:TRANSPARENT',
+    ]);
+    const { client, mockDAVClient } = updateClient(allDay);
+    await client.updateCalendarEvent('back@fm', { start: '2026-10-03T09:00:00Z', end: '2026-10-03T10:00:00Z' });
+    const written = writtenBy(mockDAVClient);
+    assert.ok(written.includes('DTSTART:20261003T090000Z'), written);
+    assert.ok(written.includes('TRANSP:TRANSPARENT'), written);
+  });
+});
+
+// The caller-facing side of the same property (#194): a `transparency` parameter on create and
+// update, `'transparency'` in `clearFields`, and the value on the read side.
+//
+// TWO VOCABULARIES, ONE BOUNDARY. A caller says `busy`/`free`; the record stores
+// `TRANSP:OPAQUE`/`TRANSP:TRANSPARENT`. So the write assertions below read the iCalendar
+// spelling out of the payload and the parameter and response assertions read the caller
+// spelling — a test asserting `'OPAQUE'` on a response field, or `transparency: 'opaque'` as an
+// accepted argument, would be asserting the boundary had leaked.
+//
+// Precedence is the point of most of this: on create an explicit value overrides the frame's
+// default on either frame, and on update `transparency` and `clearFields` are the ONLY things
+// that write or remove the property — the suite above pins what an update does when neither is
+// passed, which is nothing at all.
+describe('transparency: busy and free as caller values (#194)', () => {
+  function createClient() {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function updateClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function readClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+    });
+    (client as any).client = mockDAVClient;
+    return client;
+  }
+
+  function storedEvent(uid: string, lines: string[]): string {
+    return [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      `UID:${uid}`, 'DTSTAMP:20260301T000000Z',
+      ...lines, 'SUMMARY:Stored',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  function createdBy(mockDAVClient: ReturnType<typeof createClient>['mockDAVClient']): string {
+    return callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+  }
+
+  function writtenBy(mockDAVClient: ReturnType<typeof updateClient>['mockDAVClient']): string {
+    return callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+  }
+
+  describe('create', () => {
+    it('writes TRANSP:OPAQUE for transparency "busy" on an all-day event, overriding the default', async () => {
+      // The whole reason this parameter exists: a day-long event that genuinely should block
+      // the calendar. Without it, create's all-day default would write TRANSPARENT here.
+      const { client, mockDAVClient } = createClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'Offsite', start: '2026-10-03', end: '2026-10-04',
+        transparency: 'busy',
+      });
+      const ical = createdBy(mockDAVClient);
+      assert.ok(ical.includes('DTSTART;VALUE=DATE:20261003'), ical);
+      assert.ok(ical.includes('\r\nTRANSP:OPAQUE\r\n'), ical);
+      assert.ok(!ical.includes('TRANSPARENT'), `the default must not also be written:\n${ical}`);
+    });
+
+    it('writes TRANSP:TRANSPARENT for transparency "free" on a timed event', async () => {
+      // The other direction, and the one that has no default to override: a timed event
+      // normally carries no TRANSP at all, so this is the only way to make one transparent.
+      const { client, mockDAVClient } = createClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'Focus block',
+        start: '2026-10-03T09:00:00Z', end: '2026-10-03T11:00:00Z',
+        transparency: 'free',
+      });
+      const ical = createdBy(mockDAVClient);
+      assert.ok(ical.includes('DTSTART:20261003T090000Z'), ical);
+      assert.ok(ical.includes('\r\nTRANSP:TRANSPARENT\r\n'), ical);
+    });
+
+    it('accepts a value with different case and surrounding whitespace', async () => {
+      const { client, mockDAVClient } = createClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'Standup',
+        start: '2026-10-03T09:00:00Z', end: '2026-10-03T09:30:00Z',
+        transparency: '  FREE ',
+      });
+      assert.ok(createdBy(mockDAVClient).includes('\r\nTRANSP:TRANSPARENT\r\n'), createdBy(mockDAVClient));
+    });
+
+    it('leaves create\'s frame defaults exactly as they were when transparency is omitted', async () => {
+      // The no-regression half: adding a parameter must not change what a call that does not
+      // use it writes. All-day still free, timed still nothing at all.
+      const { client: c1, mockDAVClient: m1 } = createClient();
+      await c1.createCalendarEvent({ calendarId: 'Personal', title: 'Leave', start: '2026-10-03', end: '2026-10-06' });
+      assert.ok(createdBy(m1).includes('\r\nTRANSP:TRANSPARENT\r\n'), createdBy(m1));
+
+      const { client: c2, mockDAVClient: m2 } = createClient();
+      await c2.createCalendarEvent({
+        calendarId: 'Personal', title: 'Standup',
+        start: '2026-10-03T09:00:00Z', end: '2026-10-03T09:30:00Z',
+      });
+      assert.ok(!createdBy(m2).includes('TRANSP'), createdBy(m2));
+    });
+
+    it('refuses the iCalendar spellings, naming the two values it does accept', async () => {
+      // `opaque`/`transparent` are deliberately NOT aliases — see normalizeTransparency. This
+      // asserts the refusal reads as a vocabulary error rather than a typo, because the value
+      // is a real iCalendar token and a caller who reached for it will otherwise retry it.
+      const { client, mockDAVClient } = createClient();
+      await assert.rejects(
+        () => client.createCalendarEvent({
+          calendarId: 'Personal', title: 'Leave', start: '2026-10-03', end: '2026-10-06',
+          transparency: 'TRANSPARENT',
+        }),
+        (err: unknown) => {
+          assert.ok(err instanceof InvalidInputError, String(err));
+          assert.match(err.message, /transparency must be "busy" or "free"/);
+          assert.match(err.message, /\(got: "TRANSPARENT"\)/);
+          // And it says what the two values MEAN. A caller that reached for the iCalendar
+          // spelling is guessing at this property; naming the accepted values without saying
+          // which one it wanted would send it round again.
+          assert.match(err.message, /busy blocks .* free leaves you showing as available/);
+          return true;
+        },
+      );
+      // And nothing was written: the refusal happens before the payload is assembled.
+      assert.equal(mockDAVClient.createCalendarObject.mock.callCount(), 0);
+    });
+
+    it('refuses a non-string value by name rather than throwing on it', async () => {
+      // The inputSchema declares this a string, but a lenient client can send anything and
+      // nothing between the socket and here narrows the type. Without the typeof guard the
+      // `.trim()` would raise a TypeError, which reaches the caller as an internal error
+      // naming no parameter instead of the refusal that tells it what to send.
+      const { client } = createClient();
+      await assert.rejects(
+        () => client.createCalendarEvent({
+          calendarId: 'Personal', title: 'Leave', start: '2026-10-03', end: '2026-10-06',
+          transparency: 42 as unknown as string,
+        }),
+        (err: unknown) => {
+          assert.ok(err instanceof InvalidInputError, String(err));
+          assert.match(err.message, /transparency must be "busy" or "free"/);
+          return true;
+        },
+      );
+    });
+
+    it('bounds and neutralises the refused value rather than interpolating it raw', async () => {
+      // #190's rule, applied to the newest untrusted value in this file. A paragraph separator
+      // would otherwise split the refusal into what reads as a second sentence from the server,
+      // and an unbounded value would let the caller choose the length of the error.
+      const hostile = `x y${'z'.repeat(400)}`;
+      const { client } = createClient();
+      await assert.rejects(
+        () => client.createCalendarEvent({
+          calendarId: 'Personal', title: 'Leave', start: '2026-10-03', end: '2026-10-06',
+          transparency: hostile,
+        }),
+        (err: unknown) => {
+          assert.ok(err instanceof InvalidInputError, String(err));
+          assert.ok(!err.message.includes(' '), err.message);
+          assert.ok(err.message.includes('…'), `the echo must be bounded:\n${err.message}`);
+          assert.ok(err.message.length < hostile.length, err.message);
+          return true;
+        },
+      );
+    });
+  });
+
+  describe('update', () => {
+    it('replaces a stored TRANSP with the caller\'s value', async () => {
+      const busy = storedEvent('set@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:OPAQUE']);
+      const { client, mockDAVClient } = updateClient(busy);
+      await client.updateCalendarEvent('set@fm', { transparency: 'free' });
+      const written = writtenBy(mockDAVClient);
+      assert.ok(written.includes('TRANSP:TRANSPARENT'), written);
+      assert.ok(!written.includes('TRANSP:OPAQUE'), `the old value must be replaced, not appended:\n${written}`);
+    });
+
+    it('adds TRANSP to an event that had none', async () => {
+      const bare = storedEvent('bare@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']);
+      const { client, mockDAVClient } = updateClient(bare);
+      await client.updateCalendarEvent('bare@fm', { transparency: 'free' });
+      assert.ok(writtenBy(mockDAVClient).includes('TRANSP:TRANSPARENT'), writtenBy(mockDAVClient));
+    });
+
+    it('lets transparency "busy" fix an all-day event being converted to timed hours', async () => {
+      // The caller-facing remedy for the case the suite above pins: an update leaves TRANSPARENT
+      // alone when a day becomes a meeting, and this is how a caller says otherwise — in the
+      // same call as the new hours, so the converted event is never briefly wrong.
+      const allDay = storedEvent('flip@fm', [
+        'DTSTART;VALUE=DATE:20261003', 'DTEND;VALUE=DATE:20261004', 'TRANSP:TRANSPARENT',
+      ]);
+      const { client, mockDAVClient } = updateClient(allDay);
+      await client.updateCalendarEvent('flip@fm', {
+        start: '2026-10-03T09:00:00Z', end: '2026-10-03T10:00:00Z', transparency: 'busy',
+      });
+      const written = writtenBy(mockDAVClient);
+      assert.ok(written.includes('DTSTART:20261003T090000Z'), written);
+      assert.ok(written.includes('TRANSP:OPAQUE'), written);
+      assert.ok(!written.includes('TRANSP:TRANSPARENT'), written);
+    });
+
+    it('writes the caller\'s value on a call that also converts the event to all-day', async () => {
+      // The two halves of this call are independent: the dates make the event all-day, and the
+      // transparency is written because it was asked for. Neither the frame nor create's
+      // all-day default has any say here — the suite above pins that an update on its own would
+      // have left the property absent.
+      const timed = storedEvent('both@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']);
+      const { client, mockDAVClient } = updateClient(timed);
+      await client.updateCalendarEvent('both@fm', {
+        start: '2026-10-03', end: '2026-10-04', transparency: 'busy',
+      });
+      const written = writtenBy(mockDAVClient);
+      assert.ok(written.includes('DTSTART;VALUE=DATE:20261003'), written);
+      assert.ok(written.includes('TRANSP:OPAQUE'), written);
+      assert.ok(!written.includes('TRANSPARENT'), written);
+    });
+
+    it('removes TRANSP for clearFields ["transparency"]', async () => {
+      const free = storedEvent('clr@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:TRANSPARENT']);
+      const { client, mockDAVClient } = updateClient(free);
+      await client.updateCalendarEvent('clr@fm', { clearFields: ['transparency'] });
+      assert.ok(!writtenBy(mockDAVClient).includes('TRANSP'), writtenBy(mockDAVClient));
+    });
+
+    it('keeps a cleared TRANSP cleared when the same call also writes date-only dates', async () => {
+      // A clear and a frame change in one call. The frame change contributes nothing to the
+      // property either way, so the cleared event comes back saying nothing about free/busy —
+      // which reads as busy, and is the state the caller asked for.
+      const free = storedEvent('trap@fm', [
+        'DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:TRANSPARENT',
+      ]);
+      const { client, mockDAVClient } = updateClient(free);
+      await client.updateCalendarEvent('trap@fm', {
+        start: '2026-10-03', end: '2026-10-04', clearFields: ['transparency'],
+      });
+      const written = writtenBy(mockDAVClient);
+      assert.ok(written.includes('DTSTART;VALUE=DATE:20261003'), written);
+      assert.ok(!written.includes('TRANSP'), `a cleared property must stay cleared:\n${written}`);
+    });
+
+    it('clears description without touching transparency', async () => {
+      // The clear loop is shared, and this commit widened its field map. This pins the entry
+      // that was already there against the one being added beside it.
+      const full = storedEvent('desc@fm', [
+        'DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'DESCRIPTION:Notes', 'TRANSP:TRANSPARENT',
+      ]);
+      const { client, mockDAVClient } = updateClient(full);
+      await client.updateCalendarEvent('desc@fm', { clearFields: ['description'] });
+      const written = writtenBy(mockDAVClient);
+      assert.ok(!written.includes('DESCRIPTION'), written);
+      assert.ok(written.includes('TRANSP:TRANSPARENT'), written);
+    });
+
+    it('rejects setting and clearing transparency in one call', async () => {
+      const free = storedEvent('conf@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:TRANSPARENT']);
+      const { client, mockDAVClient } = updateClient(free);
+      await assert.rejects(
+        () => client.updateCalendarEvent('conf@fm', { transparency: 'busy', clearFields: ['transparency'] }),
+        /cannot both set and clear transparency/,
+      );
+      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0);
+    });
+
+    it('names transparency among the clearable fields when an unclearable one is asked for', async () => {
+      // Pins the CLEARABLE_FIELDS set itself: the message enumerates it, so a field dropped
+      // from the set turns this red rather than only showing up as a missing capability.
+      const free = storedEvent('bad@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']);
+      const { client } = updateClient(free);
+      await assert.rejects(
+        () => client.updateCalendarEvent('bad@fm', { clearFields: ['title'] }),
+        /clearable fields are: description, location, transparency/,
+      );
+    });
+
+    it('refuses an unrecognised value before writing anything', async () => {
+      const free = storedEvent('badval@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']);
+      const { client, mockDAVClient } = updateClient(free);
+      await assert.rejects(
+        () => client.updateCalendarEvent('badval@fm', { transparency: 'maybe' }),
+        /transparency must be "busy" or "free" \(got: "maybe"\)/,
+      );
+      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0);
+    });
+  });
+
+  describe('read side', () => {
+    it('get_calendar_event reports "busy" for an event with no TRANSP, derived from the RFC default', async () => {
+      // The distinction this call exists to make: the record says nothing, and saying nothing
+      // means OPAQUE per RFC 5545 §3.8.2.7. Reporting the field is what lets a caller tell that
+      // apart from "this server did not look".
+      const bare = storedEvent('bare@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']);
+      const { event } = await readClient(bare).getCalendarEventById('bare@fm');
+      assert.equal(event.transparency, 'busy');
+    });
+
+    it('get_calendar_event reports the caller vocabulary, never the iCalendar spelling', async () => {
+      const free = storedEvent('free@fm', ['DTSTART;VALUE=DATE:20261003', 'DTEND;VALUE=DATE:20261004', 'TRANSP:TRANSPARENT']);
+      const { event } = await readClient(free).getCalendarEventById('free@fm');
+      assert.equal(event.transparency, 'free');
+
+      const busy = storedEvent('busy@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:OPAQUE']);
+      const { event: busyEvent } = await readClient(busy).getCalendarEventById('busy@fm');
+      assert.equal(busyEvent.transparency, 'busy');
+    });
+
+    it('reads a stored value that carries padding', async () => {
+      // parseICalValue deliberately does not trim (#102), so every call site that compares the
+      // value against something has to. A `TRANSP: TRANSPARENT` written with a space after the
+      // colon is legal iCalendar, and untrimmed it matches neither spelling and would be
+      // reported verbatim as though the record held a token nobody recognises.
+      const padded = storedEvent('pad@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP: TRANSPARENT ']);
+      const { event } = await readClient(padded).getCalendarEventById('pad@fm');
+      assert.equal(event.transparency, 'free');
+    });
+
+    it('reads the property whatever case the name and the value are written in', async () => {
+      // RFC 5545 §3.1 makes property NAMES case-insensitive as well as values, and a generator
+      // that writes `transp:transparent` is producing legal iCalendar. Read case-sensitively,
+      // that event came back as a confident "busy" — the one answer that is neither the truth
+      // nor an admission of not knowing — on an event the account is free during.
+      const lower = storedEvent('lc@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'transp:transparent']);
+      const { event } = await readClient(lower).getCalendarEventById('lc@fm');
+      assert.equal(event.transparency, 'free');
+
+      // The value half, which is what the toUpperCase in readTransparency is for. Mixed case is
+      // just as legal and comes back through the same lookup table.
+      const mixed = storedEvent('mc@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:Transparent']);
+      const { event: mixedEvent } = await readClient(mixed).getCalendarEventById('mc@fm');
+      assert.equal(mixedEvent.transparency, 'free');
+
+      // And a folded line, since this read scans the unfolded lines rather than the raw text:
+      // a continuation would otherwise leave the value truncated and reported verbatim.
+      const folded = storedEvent('fold@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:TRANSPA\r\n RENT']);
+      const { event: foldedEvent } = await readClient(folded).getCalendarEventById('fold@fm');
+      assert.equal(foldedEvent.transparency, 'free');
+    });
+
+    it('decides on the property name at the START of a content line, not on text inside one', async () => {
+      // The name match is anchored, which is this repo's whole-content-lines rule applied to
+      // one read. Unanchored, a DESCRIPTION that merely quotes the property would be found
+      // first and its own text reported as the event's free/busy — an event's prose deciding
+      // an availability answer. This event states no TRANSP at all, so it is busy.
+      const prose = storedEvent('prose@fm', [
+        'DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z',
+        'DESCRIPTION:Agenda: agree whether we write TRANSP:TRANSPARENT on all-day events',
+      ]);
+      const { event } = await readClient(prose).getCalendarEventById('prose@fm');
+      assert.equal(event.transparency, 'busy');
+    });
+
+    it('get_calendar_event still returns participants alongside the new field', async () => {
+      // The option this commit added rides in the same object literal as includeParticipants,
+      // so this pins that the older half is still asked for on the tool's own path — the
+      // existing participant coverage calls parseCalendarObject directly and would not notice.
+      const withPeople = storedEvent('who@fm', [
+        'DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z',
+        'ATTENDEE;CN=Alice;PARTSTAT=ACCEPTED:mailto:alice@example.com',
+      ]);
+      const { event } = await readClient(withPeople).getCalendarEventById('who@fm');
+      assert.equal(event.participants?.[0].email, 'alice@example.com');
+      assert.equal(event.transparency, 'busy');
+    });
+
+    it('treats an empty TRANSP as an absent property rather than an unrecognised token', async () => {
+      // `TRANSP:` with nothing after the colon states no value, so the RFC default applies and
+      // the event is busy — a different case from `TRANSP:MAYBE` below, which states a value
+      // this parser cannot interpret and is reported verbatim rather than answered for.
+      const empty = storedEvent('empty@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:']);
+      const { event } = await readClient(empty).getCalendarEventById('empty@fm');
+      assert.equal(event.transparency, 'busy');
+    });
+
+    it('get_calendar_event reports a stored token neither spelling covers, verbatim', async () => {
+      // NOT folded into 'busy'. The grammar allows exactly two tokens, so this came from
+      // something that ignored the spec, and reporting the default would state as a fact about
+      // the event what is really this parser giving up.
+      const odd = storedEvent('odd@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:MAYBE']);
+      const { event } = await readClient(odd).getCalendarEventById('odd@fm');
+      assert.equal(event.transparency, 'MAYBE');
+    });
+
+    it('get_calendar_event reports it on a DURATION-based event too', async () => {
+      // parseVEvent has TWO return paths — the DURATION-computed branch and the stored-DTEND
+      // one — and the Fastmail client writes both end-shapes from one account. A field attached
+      // on only one of them goes missing on whichever events happen to take the other.
+      const dur = storedEvent('dur@fm', ['DTSTART:20261003T090000Z', 'DURATION:PT1H', 'TRANSP:TRANSPARENT']);
+      const { event } = await readClient(dur).getCalendarEventById('dur@fm');
+      assert.equal(event.end, '2026-10-03T10:00:00Z');
+      assert.equal(event.transparency, 'free');
+    });
+
+    it('list_calendar_events omits the field on a busy event and carries it on a free one', async () => {
+      // The token-budget half of the split: most events are busy, so a row that says nothing is
+      // busy. Both fixtures are in the same listing so the assertion is about the two rows
+      // differing, not about the call having reported anything at all.
+      const both = [
+        storedEvent('lbusy@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']),
+        storedEvent('lfree@fm', ['DTSTART:20261003T110000Z', 'DTEND:20261003T120000Z', 'TRANSP:TRANSPARENT']),
+      ];
+      const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+      (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+        fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) =>
+          both.map((data, i) => ({ data, url: `/cal/l${i}.ics`, etag: FIXTURE_ETAG }))),
+      });
+      const { events } = await client.getCalendarEvents(
+        undefined, 50, '2026-10-03T00:00:00Z', '2026-10-04T00:00:00Z',
+      );
+      const byId = new Map(events.map(e => [e.id, e]));
+      assert.equal(byId.get('lbusy@fm')?.transparency, undefined);
+      assert.equal(byId.get('lfree@fm')?.transparency, 'free');
+    });
+
+    it('serialises transparency through the seam each tool renders with', async () => {
+      // The response format is unchanged by this work: `transparency` is an ordinary field in
+      // the compact JSON, per docs/conventions.md. Asserting on the rendered text rather than
+      // the object is what proves the field survives the serialisation seam rather than
+      // stopping at the parser.
+      const free = storedEvent('ser@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:TRANSPARENT']);
+      const { event } = await readClient(free).getCalendarEventById('ser@fm');
+      assert.match(toolJson(event), /"transparency":"free"/);
+
+      const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+      (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+        fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: free, url: '/cal/ser.ics', etag: FIXTURE_ETAG }]),
+      });
+      const result = await client.getCalendarEvents(undefined, 50, '2026-10-03T00:00:00Z', '2026-10-04T00:00:00Z');
+      assert.match(formatQueryResult({ items: result.events, total: result.total }), /"transparency":"free"/);
+    });
+  });
+});
+
 // The timeZone parameter on create_calendar_event/update_calendar_event (#157). The offset-shape
 // rejection gate (isUsableTimezone) and its Etc/GMT-10 carve-out are already covered directly
 // against validateCallerTimezone in coerce.test.ts; these are the create/update INTEGRATION

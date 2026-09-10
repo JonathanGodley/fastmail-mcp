@@ -1290,3 +1290,45 @@ describe('get_recent_emails is gone (#92)', () => {
     );
   });
 });
+
+// The handler half of the transparency wiring (#194). built-server.test.ts proves the
+// parameter is ADVERTISED over a real tools/list; this proves the CallTool switch actually
+// reads it and hands it on. The two failure modes are opposite and neither is visible to the
+// caldav-client tests, which call the client methods directly: a schema with no handler
+// silently ignores a value the caller sent, and a handler with no schema is unreachable
+// through a validating client.
+describe('the calendar write handlers read transparency and pass it on (#194)', () => {
+  const CALENDAR_WRITE_TOOLS = ['create_calendar_event', 'update_calendar_event'];
+
+  it('destructures transparency out of args in both handlers', () => {
+    const bodies = collectCaseBodies();
+    for (const tool of CALENDAR_WRITE_TOOLS) {
+      const body = bodies.get(tool);
+      assert.ok(body, `${tool} has no case body in the CallTool switch - the handler scan has drifted`);
+      const destructure = body.find((l) => l.includes('} = args as any;'));
+      assert.ok(destructure, `${tool}'s handler no longer destructures args - the handler scan has drifted`);
+      assert.ok(
+        /\btransparency\b/.test(destructure),
+        `${tool}'s handler never reads transparency out of args, so a caller that sets busy/free ` +
+          'has it dropped between the schema and the CalDAV client with no error',
+      );
+    }
+  });
+
+  it('forwards transparency into the object it hands the CalDAV client', () => {
+    const bodies = collectCaseBodies();
+    for (const tool of CALENDAR_WRITE_TOOLS) {
+      // Destructuring alone would satisfy the test above while the value went nowhere. A
+      // forwarding site is a line where the name sits as an object-literal member — excluding
+      // the destructure itself and the McpError lines, where `transparency` appears in the
+      // required-a-field guard and in that error's own prose.
+      const forwarding = bodies.get(tool)!.filter((l) =>
+        !l.includes('args as any') && !l.includes('McpError') && /\btransparency\s*[,}]/.test(l));
+      assert.ok(
+        forwarding.length > 0,
+        `${tool}'s handler destructures transparency but never passes it on: the value reaches ` +
+          'the switch and stops there',
+      );
+    }
+  });
+});
