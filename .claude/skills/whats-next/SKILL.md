@@ -6,9 +6,7 @@ argument-hint: "[optional focus, e.g. 'upstream' or an issue topic]"
 
 # What's Next — fastmail-mcp edition
 
-**First: invoke the `whats-next-core` skill and follow its procedure. If the
-Skill tool is unavailable, Read `~/.claude/skills/whats-next-core/SKILL.md`
-in full instead.** It carries the shared triage discipline and the output
+**First: Read `C:/Users/JG/.claude/skills/_shared/whats-next-core.md` in full and follow its procedure.** It carries the shared triage discipline and the output
 contract; the sections below are this repo's half — sources, tiers, judgement,
 hygiene. Improvements to the shared discipline go in the core skill;
 repo-specific lessons go here.
