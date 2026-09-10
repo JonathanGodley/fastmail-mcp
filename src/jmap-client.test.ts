@@ -8,6 +8,7 @@ import { FastmailAuth } from './auth.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
 import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
+import { noteEditSubjectPrefix } from './subject-prefix.js';
 
 // ---------- helpers ----------
 
@@ -5185,5 +5186,122 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
     const makeReq = mockSrcUpdate(client, { ...rest, id: 'rdraft-1' });
     await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
     assert.equal(draftFromCall(makeReq)[SRC_PROP], undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateDraft: a reply or forward prefix edited onto a draft (#188)
+// ---------------------------------------------------------------------------
+
+describe('updateDraft — a reply or forward prefix written into the subject', () => {
+  const REPLY_NOTE = noteEditSubjectPrefix('reply');
+  const FORWARD_NOTE = noteEditSubjectPrefix('forward');
+
+  // The shapes the trigger reads apart. EXISTING_DRAFT carries none of the three markers,
+  // which is the whole point: a draft made by mode:'new' is what a caller retitles into a
+  // prefix.
+  const REPLY_DRAFT = { ...EXISTING_DRAFT, inReplyTo: ['<orig@x.example>'] };
+  // A reply draft can carry References without In-Reply-To - a client that writes only the
+  // chain, or a draft whose In-Reply-To was dropped somewhere upstream. It threads on the
+  // References chain all the same, so it must not be told it will not.
+  const REFERENCES_ONLY_DRAFT = { ...EXISTING_DRAFT, references: ['<root@x.example>'] };
+  const FORWARD_DRAFT = {
+    ...EXISTING_DRAFT,
+    subject: 'Fwd: pricing',
+    'header:X-Forwarded-Message-Id:asMessageIds': ['<orig@x.example>'],
+  };
+
+  let client: JmapClient;
+  beforeEach(() => { client = makeClient(); });
+
+  const notesOf = (r: any): string[] => r.notes ?? [];
+  const assertNoPrefixNote = (r: any) => {
+    const found = notesOf(r).filter((n) => n === REPLY_NOTE || n === FORWARD_NOTE);
+    assert.deepEqual(found, [], `notes were ${JSON.stringify(r.notes)}`);
+  };
+
+  it('warns when a reply prefix is written onto a draft that carries no threading headers', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Re: pricing' });
+
+    assert.ok(notesOf(r).includes(REPLY_NOTE), `notes were ${JSON.stringify(r.notes)}`);
+    // A note, never a refusal, and the subject is stored exactly as the caller wrote it.
+    assert.equal(draftFromCall(makeReq).subject, 'Re: pricing');
+  });
+
+  it('names the forward mode when the prefix written is a forward one', async () => {
+    const makeReq = mockUpdate(client, EXISTING_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Fwd: pricing' });
+
+    assert.ok(notesOf(r).includes(FORWARD_NOTE), `notes were ${JSON.stringify(r.notes)}`);
+    assert.equal(notesOf(r).includes(REPLY_NOTE), false);
+    assert.equal(draftFromCall(makeReq).subject, 'Fwd: pricing');
+  });
+
+  it('says nothing when the draft already carries In-Reply-To, because it really is a reply', async () => {
+    mockUpdate(client, REPLY_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Re: pricing again' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the draft carries References alone, which threads it just as well', async () => {
+    mockUpdate(client, REFERENCES_ONLY_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Re: pricing again' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing about a forward prefix on a References-only draft either', async () => {
+    mockUpdate(client, REFERENCES_ONLY_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Fwd: pricing' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when re-titling a FORWARD draft, which carries the forwarded id instead', async () => {
+    // A forward draft has no reply headers by design, so reading only inReplyTo would warn
+    // on every retitle of a perfectly well-formed forward.
+    mockUpdate(client, FORWARD_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Fwd: pricing, revised' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing on an edit that leaves the subject alone, even on a prefixed header-less draft', async () => {
+    // The trigger is the subject this edit WRITES, not the one the draft ends up with:
+    // hanging it off the merged value would repeat the warning on every body edit of such
+    // a draft, which is noise the caller cannot act on.
+    const prefixed = { ...EXISTING_DRAFT, subject: 'Re: pricing' };
+    const makeReq = mockUpdate(client, prefixed);
+
+    const r = await client.updateDraft('draft-1', { textBody: 'a new body', bodyHash: hashOf(prefixed) });
+
+    assert.equal(draftFromCall(makeReq).subject, 'Re: pricing');
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the subject written carries no prefix', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
+
+    const r = await client.updateDraft('draft-1', { subject: 'Rex: pricing' });
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the subject is cleared rather than written', async () => {
+    const prefixed = { ...EXISTING_DRAFT, subject: 'Re: pricing' };
+    const makeReq = mockUpdate(client, prefixed);
+
+    const r = await client.updateDraft('draft-1', { clearFields: ['subject'] });
+
+    assert.equal(draftFromCall(makeReq).subject, '');
+    assertNoPrefixNote(r);
   });
 });

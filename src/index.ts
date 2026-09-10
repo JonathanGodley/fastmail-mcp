@@ -979,7 +979,7 @@ const TOOLS = [
             },
             subject: {
               type: 'string',
-              description: 'Subject. Optional in every mode: mode:\'reply\' inherits "Re: <original subject>" and mode:\'forward\' inherits "Fwd: <original subject>", neither double-prefixing one that already has it, and a blank string is treated as omitted. The threading headers are built identically either way, so recipients still thread correctly. NOTE: Fastmail groups messages by subject as well as by those headers, so a changed subject detaches the DRAFT from the original conversation in the Fastmail UI. Display only, and it resolves once the draft is sent.',
+              description: 'Subject. Optional in every mode: mode:\'reply\' inherits "Re: <original subject>" and mode:\'forward\' inherits "Fwd: <original subject>", neither double-prefixing one that already has it, and a blank string is treated as omitted. The threading headers are built identically either way, so recipients still thread correctly. NOTE: Fastmail groups messages by subject as well as by those headers, so a changed subject detaches the DRAFT from the original conversation in the Fastmail UI. Display only, and it resolves once the draft is sent. A mode:\'new\' subject that itself starts with a reply or forward prefix ("Re:", "Fwd:" or "Fw:", with or without an [n] counter) draws a NOTE and is stored as written: it reads as part of a conversation, but mode:\'new\' writes no threading headers, so use the matching mode with originalEmailId to thread it - or pass inReplyTo/references yourself, which is the documented route for a message this account does not hold and silences the note.',
             },
             textBody: {
               type: 'string',
@@ -1043,7 +1043,7 @@ const TOOLS = [
             },
             subject: {
               type: 'string',
-              description: 'Updated email subject (optional)',
+              description: 'Updated email subject (optional). Writing a subject that starts with a reply or forward prefix ("Re:", "Fwd:" or "Fw:", with or without an [n] counter) onto a draft that carries no threading headers draws a NOTE: an edit cannot add those headers to a draft that has none, so compose a fresh draft with draft_email mode:\'reply\' or mode:\'forward\' and originalEmailId if the message needs to thread, and delete this one.',
             },
             textBody: {
               type: 'string',

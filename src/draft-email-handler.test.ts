@@ -5,6 +5,7 @@ import type { DraftEmailClient } from './draft-email-handler.js';
 import { InvalidInputError } from './coerce.js';
 import { EMAIL_BODY_PROPERTIES } from './jmap-client.js';
 import { normalizeBodies } from './body-format.js';
+import { noteComposeSubjectPrefix } from './subject-prefix.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -2937,5 +2938,151 @@ describe('draft_email — {{signature}} does not depend on the history landing',
       '/tmp/attach',
     );
     assert.deepEqual(order, ['identities', 'upload']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A reply or forward prefix typed into a mode:'new' subject (#188)
+// ---------------------------------------------------------------------------
+
+describe("draft_email — a reply or forward prefix typed into a mode:'new' subject", () => {
+  const REPLY_NOTE = noteComposeSubjectPrefix('reply');
+  const FORWARD_NOTE = noteComposeSubjectPrefix('forward');
+  const notesOf = (r: any): string[] => r.notes ?? [];
+  // A signed identity puts its own note on every one of these results, so silence about
+  // the PREFIX is asserted against the two sentences rather than against an empty list.
+  const assertNoPrefixNote = (r: any) => {
+    const found = notesOf(r).filter((n) => n === REPLY_NOTE || n === FORWARD_NOTE);
+    assert.deepEqual(found, [], `notes were ${JSON.stringify(r.notes)}`);
+  };
+
+  it('warns on a reply prefix, and stores the subject exactly as written', async () => {
+    const { client, calls } = spyClient();
+
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], subject: 'RE[2]: pricing', textBody: 'hi' },
+      client,
+    );
+
+    assert.ok(notesOf(r).includes(REPLY_NOTE), `notes were ${JSON.stringify(r.notes)}`);
+    // A note, never a refusal: the draft is saved and the caller's subject is untouched.
+    assert.equal(calls.draft.subject, 'RE[2]: pricing');
+    assert.equal(r.emailId, 'draft-9');
+  });
+
+  it('names the forward mode, not the reply mode, when the prefix is a forward one', async () => {
+    const { client } = spyClient();
+
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], subject: 'Fwd: pricing', textBody: 'hi' },
+      client,
+    );
+
+    assert.ok(notesOf(r).includes(FORWARD_NOTE), `notes were ${JSON.stringify(r.notes)}`);
+    assert.equal(notesOf(r).includes(REPLY_NOTE), false);
+  });
+
+  it('says nothing about a subject that only looks like a prefix', async () => {
+    const { client } = spyClient();
+
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], subject: 'Rex: pricing', textBody: 'hi' },
+      client,
+    );
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when no subject was passed at all', async () => {
+    const { client } = spyClient();
+
+    const r = await compose({ mode: 'new', to: ['sam@example.com'], textBody: 'hi' }, client);
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing for a blank subject, which is no subject at all', async () => {
+    // coerceSubjectOverride has already turned a whitespace-only subject into "omitted",
+    // so the matcher never sees it — this pins that the two agree on what blank means.
+    const { client } = spyClient();
+
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], subject: '   ', textBody: 'hi' },
+      client,
+    );
+
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the caller passed inReplyTo, because that draft does thread', async () => {
+    const { client, calls } = spyClient();
+
+    const r = await compose(
+      {
+        mode: 'new', to: ['sam@example.com'], subject: 'Re: pricing', textBody: 'hi',
+        inReplyTo: ['<a@x.example>'],
+      },
+      client,
+    );
+
+    assert.deepEqual(calls.draft.inReplyTo, ['<a@x.example>']);
+    assertNoPrefixNote(r);
+  });
+
+  it('says nothing when the caller passed references alone', async () => {
+    const { client } = spyClient();
+
+    const r = await compose(
+      {
+        mode: 'new', to: ['sam@example.com'], subject: 'Fwd: pricing', textBody: 'hi',
+        references: ['<root@x.example>'],
+      },
+      client,
+    );
+
+    assertNoPrefixNote(r);
+  });
+
+  it('warns when the threading headers passed are empty, since an empty list writes none', async () => {
+    // The premise the note states — this will not thread — is about what gets WRITTEN, and
+    // an empty inReplyTo writes no header at all. So the silence is keyed on a header the
+    // draft really carries, not on the parameter having been mentioned.
+    const { client, calls } = spyClient();
+
+    const r = await compose(
+      {
+        mode: 'new', to: ['sam@example.com'], subject: 'Re: pricing', textBody: 'hi',
+        inReplyTo: [], references: [],
+      },
+      client,
+    );
+
+    assert.deepEqual(calls.draft.inReplyTo, []);
+    assert.ok(notesOf(r).includes(REPLY_NOTE), `notes were ${JSON.stringify(r.notes)}`);
+  });
+
+  it("says nothing on mode:'reply', whose subject is a Re: by construction", async () => {
+    const { client, calls } = spyClient();
+
+    const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'hi {{quote}}' }, client);
+
+    assert.equal(calls.draft.subject, 'Re: Project update');
+    assert.equal(notesOf(r).includes(REPLY_NOTE), false);
+  });
+
+  it("says nothing on mode:'forward', nor when a reply carries an explicit Re: override", async () => {
+    const { client } = spyClient();
+
+    const fwd = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], textBody: 'fyi {{forward}}' },
+      client,
+    );
+    assert.equal(notesOf(fwd).includes(FORWARD_NOTE), false);
+
+    const rep = await compose(
+      { mode: 'reply', originalEmailId: 'o1', subject: 'Re: pricing', textBody: 'hi {{quote}}' },
+      client,
+    );
+    assert.equal(notesOf(rep).includes(REPLY_NOTE), false);
   });
 });

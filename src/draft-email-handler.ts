@@ -24,6 +24,7 @@ import {
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
+import { matchSubjectPrefix, noteComposeSubjectPrefix } from './subject-prefix.js';
 
 // ---------------------------------------------------------------------------
 // draft_email — one compose tool, three modes
@@ -1039,6 +1040,22 @@ export async function composeDraftEmail(
   const receipt = buildReceipt(expansions, fillerBody);
   const signaturePlaced = supplied.some((p) => p.scan.counts.signature > 0);
 
+  // A subject a caller typed "Re:" or "Fwd:" into does not thread the message; the headers
+  // this server writes for the other two modes do, and mode:'new' writes none (#188). So the
+  // draft reads as part of a conversation and arrives as a new one, in the caller's client
+  // and in every recipient's. Said out loud and never refused: reusing an old subject for a
+  // fresh conversation is legitimate, and a refusal would leave that caller no way through.
+  //
+  // Silent when the caller passed threading headers of their own, which is the documented
+  // route for replying to a message this account does not hold - there the note's premise
+  // is simply false. That test reads what those parameters COERCED to rather than whether
+  // they were mentioned, because the premise is about the header the draft ends up
+  // carrying: `inReplyTo: []` writes none, so such a draft does not thread and is warned
+  // about like any other.
+  const prefixTyped = mode === 'new' && !params.inReplyTo?.length && !params.references?.length
+    ? matchSubjectPrefix(params.subject)
+    : undefined;
+
   const notes = [
     ...ledger.emit({
       surface: mode === 'forward' ? 'forward' : 'reply',
@@ -1066,6 +1083,7 @@ export async function composeDraftEmail(
       : []),
     ...(mode === 'reply' && !historyPlaced ? [NOTE_REPLY_UNQUOTED] : []),
     ...(bccCarried ? [NOTE_BCC_CARRIED] : []),
+    ...(prefixTyped ? [noteComposeSubjectPrefix(prefixTyped)] : []),
   ];
 
   return {

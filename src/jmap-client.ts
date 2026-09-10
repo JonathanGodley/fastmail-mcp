@@ -31,6 +31,7 @@ import {
   NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DERIVED_PART, noteBodyHashAfterReRead,
 } from './inline-notes.js';
 import type { AttachmentAvailability } from './inline-notes.js';
+import { matchSubjectPrefix, noteEditSubjectPrefix } from './subject-prefix.js';
 // unlink is a security control, not a convenience: the exclusive-create download
 // path removes the file it just refused to trust before rewriting it.
 import { writeFile, mkdir, realpath, stat, lstat, open, unlink } from 'fs/promises';
@@ -3103,6 +3104,33 @@ export class JmapClient {
       tokenNotes.push(noteDiscardedTextPart());
     }
 
+    // A reply or forward prefix edited ONTO a draft that cannot thread (#188). The same
+    // matcher compose uses, so the two routes cannot drift on what counts as a prefix.
+    //
+    // THE TRIGGER IS THE SUBJECT THIS EDIT WRITES - `updates.subject`, never the merged
+    // value below, which falls back to the STORED subject. Keying on the merged one would
+    // repeat the warning on every body edit of a draft that already carries a prefix:
+    // noise the caller cannot act on, when the edit that introduced the prefix is the one
+    // that needed telling. An edit that writes no subject, and one that clears it, both
+    // arrive here as `undefined` and the matcher answers for them.
+    //
+    // ALL THREE stored markers are read, because each one shows the draft was made FROM an
+    // original message, which is what earns the prefix, and a draft that earned it must
+    // never be told it did not. A reply draft carries In-Reply-To and References, and
+    // References counts on its own: it is the chain most clients actually thread on, and a
+    // draft can carry it with no In-Reply-To beside it. A FORWARD draft does not thread at
+    // all - it starts its own conversation - and carries the forwarded id instead of any
+    // reply header, so reading only the reply headers would warn on every retitle of a
+    // perfectly well-formed forward. All three are already in this method's fetch, in this
+    // order. The stored draft is what is asked, so an edit that de-forwards a draft in the
+    // same call is not warned: it still has the marker as read, and the note is about the
+    // caller's subject rather than about the shape the edit leaves behind.
+    const storedThreadMarkers =
+      (existingEmail.inReplyTo?.length ?? 0) > 0
+      || (existingEmail.references?.length ?? 0) > 0
+      || (existingEmail['header:X-Forwarded-Message-Id:asMessageIds']?.length ?? 0) > 0;
+    const prefixTyped = storedThreadMarkers ? undefined : matchSubjectPrefix(updates.subject);
+
     // Merge non-body fields: updates override existing; clearFields force the empty value.
     const mergedSubject = clear.has('subject') ? '' : (updates.subject !== undefined ? updates.subject : (existingEmail.subject || ''));
     const mergedTo      = clear.has('to')      ? [] : (updates.to      !== undefined ? updates.to.map(parseAddress)      : (existingEmail.to || []));
@@ -3636,6 +3664,7 @@ export class JmapClient {
       // for why these are notes and never refusals.
       ...tokenNotes,
       ...followUpNotes,
+      ...(prefixTyped ? [noteEditSubjectPrefix(prefixTyped)] : []),
     ];
     const touchedInlineImages = tally.embedded > 0 || tally.degraded > 0 || tally.removed > 0;
 
