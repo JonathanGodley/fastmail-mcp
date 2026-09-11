@@ -282,14 +282,32 @@ export function coerceStringArrayStrict(value: unknown, paramName: string): stri
 // client sent into string[] | undefined, so the JMAP client's .map(parseAddress)
 // calls never receive a bare string (issue #54). Pass the raw tool args; reads
 // only to/cc/bcc/replyTo and returns the coerced quartet.
+//
+// STRICT, on all four fields and both tools, because a dropped recipient value here is
+// exactly the "mistaken for a legitimate outcome" case coerceStringArrayStrict exists for —
+// and it is mistaken for a DIFFERENT legitimate outcome on each tool:
+//
+//   draft_email mode:'reply' — `to` is a NARROWING argument. Coerced away, the field reads
+//     as omitted, so the reply-all default fills to/cc from the original and carries its Bcc
+//     list with them. A caller narrowing a reply to one person would have sent it to
+//     everyone the original touched, with nothing in the result saying so.
+//   edit_draft — a coerced-away field reads as "leave this one unchanged", so the draft
+//     keeps the recipients the caller was trying to replace and the edit reports success.
+//
+// Per element as well as per value: `['']` used to survive trimAll with length 1 (the
+// plain coercer's .filter(Boolean) runs only on the comma-split branch), so it read as a
+// real, present list — shipping a blank recipient AND suppressing the reply Bcc carry. The
+// whole-value spellings are untouched: `null`/`undefined` still read as absent, `''` and
+// `[]` still coerce to the empty list (which the bcc description documents as "treated as
+// omitted"), and a comma-separated string still splits.
 export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unknown; replyTo?: unknown }): {
   to?: string[]; cc?: string[]; bcc?: string[]; replyTo?: string[];
 } {
   return {
-    to: coerceStringArray(args.to),
-    cc: coerceStringArray(args.cc),
-    bcc: coerceStringArray(args.bcc),
-    replyTo: coerceStringArray(args.replyTo),
+    to: coerceStringArrayStrict(args.to, 'to'),
+    cc: coerceStringArrayStrict(args.cc, 'cc'),
+    bcc: coerceStringArrayStrict(args.bcc, 'bcc'),
+    replyTo: coerceStringArrayStrict(args.replyTo, 'replyTo'),
   };
 }
 

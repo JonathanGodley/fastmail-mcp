@@ -188,6 +188,91 @@ describe('lenient-boolean convention', () => {
   });
 });
 
+// The recipient lists say on their own surface that they FAIL CLOSED.
+//
+// coerceRecipients puts to/cc/bcc/replyTo through coerceStringArrayStrict on both compose
+// tools, so a value that cannot be read as a list is a refusal naming the parameter rather
+// than a silent undefined. A caller learns that from the description or nowhere: every one
+// of these eight parameters also carries LENIENT_LIST_DESC, which lists the SHAPES accepted
+// and would otherwise read as a promise that anything else is quietly ignored — which is
+// precisely the behaviour that was wrong. The failure this guards is the cheap one: a ninth
+// recipient parameter, or a re-worded description, that keeps the lenient sentence and drops
+// the strict one, leaving the surface describing the old behaviour with nothing to catch it.
+//
+// The set is ENUMERATED rather than sampled: four fields on draft_email and four on
+// edit_draft, and the assertion names which site is missing it.
+function collectRecipientParamDescriptions(): { withStrict: string[]; missing: string[] } {
+  const lines = readLines('index.ts');
+  const withStrict: string[] = [];
+  const missing: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    // A schema property block opening for one of the four recipient names. Matched on the
+    // whole trimmed line so prose mentioning them is not picked up.
+    const name = /^(to|cc|bcc|replyTo): \{$/.exec(lines[i].trim())?.[1];
+    if (!name) continue;
+    // The description follows within the block; read to its closing brace so a reformatted
+    // block (type/items on either side of it) still finds it.
+    let description = '';
+    let isList = false;
+    for (let j = i + 1; j < lines.length && lines[j].trim() !== '},'; j++) {
+      if (lines[j].trim().startsWith('description:')) description = lines[j];
+      if (lines[j].trim() === "type: ['array', 'string'],") isList = true;
+    }
+    // search_emails declares to/cc/bcc as SCALAR address filters (`type: 'string'`) — one
+    // address to match against, not a recipient list — so they are a different parameter
+    // that happens to share a name, and none of this applies to them.
+    if (!description || !isList) continue;
+    const site = `${name} (src/index.ts:${i + 1})`;
+    if (description.includes('RECIPIENT_LIST_STRICT_DESC')) withStrict.push(site);
+    else missing.push(site);
+  }
+  return { withStrict, missing };
+}
+
+describe('the recipient lists document their fail-closed reading', () => {
+  it('appends RECIPIENT_LIST_STRICT_DESC to all four fields on both compose tools', () => {
+    const { withStrict, missing } = collectRecipientParamDescriptions();
+    assert.deepEqual(
+      missing,
+      [],
+      'these recipient parameters describe only the lenient SHAPES they accept, so a caller ' +
+        'reading them cannot tell that an unreadable value is refused rather than ignored. ' +
+        `Append RECIPIENT_LIST_STRICT_DESC: ${missing.join(', ')}`,
+    );
+    // Both tools, all four fields. A count rather than a floor, because this set is closed:
+    // a ninth would be a new recipient parameter and should be looked at, not waved through.
+    assert.equal(
+      withStrict.length,
+      8,
+      `expected the four recipient parameters on draft_email and edit_draft; found ${withStrict.length}: ${withStrict.join(', ')}`,
+    );
+  });
+
+  it('says both halves of the rule: a value refused by name, an entry refused by index', () => {
+    // Read off the constant itself, so re-wording it cannot quietly drop one half while the
+    // eight call sites above still look correct.
+    // Read line by line rather than with a multiline regex over the file: this repo's
+    // checkout carries CRLF endings, so a pattern spelling its line breaks as `\n` matches
+    // nothing here and the guard passes vacuously on the machine that wrote it.
+    const lines = readLines('index.ts');
+    const start = lines.findIndex((l) => l.startsWith('const RECIPIENT_LIST_STRICT_DESC ='));
+    let declaration = '';
+    for (let i = start + 1; start !== -1 && i < lines.length; i++) {
+      declaration += lines[i];
+      if (lines[i].trimEnd().endsWith(';')) break;
+    }
+    assert.ok(declaration, 'RECIPIENT_LIST_STRICT_DESC is no longer declared as a single const');
+    assert.match(declaration, /rejects the whole call naming this parameter/);
+    assert.match(declaration, /never ignored/);
+    assert.match(declaration, /rejected by index/);
+    // Deliberately NOT pinned: what an empty whole value MEANS. This string is appended to
+    // all eight parameters and the answer differs between them (a reply's defaults still
+    // run; every edit_draft recipient field refuses an empty value outright), so a shared
+    // sentence can only say that the coercion reads it — never what it does. Pinning the
+    // wording here is what let an untrue shared promise stand.
+  });
+});
+
 // timeZone accepts null as a real, deliberately-rejected input (create_calendar_event and
 // update_calendar_event, #157) — not absence. Omitting timeZone is what absence means, and
 // that is already handled by the parameter being optional; `null` is a caller explicitly
