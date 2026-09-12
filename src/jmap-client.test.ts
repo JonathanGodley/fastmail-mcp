@@ -4,6 +4,7 @@ import { homedir } from 'os';
 import { resolve, join, basename, sep } from 'path';
 import { JmapClient, findBlankBodyPart } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
+import { composeDraftEmail } from './draft-email-handler.js';
 import { FastmailAuth } from './auth.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
 import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
@@ -3595,6 +3596,44 @@ describe('createDraft wildcard identity', () => {
           // The ADDRESS half is quoted, never the display name: the name is not the half
           // that has to change, and quoting it back would blur which one does.
           assert.equal(err.message.includes('Ops'), false);
+          return true;
+        },
+      );
+
+      // Refused before the identity match, so nothing was requested at all.
+      assert.equal(makeReq.mock.calls.length, 0);
+    });
+  }
+
+  // The same refusal, reached the way the `draft_email` tool reaches it: through
+  // composeDraftEmail, with a real client injected (#160, #161). Nothing in the compose
+  // handler looks at this value — it hands `from` to createDraft raw, and the signing
+  // identity it resolves separately is found by matchesIdentity's equality arm, so a
+  // wildcard pattern matches the very identity it came from and the compose path sees a
+  // perfectly ordinary sender. createDraft's guard is the only thing between the pattern and
+  // the stored From header, so what this pins is that the refusal still reaches the CALLER
+  // rather than being absorbed into one of the receipt's notes.
+  for (const passed of ['*@example.com', 'Ops <*@example.com>']) {
+    it(`surfaces the refusal through composeDraftEmail: ${passed}`, async () => {
+      // Answers a read-back as well as the create, so that a compose which got past the
+      // guard would RESOLVE rather than trip over an unstubbed method — the missing
+      // rejection is then the only thing this test can fail on.
+      const makeReq = stubRequests(client, async (request: JmapRequest) => (
+        request.methodCalls[0][0] === 'Email/get'
+          ? { methodResponses: [['Email/get', { list: [{ id: 'email-wild' }] }, 'getEmail']] }
+          : { methodResponses: [['Email/set', { created: { draft: { id: 'email-wild' } } }, 'createDraft']] }
+      ));
+
+      await assert.rejects(
+        () => composeDraftEmail(
+          { mode: 'new', from: passed, subject: 'Hi', textBody: 'Body' },
+          client,
+          undefined,
+          false,
+        ),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /is a wildcard identity's pattern, not an address/);
           return true;
         },
       );
