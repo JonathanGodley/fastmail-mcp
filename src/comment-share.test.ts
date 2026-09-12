@@ -55,7 +55,8 @@ before(() => {
 });
 
 after(() => {
-  rmSync(root, { recursive: true, force: true });
+  // Windows holds handles on a just-used repo briefly; the retry option covers it.
+  rmSync(root, { recursive: true, force: true, maxRetries: 3 });
 });
 
 test('--staged reports a change far above the file\'s own density, exit 0', () => {
