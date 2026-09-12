@@ -5764,6 +5764,50 @@ describe('transparency: busy and free as caller values (#194)', () => {
       const result = await client.getCalendarEvents(undefined, 50, '2026-10-03T00:00:00Z', '2026-10-04T00:00:00Z');
       assert.match(formatQueryResult({ items: result.events, total: result.total }), /"transparency":"free"/);
     });
+
+    // Hostile and malformed spellings of the one property, each read the way the rules above
+    // say: the name is matched at the start of an unfolded content line, the value is trimmed
+    // and case-folded, anything that states no value is the RFC default, and a token neither
+    // spelling covers is reported verbatim.
+    const D = ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z'];
+    const shapes: Array<[string, string[], string]> = [
+      ['a name folded across two lines', [...D, 'TRAN\r\n SP:TRANSPARENT'], 'free'],
+      ['a value folded with a tab', [...D, 'TRANSP:TRANSPA\r\n\tRENT'], 'free'],
+      ['a value followed by a bare CR', [...D, 'TRANSP:TRANSPARENT\r'], 'free'],
+      ['a parameter carrying a quoted colon', [...D, 'TRANSP;X-A="a:b":TRANSPARENT'], 'free'],
+      ['a whitespace-only value', [...D, 'TRANSP:   '], 'busy'],
+      ['a line with parameters and no value at all', [...D, 'TRANSP;VALUE=TEXT'], 'busy'],
+      ['an X-TRANSP property', [...D, 'X-TRANSP:TRANSPARENT'], 'busy'],
+      ['a TRANSPARENCY property', [...D, 'TRANSPARENCY:TRANSPARENT'], 'busy'],
+      ['the token inside a LOCATION', [...D, 'LOCATION:TRANSP:TRANSPARENT room'], 'busy'],
+      ['the token at the head of a folded DESCRIPTION continuation', [...D, 'DESCRIPTION:line one\r\n TRANSP:TRANSPARENT'], 'busy'],
+      // Two TRANSP lines are outside the grammar (RFC 5545 §3.6.1 allows at most one); the
+      // first content line is the one reported, as for every other single-valued read here.
+      ['two TRANSP lines, first wins', [...D, 'TRANSP:TRANSPARENT', 'TRANSP:OPAQUE'], 'free'],
+      // The flat read readTransparency documents: a TRANSP inside a VALARM is reported.
+      ['a TRANSP inside a VALARM only (the documented flat read)', [...D, 'BEGIN:VALARM', 'TRIGGER:-PT10M', 'TRANSP:TRANSPARENT', 'END:VALARM'], 'free'],
+    ];
+    for (const [name, lines, want] of shapes) {
+      it(`reads ${name} as ${want}`, async () => {
+        const { event } = await readClient(storedEvent('shape@fm', lines)).getCalendarEventById('shape@fm');
+        assert.equal(event.transparency, want);
+      });
+    }
+
+    it('a continuation line at the head of the VEVENT block is text of the BEGIN line, not a property', async () => {
+      // The fold-injection rule for structural scans (isFoldedContinuation): the block is still
+      // found, and the folded-in TRANSP is not read as one.
+      const data = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT\r\n TRANSP:TRANSPARENT', 'UID:lead@fm',
+        'DTSTAMP:20260301T000000Z', ...D, 'SUMMARY:S', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+      const { event } = await readClient(data).getCalendarEventById('lead@fm');
+      assert.equal(event.transparency, 'busy');
+    });
+
+    it('a verbatim token keeps a U+2028 inside it, since the value is reported as it is', async () => {
+      const odd = storedEvent('u2028@fm', [...D, 'TRANSP:MAY\u2028BE']);
+      const { event } = await readClient(odd).getCalendarEventById('u2028@fm');
+      assert.equal(event.transparency, 'MAY\u2028BE');
+    });
   });
 });
 
