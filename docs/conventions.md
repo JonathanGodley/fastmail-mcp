@@ -31,6 +31,38 @@ delegates to [libical](https://github.com/libical/libical), which is MPL-2.0 / L
 dual: MPL is file-level copyleft, so a copied file would stay MPL inside this MIT package.
 Neither licence restricts reading it to learn what the server does.
 
+## Sending identities: `email` is enforced, `name` is not
+
+RFC 8621 §6.1 splits an Identity's two halves, and the platform treats them completely
+differently. `email` is a MUST: a submission's From address has to match an identity the
+account may send as, and Fastmail enforces it — a From that matches no identity is refused,
+and a wildcard identity (`*@example.com`) matches any address in that domain while being
+refused as a From value itself. `name` is a SHOULD: it is the client's suggestion for the
+display name, and nothing server-side reads it, validates it or corrects it.
+
+Cyrus sheds no light on either half, which makes this the standing exception to the section
+above. Its `Identity/get` is a stub: one identity whose id is the userid, with `name` the
+empty string, `email` the userid if it has an `@` in it, and `mayDelete` false
+(`jmap_mail_submission.c:2276`). And where the From check would be there is a comment saying
+what ought to happen instead of code doing it — "If the address found from this is not
+allowed by the identity associated with this submission, the email property from the identity
+MUST be used instead" (`jmap_mail_submission.c:691`). Identity verification, wildcards and
+display names are therefore all Fastmail's own layer on top of the open-source server, and a
+question about any of them is settled by probing the account, never by reading the tree.
+
+The consequences this server draws follow that split. A `from` takes the `Name <address>`
+form and is parsed into its halves before anything looks at it (#161). The ADDRESS half is
+matched against the identity list — case-insensitively exact, or by a wildcard identity's
+domain — and one that matches nothing is refused before any draft is written. The NAME half
+is never validated, because there is nothing to validate it against: on create it defaults to
+the name configured on the identity that verified the address, and on edit to the name the
+stored draft already carries against that address, falling back to the signing identity's
+name (the full order, and why those two run in opposite directions, is in
+`docs/email-bodies.md`). A wildcard identity's pattern passed as `from` is refused outright
+(`rejectWildcardFromValue` in `src/jmap-client.ts`, #160) because it is a pattern and not an
+address — `matchesIdentity` opens with an equality test and would otherwise accept it against
+the very identity it came from.
+
 ## Lenient input coercion
 
 MCP clients (especially LLMs) send sloppy parameter shapes: a comma-joined string where
