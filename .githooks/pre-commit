@@ -18,3 +18,7 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 node "$SCANNER" --staged
+
+# Comment-density report, never a gate: says when the staged change carries far
+# more comment than the file it lands in. Its exit code is deliberately ignored.
+node "$HOOK_DIR/../scripts/comment-share.mjs" --staged || true
