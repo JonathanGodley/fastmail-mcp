@@ -1797,6 +1797,11 @@ Three properties of the implementation are load-bearing and easy to undo by acci
   The resolvability test is `isUsableTimezone`, never `zoneOffsetMsAt` — that one falls back to
   the HOST zone for a name it cannot resolve, so it answers for a different zone rather than
   saying it could not answer.
+  **The shape reaches this check on an UPDATE only.** `create_calendar_event` takes no
+  per-value zone — a designator-less pair is written in the configured zone — so both of a
+  created event's ends are always in one zone, and the cross-zone branch is reachable only when
+  editing a record that already holds it. The rule lives in the shared validator either way;
+  what changes is which tool's description is the right place to explain it.
 
 The frame check is deliberately *not* applied when the caller touches neither `start` nor
 `end`: it exists to stop us writing a broken pair, not to hold a title edit hostage to an
