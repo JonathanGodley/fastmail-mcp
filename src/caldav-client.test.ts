@@ -4485,6 +4485,117 @@ describe('removeOrphanedVTimezones quoted/folded references', () => {
   });
 });
 
+// ---- a `;TZID=` that is not a TZID PARAMETER is not a reference (#187) ----
+//
+// The orphan scan used to ask whether the literal text `;TZID=<name>` appeared anywhere outside
+// the VTIMEZONE blocks. iCalendar has one parser for this - `extractTzidParam`, which knows
+// where a property's parameters stop and its value starts, and which quoted spans are opaque -
+// and the substring test disagreed with it in both directions a payload can exploit. Calendar
+// content is attacker-authored (anyone who can send an invitation writes a DESCRIPTION), so the
+// disagreement is reachable by anyone who wants a block kept that nothing refers to.
+describe('removeOrphanedVTimezones counts only real TZID parameters', () => {
+  function icalWith(eventLines: string[]): string {
+    return [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:Europe/Paris',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      ...eventLines,
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+  }
+
+  it('drops a block named only inside another parameter\'s quoted value', () => {
+    const out = removeOrphanedVTimezones(icalWith([
+      'DTSTART;X-FOO=";TZID=Europe/Paris":20260320T093000Z',
+    ]));
+    assert.ok(!out.includes('BEGIN:VTIMEZONE'), 'a quoted parameter value is not a TZID parameter');
+  });
+
+  it('drops a block named only inside a property value', () => {
+    const out = removeOrphanedVTimezones(icalWith([
+      'DTSTART:20260320T093000Z',
+      'DESCRIPTION:Rendezvous set with DTSTART;TZID=Europe/Paris by the other client',
+    ]));
+    assert.ok(!out.includes('BEGIN:VTIMEZONE'), 'text inside a property value is not a TZID parameter');
+  });
+
+  it('keeps a block a real quoted TZID parameter refers to', () => {
+    const out = removeOrphanedVTimezones(icalWith([
+      'DTSTART;TZID="Europe/Paris":20260320T093000',
+    ]));
+    assert.ok(out.includes('BEGIN:VTIMEZONE'), 'a quoted TZID parameter is a reference');
+    assert.ok(out.includes('TZID:Europe/Paris'));
+  });
+
+  it('keeps a block referenced from a property other than DTSTART/DTEND', () => {
+    const out = removeOrphanedVTimezones(icalWith([
+      'DTSTART:20260320T093000Z',
+      'RECURRENCE-ID;TZID=Europe/Paris:20260320T093000',
+    ]));
+    assert.ok(out.includes('BEGIN:VTIMEZONE'));
+  });
+
+  // ONLY A SURROUNDING PAIR IS A WRAPPER. A quote inside the name is part of the name, so
+  // stripping every quote instead of the two at the ends would make a reference stop matching
+  // the block it names and silently delete a referenced VTIMEZONE. The name is malformed -
+  // RFC 5545 §3.1 admits no DQUOTE inside a param-value - which is exactly why it is here:
+  // the payload is attacker-authored and the comparison has to stay an exact one either way.
+  it('treats a quote inside the zone name as part of the name, not as a wrapper', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:Zo"ne"X',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART;TZID=Zo"ne"X:20260320T093000',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    assert.ok(removeOrphanedVTimezones(data).includes('BEGIN:VTIMEZONE'));
+  });
+
+  // A block this scan cannot name is left alone rather than deleted. It has no TZID to compare,
+  // so "no reference found" says nothing about it, and the fail-safe direction for a write path
+  // is to keep what it does not understand.
+  it('keeps a VTIMEZONE that carries no TZID at all', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'X-LIC-LOCATION:Somewhere',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    assert.ok(removeOrphanedVTimezones(data).includes('BEGIN:VTIMEZONE'));
+  });
+
+  // The exactness the substring test did not have in the other direction either: `Europe/Pari`
+  // is a prefix of the block's TZID, and `;TZID=Europe/Paris` contains `;TZID=Europe/Pari`, so
+  // a block for the SHORTER name was kept by a reference that names the longer one.
+  it('does not let a longer zone name keep a block named by its prefix', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:Europe/Pari',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART;TZID=Europe/Paris:20260320T093000',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    assert.ok(!removeOrphanedVTimezones(data).includes('BEGIN:VTIMEZONE'));
+  });
+});
+
 // ---------- v1.11.1 security fixes ----------
 
 describe('updateCalendarEvent — a hostile recurrence rule is never expanded', () => {

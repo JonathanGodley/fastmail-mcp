@@ -1092,7 +1092,8 @@ export function removeOrphanedVTimezones(icalData: string): string {
       if (blockEnd === -1) { i = lines.length; break; }
       // Use parseICalValue for proper unfolding support
       const tzBlock = lines.slice(blockStart, blockEnd + 1).join('\n');
-      // Trimmed here because this feeds an exact-match `;TZID=${tzid}` substring check below.
+      // Trimmed here because this feeds an exact-equality comparison against the parsed TZID
+      // parameter of every non-VTIMEZONE line below.
       const tzid = (parseICalValue(tzBlock, 'TZID') || '').trim();
       tzBlocks.push({ tzid, start: blockStart, end: blockEnd });
       i = blockEnd;
@@ -1109,16 +1110,28 @@ export function removeOrphanedVTimezones(icalData: string): string {
     if (structuralLine(lines[i]) === 'END:VTIMEZONE') { inTz = false; continue; }
     if (!inTz) nonTzLines.push(lines[i]);
   }
-  // Unfold before scanning so a reference split across a folded line isn't
-  // missed, and check both bare and quoted parameter forms.
-  const nonTzContent = nonTzLines.join('\n').replace(/\n[ \t]/g, '');
+  // Unfold before scanning so a reference split across a folded line isn't missed. Unfolded
+  // back into LINES, because a TZID parameter is a property of one line and the parser below
+  // reads one line at a time.
+  const unfoldedNonTzLines = nonTzLines.join('\n').replace(/\n[ \t]/g, '').split('\n');
+
+  // WHAT COUNTS AS A REFERENCE IS DECIDED BY THE SAME PARSER THAT READS A TZID EVERYWHERE ELSE
+  // (#187). A substring search for `;TZID=<name>` disagrees with `extractTzidParam` in both
+  // directions, and calendar content is attacker-authored, so both are reachable: it counts a
+  // `;TZID=` sitting inside another parameter's QUOTED value or inside a property VALUE (a
+  // DESCRIPTION will do), and — being a prefix match — it lets a reference to `Europe/Paris`
+  // keep a block whose TZID is `Europe/Pari`. The parser knows where parameters stop and a
+  // value starts, and which spans are quoted; the comparison is then exact, on the unquoted
+  // value, so neither miscount survives. A block referenced ONLY in one of those ways is now
+  // dropped, which is correct: it was never referenced.
+  const referenced = new Set<string>();
+  for (const line of unfoldedNonTzLines) {
+    const tzid = extractTzidParam(line);
+    if (tzid !== undefined) referenced.add(tzid.replace(/^"|"$/g, ''));
+  }
 
   // Check each VTIMEZONE for references
-  const orphaned = tzBlocks.filter(tz => {
-    if (!tz.tzid) return false;
-    return !nonTzContent.includes(`;TZID=${tz.tzid}`) &&
-           !nonTzContent.includes(`;TZID="${tz.tzid}"`);
-  });
+  const orphaned = tzBlocks.filter(tz => tz.tzid !== '' && !referenced.has(tz.tzid));
 
   // Remove orphaned blocks in reverse order
   for (let i = orphaned.length - 1; i >= 0; i--) {
