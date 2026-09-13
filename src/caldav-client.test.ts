@@ -10616,6 +10616,29 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
     assert.equal(events.find(e => e.id === 'b@fm')!.isRecurring, undefined);
   });
 
+  it('asks with a path, not the absolute url the row carries', async () => {
+    // tsdav resolves every listing href to an absolute url before handing it back, so a row url
+    // is always absolute against a real server. Every `<D:href>` tsdav itself writes into a
+    // request body is path-and-query, and this multiget is built by hand — sending the absolute
+    // form would make it the one request in this client that does not look like the others.
+    const calendarUrl = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+    const rowUrl = calendarUrl + 'series.ics';
+    const calendarMultiGet = mock.fn(async () => [
+      multiGetResponse(rowUrl, master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY')),
+    ]);
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: calendarUrl }], {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) =>
+        withEtags([{ url: rowUrl, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }])),
+      calendarMultiGet,
+    });
+
+    await client.getCalendarEvents(...WINDOW);
+
+    const asked = (calendarMultiGet.mock.calls[0].arguments[0] as { objectUrls?: string[] }).objectUrls;
+    assert.deepEqual(asked, ['/dav/calendars/user/probe/personal/series.ics']);
+  });
+
   it('matches a response whose href is a path against a row whose url is absolute', async () => {
     // tsdav resolves a listing href against the calendar url, so a row's url is absolute while
     // a DAV server is free to answer the multiget with a bare path. Matching the raw strings
@@ -10698,12 +10721,19 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
   });
 
   // WHAT COUNTS AS AN ANSWER. Each of these is a response the server sent for a resource that
-  // was asked about, carrying nothing that settles it. None may be read as "does not repeat".
+  // was asked about, carrying nothing that settles it. None may be read as "does not repeat" -
+  // which is the reading the caller gets from a row whose `isRecurring` is absent.
   const unanswerable: Array<[string, (url: string) => Record<string, unknown>]> = [
-    ['names no resource', () => ({ status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR' } } })],
+    ['names no resource', () => ({ status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY') } } })],
     ['carries no props at all', url => ({ href: url, status: 200, ok: true })],
     ['carries no calendar-data prop', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"' } })],
     ['carries a calendar-data prop that is not text', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: { nested: 'markup' } } } })],
+    // The payload arrived and holds no event to read a rule off. An empty `<C:calendar-data/>`,
+    // a VCALENDAR with nothing in it, and a payload whose keywords are lower-cased (legal per
+    // RFC 5545 §3.1, and not what this file's case-sensitive marker scan reads) all land here.
+    ['carries an empty calendar-data payload', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: '' } } })],
+    ['carries a payload with no VEVENT in it', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR' } } })],
+    ['carries a payload this parser cannot read an event out of', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY').toLowerCase() } } })],
   ];
 
   for (const [shape, response] of unanswerable) {

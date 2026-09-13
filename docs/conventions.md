@@ -2495,16 +2495,33 @@ ambiguous remainder is closed off the payload instead, by reading the STORED res
 stripped. Guessing in either direction was never available, because claiming `isRecurring` on
 every expanded row marks real one-off events as repeating.
 
-Two properties of that follow-up read are the load-bearing ones. It is **one request per
-calendar**, issued once the calendar has been walked and not at all when nothing in it was
-ambiguous, so the cost is bounded by the calendars in the window rather than by the rows.
+Two properties of that follow-up read are the load-bearing ones.
+
+It is **one request per calendar**, issued once the calendar has been walked and not at all
+when nothing in it was ambiguous — so round trips are bounded by the calendars in the window
+rather than by the rows. Bytes are not. The predicate that selects an ambiguous resource is "a
+single markerless block", which is exactly what an ordinary one-off event looks like, so on a
+normal calendar nearly every row qualifies and its stored payload is fetched a second time:
+budget for roughly double the data a listing used to move, in one extra request per calendar.
+
 And an **incomplete answer fails the whole listing** rather than returning the rows with the
 field left off: absence of `isRecurring` is the tool's statement that an event does not
 repeat, so a row that silently loses the field reports a repeating event as a one-off inside a
 response that looks complete — and the caller most likely to be asking is asking whether a
 slot is free. A failed follow-up is the same class of failure as the expanded fetch itself
 failing, and is reported the same way rather than through a new output field that would give
-absence a second meaning.
+absence a second meaning. "Incomplete" includes a response that arrives carrying no readable
+VEVENT — an empty `<C:calendar-data/>`, an empty VCALENDAR, or a payload whose keywords are
+lower-cased, which RFC 5545 §3.1 permits and this file's deliberately case-sensitive marker
+scan does not read. `isRecurringSeriesResource` answers false for all three, and false on this
+path is a positive claim about the calendar rather than the fail-closed refusal it is on the
+write path.
+
+The one row that carries no recurrence claim in either direction is the placeholder a resource
+with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not set to
+`isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a record
+nothing was read out of. The tool description and README carve it out by name rather than
+claiming the field is decided on literally every row.
 
 ## Local-time formatting and the U+202F trap
 

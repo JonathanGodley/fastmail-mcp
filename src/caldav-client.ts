@@ -3095,11 +3095,11 @@ function calendarLabel(calendar: DAVCalendar): string {
 }
 
 /**
- * One resource whose recurrence the expanded read left undecided: the url to ASK about (the form
- * the listing gave) and the rows that resolving it would label.
+ * One resource whose recurrence the expanded read left undecided: the href to ASK about, and the
+ * rows that resolving it would label.
  */
 interface UndecidedResource {
-  requestUrl: string;
+  requestHref: string;
   rows: CalendarEvent[];
 }
 
@@ -3112,15 +3112,20 @@ interface UndecidedResource {
  * block — byte-identical in every respect this parser can read to a genuine one-off. Reading
  * the STORED resource answers it outright, because an unexpanded master keeps its rule.
  *
- * ONE REQUEST PER CALENDAR, and none at all for a calendar with nothing ambiguous in it. The
- * payload is bounded by the row count the window already bounds.
+ * ONE REQUEST PER CALENDAR, but NOT a rare one. By the predicate that selects them, an ordinary
+ * one-off row is ambiguous — it is a single markerless block, which is exactly what a series'
+ * first instance also looks like — so a typical listing re-reads the stored payload of nearly
+ * every row it returns, roughly doubling the bytes the call moves. What it does not do is add a
+ * round trip per row: the whole calendar is walked first and asked about once, and a calendar
+ * with nothing ambiguous in it is not asked about at all.
  *
  * MATCHED ON BOTH SIDES RESOLVED, never on the raw strings. A DAV server may name a resource
  * with a bare path in one response and an absolute url in the next, so the row url and the
- * response href are each resolved against the calendar url before they are compared; only the
- * REQUEST carries the row url exactly as the listing gave it, since that is the form the server
- * has already shown it uses. A response naming no row we asked about is ignored: it is not an
- * answer to this question.
+ * response href are each resolved against the calendar url before they are compared. The REQUEST
+ * is the other way round — a path, not the absolute url the row carries — because every `<D:href>`
+ * tsdav writes into a multiget body is `pathname + search`, and an absolute one here would be the
+ * first this client has ever sent. A response naming no row we asked about is ignored: it is not
+ * an answer to this question.
  *
  * AN INCOMPLETE ANSWER FAILS THE WHOLE LISTING, which is the half worth defending. Leaving the
  * field off instead would report a repeating event as a one-off, on no evidence, inside a
@@ -3138,7 +3143,7 @@ async function settleAmbiguousRecurrence(
   const responses = await client.calendarMultiGet({
     url: calendar.url,
     props: { 'd:getetag': {}, 'c:calendar-data': {} },
-    objectUrls: [...undecided.values()].map(entry => entry.requestUrl),
+    objectUrls: [...undecided.values()].map(entry => entry.requestHref),
     depth: '1',
   });
 
@@ -3150,9 +3155,15 @@ async function settleAmbiguousRecurrence(
     const entry = undecided.get(url);
     if (!entry) continue;
     const ical = readCalendarData(res);
-    // A response carrying no payload has not answered the question, so it is left out of
-    // `answered` and the incompleteness below reports it.
     if (ical === undefined) continue;
+    // A payload this parser reads no VEVENT out of has not answered the question either, and
+    // that is the case worth naming: `isRecurringSeriesResource` returns false for it, and false
+    // here is not an absence of evidence but a positive claim that the event does not repeat.
+    // An empty `<C:calendar-data/>`, a VCALENDAR with nothing in it, and a payload whose
+    // keywords are lower-cased (legal per RFC 5545 §3.1, and not what the marker scan reads)
+    // all arrive this way. Both of these are left out of `answered`, so the throw below reports
+    // them.
+    if (extractVEventBlocks(ical).length === 0) continue;
     answered.add(url);
     if (isRecurringSeriesResource(ical)) for (const row of entry.rows) row.isRecurring = true;
   }
@@ -3182,6 +3193,21 @@ function resolveResponseHref(href: string, collectionUrl: string | undefined): s
     return new URL(href, collectionUrl).href;
   } catch {
     return href;
+  }
+}
+
+/**
+ * A resource url in the form a `<D:href>` in a multiget body takes: path and query, no origin.
+ * That is what tsdav writes for every other request it builds, and what a row url has to be
+ * converted back to, because tsdav resolves every href it hands us to an absolute url first.
+ * A url that cannot be resolved is sent as it came, which is already a path.
+ */
+function toRequestHref(url: string, collectionUrl: string | undefined): string {
+  try {
+    const resolved = new URL(url, collectionUrl);
+    return resolved.pathname + resolved.search;
+  } catch {
+    return url;
   }
 }
 
@@ -4604,7 +4630,10 @@ export class CalDAVCalendarClient {
         // decided and needs no second read. Rows the window filter dropped are not asked about:
         // there is nothing left to label.
         if (blocks.length === 1 && kept.length > 0 && !kept.some(e => e.isRecurring) && obj.url) {
-          undecided.set(resolveResponseHref(obj.url, cal.url), { requestUrl: obj.url, rows: kept });
+          undecided.set(resolveResponseHref(obj.url, cal.url), {
+            requestHref: toRequestHref(obj.url, cal.url),
+            rows: kept,
+          });
         }
       }
       await settleAmbiguousRecurrence(client, cal, undecided);
