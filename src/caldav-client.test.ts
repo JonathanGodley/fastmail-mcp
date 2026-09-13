@@ -45,7 +45,7 @@ import {
 } from './caldav-client.js';
 // A value import, not `import type`: the redirect test below stubs a method on the
 // prototype, which needs the class itself. It still serves the type positions.
-import { DAVClient, fetchCalendars as tsdavFetchCalendars, propfind as tsdavPropfind, calendarQuery as tsdavCalendarQuery, calendarMultiGet as tsdavCalendarMultiGet } from 'tsdav';
+import { DAVClient, fetchCalendars as tsdavFetchCalendars, propfind as tsdavPropfind, calendarQuery as tsdavCalendarQuery, calendarMultiGet as tsdavCalendarMultiGet, fetchCalendarObjects as tsdavFetchCalendarObjects } from 'tsdav';
 import type { DAVAccount, DAVResponse } from 'tsdav';
 import { callArguments } from './testing/mock-calls.js';
 // The calendar window's local-day resolution reads the deployment's configured zone from
@@ -10170,5 +10170,105 @@ describe('values a refusal in this file quotes back are echoed, not pasted', () 
     const message = messageOf(() => validateAttendeeEmail(`user${SEP}${FORGED}@example.com`));
     assertNoForgedLine(message);
     assert.equal(message, `Invalid participant email (contains illegal characters): "user ${FORGED}@example.com"`);
+  });
+});
+
+// ---- what a resource is NAMED never decides whether it is visible (#191) ----
+//
+// tsdav's `fetchCalendarObjects` defaults `urlFilter` to `url.includes('.ics')` and applies it
+// to resource hrefs BEFORE the multiget, so a resource stored as `.ICS`, extensionless or as a
+// bare UUID was invisible to every read and every write in this file. The three fetches have to
+// agree about that, because a lookup resolving what the listing cannot show is the coupling the
+// issue is actually about: `update_calendar_event` would rewrite a record `list_calendar_events`
+// says is not there.
+describe('calendar-object fetches filter hrefs by emptiness and the collection itself, never by name', () => {
+  const COLLECTION = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+
+  function assertNameBlindFilter(filter: unknown, site: string): void {
+    assert.equal(typeof filter, 'function', `${site} passed no urlFilter`);
+    const f = filter as (url: string) => boolean;
+    for (const href of [COLLECTION + 'x.ICS', COLLECTION + 'x', COLLECTION + 'x.ics', COLLECTION + 'de305d54']) {
+      assert.equal(f(href), true, `${site} rejected ${href}`);
+    }
+    assert.equal(f(''), false, `${site} accepted an empty href`);
+    assert.equal(f(COLLECTION), false, `${site} accepted the collection's own url`);
+    // Trailing-slash spellings of one collection are the same collection; tsdav resolves an
+    // href against the calendar url, so both spellings genuinely arrive.
+    assert.equal(f(COLLECTION.replace(/\/$/, '')), false, `${site} accepted the collection url without its trailing slash`);
+  }
+
+  /** The urlFilter each fetch was given, keyed by which fetch it was. */
+  async function captureFilters(): Promise<{ listing: unknown; uid: unknown; addressed: unknown }> {
+    const captured: { listing?: unknown; uid?: unknown; addressed?: unknown } = {};
+    const stored = {
+      url: COLLECTION + 'stored.ICS',
+      etag: FIXTURE_ETAG,
+      data: [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:named-oddly@example.invalid',
+        'DTSTART:20260325T080000Z',
+        'DTEND:20260325T090000Z',
+        'SUMMARY:Stored under a name tsdav would hide',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n'),
+    };
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test', now: () => Date.parse('2026-03-25T00:00:00Z') });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: COLLECTION }], {
+      fetchCalendarObjects: mock.fn(async (params: FetchObjectsParams) => {
+        const p = params as { objectUrls?: string[]; filters?: unknown; urlFilter?: unknown };
+        if (p.objectUrls) captured.addressed = p.urlFilter;
+        else if (p.filters) captured.uid = p.urlFilter;
+        else captured.listing = p.urlFilter;
+        return [stored];
+      }),
+    });
+    await client.getCalendarEvents(undefined, 10, '2026-03-24', '2026-03-26');
+    await client.getCalendarEventById('named-oddly@example.invalid');
+    await client.getCalendarEventById(stored.url);
+    return { listing: captured.listing, uid: captured.uid, addressed: captured.addressed };
+  }
+
+  it('passes the same name-blind filter to the listing, the UID lookup and the addressed lookup', async () => {
+    const { listing, uid, addressed } = await captureFilters();
+    assertNameBlindFilter(listing, 'the listing fetch');
+    assertNameBlindFilter(uid, 'the UID lookup fetch');
+    assertNameBlindFilter(addressed, 'the addressed lookup fetch');
+  });
+
+  // The unit assertion above says what this file passes; this says what tsdav DOES with it.
+  // Real `fetchCalendarObjects`, driven through a fetch override whose calendar-query answer
+  // lists an `.ICS` href — with the filter the listing site actually passes, so a filter that
+  // looked right and did not survive tsdav's own resolution would show up here.
+  it('makes real tsdav request an .ICS resource the library default would have dropped', async () => {
+    const { listing } = await captureFilters();
+    const href = '/dav/calendars/user/probe/personal/stored.ICS';
+    const requestBodies: string[] = [];
+    const fetchOverride = (async (_input: unknown, init?: RequestInit) => {
+      const body = String(init?.body ?? '');
+      requestBodies.push(body);
+      // The calendar-query answer lists the resource; the multiget answer carries its data.
+      return davXmlResponse(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        + '<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:response>'
+        + `<D:href>${href}</D:href>`
+        + '<D:propstat><D:prop><D:getetag>"e1"</D:getetag>'
+        + '<C:calendar-data>BEGIN:VCALENDAR\nEND:VCALENDAR</C:calendar-data>'
+        + '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>'
+        + '</D:response></D:multistatus>',
+      );
+    }) as typeof globalThis.fetch;
+
+    const objects = await tsdavFetchCalendarObjects({
+      calendar: { url: COLLECTION },
+      urlFilter: listing as ((url: string) => boolean) | undefined,
+      fetch: fetchOverride,
+    });
+
+    const multiget = requestBodies.find(b => b.includes('calendar-multiget'));
+    assert.ok(multiget, 'tsdav issued no multiget for the .ICS resource');
+    assert.ok(multiget!.includes(href), `the multiget did not address the .ICS resource: ${multiget}`);
+    assert.deepEqual(objects.map(o => o.url), [COLLECTION + 'stored.ICS']);
   });
 });

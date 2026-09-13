@@ -1,4 +1,4 @@
-import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest } from 'tsdav';
+import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, urlEquals } from 'tsdav';
 // requireNonEmpty/validateClearFields come from coerce.ts rather than being
 // defined here, so their rejections throw the tagged InvalidInputError and the
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
@@ -2885,6 +2885,28 @@ function resolveEventUrlTargets(
 type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjects']>[0]['filters']>;
 
 /**
+ * Which hrefs a calendar-object fetch will request. Passed by EVERY `fetchCalendarObjects`
+ * call in this file, because a lookup that resolves what the listing cannot show would let
+ * `update_calendar_event` rewrite a record `list_calendar_events` reports as absent (#191).
+ *
+ * It replaces tsdav's default, `url.includes('.ics')`, which decides a resource's KIND from
+ * its NAME — something no part of CalDAV promises. tsdav applies that default BEFORE the
+ * multiget, so a resource stored as `.ICS`, extensionless or as a bare UUID was not merely
+ * mis-labelled but unreachable: not listable, not readable, not updatable, not deletable.
+ * Nothing is lost by accepting every name, because what actually keeps non-VEVENT resources
+ * out is the VEVENT comp-filter the server is asked for (tsdav's own default filter and
+ * `uidEqualsFilter` both carry one) and the `extractVEvent` null-skip on the addressed path.
+ *
+ * The collection's own url is excluded HERE rather than left to the library: tsdav's calendar
+ * branch has no exclusion of its own — unlike its address-book branch, which does — and the
+ * name-based default only happened to drop a collection href because such an href carries no
+ * `.ics`. `urlEquals` is tsdav's own normalisation, so the two agree about trailing slashes.
+ */
+function calendarResourceUrlFilter(collectionUrl: string | undefined): (url: string) => boolean {
+  return (url: string) => Boolean(url) && !urlEquals(url, collectionUrl);
+}
+
+/**
  * The CalDAV `calendar-query` filter that asks one collection for the resources whose VEVENT
  * carries exactly this UID (#137).
  *
@@ -4351,7 +4373,11 @@ export class CalDAVCalendarClient {
 
     const allEvents: CalendarEvent[] = [];
     for (const cal of targetCalendars) {
-      const objects = await client.fetchCalendarObjects({ calendar: cal, ...fetchOptions });
+      const objects = await client.fetchCalendarObjects({
+        calendar: cal,
+        ...fetchOptions,
+        urlFilter: calendarResourceUrlFilter(cal.url),
+      });
       for (const obj of objects) {
         // ONE structural extraction per resource, on whole content lines — never a `/m` regex
         // or a substring count, which a DESCRIPTION containing the text "BEGIN:VEVENT" defeats
@@ -4527,22 +4553,19 @@ export class CalDAVCalendarClient {
     const urlTargets = resolveEventUrlTargets(wanted, selectable);
     const addressedHrefs = new Set(urlTargets.map(t => t.objectUrl));
 
-    // BOTH FETCHES BELOW INHERIT A tsdav FILTER NOBODY HERE ASKED FOR: `fetchCalendarObjects`
-    // defaults `urlFilter` to one that keeps only hrefs containing the lowercase string `.ics`,
-    // and applies it to the resource urls BEFORE the multiget — to the hrefs the query returned
-    // on the UID path, and to the caller's own resolved href on the addressed path, which is
-    // then not requested at all. A resource stored under any other name (no extension, `.ICS`,
-    // a bare UUID) is therefore invisible to every path in this file: it cannot be read, cannot
-    // be updated or deleted, and cannot be one of the copies this lookup reports. That is not this
-    // lookup's judgement about the account but a library default sitting under it, and it binds
-    // `getCalendarEvents` in exactly the same way.
+    // BOTH FETCHES BELOW PASS `calendarResourceUrlFilter` — see it for why a resource's name
+    // must not decide whether this lookup can see it, and why the listing passes the same one.
     //
     // EVERY selectable calendar is queried and every match kept: the scan does not stop at the
     // first hit. A UID is unique per COLLECTION and not per account, so stopping early answered
     // a two-copy account with whichever copy happened to be discovered first and said nothing
     // about the other (#101).
     for (const calendar of selectable) {
-      const objects = await client.fetchCalendarObjects({ calendar, filters: uidEqualsFilter(wanted) });
+      const objects = await client.fetchCalendarObjects({
+        calendar,
+        filters: uidEqualsFilter(wanted),
+        urlFilter: calendarResourceUrlFilter(calendar.url),
+      });
       for (const obj of objects) {
         const vevent = extractVEvent(obj.data || '');
         if (!vevent) continue;
@@ -4565,7 +4588,11 @@ export class CalDAVCalendarClient {
     for (const { calendar, objectUrl } of urlTargets) {
       let objects: DAVCalendarObject[];
       try {
-        objects = await client.fetchCalendarObjects({ calendar, objectUrls: [objectUrl] });
+        objects = await client.fetchCalendarObjects({
+          calendar,
+          objectUrls: [objectUrl],
+          urlFilter: calendarResourceUrlFilter(calendar.url),
+        });
       } catch (err) {
         // NOT-FOUND ONLY IS SWALLOWED. tsdav turns EVERY failure of an addressed multiget into
         // the same throw — a per-href 404 inside a 207, a collection 500, a 401 — and the only
