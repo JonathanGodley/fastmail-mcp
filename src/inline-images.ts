@@ -198,9 +198,7 @@ export const DESCRIBE_PART_MAX = 64;
  * src/; the whole-sentence half is a reading, done at the sentence you are editing.
  *
  * Truncation is marked with an ellipsis rather than being silent: two long values that
- * differ only past the cap must not print identically. `max` overrides the default bound for a
- * site whose value needs more room to stay useful, the way `echoCallerText` already takes one;
- * it changes how much is shown and nothing else about the treatment above.
+ * differ only past the cap must not print identically.
  *
  * A value made entirely of stripped characters renders as the empty string, and no
  * placeholder is substituted: this function renders DATA inside a quoted span, so

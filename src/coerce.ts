@@ -111,11 +111,10 @@ export function redactBearerTokens(input: string): string {
  * backwards still reads correctly and still passes every line-forging test, which is
  * exactly why the two steps live behind one name instead of at each call site (#131).
  *
- * A site whose value is unusable at 64 code points calls `describeUntrustedAt` below instead.
- * THIS function deliberately takes no second parameter: seven live call sites render lists with
- * a bare `.map(describeUntrusted)`, and `map` passes the array INDEX as the second argument, so
- * a positional bound here would silently become 0 for every first element and truncate it to a
- * lone ellipsis (33 tests went red proving exactly that).
+ * THIS function deliberately takes no second parameter, and a wider bound goes through
+ * `describeUntrustedAt` below: list-rendering call sites pass this one to `.map` bare, and `map`
+ * supplies the array INDEX as the second argument — a positional bound would silently become 0
+ * for every first element and truncate it to a lone ellipsis.
  *
  * A CALLER THAT QUOTES QUOTES WITH `"…"`, and this is the same rule `echoCallerText` carries,
  * for the same reason: the swap in step 1 turns a double quote into a single one, so it
@@ -146,12 +145,10 @@ export function describeUntrusted(value: unknown): string {
 /**
  * `describeUntrusted` at a bound named by the caller, for a value the 64-code-point default
  * renders useless — the same two steps in the same order, at a width that value can survive.
- * A separate name rather than an optional parameter on the function above, for the reason given
- * there: that one is passed to `.map` bare, and a second positional argument is the index.
  *
  * The bound moves the TRUNCATION and nothing else. Redaction still runs over the whole value
  * first, so a wider echo cannot let a credential through. Pass a named constant carrying its
- * reason, as `PATH_ECHO_LIMIT` does; a bound with no stated reason is the thing that drifts.
+ * reason, as `PATH_ECHO_LIMIT` does.
  */
 export function describeUntrustedAt(value: unknown, max: number): string {
   const source = typeof value === 'string' ? value : value == null ? '' : String(value);

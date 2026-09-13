@@ -1110,20 +1110,17 @@ export function removeOrphanedVTimezones(icalData: string): string {
     if (structuralLine(lines[i]) === 'END:VTIMEZONE') { inTz = false; continue; }
     if (!inTz) nonTzLines.push(lines[i]);
   }
-  // Unfold before scanning so a reference split across a folded line isn't missed. Unfolded
-  // back into LINES, because a TZID parameter is a property of one line and the parser below
-  // reads one line at a time.
+  // Unfold before scanning so a reference split across a folded line isn't missed, but stay in
+  // LINES: a TZID parameter is a property of one line, and the parser below reads one at a time.
   const unfoldedNonTzLines = nonTzLines.join('\n').replace(/\n[ \t]/g, '').split('\n');
 
   // WHAT COUNTS AS A REFERENCE IS DECIDED BY THE SAME PARSER THAT READS A TZID EVERYWHERE ELSE
-  // (#187). A substring search for `;TZID=<name>` disagrees with `extractTzidParam` in both
-  // directions, and calendar content is attacker-authored, so both are reachable: it counts a
-  // `;TZID=` sitting inside another parameter's QUOTED value or inside a property VALUE (a
-  // DESCRIPTION will do), and — being a prefix match — it lets a reference to `Europe/Paris`
-  // keep a block whose TZID is `Europe/Pari`. The parser knows where parameters stop and a
-  // value starts, and which spans are quoted; the comparison is then exact, on the unquoted
-  // value, so neither miscount survives. A block referenced ONLY in one of those ways is now
-  // dropped, which is correct: it was never referenced.
+  // (#187). A substring search for `;TZID=<name>` miscounts in both directions, and calendar
+  // content is attacker-authored, so both are reachable: it counts a `;TZID=` sitting inside
+  // another parameter's QUOTED value or inside a property VALUE (a DESCRIPTION will do), and —
+  // being a prefix match — it lets a reference to `Europe/Paris` keep a block whose TZID is
+  // `Europe/Pari`. A block referenced ONLY in one of those ways is now dropped, which is
+  // correct: it was never referenced.
   const referenced = new Set<string>();
   for (const line of unfoldedNonTzLines) {
     const tzid = extractTzidParam(line);
@@ -1357,11 +1354,9 @@ function hasRecurrenceId(block: string): boolean {
  * Two blocks or more can only come from a recurrence, and a RECURRENCE-ID on any block says
  * the same thing. What is NOT decidable here is the converse: a single block carrying
  * neither marker is a one-off event AND the sole in-window instance of a series that starts
- * inside the window, because Cyrus emits both identically (see above). Nothing is guessed on
- * that residue and nothing is left to the caller either — `settleAmbiguousRecurrence` reads the
- * stored resources afterwards, one request per calendar, and an unexpanded master still carries
- * the rule that the expansion stripped. This predicate therefore answers only what the blob
- * PROVES; a `false` from it means "ask", not "one-off".
+ * inside the window, because Cyrus emits both identically (see above). That residue is settled
+ * afterwards by `settleAmbiguousRecurrence`, not guessed at and not left to the caller, so this
+ * predicate answers only what the blob PROVES: a `false` from it means "ask", not "one-off".
  */
 function blockCountProvesSeries(blocks: string[]): boolean {
   return blocks.length > 1 || blocks.some(hasRecurrenceId);
@@ -2223,11 +2218,8 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
   // Two TZID-bearing values in DIFFERENT zones are a legal RFC 5545 shape — a flight that
   // departs in one zone and lands in another — so the frames agree and the event is written.
   // ORDERING IS STILL CHECKED THERE, ON INSTANTS RATHER THAN WALL CLOCKS (#140). A cross-zone
-  // pair's text says nothing about its order in either direction: Rome 10:00 to New York 08:00
-  // the same day is a real four-hour flight though the clocks read backwards, and New York
-  // 07:00 to Rome 08:00 ends four hours before it starts though they read forwards. Comparing
-  // the values as text gets both wrong, and the second one wrote an event whose end precedes
-  // its start — the very pair the refusal below exists for.
+  // pair's text says nothing about its order in either direction, so comparing the values as
+  // text both rejects real flights and writes events whose end precedes their start.
   //
   // WHAT REMAINS IS A STAND-DOWN ON AN UNRESOLVABLE NAME, and that is an inability, not a
   // choice. Real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone
@@ -2242,9 +2234,8 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
     // spelling, which is what `formatICalDate` turns it into.
     const startMs = resolveCalendarInstantMs(formatICalDate(start.value), start.tzid);
     const endMs = resolveCalendarInstantMs(formatICalDate(end.value), end.tzid);
-    // A value that cannot be placed is the same case as a zone that cannot: there is no
-    // instant to compare, so the pair is written rather than refused on a reading we do not
-    // have. Reachable from a malformed stored side, which is not the caller's to fix.
+    // A value that cannot be placed is the same case as a zone that cannot: no instant to
+    // compare, so the pair is written rather than refused on a reading we do not have.
     if (Number.isNaN(startMs) || Number.isNaN(endMs)) return;
     ordered = startMs < endMs;
   } else {
@@ -2775,9 +2766,6 @@ export const AMBIGUOUS_COPY_URL_ECHO_LIMIT = 320;
  * `Invalid credentials: PROPFIND <url> returned 401 Unauthorized`, and the url alone clears 64,
  * so the default cuts the status code off and leaves a refusal that says a request was made and
  * not what came back. 200 carries a real Fastmail principal url plus the status.
- *
- * Widening the ECHO does not widen what can escape: `describeUntrusted` redacts the whole value
- * before it truncates, so a credential in the server's response is removed at any bound.
  */
 export const LOGIN_FAILURE_ECHO_LIMIT = 200;
 
@@ -2930,21 +2918,19 @@ type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjec
 
 /**
  * Which hrefs a calendar-object fetch will request. Passed by EVERY `fetchCalendarObjects`
- * call in this file, because a lookup that resolves what the listing cannot show would let
- * `update_calendar_event` rewrite a record `list_calendar_events` reports as absent (#191).
+ * call in this file, so that no read reaches a record another read reports as absent (#191).
  *
  * It replaces tsdav's default, `url.includes('.ics')`, which decides a resource's KIND from
- * its NAME — something no part of CalDAV promises. tsdav applies that default BEFORE the
- * multiget, so a resource stored as `.ICS`, extensionless or as a bare UUID was not merely
- * mis-labelled but unreachable: not listable, not readable, not updatable, not deletable.
+ * its NAME — something no part of CalDAV promises — and which tsdav applies BEFORE the
+ * multiget, so a resource stored as `.ICS`, extensionless or as a bare UUID was unreachable.
  * Nothing is lost by accepting every name, because what actually keeps non-VEVENT resources
  * out is the VEVENT comp-filter the server is asked for (tsdav's own default filter and
  * `uidEqualsFilter` both carry one) and the `extractVEvent` null-skip on the addressed path.
  *
- * The collection's own url is excluded HERE rather than left to the library: tsdav's calendar
- * branch has no exclusion of its own — unlike its address-book branch, which does — and the
- * name-based default only happened to drop a collection href because such an href carries no
- * `.ics`. `urlEquals` is tsdav's own normalisation, so the two agree about trailing slashes.
+ * The collection's own url must be excluded HERE: tsdav's calendar branch has no exclusion of
+ * its own — unlike its address-book branch — and the name-based default only happened to drop
+ * a collection href for want of an `.ics`. `urlEquals` is tsdav's own normalisation, so the
+ * two agree about trailing slashes.
  */
 function calendarResourceUrlFilter(collectionUrl: string | undefined): (url: string) => boolean {
   return (url: string) => Boolean(url) && !urlEquals(url, collectionUrl);
@@ -3108,10 +3094,7 @@ function calendarLabel(calendar: DAVCalendar): string {
     ?? (typeof calendar.url === 'string' ? calendar.url.trim() : '');
 }
 
-/**
- * One resource whose recurrence the expanded read left undecided: the href to ASK about, and the
- * rows that resolving it would label.
- */
+/** One undecided resource: the href to ASK about, and the rows that resolving it would label. */
 interface UndecidedResource {
   requestHref: string;
   rows: CalendarEvent[];
@@ -3126,26 +3109,12 @@ interface UndecidedResource {
  * block — byte-identical in every respect this parser can read to a genuine one-off. Reading
  * the STORED resource answers it outright, because an unexpanded master keeps its rule.
  *
- * ONE REQUEST PER CALENDAR, but NOT a rare one. By the predicate that selects them, an ordinary
- * one-off row is ambiguous — it is a single markerless block, which is exactly what a series'
- * first instance also looks like — so a typical listing re-reads the stored payload of nearly
- * every row it returns, roughly doubling the bytes the call moves. What it does not do is add a
- * round trip per row: the whole calendar is walked first and asked about once, and a calendar
- * with nothing ambiguous in it is not asked about at all.
+ * ONE REQUEST PER CALENDAR, but NOT a rare one: an ordinary one-off row is a single markerless
+ * block too, so a typical listing re-reads nearly every row's stored payload.
  *
- * MATCHED ON BOTH SIDES RESOLVED, never on the raw strings. A DAV server may name a resource
- * with a bare path in one response and an absolute url in the next, so the row url and the
- * response href are each resolved against the calendar url before they are compared. The REQUEST
- * is the other way round — a path, not the absolute url the row carries — because every `<D:href>`
- * tsdav writes into a multiget body is `pathname + search`, and an absolute one here would be the
- * first this client has ever sent. A response naming no row we asked about is ignored: it is not
- * an answer to this question.
- *
- * AN INCOMPLETE ANSWER FAILS THE WHOLE LISTING, which is the half worth defending. Leaving the
- * field off instead would report a repeating event as a one-off, on no evidence, inside a
- * response that looks complete — and the caller most likely to be asking is asking whether a
- * slot is free. That is the same class as the expanded fetch itself failing, so it is reported
- * the same way rather than through a new output field that would give absence a second meaning.
+ * AN INCOMPLETE ANSWER FAILS THE WHOLE LISTING rather than dropping `isRecurring` from the rows
+ * it could not settle, because absence of that field is this tool's claim that an event does
+ * not repeat. Both properties are caller-visible; `docs/conventions.md` carries them in full.
  */
 async function settleAmbiguousRecurrence(
   client: DAVClient,
@@ -3170,21 +3139,18 @@ async function settleAmbiguousRecurrence(
     if (!entry) continue;
     const ical = readCalendarData(res);
     if (ical === undefined) continue;
-    // A payload this parser reads no VEVENT out of has not answered the question either, and
-    // that is the case worth naming: `isRecurringSeriesResource` returns false for it, and false
-    // here is not an absence of evidence but a positive claim that the event does not repeat.
-    // An empty `<C:calendar-data/>`, a VCALENDAR with nothing in it, and a payload whose
-    // keywords are lower-cased (legal per RFC 5545 §3.1, and not what the marker scan reads)
-    // all arrive this way. Both of these are left out of `answered`, so the throw below reports
-    // them.
+    // A payload this parser reads no VEVENT out of has not answered the question:
+    // `isRecurringSeriesResource` returns false for it, and false here is not an absence of
+    // evidence but a positive claim that the event does not repeat. A payload whose keywords
+    // are lower-cased arrives this way — legal per RFC 5545 §3.1, and not what the marker
+    // scan reads.
     if (extractVEventBlocks(ical).length === 0) continue;
     answered.add(url);
     if (isRecurringSeriesResource(ical)) for (const row of entry.rows) row.isRecurring = true;
   }
 
   if (answered.size < undecided.size) {
-    // The label is server-authored — a display name this account's server returned — so it goes
-    // through the shared echo inside `"…"` like every other such value in this file's messages.
+    // The label is server-authored, not caller-authored, and still goes through the echo.
     throw new Error(
       `Calendar "${echoCallerText(calendarLabel(calendar))}": the follow-up read that settles whether an ` +
       `event repeats did not answer for ${undecided.size - answered.size} of the ${undecided.size} ` +
@@ -4191,17 +4157,13 @@ export class CalDAVCalendarClient {
       // A login rejection is a credentials/config problem, not a caller argument
       // problem, so this stays a plain Error (InternalError) rather than
       // InvalidInputError — same classification as validateOrganizerUsername above.
-      // tsdav's own message doesn't say which credential is wrong, and the CalDAV
-      // app password is a separate credential from the Fastmail JMAP API token used
-      // elsewhere in this server, so name it explicitly.
+      // tsdav's own message doesn't say which credential is wrong, and the CalDAV app password
+      // is separate from the Fastmail JMAP API token, so name it explicitly.
       //
-      // `detail` IS REMOTE-AUTHORED and goes through the shared untrusted-value helper (#182).
-      // tsdav builds this text out of the server's own response — status, status text and body
-      // — so it can carry a line separator that forges a second sentence of server prose, and
-      // it can carry a credential straight back out of a response that echoed one.
-      // `describeUntrusted` rather than this file's usual `echoCallerText`: only the former
-      // redacts, and only the former removes the Unicode format characters that survive the
-      // control-character scrub.
+      // `detail` IS REMOTE-AUTHORED — tsdav builds it from the server's status, status text and
+      // body — so it takes `describeUntrustedAt` rather than this file's usual `echoCallerText`
+      // (#182): only the former redacts a credential the response echoed back, and only the
+      // former removes the Unicode format characters that survive the control-character scrub.
       throw new Error(
         `CalDAV login failed: ${describeUntrustedAt(detail, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password ` +
         `(a separate credential from the Fastmail JMAP API token).`,
@@ -4554,9 +4516,8 @@ export class CalDAVCalendarClient {
         ...fetchOptions,
         urlFilter: calendarResourceUrlFilter(cal.url),
       });
-      // The rows this calendar's EXPANDED blobs leave undecided about recurrence, keyed by
-      // resource url — see settleAmbiguousRecurrence, which reads the stored masters in one
-      // request once the whole calendar has been walked (#155).
+      // Keyed by resource url, and settled in one request after the whole calendar is walked
+      // — see `settleAmbiguousRecurrence` (#155).
       const undecided = new Map<string, UndecidedResource>();
       for (const obj of objects) {
         // ONE structural extraction per resource, on whole content lines — never a `/m` regex
@@ -4639,10 +4600,8 @@ export class CalDAVCalendarClient {
           kept.push(event);
         }
         // EXACTLY THE SET `blockCountProvesSeries` CANNOT DECIDE: one block, and nothing on it
-        // (RECURRENCE-ID, RRULE or RDATE) that says the resource repeats — which is what leaves
-        // `isRecurring` unset on the rows it produced. Two blocks, or any marker, is already
-        // decided and needs no second read. Rows the window filter dropped are not asked about:
-        // there is nothing left to label.
+        // (RECURRENCE-ID, RRULE or RDATE) that says the resource repeats. Rows the window
+        // filter dropped are not asked about: there is nothing left to label.
         if (blocks.length === 1 && kept.length > 0 && !kept.some(e => e.isRecurring) && obj.url) {
           undecided.set(resolveResponseHref(obj.url, cal.url), {
             requestHref: toRequestHref(obj.url, cal.url),
@@ -4747,9 +4706,6 @@ export class CalDAVCalendarClient {
     const urlTargets = resolveEventUrlTargets(wanted, selectable);
     const addressedHrefs = new Set(urlTargets.map(t => t.objectUrl));
 
-    // BOTH FETCHES BELOW PASS `calendarResourceUrlFilter` — see it for why a resource's name
-    // must not decide whether this lookup can see it, and why the listing passes the same one.
-    //
     // EVERY selectable calendar is queried and every match kept: the scan does not stop at the
     // first hit. A UID is unique per COLLECTION and not per account, so stopping early answered
     // a two-copy account with whichever copy happened to be discovered first and said nothing
