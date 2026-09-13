@@ -2224,17 +2224,38 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
     );
   }
 
-  // Two TZID-bearing values in DIFFERENT zones are a legal RFC 5545 shape — a
-  // flight that departs in one zone and lands in another — so the frames agree
-  // and the event is written. Ordering is skipped there and only there, and as
-  // of the window work that is a CHOICE, not an inability: both zone names are
-  // present on the write path and ICU can resolve them (`zoneOffsetMsAt` does
-  // exactly that for the read window). Checking the order here would newly
-  // reject input this tool accepts today, which is a behaviour change rather
-  // than a fix, so it is left alone and tracked in #140.
-  if (start.frame === 'zoned' && start.tzid && end.tzid && !zoneNamesEqual(start.tzid, end.tzid)) return;
+  // Two TZID-bearing values in DIFFERENT zones are a legal RFC 5545 shape — a flight that
+  // departs in one zone and lands in another — so the frames agree and the event is written.
+  // ORDERING IS STILL CHECKED THERE, ON INSTANTS RATHER THAN WALL CLOCKS (#140). A cross-zone
+  // pair's text says nothing about its order in either direction: Rome 10:00 to New York 08:00
+  // the same day is a real four-hour flight though the clocks read backwards, and New York
+  // 07:00 to Rome 08:00 ends four hours before it starts though they read forwards. Comparing
+  // the values as text gets both wrong, and the second one wrote an event whose end precedes
+  // its start — the very pair the refusal below exists for.
+  //
+  // WHAT REMAINS IS A STAND-DOWN ON AN UNRESOLVABLE NAME, and that is an inability, not a
+  // choice. Real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone
+  // ICU can place, so there is no instant to order on and refusing would reject a record the
+  // account already holds. `isUsableTimezone` is the test, and `zoneOffsetMsAt` is deliberately
+  // NOT: it falls back to the HOST zone for a name it cannot resolve, so it answers for a
+  // different zone rather than saying it could not answer.
+  let ordered: boolean;
+  if (start.frame === 'zoned' && start.tzid && end.tzid && !zoneNamesEqual(start.tzid, end.tzid)) {
+    if (!isUsableTimezone(start.tzid) || !isUsableTimezone(end.tzid)) return;
+    // `value` is the serialized iCal form (`20260320T093000`); the resolver reads the ISO-ish
+    // spelling, which is what `formatICalDate` turns it into.
+    const startMs = resolveCalendarInstantMs(formatICalDate(start.value), start.tzid);
+    const endMs = resolveCalendarInstantMs(formatICalDate(end.value), end.tzid);
+    // A value that cannot be placed is the same case as a zone that cannot: there is no
+    // instant to compare, so the pair is written rather than refused on a reading we do not
+    // have. Reachable from a malformed stored side, which is not the caller's to fix.
+    if (Number.isNaN(startMs) || Number.isNaN(endMs)) return;
+    ordered = startMs < endMs;
+  } else {
+    ordered = start.value < end.value;
+  }
 
-  if (start.value < end.value) return;
+  if (ordered) return;
 
   if (start.frame === 'date') {
     const startDate = formatICalDate(start.value) ?? start.value;
@@ -3957,13 +3978,12 @@ function rejectTimezoneConflict(value: string, label: 'start' | 'end', callerZon
 /**
  * On `update_calendar_event`, `timeZone` combined with only ONE of `start`/`end` can silently
  * strand the untouched side in a different, still-stored zone — manufacturing a two-zone event
- * (the flight-lands-elsewhere shape #140 legitimises) that nobody asked for, and doing it past
- * `validateDateConsistency`'s ordering check rather than through it: two `zoned` values in
- * different TZIDs is the one case that check deliberately stands down on, so this is the one
- * case it will not catch. Only a STORED, DIFFERENTLY-NAMED `zoned` value is a problem — a
- * stored floating or `Z` value already trips the ordinary frame mismatch inside
- * `validateDateConsistency`, and a stored TZID matching `callerZone` produces no discrepancy —
- * so this only ever fires for the one shape that check cannot see.
+ * (the flight-lands-elsewhere shape #140 legitimises) that nobody asked for. Ordering will not
+ * catch it: a two-zone pair IS ordered, on instants, but a stranded pair whose instants happen
+ * to run forwards is perfectly ordered and still not the event the caller described. Only a
+ * STORED, DIFFERENTLY-NAMED `zoned` value is a problem — a stored floating or `Z` value already
+ * trips the ordinary frame mismatch inside `validateDateConsistency`, and a stored TZID
+ * matching `callerZone` produces no discrepancy — so this fires only where nothing else would.
  */
 function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start' | 'end', callerZone: string): void {
   const strandedProp = updatedSide === 'start' ? 'DTEND' : 'DTSTART';

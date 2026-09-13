@@ -5254,10 +5254,23 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     );
   });
 
-  it('accepts a cross-timezone event, skipping an ordering comparison it cannot make', async () => {
-    // Departs Europe/Rome, lands America/New_York. The wall clocks read backwards
-    // but the instants do not; resolving that needs a timezone database, so the
-    // frames agree and the ordering check stands down rather than guess.
+  // ---- a cross-zone pair is ordered on INSTANTS, never on wall clocks (#140) ----
+  //
+  // Two TZID-bearing values in different zones are a legal RFC 5545 shape, and the ordering
+  // check used to stand down on them entirely, so a pair that ends before it starts was
+  // written. It is checked now, and the two tests below disagree with a wall-clock reading in
+  // OPPOSITE directions: one passes though its wall clocks read backwards, the other is
+  // refused though its wall clocks read forwards. Neither can be satisfied by comparing text.
+  //
+  // Reachable on update and not on create, because create takes one `timeZone` for both ends.
+  // The route is a stored two-zone event - written by another client - whose start the caller
+  // moves with a designator-less value that inherits the stored start's own zone: no
+  // `timeZone` argument, so the stranded-zone rejection never fires.
+
+  it('accepts a cross-timezone flight whose instants run forward though its wall clocks read backwards', async () => {
+    // Departs Europe/Rome 11:00 (10:00 UTC in March), lands America/New_York 08:30
+    // (12:30 UTC, EDT). A four-and-a-half hour flight: the text says 11:00 then 08:30, the
+    // instants say otherwise, and the instants are what an event's length is made of.
     const flight = stored(
       'fly@fm',
       'DTSTART;TZID=Europe/Rome:20260320T100000',
@@ -5267,6 +5280,79 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     await client.updateCalendarEvent('fly@fm', { start: '2026-03-20T11:00:00' });
     const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTSTART;TZID=Europe/Rome:20260320T110000'));
+  });
+
+  it('rejects a cross-timezone pair whose instants run backwards though its wall clocks read forwards', async () => {
+    // The same two zones, the other way round. New_York 07:00 is 11:00 UTC; the stored Rome
+    // 08:00 end is 07:00 UTC, four hours EARLIER. The text reads 07:00 then 08:00, so a
+    // string comparison calls this forward and writes an event that ends before it begins.
+    const backwards = stored(
+      'back@fm',
+      'DTSTART;TZID=America/New_York:20260320T060000',
+      'DTEND;TZID=Europe/Rome:20260320T080000'
+    );
+    const { client, mockDAVClient } = mockClient(backwards);
+    await assert.rejects(
+      () => client.updateCalendarEvent('back@fm', { start: '2026-03-20T07:00:00' }),
+      /DTEND must be later than DTSTART per RFC 5545 §3\.8\.2\.2/
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  it('refuses a cross-timezone pair that lands on the same instant, like any other zero-length event', async () => {
+    // New_York 08:00 IS Rome 13:00 on this date. RFC 5545 §3.8.2.2 wants DTEND strictly
+    // later, and the cross-zone path must not quietly relax that into "not earlier".
+    const sameInstant = stored(
+      'same@fm',
+      'DTSTART;TZID=America/New_York:20260320T060000',
+      'DTEND;TZID=Europe/Rome:20260320T130000'
+    );
+    const { client, mockDAVClient } = mockClient(sameInstant);
+    await assert.rejects(
+      () => client.updateCalendarEvent('same@fm', { start: '2026-03-20T08:00:00' }),
+      /DTEND must be later than DTSTART/
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  // THE ONE REMAINING STAND-DOWN, and it is an inability rather than a choice. A vendor TZID
+  // names no zone ICU can resolve, so neither side can be placed on a scale, and refusing
+  // would reject a record this account already holds. Both orders are exercised, because a
+  // one-sided resolvability test would pass whichever side it happened to check.
+  for (const [label, dtstart, dtend, newStart] of [
+    [
+      'the stored end',
+      'DTSTART;TZID=America/New_York:20260320T060000',
+      'DTEND;TZID=AUS Eastern Standard Time:20260320T080000',
+      '2026-03-20T07:00:00',
+    ],
+    [
+      'the start being written',
+      'DTSTART;TZID=AUS Eastern Standard Time:20260320T060000',
+      'DTEND;TZID=Europe/Rome:20260320T080000',
+      '2026-03-20T07:00:00',
+    ],
+  ] as const) {
+    it(`stands down when ${label} names a zone this server cannot resolve`, async () => {
+      const { client, mockDAVClient } = mockClient(stored('vendor@fm', dtstart, dtend));
+      await client.updateCalendarEvent('vendor@fm', { start: newStart });
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
+    });
+  }
+
+  it('stands down when the stored side of a cross-zone pair holds a value naming no instant', async () => {
+    // Both zones resolve; the stored END's value does not parse as a date at all, which a
+    // third-party client is free to have written. There is nothing to order on, so the edit
+    // goes through rather than being refused on a reading this server does not have - the same
+    // answer an unresolvable zone gets, for the same reason.
+    const garbageEnd = stored(
+      'garbage@fm',
+      'DTSTART;TZID=America/New_York:20260320T060000',
+      'DTEND;TZID=Europe/Rome:whenever',
+    );
+    const { client, mockDAVClient } = mockClient(garbageEnd);
+    await client.updateCalendarEvent('garbage@fm', { start: '2026-03-20T07:00:00' });
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
   });
 
   it('accepts a start change on a DURATION-based event with no stored DTEND', async () => {

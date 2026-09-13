@@ -1760,14 +1760,20 @@ Three properties of the implementation are load-bearing and easy to undo by acci
   defects this check closes are single-sided updates, so comparing only what the caller
   passed sees nothing. The visible consequence: moving an event to another day, or
   converting one side to UTC, requires passing both `start` and `end`.
-- **Two `zoned` values in different zones are accepted, and only their ordering is
-  skipped.** A flight departing Rome and landing New York is a legal VEVENT whose wall
-  clocks read backwards, so the check declines to guess rather than reject valid travel
-  events — which does mean a genuinely backwards cross-zone pair is written. That is now a
-  choice rather than a limit: both zone names are present here and ICU resolves them
-  (`zoneOffsetMsAt`, which the read window depends on). Adding the check would newly reject
-  input the tool accepts today, so it is tracked as
-  [#140](https://github.com/JonathanGodley/fastmail-mcp/issues/140) rather than folded in.
+- **Two `zoned` values in different zones are accepted, and ordered on INSTANTS**
+  ([#140](https://github.com/JonathanGodley/fastmail-mcp/issues/140)). A flight departing Rome
+  and landing New York is a legal VEVENT whose wall clocks read backwards, so the values'
+  TEXT says nothing about their order in either direction — and the check used to stand down
+  on the whole shape, which meant a genuinely backwards cross-zone pair was written. Both
+  names are resolved and both values placed on the UTC scale instead, so Rome 10:00 to New
+  York 08:00 the same day passes and New York 07:00 to Rome 08:00 is refused with the ordinary
+  "DTEND must be later than DTSTART" wording.
+  **The one remaining stand-down is a name ICU cannot resolve**, and it is an inability, not a
+  choice: real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone, so
+  there is no instant to order on and refusing would reject a record the account already holds.
+  The resolvability test is `isUsableTimezone`, never `zoneOffsetMsAt` — that one falls back to
+  the HOST zone for a name it cannot resolve, so it answers for a different zone rather than
+  saying it could not answer.
 
 The frame check is deliberately *not* applied when the caller touches neither `start` nor
 `end`: it exists to stop us writing a broken pair, not to hold a title edit hostage to an
@@ -1804,9 +1810,9 @@ nothing else to say; `date` (all-day) and `utc` (`Z`-suffixed) both OMIT rather 
 "floating", a different and wrong fact. `endTimeZone` applies the identical rule to `end`,
 but compared against `start`'s own classification (falling back to the configured zone only
 when `start` itself is absent) rather than against the configured zone directly — RFC 5545
-§3.8.5.3 and `validateDateConsistency`'s zoned/zoned exemption both permit a start and an end
-in two different named zones, the flight-lands-elsewhere case (#140), so `endTimeZone` is how
-that legal shape is disclosed on read. A `DURATION`-computed `end` has no raw `DTEND` line to
+§3.8.5.3 and `validateDateConsistency` both permit a start and an end in two different named
+zones, the flight-lands-elsewhere case (#140 — permitted, and ordered on instants), so
+`endTimeZone` is how that legal shape is disclosed on read. A `DURATION`-computed `end` has no raw `DTEND` line to
 classify at all, so it reads back `absent` and `endTimeZone` omits — a computed end shares
 `start`'s zone by construction, so there is nothing to disagree about.
 
@@ -2067,13 +2073,14 @@ error text says "applied because you named none" for a `'default'` source instea
   `zoneNamesEqual` (case- and separator-normalising, the same helper the read-half's
   provenance/comparison machinery already uses — `Australia/Sydney` and `australia/sydney` are
   the same zone here), so this rule is never tripped by a spelling difference alone. That
-  reuse fixed a real bug during this work: `validateDateConsistency`'s own zoned/zoned
-  stand-down (the flight-lands-elsewhere exemption, [#140](https://github.com/JonathanGodley/fastmail-mcp/issues/140))
-  used to compare TZIDs with a raw `!==`, so two differently-spelled names for the SAME zone
-  read as two DIFFERENT zones and stood the ordering check down — silently accepting a
-  backwards pair that a same-spelling stored/caller pair would have correctly rejected. It now
-  reads `zoneNamesEqual`, so ordering is checked whenever the two sides genuinely name the same
-  zone, however each was spelled.
+  reuse fixed a real bug during this work: `validateDateConsistency`'s zoned/zoned branch — at
+  the time a blanket ordering stand-down, since replaced by the instant comparison described
+  above ([#140](https://github.com/JonathanGodley/fastmail-mcp/issues/140)) — used to compare
+  TZIDs with a raw `!==`, so two differently-spelled names for the SAME zone read as two
+  DIFFERENT zones and stood the ordering check down, silently accepting a backwards pair that a
+  same-spelling stored/caller pair would have correctly rejected. It now reads `zoneNamesEqual`,
+  so ordering is checked whenever the two sides genuinely name the same zone, however each was
+  spelled.
   `zoneNamesEqual` is also **link/alias-aware**, not just case- and separator-normalising:
   after the trim and leading-slash strip, each side routes through `canonicalZoneName`
   (`src/coerce.ts`, the same seam `validateCallerTimezone`/`resolveUsableTimezone` use to decide
