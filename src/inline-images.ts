@@ -171,7 +171,7 @@ export function cidKey(ref: string): string {
 // How many code points of a foreign value an error or note may echo. Long enough to
 // identify a real Content-ID or filename, short enough that a hostile one cannot bury
 // the server's own sentence.
-const DESCRIBE_PART_MAX = 64;
+export const DESCRIBE_PART_MAX = 64;
 
 /**
  * Render a sender- or caller-supplied part value (a cid, a name, a content type) for
@@ -198,7 +198,9 @@ const DESCRIBE_PART_MAX = 64;
  * src/; the whole-sentence half is a reading, done at the sentence you are editing.
  *
  * Truncation is marked with an ellipsis rather than being silent: two long values that
- * differ only past the cap must not print identically.
+ * differ only past the cap must not print identically. `max` overrides the default bound for a
+ * site whose value needs more room to stay useful, the way `echoCallerText` already takes one;
+ * it changes how much is shown and nothing else about the treatment above.
  *
  * A value made entirely of stripped characters renders as the empty string, and no
  * placeholder is substituted: this function renders DATA inside a quoted span, so
@@ -206,7 +208,7 @@ const DESCRIBE_PART_MAX = 64;
  * be. The surrounding sentence always names the form the value came from, so an empty
  * pair of quotes still reads unambiguously.
  */
-export function describePart(value: unknown): string {
+export function describePart(value: unknown, max: number = DESCRIBE_PART_MAX): string {
   const source = typeof value === 'string' ? value : value == null ? '' : String(value);
   const cleaned = source
     .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
@@ -215,9 +217,7 @@ export function describePart(value: unknown): string {
   // Cap by CODE POINTS, not UTF-16 units — a unit slice can split a surrogate pair
   // and leave a lone surrogate in the message.
   const points = [...cleaned];
-  return points.length > DESCRIBE_PART_MAX
-    ? `${points.slice(0, DESCRIBE_PART_MAX).join('')}…`
-    : cleaned;
+  return points.length > max ? `${points.slice(0, max).join('')}…` : cleaned;
 }
 
 // Windows device names, which cannot be used as a file's stem on that platform even

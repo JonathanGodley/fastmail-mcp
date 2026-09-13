@@ -4,7 +4,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, describeUntrusted, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -2768,6 +2768,20 @@ export const AMBIGUOUS_COPY_LIST_CAP = 12;
 export const AMBIGUOUS_COPY_URL_ECHO_LIMIT = 320;
 
 /**
+ * The bound on tsdav's own text inside the login refusal (#182).
+ *
+ * Wider than `describeUntrusted`'s 64-code-point default for the reason `PATH_ECHO_LIMIT` is
+ * wider: what makes that text actionable sits at the END of it. tsdav writes
+ * `Invalid credentials: PROPFIND <url> returned 401 Unauthorized`, and the url alone clears 64,
+ * so the default cuts the status code off and leaves a refusal that says a request was made and
+ * not what came back. 200 carries a real Fastmail principal url plus the status.
+ *
+ * Widening the ECHO does not widen what can escape: `describeUntrusted` redacts the whole value
+ * before it truncates, so a credential in the server's response is removed at any bound.
+ */
+export const LOGIN_FAILURE_ECHO_LIMIT = 200;
+
+/**
  * Is this entry of the calendar-home listing BROKEN — i.e. did the server fail to describe it?
  *
  * ONE RULE COVERING BOTH FORMS a failure takes in what tsdav's parser hands back, because they
@@ -4189,7 +4203,7 @@ export class CalDAVCalendarClient {
       // redacts, and only the former removes the Unicode format characters that survive the
       // control-character scrub.
       throw new Error(
-        `CalDAV login failed: ${describeUntrusted(detail)}. Check the configured CalDAV app password ` +
+        `CalDAV login failed: ${describeUntrustedAt(detail, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password ` +
         `(a separate credential from the Fastmail JMAP API token).`,
       );
     }

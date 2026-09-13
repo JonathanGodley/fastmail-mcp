@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -661,6 +661,14 @@ describe('describeUntrusted', () => {
     assert.equal(out, 'z'.repeat(64) + '…');
   });
 
+  it('renders the same value a bare .map does, so the two cannot disagree', () => {
+    // `map` passes the array INDEX second, which is why the wide-bound form below is a separate
+    // NAME rather than an optional parameter here: a positional bound would be 0 for every
+    // first element and truncate it to a lone ellipsis at seven live list-rendering sites.
+    const rendered = ['first-value-here', 'second-value-here'].map(describeUntrusted);
+    assert.deepEqual(rendered, ['first-value-here', 'second-value-here']);
+  });
+
   it('renders a clean value unchanged', () => {
     assert.equal(describeUntrusted('Archive/2026/Receipts'), 'Archive/2026/Receipts');
   });
@@ -669,6 +677,36 @@ describe('describeUntrusted', () => {
     assert.equal(describeUntrusted(undefined), '');
     assert.equal(describeUntrusted(null), '');
     assert.equal(describeUntrusted(42), '42');
+  });
+});
+
+describe('describeUntrustedAt', () => {
+  it('leaves the default alone for every caller that does not name a bound', () => {
+    // A site widening its own echo must not widen everyone's, which is the whole reason this is
+    // a second name rather than a new default inside the shared one.
+    describeUntrustedAt('z'.repeat(300), 200);
+    assert.equal(describeUntrusted('z'.repeat(300)), 'z'.repeat(64) + '…');
+  });
+
+  it('shows more of the value without letting a secret through the wider bound', () => {
+    // Truncation is the only thing the bound moves. Redaction still sees the whole value, so a
+    // secret sitting past 64 code points is removed rather than revealed by the wider echo.
+    registerSecret('zz-second-synthetic-registered-value-not-a-real-credential');
+    const value = 'y'.repeat(100) + 'zz-second-synthetic-registered-value-not-a-real-credential';
+
+    const out = describeUntrustedAt(value, 200);
+
+    assert.ok(out.includes('y'.repeat(100)), 'the wider bound must actually show more of the value');
+    assert.ok(!out.includes('zz-second-synthetic-registered'), 'no prefix of a registered secret may survive');
+    assert.ok(out.includes('[REDACTED]'));
+  });
+
+  it('still neutralises the value it renders wider', () => {
+    assert.equal(describeUntrustedAt('a\r\nb c" d', 200), "ab c' d");
+  });
+
+  it('still marks a truncation, so the wider bound is a bound', () => {
+    assert.equal(describeUntrustedAt('z'.repeat(300), 200), 'z'.repeat(200) + '…');
   });
 });
 

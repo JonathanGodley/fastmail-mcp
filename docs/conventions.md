@@ -1386,8 +1386,21 @@ response — status, status text and body — so it is REMOTE-authored, and it w
 It renders through `describeUntrusted` now, not `echoCallerText`: this is the case that
 separates them, because only the former redacts a credential the response echoed back and only
 the former removes the Unicode format characters the control-character scrub leaves behind.
-Values in the calendar tools' SUCCESS sentences are the untraced half and remain open on that
-issue.
+It renders through `describeUntrustedAt` at `LOGIN_FAILURE_ECHO_LIMIT` rather than at the
+64-code-point default, for the reason `PATH_ECHO_LIMIT` is wide: what makes tsdav's text
+actionable is at the END of it (`… PROPFIND <url> returned 401 Unauthorized`), and a real
+principal url alone clears 64, so the default cut the refusal off mid-url and never said what
+the server answered. A wider ECHO is not a wider leak — the redaction runs over the whole value
+before any of it is truncated — and the bound is a named constant carrying its reason, which is
+what stops per-site widths drifting into arbitrary numbers.
+
+**The wide form is a second NAME, not an optional parameter on `describeUntrusted`, and that is
+not a style choice.** Seven call sites render lists with a bare `.map(describeUntrusted)`, and
+`Array.prototype.map` passes the array INDEX as the second argument: a positional bound there
+becomes 0 for every first element and truncates it to a lone ellipsis. It was tried that way
+first and turned 33 tests red. Any future echo helper meant to be passed by reference takes no
+second positional parameter, for the same reason. Values in the calendar tools' SUCCESS
+sentences are the untraced half and remain open on that issue.
 
 **That sweep is not repeatable by a guard, and the reason is worth stating
 rather than re-deriving.** A surviving `'…'` span is not a defect waiting to be found: it holds

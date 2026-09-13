@@ -265,6 +265,11 @@ describe('describePart', () => {
     assert.equal(describePart('y'.repeat(64)), 'y'.repeat(64));
   });
 
+  it('caps at a bound the caller names instead, by code point and with the same marker', () => {
+    assert.equal(describePart('\u{1F600}'.repeat(100), 10), `${'\u{1F600}'.repeat(10)}…`);
+    assert.equal(describePart('x'.repeat(120), 200), 'x'.repeat(120));
+  });
+
   it('renders a non-string or absent value as a string', () => {
     assert.equal(describePart(undefined), '');
     assert.equal(describePart(null), '');
