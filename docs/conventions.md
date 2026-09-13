@@ -1379,6 +1379,16 @@ a finding, and it is the first thing to settle when adding a message elsewhere. 
 stopped at refusals, so a value rendered into a SUCCESS sentence has not been traced either;
 it is the same defect wearing a friendlier frame.
 
+**One value outside it was traced and was not server text**
+([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)): the `detail` in
+`getClient`'s `CalDAV login failed: …`. tsdav builds that string out of the server's own
+response — status, status text and body — so it is REMOTE-authored, and it went out bare.
+It renders through `describeUntrusted` now, not `echoCallerText`: this is the case that
+separates them, because only the former redacts a credential the response echoed back and only
+the former removes the Unicode format characters the control-character scrub leaves behind.
+Values in the calendar tools' SUCCESS sentences are the untraced half and remain open on that
+issue.
+
 **That sweep is not repeatable by a guard, and the reason is worth stating
 rather than re-deriving.** A surviving `'…'` span is not a defect waiting to be found: it holds
 a mode enum `readMode` has already validated, a field name a coercion refuses by, the

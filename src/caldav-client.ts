@@ -4,7 +4,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // CallTool boundary maps them to InvalidParams. A plain Error would surface as
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
-import { InvalidInputError, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { InvalidInputError, describeUntrusted, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -4059,8 +4059,16 @@ export class CalDAVCalendarClient {
       // tsdav's own message doesn't say which credential is wrong, and the CalDAV
       // app password is a separate credential from the Fastmail JMAP API token used
       // elsewhere in this server, so name it explicitly.
+      //
+      // `detail` IS REMOTE-AUTHORED and goes through the shared untrusted-value helper (#182).
+      // tsdav builds this text out of the server's own response — status, status text and body
+      // — so it can carry a line separator that forges a second sentence of server prose, and
+      // it can carry a credential straight back out of a response that echoed one.
+      // `describeUntrusted` rather than this file's usual `echoCallerText`: only the former
+      // redacts, and only the former removes the Unicode format characters that survive the
+      // control-character scrub.
       throw new Error(
-        `CalDAV login failed: ${detail}. Check the configured CalDAV app password ` +
+        `CalDAV login failed: ${describeUntrusted(detail)}. Check the configured CalDAV app password ` +
         `(a separate credential from the Fastmail JMAP API token).`,
       );
     }
