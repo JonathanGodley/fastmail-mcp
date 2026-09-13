@@ -97,10 +97,30 @@ function withEtags<T extends object>(objects: T[]): Array<T & { etag: string }> 
   return objects.map(o => ({ etag: FIXTURE_ETAG, ...o }) as T & { etag: string });
 }
 
+// The stored master a mocked server hands back for a resource the expanded listing could not
+// decide about (#155): a VEVENT with no RRULE, no RDATE and no RECURRENCE-ID, which is what a
+// genuine one-off event's stored form looks like. Supplied by the two client builders below for
+// the same reason `withEtags` supplies an etag - a fixture that omits it describes a server that
+// does not exist, since every listing row now gets this question asked of it. A test that is
+// ABOUT the follow-up read passes its own `calendarMultiGet` and overrides this.
+const STORED_NON_RECURRING = [
+  'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:stub@fixture.invalid',
+  'DTSTART:20260101T000000Z', 'SUMMARY:Stub', 'END:VEVENT', 'END:VCALENDAR',
+].join('\r\n');
+
+function defaultCalendarMultiGet() {
+  return mock.fn(async (params: { objectUrls?: string[] }) =>
+    (params.objectUrls ?? []).map(href => ({
+      href,
+      props: { getetag: '"fixture-etag"', calendarData: { _cdata: STORED_NON_RECURRING } },
+    })));
+}
+
 function makeMockDAVClient<Calendar, Rest extends object & { login?: never; fetchCalendars?: never }>(calendars: Calendar[], rest: Rest) {
   return {
     login: mock.fn(async () => {}),
     fetchCalendars: mock.fn(async () => calendars),
+    calendarMultiGet: defaultCalendarMultiGet(),
     ...rest,
   };
 }
@@ -174,6 +194,7 @@ function makeHomeListingDAVClient<Rest extends object & { login?: never; fetchCa
     // propfind, so a failing home answer reaches assertDavOk exactly as it does in production.
     propfind: mock.fn(async (params: { url: string; props: Record<string, unknown>; depth?: '0' | '1' | 'infinity' }) =>
       tsdavPropfind({ ...params, fetch: fetchOverride })),
+    calendarMultiGet: defaultCalendarMultiGet(),
     ...rest,
   };
 }
@@ -6865,8 +6886,8 @@ describe('parseCalendarObjects', () => {
   it('leaves recurrence fields off a lone expanded block, which a one-off and a series start share', () => {
     // An expanded blob holding exactly one block with no RECURRENCE-ID is genuinely
     // ambiguous: Cyrus emits a one-off event and a series' first-and-only in-window instance
-    // identically. Nothing is claimed in either direction; the tool description points at
-    // get_calendar_event to settle it.
+    // identically. The PARSER claims nothing in either direction, which is the boundary this
+    // test pins; the listing settles it a layer up by reading the stored resource (#155).
     const data = [
       'BEGIN:VCALENDAR',
       'BEGIN:VEVENT',
@@ -10408,6 +10429,296 @@ describe('values a refusal in this file quotes back are echoed, not pasted', () 
     assertNoForgedLine(message);
     assert.equal(message, `Invalid participant email (contains illegal characters): "user ${FORGED}@example.com"`);
   });
+});
+
+// ---- a lone first occurrence is settled, not left ambiguous (#155) ----
+//
+// Cyrus strips the RRULE from an expanded series' FIRST instance and gives it no
+// RECURRENCE-ID, so a window holding that instance and no sibling produces a block
+// indistinguishable from a one-off. `isRecurring` used to be left off there, which made its
+// absence mean two different things. The listing now re-reads exactly those resources
+// UNEXPANDED, in one multiget per calendar, and asks the stored master.
+describe('list_calendar_events settles isRecurring for an ambiguous expanded row (#155)', () => {
+  const CAL = '/cal/personal/';
+
+  function expandedBlocks(uid: string, ...blocks: string[]): string {
+    return ['BEGIN:VCALENDAR', ...blocks.map(b => b.replace('${UID}', uid)), 'END:VCALENDAR'].join('\r\n');
+  }
+
+  /** One expanded occurrence as Cyrus emits a series' FIRST instance: no RRULE, no RECURRENCE-ID. */
+  function markerlessBlock(uid: string, dtstart: string): string {
+    return [
+      'BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${dtstart}`, 'SUMMARY:Weekly standup', 'END:VEVENT',
+    ].join('\r\n');
+  }
+
+  /** The stored master the unexpanded re-read returns. */
+  function master(uid: string, dtstart: string, ...extra: string[]): string {
+    return [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', `UID:${uid}`, `DTSTART:${dtstart}`,
+      ...extra, 'SUMMARY:Weekly standup', 'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  function multiGetResponse(href: string, data: string) {
+    return { href, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: data } } };
+  }
+
+  type MultiGetParams = Parameters<DAVClient['calendarMultiGet']>[0];
+
+  function listingClient(
+    objects: Array<{ data: string; url: string }>,
+    multiGet: (params: MultiGetParams) => Promise<any[]>,
+  ) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const calendarMultiGet = mock.fn(multiGet);
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: CAL }], {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => withEtags(objects)),
+      calendarMultiGet,
+    });
+    (client as any).client = mockDAVClient;
+    return { client, calendarMultiGet };
+  }
+
+  const WINDOW: [undefined, number, string, string] = [undefined, 50, '2026-03-24', '2026-03-27'];
+
+  it('reports isRecurring for a lone first occurrence whose stored master carries an RRULE', async () => {
+    const url = CAL + 'series.ics';
+    const { client, calendarMultiGet } = listingClient(
+      [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY'))],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].isRecurring, true);
+    assert.equal(calendarMultiGet.mock.calls.length, 1);
+  });
+
+  it('leaves the field absent when the stored master states no recurrence at all', async () => {
+    const url = CAL + 'oneoff.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('o1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('o1@fm', '20260325T090000Z'))],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].isRecurring, undefined);
+  });
+
+  it('reports isRecurring for a master that lists its occurrences as RDATEs instead of stating a rule', async () => {
+    const url = CAL + 'rdate.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('r1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('r1@fm', '20260325T090000Z', 'RDATE:20260401T090000Z'))],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
+
+  it('asks for the calendar data itself, one level deep', async () => {
+    // The request has to name `calendar-data`: an etag-only multiget answers every href and
+    // settles nothing, which reads here as a complete answer carrying no evidence.
+    const url = CAL + 'series.ics';
+    const { client, calendarMultiGet } = listingClient(
+      [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY'))],
+    );
+    await client.getCalendarEvents(...WINDOW);
+    const sent = calendarMultiGet.mock.calls[0].arguments[0] as { props?: Record<string, unknown>; depth?: string };
+    assert.deepEqual(Object.keys(sent.props ?? {}).sort(), ['c:calendar-data', 'd:getetag']);
+    assert.equal(sent.depth, '1');
+  });
+
+  it('makes no follow-up read at all when nothing in the calendar is ambiguous', async () => {
+    // Two in-window occurrences: the block count alone proves the series, so there is nothing
+    // left to ask about and the extra round trip is not made.
+    const url = CAL + 'proven.ics';
+    const { client, calendarMultiGet } = listingClient(
+      [{
+        url,
+        data: expandedBlocks(
+          'p1@fm',
+          markerlessBlock('${UID}', '20260325T090000Z'),
+          ['BEGIN:VEVENT', 'UID:p1@fm', 'RECURRENCE-ID:20260326T090000Z', 'DTSTART:20260326T090000Z', 'SUMMARY:Weekly standup', 'END:VEVENT'].join('\r\n'),
+        ),
+      }],
+      async () => assert.fail('no multiget should have been issued'),
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events.length, 2);
+    assert.ok(events.every(e => e.isRecurring === true));
+    assert.equal(calendarMultiGet.mock.calls.length, 0);
+  });
+
+  it('asks nothing about a lone block that carries its own RECURRENCE-ID', async () => {
+    // One block is not the test; one block with NO marker on it is. A lone override names the
+    // instance it is, so the blob has already answered and the resource is not asked about.
+    const url = CAL + 'override.ics';
+    const { client, calendarMultiGet } = listingClient(
+      [{
+        url,
+        data: expandedBlocks('ov@fm', ['BEGIN:VEVENT', 'UID:ov@fm', 'RECURRENCE-ID:20260325T090000Z',
+          'DTSTART:20260325T090000Z', 'SUMMARY:Weekly standup', 'END:VEVENT'].join('\r\n')),
+      }],
+      async () => assert.fail('no multiget should have been issued'),
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+    assert.equal(calendarMultiGet.mock.calls.length, 0);
+  });
+
+  it('asks nothing about a resource whose only row the window dropped', async () => {
+    // A row the window filter removed is not in the answer, so there is no field on it to
+    // settle. Asking anyway spends a round trip on a resource nothing will report.
+    const url = CAL + 'elsewhere.ics';
+    const { client, calendarMultiGet } = listingClient(
+      [{ url, data: expandedBlocks('e1@fm', markerlessBlock('${UID}', '20260401T090000Z')) }],
+      async () => assert.fail('no multiget should have been issued'),
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events.length, 0);
+    assert.equal(calendarMultiGet.mock.calls.length, 0);
+  });
+
+  it('asks nothing about a resource holding no VEVENT at all', async () => {
+    // Such a resource yields the placeholder row, which has no dates and so survives the window
+    // filter. It is not an ambiguous occurrence — there is no occurrence — and the stored copy
+    // holds nothing that would settle anything.
+    const url = CAL + 'task.ics';
+    const { client, calendarMultiGet } = listingClient(
+      [{ url, data: ['BEGIN:VCALENDAR', 'BEGIN:VTODO', 'UID:t1@fm', 'SUMMARY:Buy milk', 'END:VTODO', 'END:VCALENDAR'].join('\r\n') }],
+      async () => assert.fail('no multiget should have been issued'),
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].isRecurring, undefined);
+    assert.equal(calendarMultiGet.mock.calls.length, 0);
+  });
+
+  it('asks for every ambiguous resource in one request per calendar', async () => {
+    const a = CAL + 'a.ics';
+    const b = CAL + 'b.ics';
+    const { client, calendarMultiGet } = listingClient(
+      [
+        { url: a, data: expandedBlocks('a@fm', markerlessBlock('${UID}', '20260325T090000Z')) },
+        { url: b, data: expandedBlocks('b@fm', markerlessBlock('${UID}', '20260325T100000Z')) },
+      ],
+      async () => [
+        multiGetResponse(a, master('a@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY')),
+        multiGetResponse(b, master('b@fm', '20260325T100000Z')),
+      ],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(calendarMultiGet.mock.calls.length, 1, 'one request per calendar, never one per row');
+    const asked = (calendarMultiGet.mock.calls[0].arguments[0] as { objectUrls?: string[] }).objectUrls;
+    assert.deepEqual([...(asked ?? [])].sort(), [a, b]);
+    assert.equal(events.find(e => e.id === 'a@fm')!.isRecurring, true);
+    assert.equal(events.find(e => e.id === 'b@fm')!.isRecurring, undefined);
+  });
+
+  it('matches a response whose href is a path against a row whose url is absolute', async () => {
+    // tsdav resolves a listing href against the calendar url, so a row's url is absolute while
+    // a DAV server is free to answer the multiget with a bare path. Matching the raw strings
+    // would find nothing, and finding nothing is a failed call now, not a quiet omission.
+    const calendarUrl = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+    const rowUrl = calendarUrl + 'series.ics';
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: calendarUrl }], {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) =>
+        withEtags([{ url: rowUrl, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }])),
+      calendarMultiGet: mock.fn(async () => [
+        multiGetResponse('/dav/calendars/user/probe/personal/series.ics', master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY')),
+      ]),
+    });
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
+
+  it('reads a calendar-data prop the server sent as bare text rather than CDATA', async () => {
+    // tsdav hands the property back either way depending on how the XML was written, and the
+    // answer is the same iCalendar in both.
+    const url = CAL + 'series.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [{
+        href: url, status: 200, ok: true,
+        props: { getetag: '"e1"', calendarData: master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY') },
+      }],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
+
+  it('ignores a response that matches no row it asked about', async () => {
+    const url = CAL + 'series.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [
+        multiGetResponse(CAL + 'someone-elses.ics', master('x@fm', '20260325T090000Z', 'RRULE:FREQ=DAILY')),
+        multiGetResponse(url, master('s1@fm', '20260325T090000Z')),
+      ],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].isRecurring, undefined, 'a stranger\'s RRULE must not settle this row');
+  });
+
+  // A FAILED FOLLOW-UP FAILS THE WHOLE LISTING. The alternative - answer with the field left
+  // off - would report a repeating event as a one-off on no evidence, in a response that looks
+  // complete, and an availability question is exactly where that reads as a free slot.
+  it('fails the whole call when the follow-up read fails', async () => {
+    const url = CAL + 'series.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => { throw new Error('Collection query failed: 500 Internal Server Error'); },
+    );
+    await assert.rejects(() => client.getCalendarEvents(...WINDOW), /Collection query failed: 500/);
+  });
+
+  it('fails the whole call when the follow-up read answers for only some of the rows', async () => {
+    const a = CAL + 'a.ics';
+    const b = CAL + 'b.ics';
+    const { client } = listingClient(
+      [
+        { url: a, data: expandedBlocks('a@fm', markerlessBlock('${UID}', '20260325T090000Z')) },
+        { url: b, data: expandedBlocks('b@fm', markerlessBlock('${UID}', '20260325T100000Z')) },
+      ],
+      async () => [multiGetResponse(a, master('a@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY'))],
+    );
+    await assert.rejects(() => client.getCalendarEvents(...WINDOW), (err: Error) => {
+      assert.equal(
+        err.message,
+        'Calendar "Personal": the follow-up read that settles whether an event repeats did not answer '
+        + 'for 1 of the 2 resources it asked about, so this listing cannot say which of its rows repeat. '
+        + 'It fails rather than report those rows as one-off events on no evidence. Retry the call; a '
+        + 'failure that persists is the calendar server not answering a multiget it accepted.',
+      );
+      return true;
+    });
+  });
+
+  // WHAT COUNTS AS AN ANSWER. Each of these is a response the server sent for a resource that
+  // was asked about, carrying nothing that settles it. None may be read as "does not repeat".
+  const unanswerable: Array<[string, (url: string) => Record<string, unknown>]> = [
+    ['names no resource', () => ({ status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR' } } })],
+    ['carries no props at all', url => ({ href: url, status: 200, ok: true })],
+    ['carries no calendar-data prop', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"' } })],
+    ['carries a calendar-data prop that is not text', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: { nested: 'markup' } } } })],
+  ];
+
+  for (const [shape, response] of unanswerable) {
+    it(`fails the whole call for a follow-up response that ${shape}`, async () => {
+      const url = CAL + 'series.ics';
+      const { client } = listingClient(
+        [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+        async () => [response(url) as any],
+      );
+      await assert.rejects(() => client.getCalendarEvents(...WINDOW), (err: Error) => {
+        assert.match(err.message, /did not answer for 1 of the 1 resources it asked about/);
+        return true;
+      });
+    });
+  }
 });
 
 // ---- what a resource is NAMED never decides whether it is visible (#191) ----

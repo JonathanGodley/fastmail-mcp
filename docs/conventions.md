@@ -2486,13 +2486,25 @@ DTSTART returns `[first-instance, occurrence, occurrence, …]`, the sniff ident
 a master, and every sibling is discarded — measured live at 5 occurrences reported as 1, and
 102 blocks reduced to 75. The loss was invisible because `total` is counted after it.
 
-The same platform fact leaves one residue that cannot be closed from the payload: a lone
+The same platform fact leaves one residue that cannot be closed **from the payload**: a lone
 expanded block with neither marker is a one-off event AND a series whose only in-window
-instance is its first. Cyrus emits both identically. `isRecurring` is therefore set from the
-block list — more than one block, or any RECURRENCE-ID, proves a series — and left off in the
-ambiguous case rather than guessed at in either direction, since claiming it would mark real
-one-off events as repeating. The tool description and README name `get_calendar_event` as the
-one-call way to settle it, because that path fetches without a window and returns the master.
+instance is its first. Cyrus emits both identically. So `isRecurring` is set from the block
+list only where the list proves it — more than one block, or any RECURRENCE-ID — and the
+ambiguous remainder is closed off the payload instead, by reading the STORED resources
+(`settleAmbiguousRecurrence`): an unexpanded master still carries the rule the expansion
+stripped. Guessing in either direction was never available, because claiming `isRecurring` on
+every expanded row marks real one-off events as repeating.
+
+Two properties of that follow-up read are the load-bearing ones. It is **one request per
+calendar**, issued once the calendar has been walked and not at all when nothing in it was
+ambiguous, so the cost is bounded by the calendars in the window rather than by the rows.
+And an **incomplete answer fails the whole listing** rather than returning the rows with the
+field left off: absence of `isRecurring` is the tool's statement that an event does not
+repeat, so a row that silently loses the field reports a repeating event as a one-off inside a
+response that looks complete — and the caller most likely to be asking is asking whether a
+slot is free. A failed follow-up is the same class of failure as the expanded fetch itself
+failing, and is reported the same way rather than through a new output field that would give
+absence a second meaning.
 
 ## Local-time formatting and the U+202F trap
 

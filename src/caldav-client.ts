@@ -1357,15 +1357,11 @@ function hasRecurrenceId(block: string): boolean {
  * Two blocks or more can only come from a recurrence, and a RECURRENCE-ID on any block says
  * the same thing. What is NOT decidable here is the converse: a single block carrying
  * neither marker is a one-off event AND the sole in-window instance of a series that starts
- * inside the window, because Cyrus emits both identically (see above). That residual
- * ambiguity is deliberately left unresolved rather than guessed at in either direction —
- * claiming `isRecurring` on every expanded row would mark genuine one-off events as
- * repeating, and the alternative is a second, unexpanded fetch. That cost is one fetch per
- * AMBIGUOUS resource (a single block carrying neither marker), not per resource, so state it
- * that way rather than inflating it: the reason to leave this alone is that the residue is
- * disclosed and settleable in one call, not that closing it would be expensive. It is
- * documented on the tool instead: `get_calendar_event` on that id returns the master and
- * settles it in one call.
+ * inside the window, because Cyrus emits both identically (see above). Nothing is guessed on
+ * that residue and nothing is left to the caller either — `settleAmbiguousRecurrence` reads the
+ * stored resources afterwards, one request per calendar, and an unexpanded master still carries
+ * the rule that the expansion stripped. This predicate therefore answers only what the blob
+ * PROVES; a `false` from it means "ask", not "one-off".
  */
 function blockCountProvesSeries(blocks: string[]): boolean {
   return blocks.length > 1 || blocks.some(hasRecurrenceId);
@@ -3099,6 +3095,105 @@ function calendarLabel(calendar: DAVCalendar): string {
 }
 
 /**
+ * One resource whose recurrence the expanded read left undecided: the url to ASK about (the form
+ * the listing gave) and the rows that resolving it would label.
+ */
+interface UndecidedResource {
+  requestUrl: string;
+  rows: CalendarEvent[];
+}
+
+/**
+ * Settle `isRecurring` for the listing rows an EXPANDED read cannot decide (#155).
+ *
+ * WHAT CANNOT BE DECIDED, AND WHY IT IS NOT A GUESS. Cyrus strips the RRULE from a series'
+ * FIRST expanded instance and gives it no RECURRENCE-ID (`expand_cb`, imap/http_caldav.c), so a
+ * window holding that instance and no sibling yields a resource whose blob is one markerless
+ * block — byte-identical in every respect this parser can read to a genuine one-off. Reading
+ * the STORED resource answers it outright, because an unexpanded master keeps its rule.
+ *
+ * ONE REQUEST PER CALENDAR, and none at all for a calendar with nothing ambiguous in it. The
+ * payload is bounded by the row count the window already bounds.
+ *
+ * MATCHED ON BOTH SIDES RESOLVED, never on the raw strings. A DAV server may name a resource
+ * with a bare path in one response and an absolute url in the next, so the row url and the
+ * response href are each resolved against the calendar url before they are compared; only the
+ * REQUEST carries the row url exactly as the listing gave it, since that is the form the server
+ * has already shown it uses. A response naming no row we asked about is ignored: it is not an
+ * answer to this question.
+ *
+ * AN INCOMPLETE ANSWER FAILS THE WHOLE LISTING, which is the half worth defending. Leaving the
+ * field off instead would report a repeating event as a one-off, on no evidence, inside a
+ * response that looks complete — and the caller most likely to be asking is asking whether a
+ * slot is free. That is the same class as the expanded fetch itself failing, so it is reported
+ * the same way rather than through a new output field that would give absence a second meaning.
+ */
+async function settleAmbiguousRecurrence(
+  client: DAVClient,
+  calendar: DAVCalendar,
+  undecided: Map<string, UndecidedResource>,
+): Promise<void> {
+  if (undecided.size === 0) return;
+
+  const responses = await client.calendarMultiGet({
+    url: calendar.url,
+    props: { 'd:getetag': {}, 'c:calendar-data': {} },
+    objectUrls: [...undecided.values()].map(entry => entry.requestUrl),
+    depth: '1',
+  });
+
+  const answered = new Set<string>();
+  for (const res of responses) {
+    const href = res.href;
+    if (!href) continue;
+    const url = resolveResponseHref(href, calendar.url);
+    const entry = undecided.get(url);
+    if (!entry) continue;
+    const ical = readCalendarData(res);
+    // A response carrying no payload has not answered the question, so it is left out of
+    // `answered` and the incompleteness below reports it.
+    if (ical === undefined) continue;
+    answered.add(url);
+    if (isRecurringSeriesResource(ical)) for (const row of entry.rows) row.isRecurring = true;
+  }
+
+  if (answered.size < undecided.size) {
+    // The label is server-authored — a display name this account's server returned — so it goes
+    // through the shared echo inside `"…"` like every other such value in this file's messages.
+    throw new Error(
+      `Calendar "${echoCallerText(calendarLabel(calendar))}": the follow-up read that settles whether an ` +
+      `event repeats did not answer for ${undecided.size - answered.size} of the ${undecided.size} ` +
+      'resources it asked about, so this listing cannot say which of its rows repeat. It fails rather ' +
+      'than report those rows as one-off events on no evidence. Retry the call; a failure that persists ' +
+      'is the calendar server not answering a multiget it accepted.',
+    );
+  }
+}
+
+/**
+ * A resource url in one comparable form, whichever form the server wrote it in. Resolution is
+ * against the collection url because a DAV server may name a resource with a bare path; an
+ * already-absolute url survives resolution unchanged, which is why there is no branch for it.
+ * An href that cannot be resolved at all is returned as it came rather than throwing, since the
+ * url it is being matched against was built from the same unresolvable base.
+ */
+function resolveResponseHref(href: string, collectionUrl: string | undefined): string {
+  try {
+    return new URL(href, collectionUrl).href;
+  } catch {
+    return href;
+  }
+}
+
+/** The iCalendar payload of a `calendar-data` prop, which tsdav hands back CDATA-wrapped or bare. */
+function readCalendarData(res: DAVResponse): string | undefined {
+  const data = (res.props as { calendarData?: unknown } | undefined)?.calendarData;
+  if (typeof data === 'string') return data;
+  const cdata = (data as { _cdata?: unknown } | undefined)?._cdata;
+  return typeof cdata === 'string' ? cdata : undefined;
+}
+
+/**
  * The resolved copies as a caller sees them (#101), for the write refusal and the read
  * disclosure alike. `isResolvedCalendarObject` is what makes `object.url` safe to read here: a
  * match with no usable url is not a match at all.
@@ -4419,6 +4514,10 @@ export class CalDAVCalendarClient {
         ...fetchOptions,
         urlFilter: calendarResourceUrlFilter(cal.url),
       });
+      // The rows this calendar's EXPANDED blobs leave undecided about recurrence, keyed by
+      // resource url — see settleAmbiguousRecurrence, which reads the stored masters in one
+      // request once the whole calendar has been walked (#155).
+      const undecided = new Map<string, UndecidedResource>();
       for (const obj of objects) {
         // ONE structural extraction per resource, on whole content lines — never a `/m` regex
         // or a substring count, which a DESCRIPTION containing the text "BEGIN:VEVENT" defeats
@@ -4470,6 +4569,7 @@ export class CalDAVCalendarClient {
         // `trueWindowStart === undefined` arms above do: the only thing making it true is that
         // branch, and a reader who changes the branch should get the old behaviour here rather
         // than a hardcoded `true` that has quietly become a lie.
+        const kept: CalendarEvent[] = [];
         for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone, blocks })) {
           // A block that STILL CARRIES A RECURRENCE CARRIER is never dropped here, whatever
           // its dates say. This branch runs on an expanded query, so a surviving master means
@@ -4496,8 +4596,18 @@ export class CalDAVCalendarClient {
             && !eventIntersectsWindow(event, windowStartMs, windowEndMs, configuredZone);
           if (provablyOutside) continue;
           allEvents.push(event);
+          kept.push(event);
+        }
+        // EXACTLY THE SET `blockCountProvesSeries` CANNOT DECIDE: one block, and nothing on it
+        // (RECURRENCE-ID, RRULE or RDATE) that says the resource repeats — which is what leaves
+        // `isRecurring` unset on the rows it produced. Two blocks, or any marker, is already
+        // decided and needs no second read. Rows the window filter dropped are not asked about:
+        // there is nothing left to label.
+        if (blocks.length === 1 && kept.length > 0 && !kept.some(e => e.isRecurring) && obj.url) {
+          undecided.set(resolveResponseHref(obj.url, cal.url), { requestUrl: obj.url, rows: kept });
         }
       }
+      await settleAmbiguousRecurrence(client, cal, undecided);
       // NOTE: no early exit on `limit`. Breaking out of this loop once enough events had
       // been gathered meant later calendars were never queried at all, so with several
       // calendars the "earliest N" were the earliest N *of whichever calendar happened to be
