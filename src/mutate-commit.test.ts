@@ -97,6 +97,7 @@ test('refuses a commit that is not the tree\'s current HEAD', () => {
   assert.ok(r.out.includes(headSha), r.out);
   assert.ok(/HEAD/.test(r.out), r.out);
   assert.ok(/detached|worktree/.test(r.out), r.out);
+  assert.ok(!/commit the changes/.test(r.out), r.out);
   assert.ok(!r.out.includes('No node_modules'), r.out);
 });
 
@@ -108,6 +109,7 @@ test('refuses a dirty tree at HEAD, including an untracked file', () => {
     assert.equal(r.status, 2, r.out);
     assert.ok(/porcelain/i.test(r.out), r.out);
     assert.ok(/stash/i.test(r.out) && /untracked/i.test(r.out), r.out);
+    assert.ok(/commit the changes/.test(r.out), r.out);
     assert.ok(!r.out.includes('No node_modules'), r.out);
   } finally {
     unlinkSync(join(work, 'untracked.txt'));
