@@ -13,8 +13,8 @@
 // that exists, plus any test file the commit itself changed. `--tests` overrides that, which
 // is needed when the list it would otherwise pick includes a test Stryker cannot run.
 //
-// Two unrelated things make a test unrunnable here; `--tests` cures either only by leaving the
-// broken one out, never by substituting something that gives equivalent coverage.
+// Two unrelated things make a test unrunnable here, and `--tests` fixes either only by leaving
+// it out.
 //
 // The first is PARSING a src/*.ts file's own STRUCTURE: locating a literal or a declaration by
 // matching its exact line. Stryker's instrumentation rewrites exactly that shape (an array or
