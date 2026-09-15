@@ -27,6 +27,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 let root: string;
 let work: string; // multi-commit fixture: root commit, then two more, HEAD at the third
 let rootWork: string; // single-commit fixture, used only for the root-commit case: HEAD IS the root
+let shas: { rootSha: string; secondSha: string; headSha: string };
 
 function git(cwd: string, args: string[]) {
   const r = spawnSync('git', ['-c', 'user.email=t@example.invalid', '-c', 'user.name=T', '-c', 'commit.gpgsign=false', ...args], {
@@ -72,12 +73,12 @@ before(() => {
   git(work, ['add', '.']);
   git(work, ['commit', '-m', 'third']);
   const headSha = git(work, ['rev-parse', 'HEAD']);
-  (globalThis as any).__fixtureShas = { rootSha, secondSha, headSha };
+  shas = { rootSha, secondSha, headSha };
 
   // Separate single-commit repo: the only way to reach the root-commit refusal is a root
-  // commit that is ALSO HEAD, since a root commit that is not HEAD is refused for that
-  // reason first (see D4's ordering). A second repo keeps that untangled from `work`'s
-  // multi-commit non-HEAD case rather than checking `work`'s own root out detached.
+  // commit that is ALSO HEAD, since a root commit that is not HEAD is refused by the
+  // HEAD-mismatch check first. A second repo keeps that untangled from `work`'s multi-commit
+  // non-HEAD case rather than checking `work`'s own root out detached.
   rootWork = join(root, 'root-work');
   initRepo(rootWork);
 });
@@ -88,7 +89,7 @@ after(() => {
 });
 
 test('refuses a commit that is not the tree\'s current HEAD', () => {
-  const { secondSha, headSha } = (globalThis as any).__fixtureShas;
+  const { secondSha, headSha } = shas;
   const r = run(work, [secondSha]);
   assert.equal(r.status, 2, r.out);
   assert.ok(r.out.includes(work), r.out);
@@ -100,7 +101,7 @@ test('refuses a commit that is not the tree\'s current HEAD', () => {
 });
 
 test('refuses a dirty tree at HEAD, including an untracked file', () => {
-  const { headSha } = (globalThis as any).__fixtureShas;
+  const { headSha } = shas;
   writeFileSync(join(work, 'untracked.txt'), 'scratch\n');
   try {
     const r = run(work, [headSha]);
@@ -114,12 +115,22 @@ test('refuses a dirty tree at HEAD, including an untracked file', () => {
 });
 
 test('two bare commit arguments is refused as a plain typo, not a --tests mistake', () => {
-  const { headSha } = (globalThis as any).__fixtureShas;
+  const { headSha } = shas;
   const r = run(work, [headSha, 'some-other-arg']);
   assert.equal(r.status, 2, r.out);
   assert.ok(/exactly one commit/i.test(r.out), r.out);
-  assert.ok(!r.out.includes('--tests=a,b') && !/comma-separated --tests/i.test(r.out), r.out);
+  assert.ok(!/comma-separated --tests/i.test(r.out), r.out);
   assert.ok(!r.out.includes('No node_modules'), r.out);
+});
+
+test('an annotated tag, a branch name, and a short SHA all resolve to HEAD - none are refused', () => {
+  const { headSha } = shas;
+  git(work, ['tag', '-a', 'fixture-tag', '-m', 'annotated tag pointing at HEAD']);
+  for (const rev of ['fixture-tag', 'main', headSha.slice(0, 7)]) {
+    const r = run(work, [rev]);
+    assert.equal(r.status, 1, `${rev}: ${r.out}`);
+    assert.ok(r.out.includes('No node_modules'), `${rev}: ${r.out}`);
+  }
 });
 
 test('an unresolvable rev is refused by name, not a git stack trace', () => {
@@ -127,6 +138,7 @@ test('an unresolvable rev is refused by name, not a git stack trace', () => {
   assert.equal(r.status, 2, r.out);
   assert.ok(r.out.includes('no-such-ref-xyz'), r.out);
   assert.ok(!/at Object|node:internal|throw/.test(r.out), r.out);
+  assert.ok(!/fatal:/.test(r.out), r.out);
   assert.ok(!r.out.includes('No node_modules'), r.out);
 });
 
@@ -139,15 +151,30 @@ test('a root commit that is HEAD is refused - nothing to diff against', () => {
 });
 
 test('an empty --tests= value is refused, not silently name-matched', () => {
-  const { headSha } = (globalThis as any).__fixtureShas;
+  const { headSha } = shas;
   const r = run(work, [headSha, '--tests=']);
   assert.equal(r.status, 2, r.out);
   assert.ok(/--tests/.test(r.out) && /value|empty/i.test(r.out), r.out);
   assert.ok(!r.out.includes('No node_modules'), r.out);
 });
 
+test('a bare --tests with nothing following it is refused the same as --tests=', () => {
+  const { headSha } = shas;
+  const r = run(work, [headSha, '--tests']);
+  assert.equal(r.status, 2, r.out);
+  assert.ok(/--tests/.test(r.out) && /value|empty/i.test(r.out), r.out);
+  assert.ok(!r.out.includes('No node_modules'), r.out);
+});
+
+test('--tests followed by two bare file names names the comma-separated form, not a second commit', () => {
+  const r = run(work, ['--tests', 'src/a.test.ts', 'src/b.test.ts', shas.headSha]);
+  assert.equal(r.status, 2, r.out);
+  assert.ok(/comma-separated --tests/i.test(r.out), r.out);
+  assert.ok(!r.out.includes('No node_modules'), r.out);
+});
+
 test('--tests=a,b is parsed as an override, echoed before the dependency gate', () => {
-  const { headSha } = (globalThis as any).__fixtureShas;
+  const { headSha } = shas;
   const r = run(work, [headSha, '--tests=src/whatever-a.test.ts,src/whatever-b.test.ts']);
   // Bare fixture, no node_modules: this run cannot get past the dependency gate, so its exit
   // status is the gate's (1), same as an unrelated dependency failure would give. What is

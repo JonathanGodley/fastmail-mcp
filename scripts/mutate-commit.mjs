@@ -118,10 +118,13 @@ const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8'
 // Peels an annotated tag to the commit it names, so a branch, a short SHA and an annotated
 // tag all compare equal to what `git status`/HEAD report. Returns null rather than throwing,
 // so a rev that does not resolve is refused below with its own name rather than a git
-// stack trace.
+// stack trace. `--verify --quiet` is load-bearing, not decoration: without it, a rev
+// starting with `-` (e.g. `--help`) is read by `git rev-parse` as an option rather than an
+// argument and echoed back instead of failing, and a plain failure prints git's own
+// "fatal: ambiguous argument" noise to stderr before this function ever gets to react to it.
 function resolveCommit(rev) {
   try {
-    return git('rev-parse', `${rev}^{commit}`).trim();
+    return git('rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`).trim();
   } catch {
     return null;
   }
@@ -147,10 +150,11 @@ if (headMismatch || dirty) {
   const cures = [];
   if (headMismatch) {
     console.error(`${commit} resolves to ${resolvedCommit}, but HEAD is ${headSha}.`);
-    cures.push(`commit your changes and re-run naming the new HEAD, or check ${commit} out detached (or in a worktree) and re-run from there`);
+    cures.push(`check ${commit} out detached (or in a worktree) and re-run from there`);
   }
   if (dirty) {
     console.error(`The tree is not clean (git status --porcelain):\n${status}`);
+    cures.push('commit the changes and re-run naming the new HEAD');
     cures.push('stash the changes INCLUDING UNTRACKED FILES (`git stash -u` - a bare `git stash` leaves untracked files behind and this refusal keeps firing)');
   }
   console.error(`Cure: ${cures.join('; or ')}.`);
@@ -250,7 +254,7 @@ function changedRanges(rev) {
 const isTest = (f) => f.endsWith('.test.ts');
 const isSource = (f) => f.startsWith('src/') && f.endsWith('.ts') && !isTest(f);
 
-const ranges = changedRanges(commit);
+const ranges = changedRanges(resolvedCommit);
 const sources = [...ranges.keys()].filter(isSource).sort();
 if (sources.length === 0) {
   console.error(`${commit} changed no non-test src/*.ts file - nothing to mutate.`);
