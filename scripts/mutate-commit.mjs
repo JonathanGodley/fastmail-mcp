@@ -7,20 +7,46 @@
 // changed line at once instead of one test at a time.
 //
 // Usage: node scripts/mutate-commit.mjs <commit> [--tests src/a.test.ts,src/b.test.ts]
+//        node scripts/mutate-commit.mjs <commit> [--tests=src/a.test.ts,src/b.test.ts]
 //
 // Test files are chosen BY NAME by default: for each changed src/X.ts, every src/X*.test.ts
 // that exists, plus any test file the commit itself changed. `--tests` overrides that, which
-// is needed when the name match picks up a test Stryker cannot run: a drift guard that reads
-// src/*.ts as TEXT (index-env.test.ts, readme-inventory.test.ts) sees Stryker's
-// instrumentation in the file and fails the initial run before any mutant is tried.
+// is needed when the name match picks up a test Stryker cannot run.
 //
-// That is ONE of the two ways the initial run can fail, and `--tests` cures only that one.
-// The other announces itself as a MISSING PACKAGE ("Cannot find package '@modelcontextprotocol/sdk'"),
-// which is the sandbox having no node_modules to resolve against - no choice of test files
-// changes it. DEPS_ROOT below is what stops that happening; read its comment if it recurs.
+// The tests that need that override are the ones that PARSE a src/*.ts file's own STRUCTURE:
+// locating a literal by its opening line, or matching a declaration line exactly. Stryker's
+// instrumentation rewrites exactly that shape (an array or string literal gets wrapped in a
+// mutant-switch conditional, so the text right after it no longer reads as it did), which
+// fails these tests' initial run before any mutant is tried - a plain substring search
+// elsewhere in the same file is untouched. By that criterion: index-env.test.ts and
+// readme-inventory.test.ts locate declarations in src/index.ts by their opening line;
+// tool-schema.test.ts locates the `const TOOLS = [` array the same way; config-surface.test.ts
+// matches `findEnvValue(\s*\[` literally, which an ArrayDeclaration mutant breaks the instant
+// it wraps that argument. Teaching this script to hand those guards an un-instrumented copy of
+// the source was considered and declined - it would let a real regression in the parsed
+// structure through untested, which defeats the guard rather than accommodating it.
+//
+// A change to src/index.ts specifically cannot be meaningfully mutation-tested by this script:
+// index.ts holds the tool schema literal and the CallTool switch, which has no test harness of
+// its own (see CLAUDE.md § Testing), so every test that pins its content either IS one of the
+// structural guards above (which instrumentation breaks outright) or spawns the built server
+// and so exercises the last `npm run build`, not the mutated source. `--tests` is no cure for
+// either. Illustration, not to be re-measured: `abc1d9f` (a real index.ts change), restricted
+// to tests that survive instrumentation, scored 5 mutants, 5 survived - every one vacuously.
+//
+// That is ONE of the two ways the initial run can fail. The other announces itself as a
+// MISSING PACKAGE ("Cannot find package '@modelcontextprotocol/sdk'"), which is the sandbox
+// having no node_modules to resolve against - no choice of test files changes it. DEPS_ROOT
+// below is what stops that happening; read its comment if it recurs.
 //
 // Runs from a `git worktree` as well as from the primary checkout. A worktree contributes the
 // FILES to mutate; the primary checkout contributes the installed DEPENDENCIES.
+//
+// Refuses to run unless the commit named is REPO's current HEAD and REPO's tree is clean
+// (`git status --porcelain` reports nothing) - Stryker copies the tree it finds, so a dirty
+// mutated source or test shifts what gets measured. See the refusal itself for the cure; a
+// non-tip commit of a multi-commit branch needs a detached checkout (or a worktree) first.
+// A merge commit is diffed against its first parent only (`${rev}~1`) - not refused.
 //
 // Writes the Stryker config, sandbox and report OUTSIDE the repo tree (os.tmpdir by
 // default; override with MUTATE_OUT_DIR). Re-running overwrites; nothing needs deleting.
@@ -43,15 +69,105 @@ const CONFIG_FILE = path.join(OUT_DIR, 'stryker.config.json');
 const REPORT_FILE = path.join(OUT_DIR, 'mutation-report.json');
 
 const argv = process.argv.slice(2);
-const testsFlag = argv.indexOf('--tests');
-const testsOverride = testsFlag === -1 ? null : (argv[testsFlag + 1] || '').split(',').filter(Boolean);
-const commit = argv.filter((_, i) => testsFlag === -1 || (i !== testsFlag && i !== testsFlag + 1))[0];
-if (!commit || (testsFlag !== -1 && !testsOverride?.length)) {
-  console.error('Usage: node scripts/mutate-commit.mjs <commit> [--tests src/a.test.ts,src/b.test.ts]');
+const USAGE = 'Usage: node scripts/mutate-commit.mjs <commit> '
+  + '[--tests src/a.test.ts,src/b.test.ts | --tests=src/a.test.ts,src/b.test.ts]';
+
+// `--tests` takes its value as a following argument OR as `--tests=...`; both forms are
+// consumed here so neither leaves its raw token in `rest` to be mistaken for the commit.
+let testsFlagPresent = false;
+let testsRaw = null;
+const rest = [];
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--tests') {
+    testsFlagPresent = true;
+    testsRaw = argv[i + 1] ?? '';
+    i++;
+  } else if (a.startsWith('--tests=')) {
+    testsFlagPresent = true;
+    testsRaw = a.slice('--tests='.length);
+  } else {
+    rest.push(a);
+  }
+}
+const testsOverride = testsFlagPresent ? testsRaw.split(',').filter(Boolean) : null;
+
+if (testsFlagPresent && testsOverride.length === 0) {
+  console.error(USAGE);
+  console.error('--tests was given no value. Pass a comma-separated list, e.g. --tests=src/a.test.ts,src/b.test.ts.');
+  process.exit(2);
+}
+if (rest.length !== 1) {
+  console.error(USAGE);
+  if (testsFlagPresent) {
+    console.error(
+      `Expected one commit after --tests, found ${rest.length}: ${rest.join(' ') || '(none)'}. `
+      + 'Pass every test file as one comma-separated --tests value, not as separate arguments.',
+    );
+  } else if (rest.length === 0) {
+    console.error('A commit is required.');
+  } else {
+    console.error(`Expected exactly one commit argument, got ${rest.length}: ${rest.join(' ')}.`);
+  }
+  process.exit(2);
+}
+const commit = rest[0];
+
+const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+
+// Peels an annotated tag to the commit it names, so a branch, a short SHA and an annotated
+// tag all compare equal to what `git status`/HEAD report. Returns null rather than throwing,
+// so a rev that does not resolve is refused below with its own name rather than a git
+// stack trace.
+function resolveCommit(rev) {
+  try {
+    return git('rev-parse', `${rev}^{commit}`).trim();
+  } catch {
+    return null;
+  }
+}
+
+const headSha = resolveCommit('HEAD');
+const resolvedCommit = resolveCommit(commit);
+if (!resolvedCommit) {
+  console.error(`${commit} does not resolve to a commit in ${REPO}.`);
   process.exit(2);
 }
 
-const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+// Refuse unless the tree Stryker is about to copy is exactly the commit being measured.
+// Stryker sandboxes whatever it finds on disk, not the named commit's own snapshot: a dirty
+// mutated source shifts which lines are "changed", a dirty test earns kills the commit does
+// not contain, and a dirty file either of those imports does the same at one remove. The
+// check is WHOLE-TREE, not just the changed files, for the same reason.
+const headMismatch = resolvedCommit !== headSha;
+const status = git('status', '--porcelain').trim();
+const dirty = status !== '';
+if (headMismatch || dirty) {
+  console.error(`Refusing to mutate ${REPO}: it would not describe ${commit}.`);
+  const cures = [];
+  if (headMismatch) {
+    console.error(`${commit} resolves to ${resolvedCommit}, but HEAD is ${headSha}.`);
+    cures.push(`commit your changes and re-run naming the new HEAD, or check ${commit} out detached (or in a worktree) and re-run from there`);
+  }
+  if (dirty) {
+    console.error(`The tree is not clean (git status --porcelain):\n${status}`);
+    cures.push('stash the changes INCLUDING UNTRACKED FILES (`git stash -u` - a bare `git stash` leaves untracked files behind and this refusal keeps firing)');
+  }
+  console.error(`Cure: ${cures.join('; or ')}.`);
+  process.exit(2);
+}
+
+// A root commit resolves fine above but has no parent, so `${rev}~1` below has nothing to
+// diff against. Checked only once HEAD/clean has already passed, since a root commit that is
+// not also HEAD is refused by that check first.
+if (!resolveCommit(`${resolvedCommit}~1`)) {
+  console.error(`${commit} (${resolvedCommit}) is a root commit - it has no parent to diff against, so its changed lines cannot be computed.`);
+  process.exit(2);
+}
+
+// Observable without a dependency tree: this is everything --tests resolved to, printed
+// before DEPS_ROOT below can refuse the run for unrelated reasons.
+if (testsOverride) console.log(`tests (--tests) ${testsOverride.join(', ')}`);
 
 // The checkout whose node_modules the sandboxed tests resolve against. REPO holds the files to
 // mutate; it does NOT necessarily hold the dependencies. `npm install` is run once, in the
@@ -236,7 +352,8 @@ try {
     : run.signal ? `killed by ${run.signal}` : `exit status ${run.status}`;
   console.error(`\nStryker produced no report at ${REPORT_FILE} (${how}).`);
   console.error('Its output above says why. Most often one of the selected tests reads src/*.ts');
-  console.error('as text and is seeing Stryker\'s instrumentation; --tests drops that test.');
+  console.error('as text and is seeing Stryker\'s instrumentation; --tests drops that test - except');
+  console.error('for a src/index.ts change, where no --tests selection avoids this (see the header).');
   process.exit(run.status || 1);
 }
 
