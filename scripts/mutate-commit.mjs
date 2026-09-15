@@ -11,33 +11,49 @@
 //
 // Test files are chosen BY NAME by default: for each changed src/X.ts, every src/X*.test.ts
 // that exists, plus any test file the commit itself changed. `--tests` overrides that, which
-// is needed when the name match picks up a test Stryker cannot run.
+// is needed when the list it would otherwise pick includes a test Stryker cannot run.
 //
-// The tests that need that override are the ones that PARSE a src/*.ts file's own STRUCTURE:
-// locating a literal by its opening line, or matching a declaration line exactly. Stryker's
-// instrumentation rewrites exactly that shape (an array or string literal gets wrapped in a
-// mutant-switch conditional, so the text right after it no longer reads as it did), which
-// fails these tests' initial run before any mutant is tried - a plain substring search
-// elsewhere in the same file is untouched. By that criterion: index-env.test.ts and
-// readme-inventory.test.ts locate declarations in src/index.ts by their opening line;
-// tool-schema.test.ts locates the `const TOOLS = [` array the same way; config-surface.test.ts
-// matches `findEnvValue(\s*\[` literally, which an ArrayDeclaration mutant breaks the instant
-// it wraps that argument. Teaching this script to hand those guards an un-instrumented copy of
-// the source was considered and declined - it would let a real regression in the parsed
-// structure through untested, which defeats the guard rather than accommodating it.
+// Two unrelated things make a test unrunnable here; `--tests` cures either only by leaving the
+// broken one out, never by substituting something that gives equivalent coverage.
+//
+// The first is PARSING a src/*.ts file's own STRUCTURE: locating a literal or a declaration by
+// matching its exact line. Stryker's instrumentation rewrites exactly that shape (an array or
+// string literal gets wrapped in a mutant-switch conditional, so the text right after it no
+// longer reads as it did), which fails the test's initial run before any mutant is tried - a
+// plain substring search elsewhere in the same file is untouched. Measured members:
+// index-env.test.ts locates the `function findEnvValue(` declaration in src/index.ts by its
+// opening line; readme-inventory.test.ts and tool-schema.test.ts both locate the
+// `const TOOLS = [` array the same way; config-surface.test.ts matches `findEnvValue(\s*\[`
+// literally, which an ArrayDeclaration mutant breaks the instant it wraps that argument;
+// jmap-client.test.ts's "version sync" check matches `version:\s*'([^']+)'` against index.ts's
+// text and fails identically on a change to the version line. Of these five, only
+// index-env.test.ts shares a source-file stem with anything under test (src/index.ts) and so
+// is ever auto-selected by the by-name rule above; the other four reach a run only through an
+// explicit `--tests` or by being changed in the commit under test. Teaching this script to hand
+// those guards an un-instrumented copy of the source was considered and declined - it would let
+// a real regression in the parsed structure through untested, which defeats the guard rather
+// than accommodating it.
+//
+// The second is READING dist/index.js, which is gitignored and so never present in a sandbox
+// no matter what REPO holds. built-server.test.ts's `before` hooks assert dist/ exists and is
+// current, and fail the initial run the moment that assertion runs - every time, for every
+// commit, whatever is mutated. server-lifecycle.test.ts instead skips its whole suite when
+// dist/ is missing, so including it does not fail a run, but it can never contribute a kill
+// either - dist/ is never there to skip around.
 //
 // A change to src/index.ts specifically cannot be meaningfully mutation-tested by this script:
-// index.ts holds the tool schema literal and the CallTool switch, which has no test harness of
-// its own (see CLAUDE.md § Testing), so every test that pins its content either IS one of the
-// structural guards above (which instrumentation breaks outright) or spawns the built server
-// and so exercises the last `npm run build`, not the mutated source. `--tests` is no cure for
-// either. Illustration, not to be re-measured: `abc1d9f` (a real index.ts change), restricted
-// to tests that survive instrumentation, scored 5 mutants, 5 survived - every one vacuously.
+// it holds the tool schema literal and the CallTool switch, which has no test harness of its
+// own (see CLAUDE.md § Testing), so every test that pins its content either IS one of the five
+// structural guards above, or is one of the two dist-reading tests above (which either fails
+// outright or exercises the last `npm run build`, not the mutated source). `--tests` is no cure
+// for either. Illustration, not to be re-measured: `abc1d9f` (a real index.ts change),
+// restricted to tests that survive instrumentation, scored 5 mutants, 5 survived - every one
+// vacuously.
 //
-// That is ONE of the two ways the initial run can fail. The other announces itself as a
-// MISSING PACKAGE ("Cannot find package '@modelcontextprotocol/sdk'"), which is the sandbox
-// having no node_modules to resolve against - no choice of test files changes it. DEPS_ROOT
-// below is what stops that happening; read its comment if it recurs.
+// That accounts for two of the three ways the initial run can fail. The third announces itself
+// as a MISSING PACKAGE ("Cannot find package '@modelcontextprotocol/sdk'"), which is the
+// sandbox having no node_modules to resolve against - no choice of test files changes it.
+// DEPS_ROOT below is what stops that happening; read its comment if it recurs.
 //
 // Runs from a `git worktree` as well as from the primary checkout. A worktree contributes the
 // FILES to mutate; the primary checkout contributes the installed DEPENDENCIES.
