@@ -43,10 +43,9 @@
 // FILES to mutate; the primary checkout contributes the installed DEPENDENCIES.
 //
 // Refuses to run unless the commit named is REPO's current HEAD and REPO's tree is clean
-// (`git status --porcelain` reports nothing) - Stryker copies the tree it finds, so a dirty
-// mutated source or test shifts what gets measured. See the refusal itself for the cure; a
-// non-tip commit of a multi-commit branch needs a detached checkout (or a worktree) first.
-// A merge commit is diffed against its first parent only (`${rev}~1`) - not refused.
+// (`git status --porcelain` reports nothing) - see the refusal itself for why and for the
+// cure. A non-tip commit of a multi-commit branch needs a detached checkout (or a worktree)
+// first. A merge commit is diffed against its first parent only (`${rev}~1`) - not refused.
 //
 // Writes the Stryker config, sandbox and report OUTSIDE the repo tree (os.tmpdir by
 // default; override with MUTATE_OUT_DIR). Re-running overwrites; nothing needs deleting.
