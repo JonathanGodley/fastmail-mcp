@@ -1443,15 +1443,22 @@ describe('bulk email tools return their success text via a shared formatter (#18
       bulkTools.length >= 6,
       `found only ${bulkTools.length} bulk_* cases; the case-body scan has probably stopped matching`,
     );
+    // EVERY `text:` line in the case body, not just the first: a case with two return paths
+    // (an early one through the formatter, a later inline one on some other branch) must not
+    // read as conforming just because the first line found happens to route correctly.
     const offenders: string[] = [];
     for (const tool of bulkTools) {
       const body = bodies.get(tool)!;
-      const textLine = body.find((l) => l.startsWith('text:'));
-      const routesThroughFormatter =
-        !!textLine &&
-        (/text:\s*formatBulkEmailResult\(/.test(textLine) || /text:\s*formatLabelRemoval\(/.test(textLine));
-      if (!routesThroughFormatter) {
-        offenders.push(`${tool}${textLine ? ` (${textLine})` : ' (no text: line found in its case body)'}`);
+      const textLines = body.filter((l) => l.startsWith('text:'));
+      if (textLines.length === 0) {
+        offenders.push(`${tool} (no text: line found in its case body)`);
+        continue;
+      }
+      const nonConforming = textLines.filter((l) =>
+        !(/text:\s*formatBulkEmailResult\(/.test(l) || /text:\s*formatLabelRemoval\(/.test(l))
+      );
+      if (nonConforming.length > 0) {
+        offenders.push(`${tool} (${nonConforming.join(' | ')})`);
       }
     }
     assert.deepEqual(
