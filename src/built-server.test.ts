@@ -42,12 +42,14 @@ const require = createRequire(join(REPO_ROOT, 'package.json'));
 // clean, registration-based redaction is what did it.
 const FAKE_API_VALUE = 'probe-value-not-a-real-credential';
 
-// `npm test` runs tsx over src/ and never builds, so every assertion in this file
-// is made against whatever dist/ happened to be lying around. A stale dist would
-// pass these tests using the previous build's code - the exact false green they
-// exist to prevent, and it would be loudest on the change most likely to break
-// them (a newly edited source file). So refuse to run against a stale artifact
-// rather than reporting a pass that means nothing.
+// `npm test`'s `pretest` script builds first, so the normal route always has a current
+// dist/. This guard is the backstop for the other route: anyone invoking
+// `tsx --test src/built-server.test.ts` directly skips `pretest`, and every assertion in
+// this file is then made against whatever dist/ happens to be lying around. A stale dist
+// would pass these tests using the previous build's code - the exact false green this
+// exists to prevent, and it would be loudest on the change most likely to break them (a
+// newly edited source file). So refuse to run against a stale artifact rather than
+// reporting a pass that means nothing.
 function assertDistIsCurrent(): void {
   let built: number;
   try {
@@ -264,6 +266,23 @@ function arrayItems(declared: any): any {
   return branch?.items;
 }
 
+// What a client can SEND is the fact under test, not how the schema spells it. A
+// `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, and the
+// declarations in this file have been written both ways, so callers read the types a
+// declaration admits and the constraint on its array elements, whichever shape carries them.
+// Pinning one spelling would fail a rewrite into the other while the client-visible behaviour
+// was unchanged. Module-scoped beside arrayItems() because the drift guard below (#98) walks
+// every tool's schema with it, not just edit_draft's.
+function admittedTypes(declared: any): string[] {
+  const out = new Set<string>();
+  const add = (t: any) => {
+    for (const one of Array.isArray(t) ? t : (t ? [t] : [])) out.add(one);
+  };
+  add(declared.type);
+  for (const branch of declared.oneOf ?? declared.anyOf ?? []) add(branch.type);
+  return [...out].sort();
+}
+
 describe('edit_draft advertises the stringified-array form its handler accepts', () => {
   before(() => assertDistIsCurrent());
 
@@ -286,47 +305,258 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
     }
   }
 
-  // What a client can SEND is the fact under test, not how the schema spells it. A
-  // `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, and
-  // the declarations read here have been written both ways, so the assertions read the
-  // types the declaration admits and the constraint on its array elements, whichever shape
-  // carries them. Pinning one spelling would fail a rewrite into the other while the
-  // client-visible behaviour was unchanged.
-  function admittedTypes(declared: any): string[] {
-    const out = new Set<string>();
-    const add = (t: any) => {
-      for (const one of Array.isArray(t) ? t : (t ? [t] : [])) out.add(one);
-    };
-    add(declared.type);
-    for (const branch of declared.oneOf ?? declared.anyOf ?? []) add(branch.type);
-    return [...out].sort();
-  }
-
-  // Both parameters run through coerceStringArray in edit-draft-handler.ts, and
-  // edit-draft-handler.test.ts pins that the handler reads `clearFields: 'cc'` and
-  // `removeAttachments: 'blob-9'`.
-  for (const param of ['clearFields', 'removeAttachments']) {
-    it(`declares ${param} as array-or-string`, async () => {
-      const schema = await toolSchema('edit_draft');
-      const declared = schema.properties[param];
-      assert.deepEqual(
-        admittedTypes(declared),
-        ['array', 'string'],
-        `${param} declares ${JSON.stringify(declared.type ?? declared.oneOf ?? declared.anyOf)} ` +
-          'with no string alternative, so a validating client rejects the stringified form ' +
-          'before coerceStringArray runs',
-      );
-    });
-  }
-
   // The enum is what turns a bad field name into an error naming the nine valid ones. It
-  // constrains the array elements and is the easiest thing to lose to a widening, which is
-  // why it is asserted separately from the admitted types above.
+  // constrains the array elements and is the easiest thing to lose to a widening. Not covered
+  // by the general drift guard below (#98), which pins the string-form sentence and the
+  // coercer table but says nothing about an enum's contents.
   it('keeps the clearFields enum on the array elements', async () => {
     const schema = await toolSchema('edit_draft');
     assert.deepEqual(arrayItems(schema.properties.clearFields).enum, [
       'to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b-ter. Array-side schema drift guard (#98)
+// ---------------------------------------------------------------------------
+//
+// The lenient-boolean convention (src/tool-schema.test.ts's `lenient-boolean convention`) has
+// no array-side counterpart: nothing stops a new tool parameter shipping a narrow
+// `type: 'array'`, which makes its coercer unreachable through a validating client for exactly
+// the reason a narrow `type: 'boolean'` does. Reading tools/list off one spawn of the built
+// server (rather than scanning src/index.ts as text, the way the boolean guard does) is the
+// point here, not an inconsistency with it: the boolean guard's own comment gives up the
+// stronger claim only because `npm test` used to run tsx with no build first (see the
+// correction below at the `pretest` comments) — that reason is gone, and this guard is written
+// against the ADVERTISED schema because that is the only thing that says what a client
+// actually sees, which is the fact every assertion below is about.
+//
+// Four things, each lost independently by a different mistake:
+//
+//   1. Every top-level parameter admitting `array` also admits `string`. Without this, a
+//      validating client rejects the stringified form before any coercer runs.
+//   2. No top-level parameter carries `items` with no declared `type` at all. That shape is
+//      array-shaped to every reader and to the schema's own intent, but admits no `array`
+//      value, so assertion 1 alone would miss it silently.
+//   3. Every array-admitting parameter keeps `items` and states which string forms it accepts,
+//      in one of the sentences below — matched by SENTENCE TEXT, not by parameter name, so
+//      `participants`' own wording (which is deliberately not one of the shared constants) is
+//      accepted on the same footing as the shared ones.
+//   4. Every array-admitting parameter is named in the table below against the coercer that
+//      reads it, checked in BOTH directions. Coercion here is wired by hand per call site —
+//      `assertKnownParams` (src/coerce.ts) is key-strictness only — so a widened type with no
+//      coercer wired is a silent fail-OPEN: the schema now promises a string works, nothing
+//      converts it, and a handler doing `for (const id of "abc")` iterates characters. A
+//      name-pattern scan of the handler files cannot replace this table: `coerceRecipients(a)`
+//      names none of to/cc/bcc/replyTo, and `fields` is read by `parseEmailFields`. The table
+//      is therefore the enumerated claim, not a sampled one.
+//
+// Scoped to TOP-LEVEL tool parameters only. Nothing below the top level declares an array type
+// on the live surface today (checked directly below), so that bound is a stated limit rather
+// than machinery — a nested array parameter would need this walk extended to reach it.
+
+// The accepted string-form sentences, matched by substring. Both LENIENT_LIST_DESC and
+// LENIENT_OBJECT_LIST_DESC (src/index.ts) are copied here verbatim rather than imported:
+// index.ts has no exported seam for them, and copying pins the exact prose a widening must not
+// silently drop. participants' own sentence is included on equal footing — assertion 3 accepts
+// any of these, keyed by text, not by which parameter is being checked.
+const ARRAY_STRING_FORM_SENTENCES = [
+  'Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.',
+  'Accepts an array, or a JSON-encoded array as one string; a comma-joined string is NOT accepted.',
+  'The whole array may also be sent as a JSON string',
+];
+
+// Every array-admitting top-level parameter, named against the coercer that reads its string
+// form. Enumerated by hand against the wire (see the report for how each row was read), and
+// checked against the live surface in both directions by the last test below: a wire parameter
+// missing from this table, or a row naming a parameter no longer on the wire, both fail.
+const ARRAY_PARAM_COERCERS: Record<string, string> = {
+  'list_emails.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
+  'get_email.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
+  'get_thread.fields': 'thread-handler.ts parseEmailFields() -> coerceStringArray',
+  'search_emails.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
+  'search_emails.requiredMailboxes': 'index.ts coerceStringArrayStrict',
+  'search_emails.excludeMailboxes': 'index.ts coerceStringArrayStrict',
+  'draft_email.to': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'draft_email.cc': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'draft_email.bcc': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'draft_email.replyTo': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'draft_email.inReplyTo': 'draft-email-handler.ts coerceStringArray',
+  'draft_email.references': 'draft-email-handler.ts coerceStringArray',
+  'draft_email.attachments': 'draft-email-handler.ts coerceAttachments',
+  'edit_draft.to': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'edit_draft.cc': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'edit_draft.bcc': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'edit_draft.replyTo': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
+  'edit_draft.attachments': 'edit-draft-handler.ts coerceAttachments',
+  'edit_draft.removeAttachments': 'edit-draft-handler.ts coerceStringArray',
+  'edit_draft.clearFields': 'edit-draft-handler.ts coerceStringArray',
+  'create_contact.emails': 'contacts-handler.ts coerceContactEmails',
+  'create_contact.phones': 'contacts-handler.ts coerceContactPhones',
+  'create_contact.addresses': 'contacts-handler.ts coerceContactAddresses',
+  'update_contact.emails': 'contacts-handler.ts coerceContactEmails',
+  'update_contact.phones': 'contacts-handler.ts coerceContactPhones',
+  'update_contact.addresses': 'contacts-handler.ts coerceContactAddresses',
+  'update_contact.clearFields': 'contacts-handler.ts coerceStringArray',
+  'create_calendar_event.participants': 'index.ts coerceParticipants',
+  'update_calendar_event.participants': 'index.ts coerceParticipants',
+  'update_calendar_event.clearFields': 'index.ts coerceStringArray',
+  'archive_email.emailIds': 'index.ts coerceStringArrayStrict',
+  'add_labels.mailboxes': 'index.ts coerceStringArray',
+  'remove_labels.mailboxes': 'index.ts coerceStringArray',
+  'bulk_mark_read.emailIds': 'index.ts coerceStringArray',
+  'bulk_pin.emailIds': 'index.ts coerceStringArray',
+  'bulk_move.emailIds': 'index.ts coerceStringArray',
+  'bulk_delete.emailIds': 'index.ts coerceStringArray',
+  'bulk_add_labels.emailIds': 'index.ts coerceStringArray',
+  'bulk_add_labels.mailboxes': 'index.ts coerceStringArray',
+  'bulk_remove_labels.emailIds': 'index.ts coerceStringArray',
+  'bulk_remove_labels.mailboxes': 'index.ts coerceStringArray',
+};
+
+describe('array-side schema drift guard (#98)', () => {
+  let tools: any[];
+
+  // Spawned ONCE and shared by every test below, unlike toolSchema() above (which spawns a
+  // fresh server per call): a 41-tool walk has no reason to pay for 41 spawns to read one
+  // tools/list. Same env scrub as toolSchema() — every FASTMAIL_* name stripped, then only the
+  // token set — so an ambient setting cannot be what the assertions below see.
+  before(async () => {
+    assertDistIsCurrent();
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+    }
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+
+    const client = createClient({ env });
+    try {
+      await client.init();
+      const result: any = await client.list();
+      tools = result.tools;
+    } finally {
+      client.close();
+    }
+  });
+
+  // Every top-level property of every tool, flattened so a failure can name which tool and
+  // which parameter, alongside the schema fragment under test.
+  function topLevelParams(): { key: string; declared: any }[] {
+    const out: { key: string; declared: any }[] = [];
+    for (const tool of tools) {
+      for (const [param, declared] of Object.entries<any>(tool.inputSchema.properties ?? {})) {
+        out.push({ key: `${tool.name}.${param}`, declared });
+      }
+    }
+    return out;
+  }
+
+  it('sees at least 30 tools on the wire', () => {
+    // A floor on the TOOL count, separate from the array-admitting floor below: a tool
+    // removed outright (rather than a parameter narrowed) shrinks `tools` itself, which every
+    // assertion below would otherwise absorb silently — each just walks fewer properties.
+    // Kept as its own test so a failure here reads as "a tool went missing", not "a parameter
+    // widening broke", which is what the array-admitting floor's own message says instead.
+    assert.ok(
+      tools.length >= 30,
+      `found only ${tools.length} tools (expected at least 30); either tools/list stopped ` +
+        'returning the real surface, or tools were actually removed',
+    );
+  });
+
+  it('never advertises array without also admitting string', () => {
+    const params = topLevelParams();
+    // A floor on the ARRAY-ADMITTING set, not the total walked: re-spelling every array
+    // parameter as a narrow `type: 'string'` still walks every tool and every parameter, so a
+    // floor on the walk itself would stay green through exactly the regression this guard
+    // exists to catch. This floor fails if the admittedTypes() match goes blind OR if array
+    // parameters are actually removed wholesale — either way, "the array check stopped seeing
+    // arrays" is the fact worth surfacing, distinct from the cure below.
+    const arrayAdmitting = params.filter((p) => admittedTypes(p.declared).includes('array'));
+    assert.ok(
+      arrayAdmitting.length >= 30,
+      `found only ${arrayAdmitting.length} array-admitting top-level parameters (expected at ` +
+        'least 30); either admittedTypes() has stopped matching the live schema, or array ' +
+        'parameters were actually removed',
+    );
+
+    const offenders = arrayAdmitting
+      .filter((p) => !admittedTypes(p.declared).includes('string'))
+      .map((p) => `${p.key} (declares ${JSON.stringify(p.declared.type ?? p.declared.oneOf ?? p.declared.anyOf)})`);
+    assert.deepEqual(
+      offenders,
+      [],
+      'these parameters admit array with no string alternative, so a validating client rejects ' +
+        'the stringified form before any coercer runs. Cure, both halves: widen the type to ' +
+        "admit 'string' too (LENIENT_LIST_DESC / LENIENT_OBJECT_LIST_DESC in src/index.ts are " +
+        'the usual route, not a requirement — participants deliberately writes its own ' +
+        'sentence) AND wire a coercer that actually reads the string form, or the widening ' +
+        `ships with nothing behind it: ${offenders.join(', ')}`,
+    );
+  });
+
+  it('never advertises items with no declared type at all', () => {
+    const offenders = topLevelParams()
+      .filter(({ declared }) => {
+        const hasType = declared.type !== undefined || declared.oneOf !== undefined || declared.anyOf !== undefined;
+        return declared.items !== undefined && !hasType;
+      })
+      .map((p) => p.key);
+    assert.deepEqual(
+      offenders,
+      [],
+      "these parameters carry 'items' with no 'type' at all — array-shaped to every reader and " +
+        "to the schema's own intent, but admitting no 'array' means the previous assertion " +
+        "skips them silently. Declare a type (['array', 'string'] if a coercer reads the " +
+        `string form): ${offenders.join(', ')}`,
+    );
+  });
+
+  it('keeps items and a documented string-form sentence on every array-admitting parameter', () => {
+    const offenders: string[] = [];
+    for (const { key, declared } of topLevelParams()) {
+      if (!admittedTypes(declared).includes('array')) continue;
+      const missing: string[] = [];
+      if (!arrayItems(declared)) missing.push('items');
+      const description = String(declared.description ?? '');
+      if (!ARRAY_STRING_FORM_SENTENCES.some((s) => description.includes(s))) missing.push('string-form sentence');
+      if (missing.length > 0) offenders.push(`${key} (missing ${missing.join(' and ')})`);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'a widening can drop items (degrading a named rejection into a generic one, per ' +
+        "index.ts's clearFields comment) or the string-form sentence (leaving the type union " +
+        'with no clue which strings actually work) without tripping the previous two ' +
+        `assertions: ${offenders.join(', ')}`,
+    );
+  });
+
+  it('names a coercer for every array-admitting parameter, matched to the wire in both directions', () => {
+    const wireKeys = new Set(
+      topLevelParams()
+        .filter((p) => admittedTypes(p.declared).includes('array'))
+        .map((p) => p.key),
+    );
+    const tableKeys = new Set(Object.keys(ARRAY_PARAM_COERCERS));
+
+    const untabled = [...wireKeys].filter((k) => !tableKeys.has(k)).sort();
+    assert.deepEqual(
+      untabled,
+      [],
+      'these array-admitting parameters are not named in ARRAY_PARAM_COERCERS, so nothing ' +
+        'states which coercer is supposed to read their string form — add a row naming it ' +
+        `(and confirm the coercer actually runs): ${untabled.join(', ')}`,
+    );
+
+    const stale = [...tableKeys].filter((k) => !wireKeys.has(k)).sort();
+    assert.deepEqual(
+      stale,
+      [],
+      'ARRAY_PARAM_COERCERS names a coercer for a parameter no longer on the wire (renamed, ' +
+        `narrowed back to a plain array, or removed) — delete its row: ${stale.join(', ')}`,
+    );
   });
 });
 

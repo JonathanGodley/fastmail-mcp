@@ -17,12 +17,13 @@
 //
 // This asserts against src/index.ts and the handler modules as TEXT rather than by
 // spawning the built server and reading tools/list. tools/list would prove what is
-// actually shipped, which is the stronger claim, but `npm test` runs tsx over src/ and
-// never builds first: a guard read out of a stale dist/ would not see a tool added since
-// the last build, which is precisely the drift it exists to catch. tsc does not rewrite
-// string literals, so the source and the shipped schema cannot disagree on these, and the
-// source check can never go stale. (scripts/mcp-harness.mjs grew a list() for the
-// on-demand check against a freshly built server; `node scripts/mcp-harness.mjs --list`.)
+// actually shipped, which is the stronger claim — the array-side guard (#98,
+// src/built-server.test.ts's `array-side schema drift guard`) takes exactly that route — but
+// a text scan needs no server spawn and no built dist/ at all, so it stays the cheaper check
+// for a convention this size. tsc does not rewrite string literals, so the source and the
+// shipped schema cannot disagree on these, and the source check can never go stale.
+// (scripts/mcp-harness.mjs grew a list() for the on-demand check against a freshly built
+// server; `node scripts/mcp-harness.mjs --list`.)
 //
 // Recovery notes name only parameters the emitting tool has.
 //
@@ -108,9 +109,10 @@ function readLines(file: string): string[] {
   return readFileSync(join(SRC_DIR, file), 'utf8').split('\n').map((l) => l.replace(/\r$/, ''));
 }
 
-// Collect the boolean parameters out of the TOOLS schemas. Matches the declaration line
-// exactly (leading whitespace, trailing comma) so the prose in nearby comments — which
-// quotes both forms — is not picked up.
+// Collect the boolean parameters by scanning every line of src/index.ts as text (not by
+// parsing the TOOLS literal), matching the declaration line exactly (leading whitespace,
+// trailing comma) so the prose in nearby comments — which quotes both forms — is not picked
+// up.
 function collectBooleanParams(): { unionNames: string[]; narrow: string[] } {
   const lines = readLines('index.ts');
   const unionNames = new Set<string>();
@@ -825,8 +827,9 @@ const NON_SHIPPED_DIRS = new Set(['testing']);
 
 // Every shipped source file, recursively: any handler or formatter can serialise a payload,
 // wherever it lives. Read as text out of src/ rather than imported from dist/, for the same
-// reason as the scans above: `npm test` never builds first, so a dist/ read would miss the
-// site just added. Paths come back relative to src/ ('coerce.ts', 'sub/thing.ts').
+// reason as the scans above: a text scan needs no build and no server spawn, and tsc does not
+// rewrite a JSON.stringify call site, so the source read is accurate whether or not dist/ has
+// been rebuilt since. Paths come back relative to src/ ('coerce.ts', 'sub/thing.ts').
 function collectSourceFiles(dir: string = SRC_DIR, prefix = ''): string[] {
   return readdirSync(dir, { withFileTypes: true })
     .flatMap((entry) => {

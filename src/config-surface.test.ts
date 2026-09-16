@@ -8,11 +8,10 @@
 // to an uninterpolated placeholder string. Both look configured and do nothing.
 //
 // The third check goes further and asks whether the server reads the variable at all, by
-// scanning src/index.ts and its siblings as TEXT. That mirrors src/tool-schema.test.ts and
-// is text-based for the same reason: `npm test` runs tsx over src/ and never builds, so a
-// guard reading dist/ would validate the last build rather than the current source — which
-// is precisely the drift it exists to catch. tsc does not rewrite string literals, so the
-// source and the shipped code cannot disagree on these names.
+// scanning src/index.ts and its siblings as TEXT. That mirrors src/tool-schema.test.ts and is
+// text-based for the same reason: a text scan needs no build and no server spawn, and tsc
+// does not rewrite string literals, so the source and the shipped code cannot disagree on
+// these names — the check stays accurate whether or not dist/ happens to be current.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

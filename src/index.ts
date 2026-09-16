@@ -587,10 +587,13 @@ const CREATE_PARENT_PARAM_DESC =
 // shape, which neither constant can. Do not replace it with one of these for the sake of
 // uniformity.
 //
-// One thing is not done, and it is what #98 stays open for: the drift guard.
-// `tool-schema.test.ts` fails a boolean declared `type: 'boolean'` and has no array-side
-// equivalent, so nothing stops a narrow `type: 'array'` being added tomorrow and quietly
-// making its coercion unreachable again.
+// This is now guarded (#98): src/built-server.test.ts's `array-side schema drift guard` reads
+// the ADVERTISED schema off a spawned server and fails a top-level parameter that admits
+// `array` with no `string` alternative, that carries `items` with no `type` at all, that drops
+// `items` or its string-form sentence, or that is not named against a coercer in its table.
+// Two bounds stay open, stated there rather than fixed by this comment: the walk covers
+// TOP-LEVEL tool parameters only, and the table pins that a coercer is NAMED for a parameter —
+// not that the named coercer is the right one, or that it actually runs.
 const LENIENT_LIST_DESC =
   ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
 
