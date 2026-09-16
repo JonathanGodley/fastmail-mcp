@@ -336,9 +336,9 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
 //
 //   1. Every top-level parameter admitting `array` also admits `string`. Without this, a
 //      validating client rejects the stringified form before any coercer runs.
-//   2. No top-level parameter carries `items` with no declared `type` at all. That shape is
-//      array-shaped to every reader and to the schema's own intent, but admits no `array`
-//      value, so assertion 1 alone would miss it silently.
+//   2. No top-level parameter carries `items` with no declared `type` at all — that shape
+//      admits no `array`, so it slips past assertion 1 unseen even though it is array-shaped
+//      to every reader and to the schema's own intent.
 //   3. Every array-admitting parameter keeps `items` and states which string forms it accepts,
 //      in one of the sentences below — matched by SENTENCE TEXT, not by parameter name, so
 //      `participants`' own wording (which is deliberately not one of the shared constants) is
@@ -353,8 +353,9 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
 //      is therefore the enumerated claim, not a sampled one.
 //
 // Scoped to TOP-LEVEL tool parameters only. Nothing below the top level declares an array type
-// on the live surface today (checked directly below), so that bound is a stated limit rather
-// than machinery — a nested array parameter would need this walk extended to reach it.
+// on the live surface as of this writing, so that bound is a stated limit rather than
+// machinery, and not itself enforced by a test — a nested array parameter would need this walk
+// extended to reach it.
 
 // The accepted string-form sentences, matched by substring. Both LENIENT_LIST_DESC and
 // LENIENT_OBJECT_LIST_DESC (src/index.ts) are copied here verbatim rather than imported:
@@ -368,9 +369,10 @@ const ARRAY_STRING_FORM_SENTENCES = [
 ];
 
 // Every array-admitting top-level parameter, named against the coercer that reads its string
-// form. Enumerated by hand against the wire (see the report for how each row was read), and
-// checked against the live surface in both directions by the last test below: a wire parameter
-// missing from this table, or a row naming a parameter no longer on the wire, both fail.
+// form — derived by reading each call site in index.ts and the handler modules, since coercion
+// here is wired by hand rather than by a naming convention a scan could follow. Checked against
+// the live surface in both directions by the last test below: a wire parameter missing from
+// this table, or a row naming a parameter no longer on the wire, both fail.
 const ARRAY_PARAM_COERCERS: Record<string, string> = {
   'list_emails.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
   'get_email.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
