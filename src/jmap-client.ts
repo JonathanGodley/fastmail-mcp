@@ -32,6 +32,7 @@ import {
 } from './inline-notes.js';
 import type { AttachmentAvailability } from './inline-notes.js';
 import { matchSubjectPrefix, noteEditSubjectPrefix } from './subject-prefix.js';
+import { buildIdCollapseNote } from './id-collapse-note.js';
 // unlink is a security control, not a convenience: the exclusive-create download
 // path removes the file it just refused to trust before rewriting it.
 import { writeFile, mkdir, realpath, stat, lstat, open, unlink } from 'fs/promises';
@@ -1072,9 +1073,9 @@ function isPlainResponseMap(value: any): boolean {
  * `updates['__proto__'] = patch` on an ordinary object invokes the prototype SETTER instead
  * of creating an own key, so the entry never reaches the request. The server is then never
  * asked about that id, cannot list it in `notUpdated`, and every tool here's SUCCESS text
- * infers success from the absence of a set-error — so a call that reports success says the
- * message was changed while nothing touched it. (The bulk write paths' own FAILURE text is
- * unaffected: it counts a success from the server's `updated` acknowledgement, and an id the
+ * counts a success from the server's own `updated` acknowledgement — so a call that reports
+ * success says the message was changed while nothing touched it. (The bulk write paths' own
+ * FAILURE text is unaffected the same way: it counts a success from `updated`, and an id the
  * server was never asked about cannot appear there either — see countAcknowledged.)
  * Underscores are in the base64url alphabet JMAP ids are drawn from, so `__proto__` is a
  * legal id rather than a contrived one.
@@ -2004,6 +2005,41 @@ export class JmapClient {
       Object.prototype.hasOwnProperty.call(acknowledged, id) &&
       !Object.prototype.hasOwnProperty.call(notUpdated, id)
     ).length;
+  }
+
+  /**
+   * A fresh Email/set `notUpdated` map: the server's own map, plus a synthesized
+   * `outcomeUnknown` entry for every id in `submittedIds` the server acknowledged in
+   * NEITHER `updated` nor its own `notUpdated`. archiveEmails and applyLabelRemoval already
+   * draw this same conclusion for the same non-compliant-server condition; this is that
+   * treatment shared, so the five uniform bulk writers agree with them that an unconfirmed
+   * id is a failure, not a success.
+   *
+   * Returns a FRESH newUpdateMap(), with the server's map Object.assign-ed in — never
+   * `result.notUpdated` itself, and never a fresh `{}` or a `{...}` spread. Synthesizing an
+   * entry under a caller-supplied id (e.g. `__proto__`) into an ordinary object runs the
+   * prototype SETTER: the entry never becomes an own key, so it is invisible to
+   * `Object.keys`/`hasOwnProperty` and the id is then reported as written. See
+   * newUpdateMap's docblock. Membership is read with `hasOwnProperty`, never truthiness,
+   * because RFC 8620 §5.3 lets a successful update come back as a null value.
+   *
+   * Must run BEFORE countAcknowledged, so an id this adds is excluded from the success
+   * count it computes.
+   */
+  private static withUnaccountedFailures(
+    submittedIds: string[],
+    updated: any,
+    serverNotUpdated: any,
+  ): Record<string, any> {
+    const notUpdated: Record<string, any> = newUpdateMap();
+    if (isPlainResponseMap(serverNotUpdated)) Object.assign(notUpdated, serverNotUpdated);
+    const acknowledged = isPlainResponseMap(updated) ? updated : {};
+    for (const id of submittedIds) {
+      if (Object.prototype.hasOwnProperty.call(notUpdated, id)) continue;
+      if (Object.prototype.hasOwnProperty.call(acknowledged, id)) continue;
+      notUpdated[id] = { type: 'outcomeUnknown' };
+    }
+    return notUpdated;
   }
 
   /**
@@ -5079,12 +5115,11 @@ export class JmapClient {
     // No Email/set at all when every id was a no-op or a notFound: an empty update writes
     // nothing, and issuing it would advance the account state for a call that does nothing.
     //
-    // newUpdateMap() rather than {}: the synthesis loop below ASSIGNS into this map under a
-    // caller-supplied email id, and `map['__proto__'] = …` on an ordinary object runs the
-    // prototype setter — the entry never becomes an own key, Object.keys and setErrorFor
-    // never see it, and a message the server said does not exist is reported as removed.
-    // Underscores are in the JMAP id alphabet, so `__proto__` is a legal id. The server's own
-    // map is Object.assign-ed in rather than spread into a fresh {}, for the same reason.
+    // newUpdateMap() rather than {}: withUnaccountedFailures below ASSIGNS its own fresh map
+    // into this one, and a caller-supplied email id of `__proto__` (legal — underscores are
+    // in the JMAP id alphabet) would invoke the prototype setter on an ordinary object
+    // instead of becoming an own key, so a message the server said does not exist would be
+    // reported as removed. See newUpdateMap's docblock.
     const notUpdated: Record<string, any> = newUpdateMap();
     let wroteEmailSet = false;
     // Count of submitted ids the server acknowledged as updated, for throwBulkSetError's
@@ -5100,24 +5135,13 @@ export class JmapClient {
         ],
       });
       const result = this.getMethodResult(response, 0);
-      if (isPlainResponseMap(result?.notUpdated)) Object.assign(notUpdated, result.notUpdated);
-
-      // An id we wrote that the server acknowledged in NEITHER map has no known outcome, and
-      // reporting it as done would state as fact something nothing confirmed — the sharper
-      // risk here being a rescue, where "filed in Archive" would be a relocation claim with
-      // no server behind it. Treated as a failure, matching archiveEmails' outcomeUnknown.
-      const acknowledged = isPlainResponseMap(result?.updated) ? result.updated : {};
-      for (const id of Object.keys(update)) {
-        if (Object.prototype.hasOwnProperty.call(notUpdated, id)) continue;
-        if (Object.prototype.hasOwnProperty.call(acknowledged, id)) continue;
-        notUpdated[id] = { type: 'outcomeUnknown' };
-      }
-
-      // Shared with the five uniform bulk sites — see countAcknowledged's docblock. Must run
-      // here, after the outcomeUnknown loop above: an id that loop just added to `notUpdated`
-      // must already be excluded from this count. Its position relative to the notFound
-      // synthesis below does not matter — a notFound id was never in `update` to begin with,
-      // so it is not among the ids this call even looks at.
+      // Shared with the five uniform bulk sites: the server's own notUpdated plus an
+      // outcomeUnknown entry for any submitted id acknowledged in neither map (see its
+      // docblock). Must run BEFORE countAcknowledged, so an id it just added is excluded
+      // from that count. Its position relative to the notFound synthesis below does not
+      // matter — a notFound id was never in `update` to begin with, so it is not among the
+      // ids this call even looks at.
+      Object.assign(notUpdated, JmapClient.withUnaccountedFailures(Object.keys(update), result?.updated, result?.notUpdated));
       updatedCount = JmapClient.countAcknowledged(Object.keys(update), result?.updated, notUpdated);
     }
 
@@ -5194,13 +5218,14 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // Object.keys(updates).length, not emailIds.length: `updates` is built by assigning
-      // into an id-keyed map over emailIds, so a duplicate id collapses to one entry and the
-      // raw array length would overstate what was actually submitted to the server.
-      const submittedIds = Object.keys(updates);
-      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
-      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, 'add labels to');
+    // Object.keys(updates).length, not emailIds.length: `updates` is built by assigning
+    // into an id-keyed map over emailIds, so a duplicate id collapses to one entry and the
+    // raw array length would overstate what was actually submitted to the server.
+    const submittedIds = Object.keys(updates);
+    const notUpdated = JmapClient.withUnaccountedFailures(submittedIds, result.updated, result.notUpdated);
+    if (Object.keys(notUpdated).length > 0) {
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, notUpdated);
+      this.throwBulkSetError(notUpdated, submittedIds.length, successCount, 'add labels to', buildIdCollapseNote(emailIds));
     }
   }
 
@@ -5234,6 +5259,8 @@ export class JmapClient {
         // skipped ones in a different register than a batch that only skipped them.
         notes.push(`${unchangedCount} of the messages named did not carry any of these labels and ${unchangedCount === 1 ? 'was' : 'were'} left untouched.`);
       }
+      const collapseNote = buildIdCollapseNote(emailIds);
+      if (collapseNote) notes.push(collapseNote);
       this.throwBulkSetError(
         notUpdated,
         // Deliberately NOT the same count formatLabelRemoval's success subject uses
@@ -6315,11 +6342,14 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
     
-    if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is the distinct submitted ids.
-      const submittedIds = Object.keys(updates);
-      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
-      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, `mark as ${read ? 'read' : 'unread'}`);
+    // See bulkAddLabels for why the total is the distinct submitted ids, and
+    // withUnaccountedFailures for why the notUpdated read is the fresh map rather than
+    // result.notUpdated.
+    const submittedIds = Object.keys(updates);
+    const notUpdated = JmapClient.withUnaccountedFailures(submittedIds, result.updated, result.notUpdated);
+    if (Object.keys(notUpdated).length > 0) {
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, notUpdated);
+      this.throwBulkSetError(notUpdated, submittedIds.length, successCount, `mark as ${read ? 'read' : 'unread'}`, buildIdCollapseNote(emailIds));
     }
   }
 
@@ -6346,11 +6376,14 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is the distinct submitted ids.
-      const submittedIds = Object.keys(updates);
-      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
-      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, `${pinned ? 'pin' : 'unpin'}`);
+    // See bulkAddLabels for why the total is the distinct submitted ids, and
+    // withUnaccountedFailures for why the notUpdated read is the fresh map rather than
+    // result.notUpdated.
+    const submittedIds = Object.keys(updates);
+    const notUpdated = JmapClient.withUnaccountedFailures(submittedIds, result.updated, result.notUpdated);
+    if (Object.keys(notUpdated).length > 0) {
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, notUpdated);
+      this.throwBulkSetError(notUpdated, submittedIds.length, successCount, `${pinned ? 'pin' : 'unpin'}`, buildIdCollapseNote(emailIds));
     }
   }
 
@@ -6382,11 +6415,14 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is the distinct submitted ids.
-      const submittedIds = Object.keys(updates);
-      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
-      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, 'move');
+    // See bulkAddLabels for why the total is the distinct submitted ids, and
+    // withUnaccountedFailures for why the notUpdated read is the fresh map rather than
+    // result.notUpdated.
+    const submittedIds = Object.keys(updates);
+    const notUpdated = JmapClient.withUnaccountedFailures(submittedIds, result.updated, result.notUpdated);
+    if (Object.keys(notUpdated).length > 0) {
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, notUpdated);
+      this.throwBulkSetError(notUpdated, submittedIds.length, successCount, 'move', buildIdCollapseNote(emailIds));
     }
   }
 
@@ -6422,11 +6458,14 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    if (result.notUpdated && Object.keys(result.notUpdated).length > 0) {
-      // See bulkAddLabels for why the total is the distinct submitted ids.
-      const submittedIds = Object.keys(updates);
-      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, result.notUpdated);
-      this.throwBulkSetError(result.notUpdated, submittedIds.length, successCount, 'delete');
+    // See bulkAddLabels for why the total is the distinct submitted ids, and
+    // withUnaccountedFailures for why the notUpdated read is the fresh map rather than
+    // result.notUpdated.
+    const submittedIds = Object.keys(updates);
+    const notUpdated = JmapClient.withUnaccountedFailures(submittedIds, result.updated, result.notUpdated);
+    if (Object.keys(notUpdated).length > 0) {
+      const successCount = JmapClient.countAcknowledged(submittedIds, result.updated, notUpdated);
+      this.throwBulkSetError(notUpdated, submittedIds.length, successCount, 'delete', buildIdCollapseNote(emailIds));
     }
   }
 }

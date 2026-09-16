@@ -1471,10 +1471,11 @@ describe('bulk set-error formatting', () => {
     stubMakeRequest(client, { methodResponses: [['Email/set', { notUpdated }, 'bulkMove']] });
   }
 
-  it('reports an id acknowledged in neither map as having no reported outcome, never as a success (#120)', async () => {
+  it('treats an id acknowledged in neither map as its own outcomeUnknown failure (#185)', async () => {
     // Only a non-compliant server produces this: e3 is submitted but appears in neither
-    // `updated` nor `notUpdated`. Folding it into successCount (as total - failCount did)
-    // would report a change nothing confirmed; the fix states it as its own clause instead.
+    // `updated` nor `notUpdated`. Before #185 this was folded into a separate "N with no
+    // reported outcome" clause on the success side of the count; withUnaccountedFailures now
+    // treats it exactly like any other failure, grouped under `outcomeUnknown`.
     stubMakeRequest(client, {
       methodResponses: [
         ['Email/set', { updated: { e1: null }, notUpdated: { e2: { type: 'forbidden' } } }, 'bulkMove'],
@@ -1484,7 +1485,8 @@ describe('bulk set-error formatting', () => {
     await assert.rejects(
       () => client.bulkMove(['e1', 'e2', 'e3'], 'mb-archive'),
       (err: Error) => {
-        assert.match(err.message, /Failed to move 1 of 3 emails \(1 succeeded, 1 with no reported outcome\)/);
+        assert.match(err.message, /Failed to move 2 of 3 emails \(1 succeeded\)/);
+        assert.match(err.message, /outcomeUnknown: e3/);
         return true;
       },
     );
@@ -3124,6 +3126,72 @@ describe('getMailboxStats resolution', () => {
   });
 });
 
+// ---------- bulk writers treat an unacknowledged id as a failure (#185) ----------
+//
+// Today each of these five gates its throw solely on the server's own `notUpdated` being
+// non-empty, so a non-compliant server that drops a submitted id from BOTH `updated` and
+// `notUpdated` reports success for a write nothing confirmed. archiveEmails and
+// applyLabelRemoval already treat that condition as a failure (an `outcomeUnknown` entry);
+// these five are brought in line with the same treatment.
+describe('bulk writers treat an unacknowledged id as a failure (#185)', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client);
+  });
+
+  it('bulkMarkRead throws naming an id the server acknowledged in neither map', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkUpdate']],
+    });
+    await assert.rejects(
+      () => client.bulkMarkRead(['e1', 'e2']),
+      (err: Error) => { assert.match(err.message, /e2/); return true; },
+    );
+  });
+
+  it('bulkPinEmails throws naming an id the server acknowledged in neither map', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkFlag']],
+    });
+    await assert.rejects(
+      () => client.bulkPinEmails(['e1', 'e2']),
+      (err: Error) => { assert.match(err.message, /e2/); return true; },
+    );
+  });
+
+  it('bulkMove throws naming an id the server acknowledged in neither map', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkMove']],
+    });
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e2'], 'Archive'),
+      (err: Error) => { assert.match(err.message, /e2/); return true; },
+    );
+  });
+
+  it('bulkDelete throws naming an id the server acknowledged in neither map', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkDelete']],
+    });
+    await assert.rejects(
+      () => client.bulkDelete(['e1', 'e2']),
+      (err: Error) => { assert.match(err.message, /e2/); return true; },
+    );
+  });
+
+  it('bulkAddLabels throws naming an id the server acknowledged in neither map', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null } }, 'bulkAddLabels']],
+    });
+    await assert.rejects(
+      () => client.bulkAddLabels(['e1', 'e2'], ['inbox']),
+      (err: Error) => { assert.match(err.message, /e2/); return true; },
+    );
+  });
+});
+
 // ---------- bulkMove resolution ----------
 
 describe('bulkMove resolution', () => {
@@ -3159,8 +3227,17 @@ describe('bulkMove resolution', () => {
     // succeeded for a message the server never saw. Pinned on a bulk writer as well as on
     // archive_email, because the null-prototype map is shared across all of them and
     // reverting one back to {} would otherwise leave the suite green.
+    //
+    // The stubbed response's `updated` is built via JSON.parse, not an object literal:
+    // `{ '__proto__': null }` as an object-literal key invokes the SAME special-cased
+    // proto-setting behaviour as bare `{ __proto__: null }` (it is the computed-key form,
+    // `{ ['__proto__']: null }`, that would not), so that literal never produces an own
+    // `__proto__` key at all — it silently sets no own key on the object it appears in,
+    // whether that object is `updates` in production code or a test fixture literal. A
+    // real server's JSON response does not go through object-literal syntax, so
+    // JSON.parse is what a compliant server would actually hand back for this id.
     const makeReq = stubRequests(client, async () => (
-      { methodResponses: [['Email/set', { updated: { '__proto__': null } }, 'bulkMove']] }
+      { methodResponses: [['Email/set', { updated: JSON.parse('{"__proto__":null}') }, 'bulkMove']] }
     ));
     await client.bulkMove(['__proto__'], 'Archive');
     const update = callArguments(makeReq, 0)[0].methodCalls[0][1].update;
