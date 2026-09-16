@@ -25,10 +25,12 @@
 //   - index-env.test.ts scans every non-test src/*.ts file for a bare process.env read, and
 //     fails the moment ANY of them carries Stryker's own env-reading header - not because its
 //     own `function findEnvValue(` text match ever breaks. Measured against a commit touching
-//     only src/index.ts and, separately, one touching only src/auth.ts: both failed identically,
-//     citing process.env.__STRYKER_ACTIVE_MUTANT__ at the mutated file's own top lines. It
-//     therefore fails on every run this script performs, whichever src/*.ts file that commit
-//     touches - there is no line to avoid mutating that keeps it green.
+//     only src/index.ts and, separately, one touching only src/auth.ts: both fail from the same
+//     cause, process.env.__STRYKER_ACTIVE_MUTANT__ at the mutated file's own top lines (the
+//     src/index.ts case also fails a second assertion, because the reprint moves the closing
+//     brace that ends findEnvValue's located body range). It therefore fails on every run that
+//     selects it, whichever src/*.ts file that commit touches - there is no line to avoid
+//     mutating that keeps it green.
 //   - readme-inventory.test.ts and tool-schema.test.ts each locate a piece of src/index.ts's
 //     structure by matching exact text (the `const TOOLS = [` array; tool-schema.test.ts also
 //     scans recipient-parameter descriptions for a named constant) rather than by parsing it, so
@@ -46,13 +48,12 @@
 //     initial run.
 // Of these five, index-env.test.ts and jmap-client.test.ts are the two the by-name rule above
 // ever auto-selects on its own (for a change to src/index.ts and to src/jmap-client.ts
-// respectively) - and each is also that module's real unit-test suite, not only a guard, so
-// dropping it with `--tests` costs more than dropping readme-inventory.test.ts,
-// tool-schema.test.ts or config-surface.test.ts, which exist for no other reason. A commit
-// touching both src/index.ts and src/jmap-client.ts auto-selects both: index-env.test.ts must
-// still be dropped (it fails unconditionally, above), but dropping jmap-client.test.ts too loses
-// real coverage of src/jmap-client.ts's own changed lines for a version-sync failure that may
-// not even occur in that run - check whether it actually fails before excluding the whole file.
+// respectively). Only jmap-client.test.ts is also that module's real unit-test suite; the other
+// four - index-env.test.ts included - exist for no reason but the guard. A commit touching both
+// src/index.ts and src/jmap-client.ts auto-selects both: index-env.test.ts must still be dropped
+// (it fails unconditionally, above), but dropping jmap-client.test.ts too loses real coverage of
+// src/jmap-client.ts's own changed lines for a version-sync failure that may not even occur in
+// that run - check whether it actually fails before excluding the whole file.
 //
 // The second is READING dist/index.js. dist/ being gitignored does not keep it out of a
 // sandbox: Stryker's own file-copy step has no .gitignore handling at all, only a short
