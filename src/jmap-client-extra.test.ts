@@ -1453,6 +1453,18 @@ describe('bulkMarkRead', () => {
       },
     );
   });
+
+  it('names the action as "unread" (not "read") when a mark-as-unread call partially fails', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': { type: 'notFound' } } }, 'bulkUpdate'],
+      ],
+    });
+    await assert.rejects(
+      () => client.bulkMarkRead(['e1', 'e2'], false),
+      (err: Error) => { assert.match(err.message, /Failed to mark as unread/); return true; },
+    );
+  });
 });
 
 // ---------- bulk set-error formatting (#22 + #41) ----------
@@ -1740,6 +1752,47 @@ describe('bulk set-error formatting', () => {
         return true;
       },
     );
+  });
+
+  it('bulkDelete resolves cleanly when the server acknowledges every id', async () => {
+    stubMakeRequest(client, { methodResponses: [['Email/set', { updated: { e1: null, e2: null } }, 'bulkDelete']] });
+    await assert.doesNotReject(() => client.bulkDelete(['e1', 'e2']));
+  });
+
+  it('bulkPinEmails resolves cleanly when the server acknowledges every id', async () => {
+    stubMakeRequest(client, { methodResponses: [['Email/set', { updated: { e1: null, e2: null } }, 'bulkFlag']] });
+    await assert.doesNotReject(() => client.bulkPinEmails(['e1', 'e2']));
+  });
+
+  it('bulkPinEmails names the action as "pin" on a partial failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null }, notUpdated: { e2: { type: 'notFound' } } }, 'bulkFlag']],
+    });
+    await assert.rejects(
+      () => client.bulkPinEmails(['e1', 'e2'], true),
+      (err: Error) => { assert.match(err.message, /Failed to pin/); return true; },
+    );
+  });
+
+  it('bulkPinEmails names the action as "unpin" on a partial failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null }, notUpdated: { e2: { type: 'notFound' } } }, 'bulkFlag']],
+    });
+    await assert.rejects(
+      () => client.bulkPinEmails(['e1', 'e2'], false),
+      (err: Error) => { assert.match(err.message, /Failed to unpin/); return true; },
+    );
+  });
+
+  it('ignores a non-map notUpdated from a non-compliant server rather than merging its contents in', async () => {
+    // withUnaccountedFailures only Object.assigns the server's notUpdated in when it passes
+    // isPlainResponseMap; a non-compliant server sending an array (or any other non-map)
+    // there must be treated as "reported nothing", not merged in as if its own keys (here,
+    // the array's numeric indices) were real ids the server named.
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { updated: { e1: null, e2: null }, notUpdated: ['bogus'] }, 'bulkUpdate']],
+    });
+    await assert.doesNotReject(() => client.bulkMarkRead(['e1', 'e2']));
   });
 });
 
@@ -3459,6 +3512,18 @@ describe('label mailboxId resolution (#50)', () => {
       (err: Error) => { assert.ok(err instanceof InvalidInputError); return true; },
     );
   });
+
+  it('names the action as "add labels to" when a genuine server failure partially fails the batch', async () => {
+    stubRequests(client, async () => ({
+      methodResponses: [
+        ['Email/set', { updated: { e1: null }, notUpdated: { e2: { type: 'notFound' } } }, 'bulkAddLabels'],
+      ],
+    }));
+    await assert.rejects(
+      () => client.bulkAddLabels(['e1', 'e2'], ['inbox']),
+      (err: Error) => { assert.match(err.message, /Failed to add labels to/); return true; },
+    );
+  });
 });
 
 // ---------- removing the last label archives rather than destroys (#132) ----------
@@ -3864,6 +3929,29 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
         assert.match(err.message, /duplicates collapsed them to 2 distinct emails; nothing was skipped\./);
         return true;
       },
+    );
+  });
+
+  it('treats a malformed (null) Email/set result as every id unaccounted, not a crash (#185)', async () => {
+    // A non-compliant server can send `null` as Email/set's own result data -
+    // getMethodResult hands it straight back, and this read goes through
+    // `result?.updated`/`result?.notUpdated` rather than assuming `result` is always an
+    // object.
+    stubRequests(client, async (request: JmapRequest) => {
+      const [method, , callId] = request.methodCalls[0] as [string, any, string];
+      if (method === 'Email/get') {
+        return {
+          methodResponses: [['Email/get', {
+            list: [{ id: 'e1', mailboxIds: { 'mb-receipts': true, 'mb-sent': true } }],
+            notFound: [],
+          }, callId]],
+        };
+      }
+      return { methodResponses: [['Email/set', null, callId]] };
+    });
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1'], ['Receipts']),
+      (err: Error) => { assert.match(err.message, /outcomeUnknown: e1/); return true; },
     );
   });
 
