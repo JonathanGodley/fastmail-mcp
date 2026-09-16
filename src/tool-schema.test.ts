@@ -1417,3 +1417,49 @@ describe('the calendar write handlers read transparency and pass it on (#194)', 
     }
   });
 });
+
+// The six bulk email tools' success text has to route through one of the two shared
+// formatters (#185): formatBulkEmailResult for five of them, or formatLabelRemoval (which
+// keeps its own and is NOT folded into the new one) for bulk_remove_labels. Otherwise a
+// duplicated id collapses to one write while the reported count still claims every
+// submitted id changed.
+//
+// Pinned by ENUMERATING every `case 'bulk_…':` handler, not by banning the old inline
+// `emailIds.length` string: a seventh bulk tool that aliased the length to a local, or
+// inlined `new Set(emailIds).size` and skipped the formatter, would ship the exact #185
+// defect while reading green against a ban on one string. See the lenient-boolean guard's
+// own documented alias blind spot above for the same shape of gap - the fix there is not a
+// wider regex either, it is a scan built to actually derive what to look for.
+describe('bulk email tools return their success text via a shared formatter (#185)', () => {
+  it('every case whose name starts with bulk_ calls formatBulkEmailResult or formatLabelRemoval', () => {
+    const bodies = collectCaseBodies();
+    const bulkTools = [...bodies.keys()].filter((name) => name.startsWith('bulk_'));
+    // A floor, not an exact count: test_bulk_operations is excluded because its name does
+    // not start with bulk_ - it counts server-derived distinct ids from its own results,
+    // not caller-supplied emailIds, so #185 does not apply to it. Raise this number when a
+    // seventh bulk_* tool is added; a scan that has stopped matching at all would otherwise
+    // pass the assertion below vacuously.
+    assert.ok(
+      bulkTools.length >= 6,
+      `found only ${bulkTools.length} bulk_* cases; the case-body scan has probably stopped matching`,
+    );
+    const offenders: string[] = [];
+    for (const tool of bulkTools) {
+      const body = bodies.get(tool)!;
+      const textLine = body.find((l) => l.startsWith('text:'));
+      const routesThroughFormatter =
+        !!textLine &&
+        (/text:\s*formatBulkEmailResult\(/.test(textLine) || /text:\s*formatLabelRemoval\(/.test(textLine));
+      if (!routesThroughFormatter) {
+        offenders.push(`${tool}${textLine ? ` (${textLine})` : ' (no text: line found in its case body)'}`);
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'these bulk_* tools do not return their success text via formatBulkEmailResult or ' +
+        `formatLabelRemoval, so a change to either could reintroduce #185 with nothing here ` +
+        `to catch it: ${offenders.join('; ')}`,
+    );
+  });
+});
