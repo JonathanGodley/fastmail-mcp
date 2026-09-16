@@ -267,12 +267,12 @@ function arrayItems(declared: any): any {
 }
 
 // What a client can SEND is the fact under test, not how the schema spells it. A
-// `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, and the
-// declarations in this file have been written both ways, so callers read the types a
-// declaration admits and the constraint on its array elements, whichever shape carries them.
-// Pinning one spelling would fail a rewrite into the other while the client-visible behaviour
-// was unchanged. Module-scoped beside arrayItems() because the drift guard below (#98) walks
-// every tool's schema with it, not just edit_draft's.
+// `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, so this
+// reads the types a declaration admits (and, in arrayItems() above, the constraint on its
+// array elements) whichever shape carries them — src/index.ts writes only the union spelling
+// today, but a rewrite into `oneOf` must not silently fail this guard for a schema that still
+// behaves the same. Module-scoped beside arrayItems() because the drift guard below (#98)
+// walks every tool's schema with it, not just edit_draft's.
 function admittedTypes(declared: any): string[] {
   const out = new Set<string>();
   const add = (t: any) => {
@@ -326,11 +326,9 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
 // `type: 'array'`, which makes its coercer unreachable through a validating client for exactly
 // the reason a narrow `type: 'boolean'` does. Reading tools/list off one spawn of the built
 // server (rather than scanning src/index.ts as text, the way the boolean guard does) is the
-// point here, not an inconsistency with it: the boolean guard's own comment gives up the
-// stronger claim only because `npm test` used to run tsx with no build first (see the
-// correction below at the `pretest` comments) — that reason is gone, and this guard is written
-// against the ADVERTISED schema because that is the only thing that says what a client
-// actually sees, which is the fact every assertion below is about.
+// point here, not an inconsistency with it: this guard reads the ADVERTISED schema because
+// that is the only thing that says what a client actually sees, which is the fact every
+// assertion below is about.
 //
 // Four things, each lost independently by a different mistake:
 //
@@ -374,10 +372,10 @@ const ARRAY_STRING_FORM_SENTENCES = [
 // the live surface in both directions by the last test below: a wire parameter missing from
 // this table, or a row naming a parameter no longer on the wire, both fail.
 const ARRAY_PARAM_COERCERS: Record<string, string> = {
-  'list_emails.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
-  'get_email.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
+  'list_emails.fields': 'index.ts parseEmailFields() -> coerceStringArray',
+  'get_email.fields': 'index.ts parseEmailFields() -> coerceStringArray',
   'get_thread.fields': 'thread-handler.ts parseEmailFields() -> coerceStringArray',
-  'search_emails.fields': 'field-projection.ts parseEmailFields() -> coerceStringArray',
+  'search_emails.fields': 'index.ts parseEmailFields() -> coerceStringArray',
   'search_emails.requiredMailboxes': 'index.ts coerceStringArrayStrict',
   'search_emails.excludeMailboxes': 'index.ts coerceStringArrayStrict',
   'draft_email.to': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
@@ -419,11 +417,19 @@ const ARRAY_PARAM_COERCERS: Record<string, string> = {
 
 describe('array-side schema drift guard (#98)', () => {
   let tools: any[];
+  let bootError: unknown;
 
   // Spawned ONCE and shared by every test below, unlike toolSchema() above (which spawns a
   // fresh server per call): a 41-tool walk has no reason to pay for 41 spawns to read one
   // tools/list. Same env scrub as toolSchema() — every FASTMAIL_* name stripped, then only the
   // token set — so an ambient setting cannot be what the assertions below see.
+  //
+  // The spawn/init/list is wrapped in its own try/catch, unlike the assertDistIsCurrent() call
+  // above it: a throwing before() makes node:test report the whole suite CANCELLED, not
+  // failed — fail 0, a green-looking exit, the real reason buried in a hook stack trace (the
+  // same trap assertDistIsCurrent's own definition comment names for a missing build). Storing
+  // the error and asserting it below turns a boot or tools/list failure into an ordinary
+  // failing assertion instead.
   before(async () => {
     assertDistIsCurrent();
     const env: Record<string, string> = {};
@@ -432,13 +438,18 @@ describe('array-side schema drift guard (#98)', () => {
     }
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
-    const client = createClient({ env });
     try {
-      await client.init();
-      const result: any = await client.list();
-      tools = result.tools;
-    } finally {
-      client.close();
+      const client = createClient({ env });
+      try {
+        await client.init();
+        const result: any = await client.list();
+        tools = result.tools;
+      } finally {
+        client.close();
+      }
+    } catch (err) {
+      bootError = err;
+      tools = [];
     }
   });
 
@@ -454,16 +465,31 @@ describe('array-side schema drift guard (#98)', () => {
     return out;
   }
 
-  it('sees at least 30 tools on the wire', () => {
+  it('sees all 41 tools on the wire', () => {
+    // Checked here, first, so a boot/list failure caught in before() (see the comment there)
+    // reads as this test's own failure rather than every test below blaming an empty tool set
+    // on the wrong thing.
+    assert.equal(
+      bootError,
+      undefined,
+      `the built server failed to boot or answer tools/list, so every assertion in this ` +
+        `describe block saw an empty tool set rather than a real check: ${bootError}`,
+    );
+
     // A floor on the TOOL count, separate from the array-admitting floor below: a tool
     // removed outright (rather than a parameter narrowed) shrinks `tools` itself, which every
     // assertion below would otherwise absorb silently — each just walks fewer properties.
     // Kept as its own test so a failure here reads as "a tool went missing", not "a parameter
     // widening broke", which is what the array-admitting floor's own message says instead.
+    // Pinned to the count on the day this was written (41), not a loose sanity margin, so a
+    // single deliberate removal trips it. `>=` cannot see the opposite case: adding a tool
+    // takes the count to 42 and this floor stays green, so it is only as good as whoever adds
+    // one remembering to raise it too — do that in the same change, or single-removal
+    // sensitivity erodes straight back toward the loose margin this floor replaced.
     assert.ok(
-      tools.length >= 30,
-      `found only ${tools.length} tools (expected at least 30); either tools/list stopped ` +
-        'returning the real surface, or tools were actually removed',
+      tools.length >= 41,
+      `found only ${tools.length} tools (expected 41); either tools/list stopped returning the ` +
+        'real surface, or a tool was removed with this floor not yet lowered to match',
     );
   });
 
@@ -473,14 +499,16 @@ describe('array-side schema drift guard (#98)', () => {
     // parameter as a narrow `type: 'string'` still walks every tool and every parameter, so a
     // floor on the walk itself would stay green through exactly the regression this guard
     // exists to catch. This floor fails if the admittedTypes() match goes blind OR if array
-    // parameters are actually removed wholesale — either way, "the array check stopped seeing
-    // arrays" is the fact worth surfacing, distinct from the cure below.
+    // parameters are actually removed — either way, "the array check stopped seeing
+    // arrays" is the fact worth surfacing, distinct from the cure below. Pinned to today's
+    // actual count (41), same reasoning as the tool floor above: a deliberate removal or
+    // narrowing updates this number on purpose, in the same change.
     const arrayAdmitting = params.filter((p) => admittedTypes(p.declared).includes('array'));
     assert.ok(
-      arrayAdmitting.length >= 30,
-      `found only ${arrayAdmitting.length} array-admitting top-level parameters (expected at ` +
-        'least 30); either admittedTypes() has stopped matching the live schema, or array ' +
-        'parameters were actually removed',
+      arrayAdmitting.length >= 41,
+      `found only ${arrayAdmitting.length} array-admitting top-level parameters (expected 41); ` +
+        'either admittedTypes() has stopped matching the live schema, or an array-admitting ' +
+        'parameter was removed or narrowed with this floor not yet lowered to match',
     );
 
     const offenders = arrayAdmitting
@@ -500,10 +528,7 @@ describe('array-side schema drift guard (#98)', () => {
 
   it('never advertises items with no declared type at all', () => {
     const offenders = topLevelParams()
-      .filter(({ declared }) => {
-        const hasType = declared.type !== undefined || declared.oneOf !== undefined || declared.anyOf !== undefined;
-        return declared.items !== undefined && !hasType;
-      })
+      .filter(({ declared }) => declared.items !== undefined && admittedTypes(declared).length === 0)
       .map((p) => p.key);
     assert.deepEqual(
       offenders,
