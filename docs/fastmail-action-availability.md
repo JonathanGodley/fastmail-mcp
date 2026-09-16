@@ -481,12 +481,8 @@ something it may not serve.
 | --- | --- |
 | `OPTIONS` on the calendar home, reading the `DAV:` header | `1, 2, 3, access-control, extended-mkcol, resource-sharing, calendar-access, calendar-auto-schedule, calendar-query-extended, calendar-availability, calendarserver-sharing, inbox-availability` — no `calendar-no-timezone` |
 | `PROPFIND` for `CALDAV:timezone-service-set` on the calendar home | `HTTP/1.1 404 Not Found`, inside a `207` |
-| `PROPFIND` for `CALDAV:calendar-timezone-id` on the same collection | `404`, in the same `207` |
+| `CALDAV:calendar-timezone-id`, asked in the same `PROPFIND` as the row above | `404`, in the same `207` |
 | `GET` for the tzdist service at `/.well-known/timezone`, at `/.well-known/`, at `/tzdist/capabilities` and at `/dav/tzdist/capabilities` | `404` on all four |
-
-One note on reproducing these: the committed probe asks for `timezone-service-set` and not
-`calendar-timezone-id`, so the third row came from a direct `PROPFIND` run alongside it in the same
-session rather than from the probe. Re-running the probe reproduces rows one, two and four.
 
 **What makes the first two positive evidence rather than silence.** Each is emitted under exactly one
 condition. Cyrus sets `ALLOW_CAL_NOTZ` if and only if its tzdist namespace is enabled
@@ -507,9 +503,12 @@ fetch.
 
 **Dated, not permanent.** One account, one deployment, one day. A config switch is exactly the kind
 of thing that changes with no announcement, so re-ask rather than cite this row as settled: the probe
-prints PASS/FAIL per condition and needs no fixture. **What it does not cover** is whether the
-service is reachable on some other Fastmail host or for some other account, and whether Fastmail
-serves timezone data by any route that is not RFC 7808. Neither was measured.
+reproduces all four rows above, prints PASS/FAIL per condition and needs no fixture. (The zone-id row
+is reported there and deliberately not gated — a deployment may serve the timezone service with no
+zone id set on any collection, so a condition over it would fail a working service.) **What it does
+not cover** is whether the service is reachable on some other Fastmail host or for some other
+account, and whether Fastmail serves timezone data by any route that is not RFC 7808. Neither was
+measured.
 
 ### A 404 at this host names a tier before it names a fact
 

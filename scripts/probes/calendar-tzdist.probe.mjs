@@ -36,6 +36,8 @@
 //      `Location` is the prefix.
 //   D. `GET /.well-known/` — Cyrus serves an HTML index of its enabled well-known URLs.
 //
+// Route B's request also carries the other RFC 7809 property, reported but not gated (see there).
+//
 // If no route names a base, the run still measures Cyrus's compiled-in default prefix
 // (`/tzdist`) so the result can distinguish "not advertised and not there" from "not
 // advertised but serving". That measurement never turns condition 1 into a pass on its own:
@@ -136,6 +138,24 @@ const el = (xml, name) => {
   return m ? m[1] : undefined;
 };
 const abs = href => new URL(href, ROOT).href;
+
+/**
+ * The DAV status a multistatus reported for one named property.
+ *
+ * A 207 carries one propstat PER STATUS, so asking for two properties and finding one returns two
+ * blocks — reading a single `<d:status>` out of the whole response would hand one block's status to
+ * every property in it. The name is matched up to a delimiter, so an empty `<c:foo/>` and a valued
+ * `<c:foo>x</c:foo>` both hit and `calendar-timezone` cannot match `calendar-timezone-id`.
+ */
+function propStatus(xml, name) {
+  const blocks = [...String(xml ?? '').matchAll(
+    /<(?:[\w-]+:)?propstat(?:\s[^>]*)?>([\s\S]*?)<\/(?:[\w-]+:)?propstat>/g,
+  )].map(m => m[1]);
+  for (const block of blocks) {
+    if (new RegExp(`<(?:[\\w-]+:)?${name}[\\s/>]`).test(block)) return el(block, 'status')?.trim();
+  }
+  return undefined;
+}
 const PROPFIND = props =>
   `<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
   `<d:prop>${props.map(p => `<${p}/>`).join('')}</d:prop></d:propfind>`;
@@ -251,17 +271,28 @@ try {
   }
 
   // Route B: CALDAV:timezone-service-set. The authoritative one — the server names the prefix.
+  //
+  // The same request carries CALDAV:calendar-timezone-id, the other RFC 7809 property. Keep it
+  // REPORTED AND NOT GATED: it names no base URL, and a deployment may serve the timezone service
+  // with no zone id set on any collection, so a condition over it would fail a working service.
+  // It rides along for scope — it is what separates "the whole time-zones-by-reference family is
+  // off here" from "the service is off". Measured-not-gated as in calendar-uid-query.probe.mjs.
   if (home) {
     const tzsPf = await http('PROPFIND', home, {
-      body: PROPFIND(['c:timezone-service-set']),
+      body: PROPFIND(['c:timezone-service-set', 'c:calendar-timezone-id']),
       headers: { Depth: '0' },
     });
     const set = el(tzsPf.text, 'timezone-service-set');
     const href = set ? el(set, 'href')?.trim() : undefined;
     if (href) discovered.push({ route: 'B (CALDAV:timezone-service-set)', base: abs(href).replace(/\/$/, '') });
     console.log(`  B. CALDAV:timezone-service-set names a service: ${href ? 'yes' : 'no'}`);
+
+    const tzIdStatus = propStatus(tzsPf.text, 'calendar-timezone-id');
+    const tzIdValue = el(tzsPf.text, 'calendar-timezone-id')?.trim();
+    console.log(`  B'. CALDAV:calendar-timezone-id, asked in the same request (reported, not gated): ${tzIdStatus ?? '(no propstat)'}${tzIdValue ? ', carries a value' : ', no value'}`);
   } else {
     console.log('  B. CALDAV:timezone-service-set: not asked (no calendar home)');
+    console.log("  B'. CALDAV:calendar-timezone-id: not asked (no calendar home)");
   }
 
   // Route C: the RFC 7808 well-known URI, redirects unfollowed so the Location IS the answer.
