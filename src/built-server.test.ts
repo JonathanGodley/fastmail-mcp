@@ -524,6 +524,28 @@ describe('array-side schema drift guard (#98)', () => {
         'sentence) AND wire a coercer that actually reads the string form, or the widening ' +
         `ships with nothing behind it: ${offenders.join(', ')}`,
     );
+
+    // A second, separate offender list: every array-admitting parameter in this codebase
+    // today is the exact pair ['array', 'string'], never a wider set, so a third admitted
+    // type is a change nobody has explained rather than a variant of the convention above.
+    // No filter for "admits string" here: the assertion above throws on any array-admitting
+    // parameter that does not, so this code only ever runs once every one of them already does.
+    const extraTypeOffenders = arrayAdmitting
+      .filter((p) => admittedTypes(p.declared).some((t) => t !== 'array' && t !== 'string'))
+      .map((p) => {
+        const extra = admittedTypes(p.declared).filter((t) => t !== 'array' && t !== 'string');
+        return `${p.key} (also admits ${extra.join(', ')})`;
+      });
+    assert.deepEqual(
+      extraTypeOffenders,
+      [],
+      'these parameters admit array, string, AND a further type. The lenient-list convention ' +
+        "is exactly the pair ['array', 'string'] — a client and a reader both learn the whole " +
+        'admitted set from that pair alone, with no third type to account for. Whoever widened ' +
+        'this needs to say why a third type belongs here, and either narrow back to the pair or ' +
+        "document its own coercion path the same way the pair's two halves are documented: " +
+        `${extraTypeOffenders.join(', ')}`,
+    );
   });
 
   it('never advertises items with no declared type at all', () => {
