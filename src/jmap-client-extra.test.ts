@@ -1473,9 +1473,8 @@ describe('bulk set-error formatting', () => {
 
   it('treats an id acknowledged in neither map as its own outcomeUnknown failure (#185)', async () => {
     // Only a non-compliant server produces this: e3 is submitted but appears in neither
-    // `updated` nor `notUpdated`. Before #185 this was folded into a separate "N with no
-    // reported outcome" clause on the success side of the count; withUnaccountedFailures now
-    // treats it exactly like any other failure, grouped under `outcomeUnknown`.
+    // `updated` nor `notUpdated`. withUnaccountedFailures treats it like any other failure,
+    // grouped under `outcomeUnknown`, rather than as a separate success-side clause (#185).
     stubMakeRequest(client, {
       methodResponses: [
         ['Email/set', { updated: { e1: null }, notUpdated: { e2: { type: 'forbidden' } } }, 'bulkMove'],
@@ -3228,14 +3227,12 @@ describe('bulkMove resolution', () => {
     // archive_email, because the null-prototype map is shared across all of them and
     // reverting one back to {} would otherwise leave the suite green.
     //
-    // The stubbed response's `updated` is built via JSON.parse, not an object literal:
-    // `{ '__proto__': null }` as an object-literal key invokes the SAME special-cased
-    // proto-setting behaviour as bare `{ __proto__: null }` (it is the computed-key form,
-    // `{ ['__proto__']: null }`, that would not), so that literal never produces an own
-    // `__proto__` key at all — it silently sets no own key on the object it appears in,
-    // whether that object is `updates` in production code or a test fixture literal. A
-    // real server's JSON response does not go through object-literal syntax, so
-    // JSON.parse is what a compliant server would actually hand back for this id.
+    // The stubbed response's `updated` is built via JSON.parse, not an object literal: the
+    // object-literal form `{ '__proto__': null }` invokes the same special-cased
+    // proto-setting behaviour as bare `{ __proto__: null }` (only the COMPUTED-key form,
+    // `{ ['__proto__']: null }`, would create a real own key), so it never produces an own
+    // `__proto__` key at all. A real server's JSON response does not go through
+    // object-literal syntax, so JSON.parse is what it would actually send for this id.
     const makeReq = stubRequests(client, async () => (
       { methodResponses: [['Email/set', { updated: JSON.parse('{"__proto__":null}') }, 'bulkMove']] }
     ));

@@ -609,11 +609,9 @@ export function formatLabelRemoval(rescued: string[], total: string[] | number, 
 
 /**
  * The success text for bulk_mark_read, bulk_pin, bulk_move, bulk_delete and bulk_add_labels
- * (#185). Each of these five writers builds its write by assigning into an id-keyed map, so
- * a duplicated id in `emailIds` collapses to one entry and is written once — reporting
- * `emailIds.length` as the count (the pre-#185 bug) claims two emails changed when only one
- * did. This derives the DISTINCT count itself so no call site computes `new Set(...)` inline,
- * and appends the duplicate-collapse disclosure (silent when there is nothing to disclose).
+ * (#185). Derives the DISTINCT id count itself, so no call site computes `new Set(...)`
+ * inline, and appends buildIdCollapseNote's disclosure (silent when there is nothing to
+ * disclose) — see its docblock for why a duplicated id needs disclosing at all.
  *
  * `action` carries each tool's exact wording so the five stay distinguishable: the four
  * subject-first shapes ("N emails <verb>[, optional trailing]"), and bulk_add_labels' own

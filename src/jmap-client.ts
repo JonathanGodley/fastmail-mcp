@@ -2016,12 +2016,10 @@ export class JmapClient {
    * id is a failure, not a success.
    *
    * Returns a FRESH newUpdateMap(), with the server's map Object.assign-ed in — never
-   * `result.notUpdated` itself, and never a fresh `{}` or a `{...}` spread. Synthesizing an
-   * entry under a caller-supplied id (e.g. `__proto__`) into an ordinary object runs the
-   * prototype SETTER: the entry never becomes an own key, so it is invisible to
-   * `Object.keys`/`hasOwnProperty` and the id is then reported as written. See
-   * newUpdateMap's docblock. Membership is read with `hasOwnProperty`, never truthiness,
-   * because RFC 8620 §5.3 lets a successful update come back as a null value.
+   * `result.notUpdated` itself, never a fresh `{}` or a `{...}` spread; see newUpdateMap's
+   * docblock for why a caller-supplied id (e.g. `__proto__`) demands this. Membership is
+   * read with `hasOwnProperty`, never truthiness, because RFC 8620 §5.3 lets a successful
+   * update come back as a null value.
    *
    * Must run BEFORE countAcknowledged, so an id this adds is excluded from the success
    * count it computes.

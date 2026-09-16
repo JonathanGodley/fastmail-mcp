@@ -1240,9 +1240,6 @@ describe('formatLabelRemoval', () => {
 
 // ---------- formatBulkEmailResult ----------
 
-// The success text for bulk_mark_read, bulk_pin, bulk_move, bulk_delete and
-// bulk_add_labels (#185). Each preserves the shape its handler used to build inline, with
-// the distinct count derived internally and a duplicate-collapse disclosure appended.
 describe('formatBulkEmailResult', () => {
   it('marks as read, pluralised', () => {
     assert.equal(
