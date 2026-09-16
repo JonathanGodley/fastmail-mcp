@@ -460,6 +460,80 @@ What is still not authored, and so still not known:
 
 These are left explicit rather than blank.
 
+## The platform: whether the server will hand this one a `VTIMEZONE`
+
+The subsection above ends on #166 — this server writes a bare `TZID` where the client embeds a
+`VTIMEZONE`, and the decision is to match the client. That leaves a question the client cannot
+answer, because it is about the server rather than the client: where the block would come from. RFC
+7808 timezone data distribution would supply one by zone name, and Cyrus implements that service, so
+asking for it would be the cheap answer. **Cyrus implementing it is not evidence Fastmail exposes
+it.** The service is gated on a per-deployment config switch, and no amount of source reading says
+which way that switch is set on an account, which is why this was measured.
+
+**Measured on 17 September 2026** by `scripts/probes/calendar-tzdist.probe.mjs` — raw CalDAV and
+HTTP over bare `fetch`, one account, read-only, creating nothing. This is a fifth method in this
+file: neither the client's pixels nor a stored resource, but what the server answers when asked for
+something it may not serve.
+
+**RFC 7809 time zones by reference is off on this deployment.** Four negatives, all measured:
+
+| What was asked | What came back |
+| --- | --- |
+| `OPTIONS` on the calendar home, reading the `DAV:` header | `1, 2, 3, access-control, extended-mkcol, resource-sharing, calendar-access, calendar-auto-schedule, calendar-query-extended, calendar-availability, calendarserver-sharing, inbox-availability` — no `calendar-no-timezone` |
+| `PROPFIND` for `CALDAV:timezone-service-set` on the calendar home | `HTTP/1.1 404 Not Found`, inside a `207` |
+| `PROPFIND` for `CALDAV:calendar-timezone-id` on the same collection | `404`, in the same `207` |
+| `GET` for the tzdist service at `/.well-known/timezone`, at `/.well-known/`, at `/tzdist/capabilities` and at `/dav/tzdist/capabilities` | `404` on all four |
+
+One note on reproducing these: the committed probe asks for `timezone-service-set` and not
+`calendar-timezone-id`, so the third row came from a direct `PROPFIND` run alongside it in the same
+session rather than from the probe. Re-running the probe reproduces rows one, two and four.
+
+**What makes the first two positive evidence rather than silence.** Each is emitted under exactly one
+condition. Cyrus sets `ALLOW_CAL_NOTZ` if and only if its tzdist namespace is enabled
+(`imap/http_caldav.c:725`, inside `if (namespace_tzdist.enabled)`), and that single flag gates both
+the `calendar-no-timezone` feature token (`imap/httpd.c:3235`) and what `propfind_tzservset` answers
+(`imap/http_caldav.c:6782`). A deployment with the service on would have said so in both places, and
+a `404` on a property is the server answering rather than a request going astray. That is what
+separates this row from an absence of evidence.
+
+Read it alongside the sibling fact this file's read side already rests on:
+`scripts/probes/calendar-window-frames.probe.mjs` found no `CALDAV:calendar-timezone` on the
+collection or on the calendar home. Together they say the whole time-zones-by-reference family is off
+here, not that one property happens to be missing.
+
+**What follows for this server.** Any `VTIMEZONE` it embeds has to come from somewhere other than the
+platform — bundled, or generated from timezone rules it carries itself. #166 cannot be closed by a
+fetch.
+
+**Dated, not permanent.** One account, one deployment, one day. A config switch is exactly the kind
+of thing that changes with no announcement, so re-ask rather than cite this row as settled: the probe
+prints PASS/FAIL per condition and needs no fixture. **What it does not cover** is whether the
+service is reachable on some other Fastmail host or for some other account, and whether Fastmail
+serves timezone data by any route that is not RFC 7808. Neither was measured.
+
+### A 404 at this host names a tier before it names a fact
+
+Found while measuring the above, and the half of it that generalises. `caldav.fastmail.com` sits
+behind nginx, and **nginx answers root paths itself** rather than passing them to the CalDAV backend:
+`GET /.well-known/caldav` returns an nginx `301` to `/dav/calendars`, which is a proxy rewrite and
+not Cyrus's own well-known bootstrap. So a `404` on a root path here is a fact about the edge and
+says nothing about what the backend implements.
+
+Two consequences for any probe at this host that reads a status code:
+
+- **Ask the backend through a prefix that provably reaches it.** `/dav/` does, since every
+  authenticated CalDAV request in this repo's probes succeeds there. `/tzdist/capabilities` and
+  `/dav/tzdist/capabilities` both returned `404` above, and only the second says anything about the
+  backend.
+- **Identify the responder by its error page, not by `Server:`.** Both tiers answer under
+  `Server: nginx`. The backend builds its error pages through its own markup helper, which stamps a
+  `color-scheme` style attribute on the `<html>` element; the proxy's stock page carries none. The
+  probe attributes an unmarked body to the proxy, which claims less about the backend and is the
+  conservative reading.
+
+**What this does not settle** is the proxy's routing table. Which prefixes reach the backend was not
+enumerated — only that `/dav/` does, and that two root paths do not.
+
 ## Authoring: what a reply prefills as recipients
 
 Reading the client's pixels again, this time on the **mobile** app and against a compose form rather
