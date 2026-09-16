@@ -13,42 +13,78 @@
 // that exists, plus any test file the commit itself changed. `--tests` overrides that, which
 // is needed when the list it would otherwise pick includes a test Stryker cannot run.
 //
-// Two unrelated things make a test unrunnable here, and `--tests` fixes either only by leaving
-// it out.
+// Two different things push a test out of the by-name list here, and they do not fail the same
+// way: one aborts the initial run outright; the other, for one of its two members, does not fail
+// at all - it just runs against the wrong code and can never register a kill.
 //
-// The first is PARSING a src/*.ts file's own STRUCTURE: locating a literal or a declaration by
-// matching its exact line. Stryker's instrumentation rewrites exactly that shape (an array or
-// string literal gets wrapped in a mutant-switch conditional, so the text right after it no
-// longer reads as it did), which fails the test's initial run before any mutant is tried - a
-// plain substring search elsewhere in the same file is untouched. Measured members:
-// index-env.test.ts locates the `function findEnvValue(` declaration in src/index.ts by its
-// opening line; readme-inventory.test.ts and tool-schema.test.ts both locate the
-// `const TOOLS = [` array the same way; config-surface.test.ts matches `findEnvValue(\s*\[`
-// literally, which an ArrayDeclaration mutant breaks the instant it wraps that argument;
-// jmap-client.test.ts's "version sync" check matches `version:\s*'([^']+)'` against index.ts's
-// text and fails identically on a change to the version line. Of these five, only
-// index-env.test.ts shares a source-file stem with anything under test (src/index.ts) and so
-// is ever auto-selected by the by-name rule above; the other four reach a run only through an
-// explicit `--tests` or by being changed in the commit under test. Teaching this script to hand
-// those guards an un-instrumented copy of the source was considered and declined - it would let
-// a real regression in the parsed structure through untested, which defeats the guard rather
-// than accommodating it.
+// The first is a src/*.ts file getting Stryker's instrumentation AT ALL. Whichever file actually
+// receives a mutant is reprinted WHOLE by Stryker's TypeScript printer (@babel/generator over the
+// entire file, not just the mutated node), and every instrumented file also gets a header
+// prepended that itself reads process.env (to learn which mutant is active). Five tests are
+// affected, in three different ways - each measured directly, not inferred from reading the
+// guard's own code:
+//   - index-env.test.ts scans every non-test src/*.ts file for a bare process.env read, and
+//     fails the moment ANY of them carries Stryker's own env-reading header - not because its
+//     own `function findEnvValue(` text match ever breaks. Measured against a commit touching
+//     only src/index.ts and, separately, one touching only src/auth.ts: both failed identically,
+//     citing process.env.__STRYKER_ACTIVE_MUTANT__ at the mutated file's own top lines. It
+//     therefore fails on every run this script performs, whichever src/*.ts file that commit
+//     touches - there is no line to avoid mutating that keeps it green.
+//   - readme-inventory.test.ts and tool-schema.test.ts each locate a piece of src/index.ts's
+//     structure by matching exact text (the `const TOOLS = [` array; tool-schema.test.ts also
+//     scans recipient-parameter descriptions for a named constant) rather than by parsing it, so
+//     the whole-file reprint above can disturb their match wherever in the file a mutant lands,
+//     not only beside it. Measured: a one-line mutation on the Server constructor's `name`
+//     field, nowhere near either scan's target, still broke both - readme-inventory.test.ts's
+//     search for `const TOOLS = [`, and, separately, tool-schema.test.ts's count of
+//     recipient-parameter descriptions.
+//   - config-surface.test.ts and jmap-client.test.ts's "version sync" check each match one
+//     narrow literal (a findEnvValue([...]) argument list; the `version: '...'` line) and fail
+//     only when that text is itself what a mutant lands on, or what the reprint happens to
+//     reformat - not on every src/index.ts change. The same name-field mutation above left both
+//     passing (their own mutated line was just an ordinary, unrelated survivor); mutating a
+//     manifest-mapped findEnvValue() call, by contrast, does break config-surface.test.ts's
+//     initial run.
+// Of these five, index-env.test.ts and jmap-client.test.ts are the two the by-name rule above
+// ever auto-selects on its own (for a change to src/index.ts and to src/jmap-client.ts
+// respectively) - and each is also that module's real unit-test suite, not only a guard, so
+// dropping it with `--tests` costs more than dropping readme-inventory.test.ts,
+// tool-schema.test.ts or config-surface.test.ts, which exist for no other reason. A commit
+// touching both src/index.ts and src/jmap-client.ts auto-selects both: index-env.test.ts must
+// still be dropped (it fails unconditionally, above), but dropping jmap-client.test.ts too loses
+// real coverage of src/jmap-client.ts's own changed lines for a version-sync failure that may
+// not even occur in that run - check whether it actually fails before excluding the whole file.
 //
-// The second is READING dist/index.js, which is gitignored and so never present in a sandbox
-// no matter what REPO holds. built-server.test.ts's `before` hooks assert dist/ exists and is
-// current, and fail the initial run the moment that assertion runs - every time, for every
-// commit, whatever is mutated. server-lifecycle.test.ts instead skips its whole suite when
-// dist/ is missing, so including it does not fail a run, but it can never contribute a kill
-// either - dist/ is never there to skip around.
+// The second is READING dist/index.js. dist/ being gitignored does not keep it out of a
+// sandbox: Stryker's own file-copy step has no .gitignore handling at all, only a short
+// hardcoded ignore list (node_modules, .git and a few framework build directories), so a dist/
+// that exists on disk when a run starts is copied in whole - measured by the sandboxed file
+// count rising from 131 to 218 once `npm run build` had been run first. What decides the
+// outcome is whether the tree was built before the run, and the two dist-reading tests react to
+// that differently:
+//   - built-server.test.ts's `before` hooks fail the initial run outright either way, for two
+//     different reasons depending on whether dist/ existed: with no dist/ present, "dist/index.js
+//     does not exist"; with a freshly built dist/ present, the mtime comparison itself fails
+//     instead, because Stryker's sandbox copy does not preserve source timestamps, so a dist/
+//     built moments earlier can still compare as older than a src file the copy touched
+//     afterward. Either way it fails, every time, for every commit, whatever is mutated.
+//   - server-lifecycle.test.ts only skips its whole suite when dist/ is absent; with dist/
+//     present it actually runs (measured: its dry run succeeds) and spawns the server that was
+//     last built, so it can never contribute a kill against the mutated source either way - the
+//     same reason a change to src/index.ts itself cannot be measured, below.
 //
 // A change to src/index.ts specifically cannot be meaningfully mutation-tested by this script:
 // it holds the tool schema literal and the CallTool switch, which has no test harness of its
 // own (see CLAUDE.md § Testing), so every test that pins its content either IS one of the five
-// structural guards above, or is one of the two dist-reading tests above (which either fails
+// text-parsing guards above, or is one of the two dist-reading tests above (which either fails
 // outright or exercises the last `npm run build`, not the mutated source). `--tests` is no cure
-// for either. Illustration, not to be re-measured: `abc1d9f` (a real index.ts change),
-// restricted to tests that survive instrumentation, scored 5 mutants, 5 survived - every one
-// vacuously.
+// for either. A single past observation, not reproduced in this pass and not to be re-measured:
+// `abc1d9f` (a real index.ts change), run with `--tests` set to the files outside both classes
+// above, scored 5 mutants, 5 survived - every one vacuously. (A sibling observation from that
+// same build - that Stryker placed zero mutants on the version string literal - did not
+// reproduce either: measuring it directly placed one StringLiteral mutant on that literal both
+// in isolation and as part of a realistic single-line commit, so that claim was never written
+// here.)
 //
 // That accounts for two of the three ways the initial run can fail. The third announces itself
 // as a MISSING PACKAGE ("Cannot find package '@modelcontextprotocol/sdk'"), which is the
