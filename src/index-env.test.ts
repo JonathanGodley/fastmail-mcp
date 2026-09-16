@@ -10,8 +10,9 @@
 // was checking.
 //
 // This reads the sources as TEXT rather than importing them, for the same reason the
-// lenient-boolean guard does: `npm test` runs tsx over src/ and never builds, so a check
-// that inspected dist/ would read whatever was compiled last and miss a module added since.
+// lenient-boolean guard does: a text scan needs no build and no server spawn, and tsc does
+// not rewrite a `process.env` read into a different shape, so the source read is accurate
+// whether or not dist/ is current.
 //
 // Test files are deliberately out of scope — a test may legitimately set or stub
 // process.env for a fixture, and spawning-the-server tests copy the whole environment.

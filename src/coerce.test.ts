@@ -2110,9 +2110,9 @@ describe('describeTimezone names the zone that actually resolved', () => {
 //
 // A convention that lives only in a doc comment is the one that drifts, because the wrong
 // spelling looks exactly as careful as the right one at the call site. This reads the sources
-// as TEXT rather than importing them, for the same reason the env-resolution guard does:
-// `npm test` runs tsx over src/ and never builds, so a check over dist/ would read whatever
-// was compiled last and miss a module added since.
+// as TEXT rather than importing them, for the same reason the env-resolution guard does: a
+// text scan needs no build and no server spawn, and tsc does not rewrite a string literal's
+// quote characters, so the source read is accurate whether or not dist/ is current.
 //
 // WHAT IT DOES NOT CATCH, stated so the next reader does not over-trust it: it sees the direct
 // `'${helper(...)}'` spelling only. A value described into a local and rendered inside `'…'` on

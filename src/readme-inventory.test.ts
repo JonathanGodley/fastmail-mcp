@@ -11,10 +11,10 @@
 // a removed tool, which this fork has done more than once), and the heading number is
 // derived from the set rather than checked on its own.
 //
-// Both sides are read as source TEXT out of src/, never from the built server. `npm test`
-// runs tsx over src/ and never builds first, so a check that imported dist/ would read the
-// previous build and miss the tool just added — precisely the drift it is here to catch.
-// (Same reasoning as the schema scan in tool-schema.test.ts.)
+// Both sides are read as source TEXT out of src/, never from the built server. A text scan
+// needs no build and no server spawn, and tsc does not rewrite a tool's name or description
+// literal, so the source read is accurate whether or not dist/ is current — the same
+// reasoning as the schema scan in tool-schema.test.ts.
 //
 // README STRUCTURAL CONTRACT — what counts as a tool's reference entry:
 //
