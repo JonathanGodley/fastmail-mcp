@@ -1905,9 +1905,11 @@ export class JmapClient {
    * from both its `updated` and `notUpdated` maps — and is surfaced as its own clause rather
    * than folded into either number, per the never-silently-drop-a-field rule in CLAUDE.md.
    * No caller in this repository can drive it above 0 today: all six close their
-   * `notUpdated` map over every id they submitted before calling here (the five uniform
-   * writers via `withUnaccountedFailures`, `bulkRemoveLabels` via its own equivalent
-   * synthesis), so every submitted id is already a reported failure or a reported success.
+   * `notUpdated` map over every id they submitted before calling here, all six through
+   * `withUnaccountedFailures` — `bulkRemoveLabels` reaches it via `applyLabelRemoval`, which
+   * additionally synthesizes a `notFound` entry for each id the pre-read proved absent (not
+   * the unchanged ids above, which get no entry at all) — so every submitted id is already a
+   * reported failure or a reported success.
    * The clause stays because `notUpdated`/`total` are the caller's to supply and this method
    * is `protected` — a subclass that calls in with a map not closed that way is a real
    * caller, and an id it left unaccounted for must not vanish from the sentence.

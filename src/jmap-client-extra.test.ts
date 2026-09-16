@@ -1788,7 +1788,11 @@ describe('bulk set-error formatting', () => {
     // withUnaccountedFailures only Object.assigns the server's notUpdated in when it passes
     // isPlainResponseMap; a non-compliant server sending an array (or any other non-map)
     // there must be treated as "reported nothing", not merged in as if its own keys (here,
-    // the array's numeric indices) were real ids the server named.
+    // the array's numeric indices) were real ids the server named. On `main`, this same
+    // input read as a failing id `0` of type `undefined` — not because isPlainResponseMap
+    // didn't exist there, but because main's bulkMarkRead never routed through
+    // withUnaccountedFailures at all; routing this call through that helper is what makes
+    // a non-map `notUpdated` read as "the server reported nothing" instead.
     stubMakeRequest(client, {
       methodResponses: [['Email/set', { updated: { e1: null, e2: null }, notUpdated: ['bogus'] }, 'bulkUpdate']],
     });
@@ -3277,6 +3281,58 @@ describe('bulk writers disclose a duplicate-id collapse on the failure path too 
       },
     );
   });
+
+  it('bulkAddLabels appends the collapse note to a genuine failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { notUpdated: { e1: { type: 'forbidden' } } }, 'bulkAddLabels']],
+    });
+    await assert.rejects(
+      () => client.bulkAddLabels(['e1', 'e1'], ['inbox']),
+      (err: Error) => {
+        assert.match(err.message, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+        return true;
+      },
+    );
+  });
+
+  it('bulkPinEmails appends the collapse note to a genuine failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { notUpdated: { e1: { type: 'forbidden' } } }, 'bulkFlag']],
+    });
+    await assert.rejects(
+      () => client.bulkPinEmails(['e1', 'e1']),
+      (err: Error) => {
+        assert.match(err.message, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+        return true;
+      },
+    );
+  });
+
+  it('bulkMove appends the collapse note to a genuine failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { notUpdated: { e1: { type: 'forbidden' } } }, 'bulkMove']],
+    });
+    await assert.rejects(
+      () => client.bulkMove(['e1', 'e1'], 'archive'),
+      (err: Error) => {
+        assert.match(err.message, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+        return true;
+      },
+    );
+  });
+
+  it('bulkDelete appends the collapse note to a genuine failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { notUpdated: { e1: { type: 'forbidden' } } }, 'bulkDelete']],
+    });
+    await assert.rejects(
+      () => client.bulkDelete(['e1', 'e1']),
+      (err: Error) => {
+        assert.match(err.message, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+        return true;
+      },
+    );
+  });
 });
 
 // ---------- bulkMove resolution ----------
@@ -3932,11 +3988,13 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     );
   });
 
-  it('treats a malformed (null) Email/set result as every id unaccounted, not a crash (#185)', async () => {
+  it('pins the optional-chained read of a malformed (null) Email/set result on the #185 line', async () => {
     // A non-compliant server can send `null` as Email/set's own result data -
     // getMethodResult hands it straight back, and this read goes through
     // `result?.updated`/`result?.notUpdated` rather than assuming `result` is always an
-    // object.
+    // object. That read predates #185 (it is why applyLabelRemoval already synthesized
+    // outcomeUnknown for every id here); this test is a mutation kill on the line #185
+    // rewrote around it, not a pin of behaviour #185 introduced.
     stubRequests(client, async (request: JmapRequest) => {
       const [method, , callId] = request.methodCalls[0] as [string, any, string];
       if (method === 'Email/get') {
