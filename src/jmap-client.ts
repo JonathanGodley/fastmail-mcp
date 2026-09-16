@@ -1073,9 +1073,9 @@ function isPlainResponseMap(value: any): boolean {
  * `updates['__proto__'] = patch` on an ordinary object invokes the prototype SETTER instead
  * of creating an own key, so the entry never reaches the request. The server is then never
  * asked about that id, cannot list it in `notUpdated`, and every tool here's SUCCESS text
- * counts a success from the server's own `updated` acknowledgement — so a call that reports
- * success says the message was changed while nothing touched it. (The bulk write paths' own
- * FAILURE text is unaffected the same way: it counts a success from `updated`, and an id the
+ * infers success from the absence of a set-error — so a call that reports success says the
+ * message was changed while nothing touched it. (The bulk write paths' own FAILURE text is
+ * unaffected: it counts a success from the server's `updated` acknowledgement, and an id the
  * server was never asked about cannot appear there either — see countAcknowledged.)
  * Underscores are in the base64url alphabet JMAP ids are drawn from, so `__proto__` is a
  * legal id rather than a contrived one.
@@ -1904,6 +1904,13 @@ export class JmapClient {
    * failure nor a reported success — reachable only when a non-compliant server drops an id
    * from both its `updated` and `notUpdated` maps — and is surfaced as its own clause rather
    * than folded into either number, per the never-silently-drop-a-field rule in CLAUDE.md.
+   * No caller in this repository can drive it above 0 today: all six close their
+   * `notUpdated` map over every id they submitted before calling here (the five uniform
+   * writers via `withUnaccountedFailures`, `bulkRemoveLabels` via its own equivalent
+   * synthesis), so every submitted id is already a reported failure or a reported success.
+   * The clause stays because `notUpdated`/`total` are the caller's to supply and this method
+   * is `protected` — a subclass that calls in with a map not closed that way is a real
+   * caller, and an id it left unaccounted for must not vanish from the sentence.
    */
   protected throwBulkSetError(
     notUpdated: Record<string, { type: string; description?: string }>,
@@ -1928,8 +1935,9 @@ export class JmapClient {
     // more outcomes than the emails it names.
     const effectiveTotal = Math.max(total, failCount + successCount);
     // Ids `effectiveTotal` counts that are neither a reported success nor a reported
-    // failure — reachable only when a non-compliant server drops a submitted id from both
-    // its `updated` and `notUpdated` maps.
+    // failure. Always 0 for every caller in this repo today, because each one's
+    // `notUpdated` already accounts for every id it submitted (see the docblock above);
+    // kept for a future caller whose map is not closed that way.
     const unaccountedCount = effectiveTotal - failCount - successCount;
 
     // Group failing ids by their server-stated reason, keyed on the RAW type+description and

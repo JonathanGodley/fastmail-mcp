@@ -16,7 +16,8 @@ export function buildIdCollapseNote(rawIds: string[]): string {
   const submitted = rawIds.length;
   const distinct = new Set(rawIds).size;
   if (submitted === distinct) return '';
-  const idsPhrase = submitted === 1 ? '1 id' : `${submitted} ids`;
+  // submitted is never 1 here: a single-element array has exactly 1 distinct element, so
+  // submitted === 1 would force distinct === submitted, already returned '' above.
   const emailsPhrase = distinct === 1 ? '1 distinct email' : `${distinct} distinct emails`;
-  return `${idsPhrase} were given, but duplicates collapsed them to ${emailsPhrase}; nothing was skipped.`;
+  return `${submitted} ids were given, but duplicates collapsed them to ${emailsPhrase}; nothing was skipped.`;
 }
