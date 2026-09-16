@@ -3127,11 +3127,10 @@ describe('getMailboxStats resolution', () => {
 
 // ---------- bulk writers treat an unacknowledged id as a failure (#185) ----------
 //
-// Today each of these five gates its throw solely on the server's own `notUpdated` being
-// non-empty, so a non-compliant server that drops a submitted id from BOTH `updated` and
-// `notUpdated` reports success for a write nothing confirmed. archiveEmails and
-// applyLabelRemoval already treat that condition as a failure (an `outcomeUnknown` entry);
-// these five are brought in line with the same treatment.
+// Each of these five now throws on a submitted id the server acknowledged in NEITHER
+// `updated` nor `notUpdated`, matching archiveEmails and applyLabelRemoval's existing
+// outcomeUnknown treatment of the same non-compliant-server condition — a write nothing
+// confirmed must not read as a success just because the server never named the id as failed.
 describe('bulk writers treat an unacknowledged id as a failure (#185)', () => {
   let client: JmapClient;
 
@@ -3146,7 +3145,17 @@ describe('bulk writers treat an unacknowledged id as a failure (#185)', () => {
     });
     await assert.rejects(
       () => client.bulkMarkRead(['e1', 'e2']),
-      (err: Error) => { assert.match(err.message, /e2/); return true; },
+      (err: Error) => {
+        // Pins the id to the FAILURE side specifically, not merely present somewhere in the
+        // message: the type it was synthesized under, on the failed-1-of-2 count clause, and
+        // a plain Error (outcomeUnknown is deliberately not in CALLER_FIXABLE_SET_ERROR_TYPES,
+        // so a batch that is ALL outcomeUnknown must still read as InternalError, not
+        // InvalidParams).
+        assert.equal(err.name, 'Error');
+        assert.match(err.message, /Failed to mark as read 1 of 2 emails \(1 succeeded\)/);
+        assert.match(err.message, /outcomeUnknown: e2/);
+        return true;
+      },
     );
   });
 
@@ -3187,6 +3196,32 @@ describe('bulk writers treat an unacknowledged id as a failure (#185)', () => {
     await assert.rejects(
       () => client.bulkAddLabels(['e1', 'e2'], ['inbox']),
       (err: Error) => { assert.match(err.message, /e2/); return true; },
+    );
+  });
+});
+
+// buildIdCollapseNote(emailIds) is threaded through as throwBulkSetError's trailingNote at
+// all five uniform writers, so a genuine failure (not merely an unaccounted id) still
+// carries the disclosure - the success and failure texts must never disagree about whether
+// a call submitted a duplicated id.
+describe('bulk writers disclose a duplicate-id collapse on the failure path too (#185)', () => {
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    stubMailboxes(client);
+  });
+
+  it('bulkMarkRead appends the collapse note to a genuine failure', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['Email/set', { notUpdated: { e1: { type: 'forbidden' } } }, 'bulkUpdate']],
+    });
+    await assert.rejects(
+      () => client.bulkMarkRead(['e1', 'e1']),
+      (err: Error) => {
+        assert.match(err.message, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+        return true;
+      },
     );
   });
 });
@@ -3808,6 +3843,25 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
       () => client.bulkRemoveLabels(['e1', 'e1', 'e2'], ['Receipts']),
       (err: Error) => {
         assert.match(err.message, /1 of 2 emails/);
+        return true;
+      },
+    );
+  });
+
+  it('discloses the duplicate collapse on the failure text too (#185)', async () => {
+    // buildIdCollapseNote(emailIds) is pushed onto `notes` before this call's own
+    // throwBulkSetError, alongside the rescue/unchanged notes above - a duplicated id must
+    // be disclosed on the failure path exactly as it is on formatLabelRemoval's success
+    // path, so the two never say something different about the same call.
+    stubRemoval(
+      client,
+      { e1: { 'mb-receipts': true, 'mb-sent': true }, e2: { 'mb-receipts': true, 'mb-sent': true } },
+      { notUpdated: { e2: { type: 'forbidden' } } },
+    );
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'e1', 'e2'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /duplicates collapsed them to 2 distinct emails; nothing was skipped\./);
         return true;
       },
     );
