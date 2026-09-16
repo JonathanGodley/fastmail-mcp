@@ -7,6 +7,7 @@ import { CALENDAR_OPEN_WINDOW_DAYS, describeEventCopies, summariseBrokenCollecti
 import type { CalendarEvent, CalendarEventCopy, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
+import { buildIdCollapseNote } from './id-collapse-note.js';
 
 // The query-level summary that heads every list/search response, so the count wording
 // is written once and can't drift between the raw and simplified paths (#51).
@@ -566,23 +567,36 @@ function listIds(ids: string[]): string {
  *
  * Ids run through listIds for the same reason they do everywhere else in this file: they are
  * CALLER-supplied and can carry a newline that would forge extra lines in this prose.
+ *
+ * `total` is `string[] | number` (#185): the single-email `remove_labels` site keeps passing
+ * the number 1 (never a duplicate there), while `bulk_remove_labels` passes its raw
+ * `emailIds` array so the duplicate-collapse disclosure below can be derived from it. Every
+ * branch below still decides on the DISTINCT count, never the raw submitted count — the
+ * no-op branch in particular ("No labels were removed") has to fire off how many distinct
+ * messages carried none of the labels, not off how many ids were submitted, or a batch
+ * containing a duplicate could claim success where nothing was written.
  */
-export function formatLabelRemoval(rescued: string[], total: number, unchangedCount = 0): string {
-  const subject = total === 1 ? '1 email' : `${total} emails`;
+export function formatLabelRemoval(rescued: string[], total: string[] | number, unchangedCount = 0): string {
+  const rawIds = Array.isArray(total) ? total : undefined;
+  const distinctTotal: number = Array.isArray(total) ? new Set(total).size : total;
+  const collapseNote = rawIds ? buildIdCollapseNote(rawIds) : '';
+  const withNote = (text: string) => (collapseNote ? `${text} ${collapseNote}` : text);
+
+  const subject = distinctTotal === 1 ? '1 email' : `${distinctTotal} emails`;
   // Nothing was written at all: every message carried none of the named labels. Leading with
   // "Labels removed successfully" here would claim a removal that did not happen, so the
   // no-op leads instead. This is the whole-batch case; the mixed one is handled below.
-  if (unchangedCount >= total && rescued.length === 0) {
-    return total === 1
+  if (unchangedCount >= distinctTotal && rescued.length === 0) {
+    return withNote(distinctTotal === 1
       ? 'No labels were removed: the email did not carry any of these labels.'
-      : `No labels were removed: none of the ${total} emails carried any of these labels.`;
+      : `No labels were removed: none of the ${distinctTotal} emails carried any of these labels.`);
   }
   // A message none of the named labels was on is not written at all. Saying so keeps a call
   // that changed nothing for part of the batch from reading like one that relabelled all of it.
   const nothingToDo = unchangedCount > 0
     ? ` ${unchangedCount} of them did not carry any of these labels and ${unchangedCount === 1 ? 'was' : 'were'} left untouched.`
     : '';
-  if (rescued.length === 0) return `Labels removed successfully from ${subject}.${nothingToDo}`;
+  if (rescued.length === 0) return withNote(`Labels removed successfully from ${subject}.${nothingToDo}`);
   // "would have been left filed nowhere, so Archive was added" rather than "was filed in
   // Archive": the latter reads as a report of where the message already sat, when the point
   // is that this call put it there. The distinction matters most in the case a caller finds
@@ -590,7 +604,52 @@ export function formatLabelRemoval(rescued: string[], total: number, unchangedCo
   const n = rescued.length;
   const which = `${n} ${n === 1 ? 'message' : 'messages'} would have been left filed nowhere, ` +
     `so Archive was added: ${listIds(rescued)}`;
-  return `Labels removed successfully from ${subject}.${nothingToDo} ${which}.`;
+  return withNote(`Labels removed successfully from ${subject}.${nothingToDo} ${which}.`);
+}
+
+/**
+ * The success text for bulk_mark_read, bulk_pin, bulk_move, bulk_delete and bulk_add_labels
+ * (#185). Each of these five writers builds its write by assigning into an id-keyed map, so
+ * a duplicated id in `emailIds` collapses to one entry and is written once — reporting
+ * `emailIds.length` as the count (the pre-#185 bug) claims two emails changed when only one
+ * did. This derives the DISTINCT count itself so no call site computes `new Set(...)` inline,
+ * and appends the duplicate-collapse disclosure (silent when there is nothing to disclose).
+ *
+ * `action` carries each tool's exact wording so the five stay distinguishable: the four
+ * subject-first shapes ("N emails <verb>[, optional trailing]"), and bulk_add_labels' own
+ * count-last shape ("Labels added successfully to N emails"), symmetric with
+ * formatLabelRemoval's "Labels removed successfully from N emails" above.
+ */
+export type BulkEmailAction =
+  | { verb: 'markRead'; read: boolean }
+  | { verb: 'pin'; pinned: boolean }
+  | { verb: 'move' }
+  | { verb: 'delete' }
+  | { verb: 'addLabels' };
+
+export function formatBulkEmailResult(action: BulkEmailAction, emailIds: string[]): string {
+  const distinct = new Set(emailIds).size;
+  const subject = distinct === 1 ? '1 email' : `${distinct} emails`;
+  let base: string;
+  switch (action.verb) {
+    case 'markRead':
+      base = `${subject} ${action.read ? 'marked as read' : 'marked as unread'} successfully`;
+      break;
+    case 'pin':
+      base = `${subject} ${action.pinned ? 'pinned' : 'unpinned'} successfully`;
+      break;
+    case 'move':
+      base = `${subject} moved successfully`;
+      break;
+    case 'delete':
+      base = `${subject} deleted successfully (moved to trash)`;
+      break;
+    case 'addLabels':
+      base = `Labels added successfully to ${subject}`;
+      break;
+  }
+  const collapseNote = buildIdCollapseNote(emailIds);
+  return collapseNote ? `${base}. ${collapseNote}` : base;
 }
 
 // The distinct mailbox names across a group of results, in first-seen order, so one line

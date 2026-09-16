@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CalDAVCalendarClient, TRANSPARENCY_VALUES, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
@@ -2803,7 +2803,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `${emailIds.length} emails ${read ? 'marked as read' : 'marked as unread'} successfully`,
+              text: formatBulkEmailResult({ verb: 'markRead', read }, emailIds),
             },
           ],
         };
@@ -2821,7 +2821,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `${emailIds.length} emails ${pinned ? 'pinned' : 'unpinned'} successfully`,
+              text: formatBulkEmailResult({ verb: 'pin', pinned }, emailIds),
             },
           ],
         };
@@ -2842,7 +2842,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `${emailIds.length} emails moved successfully`,
+              text: formatBulkEmailResult({ verb: 'move' }, emailIds),
             },
           ],
         };
@@ -2859,7 +2859,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `${emailIds.length} emails deleted successfully (moved to trash)`,
+              text: formatBulkEmailResult({ verb: 'delete' }, emailIds),
             },
           ],
         };
@@ -2880,7 +2880,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `Labels added successfully to ${emailIds.length} emails`,
+              text: formatBulkEmailResult({ verb: 'addLabels' }, emailIds),
             },
           ],
         };
@@ -2901,7 +2901,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: formatLabelRemoval(rescued, new Set(emailIds).size, unchangedCount),
+              text: formatLabelRemoval(rescued, emailIds, unchangedCount),
             },
           ],
         };

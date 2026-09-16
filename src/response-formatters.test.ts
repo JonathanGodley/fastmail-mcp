@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -1198,6 +1198,117 @@ describe('formatLabelRemoval', () => {
     const text = formatLabelRemoval(['fmu1-abcdefghijklmnopqrstuvwxyz012345'], 1); // allowlist-secret (synthetic)
     assert.doesNotMatch(text, /fmu1-\w/);
     assert.match(text, /REDACTED/);
+  });
+
+  // ---------- total as a raw id array (#185) ----------
+
+  it('accepts the raw emailIds array and derives the distinct count itself', () => {
+    const text = formatLabelRemoval([], ['e1', 'e2', 'e3']);
+    assert.match(text, /Labels removed successfully from 3 emails\./);
+  });
+
+  it('says nothing extra when the array carries no duplicates', () => {
+    const text = formatLabelRemoval([], ['e1', 'e2']);
+    assert.doesNotMatch(text, /duplicates/);
+  });
+
+  it('discloses a duplicate-collapse on the successful-removal path', () => {
+    const text = formatLabelRemoval([], ['e1', 'e1', 'e2']);
+    assert.match(text, /Labels removed successfully from 2 emails\./);
+    assert.match(text, /duplicates collapsed them to 2 distinct emails; nothing was skipped\./);
+  });
+
+  it('decides the no-op branch on the DISTINCT count, not the raw submitted count', () => {
+    // 3 raw ids, 2 distinct, both distinct ids untouched: this is the whole-batch no-op,
+    // and must say so even though the raw count (3) differs from the distinct count (2).
+    const text = formatLabelRemoval([], ['e1', 'e1', 'e2'], 2);
+    assert.match(text, /No labels were removed: none of the 2 emails carried any of these labels\./);
+  });
+
+  it('discloses a duplicate-collapse on the no-op path too', () => {
+    const text = formatLabelRemoval([], ['e1', 'e1'], 1);
+    assert.match(text, /No labels were removed: the email did not carry any of these labels\./);
+    assert.match(text, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+  });
+
+  it('discloses a duplicate-collapse alongside a rescue', () => {
+    const text = formatLabelRemoval(['e1'], ['e1', 'e1']);
+    assert.match(text, /Archive was added: e1\./);
+    assert.match(text, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+  });
+});
+
+// ---------- formatBulkEmailResult ----------
+
+// The success text for bulk_mark_read, bulk_pin, bulk_move, bulk_delete and
+// bulk_add_labels (#185). Each preserves the shape its handler used to build inline, with
+// the distinct count derived internally and a duplicate-collapse disclosure appended.
+describe('formatBulkEmailResult', () => {
+  it('marks as read, pluralised', () => {
+    assert.equal(
+      formatBulkEmailResult({ verb: 'markRead', read: true }, ['e1', 'e2']),
+      '2 emails marked as read successfully',
+    );
+  });
+
+  it('marks as read, singular', () => {
+    assert.equal(
+      formatBulkEmailResult({ verb: 'markRead', read: true }, ['e1']),
+      '1 email marked as read successfully',
+    );
+  });
+
+  it('marks as unread', () => {
+    assert.equal(
+      formatBulkEmailResult({ verb: 'markRead', read: false }, ['e1', 'e2']),
+      '2 emails marked as unread successfully',
+    );
+  });
+
+  it('pins', () => {
+    assert.equal(formatBulkEmailResult({ verb: 'pin', pinned: true }, ['e1']), '1 email pinned successfully');
+  });
+
+  it('unpins', () => {
+    assert.equal(
+      formatBulkEmailResult({ verb: 'pin', pinned: false }, ['e1', 'e2']),
+      '2 emails unpinned successfully',
+    );
+  });
+
+  it('moves', () => {
+    assert.equal(formatBulkEmailResult({ verb: 'move' }, ['e1', 'e2']), '2 emails moved successfully');
+  });
+
+  it('deletes, with the trailing (moved to trash)', () => {
+    assert.equal(
+      formatBulkEmailResult({ verb: 'delete' }, ['e1', 'e2']),
+      '2 emails deleted successfully (moved to trash)',
+    );
+  });
+
+  it('adds labels, in the count-LAST shape', () => {
+    assert.equal(
+      formatBulkEmailResult({ verb: 'addLabels' }, ['e1', 'e2']),
+      'Labels added successfully to 2 emails',
+    );
+  });
+
+  it('reports the DISTINCT count, not the raw submitted count, when ids repeat', () => {
+    // The defect this formatter exists to fix (#185): a duplicated id collapses to one
+    // write, so "2 emails marked as read" for a single write is wrong.
+    const text = formatBulkEmailResult({ verb: 'markRead', read: true }, ['e1', 'e1']);
+    assert.match(text, /^1 email marked as read successfully/);
+  });
+
+  it('discloses the duplicate collapse rather than staying silent about it', () => {
+    const text = formatBulkEmailResult({ verb: 'markRead', read: true }, ['e1', 'e1']);
+    assert.match(text, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+  });
+
+  it('says nothing extra when there are no duplicates', () => {
+    const text = formatBulkEmailResult({ verb: 'delete' }, ['e1', 'e2']);
+    assert.doesNotMatch(text, /duplicates/);
   });
 });
 
