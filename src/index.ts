@@ -1935,7 +1935,7 @@ const TOOLS = [
             emailIds: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to mark.' + LENIENT_LIST_DESC,
+              description: 'Array of email IDs to mark. Duplicates are collapsed.' + LENIENT_LIST_DESC,
             },
             read: {
               type: ['boolean', 'string'],
@@ -1955,7 +1955,7 @@ const TOOLS = [
             emailIds: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to pin/unpin.' + LENIENT_LIST_DESC,
+              description: 'Array of email IDs to pin/unpin. Duplicates are collapsed.' + LENIENT_LIST_DESC,
             },
             pinned: {
               type: ['boolean', 'string'],
@@ -1975,7 +1975,7 @@ const TOOLS = [
             emailIds: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to move.' + LENIENT_LIST_DESC,
+              description: 'Array of email IDs to move. Duplicates are collapsed.' + LENIENT_LIST_DESC,
             },
             targetMailbox: {
               type: 'string',
@@ -1994,7 +1994,7 @@ const TOOLS = [
             emailIds: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to delete.' + LENIENT_LIST_DESC,
+              description: 'Array of email IDs to delete. Duplicates are collapsed.' + LENIENT_LIST_DESC,
             },
           },
           required: ['emailIds'],
@@ -2009,7 +2009,7 @@ const TOOLS = [
             emailIds: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to add labels to.' + LENIENT_LIST_DESC,
+              description: 'Array of email IDs to add labels to. Duplicates are collapsed.' + LENIENT_LIST_DESC,
             },
             mailboxes: {
               type: ['array', 'string'],
@@ -2029,7 +2029,7 @@ const TOOLS = [
             emailIds: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'Array of email IDs to remove labels from.' + LENIENT_LIST_DESC,
+              description: 'Array of email IDs to remove labels from. Duplicates are collapsed.' + LENIENT_LIST_DESC,
             },
             mailboxes: {
               type: ['array', 'string'],

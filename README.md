@@ -832,17 +832,17 @@ Images written as `data:` URIs are dropped and counted rather than converted, as
 ### Bulk Operations
 
 - **bulk_mark_read**: Mark multiple emails as read/unread
-  - Parameters: `emailIds` (required array), `read` (default: true)
+  - Parameters: `emailIds` (required array; duplicates are collapsed), `read` (default: true)
 - **bulk_pin**: Pin or unpin multiple emails
-  - Parameters: `emailIds` (required array), `pinned` (default: true)
+  - Parameters: `emailIds` (required array; duplicates are collapsed), `pinned` (default: true)
 - **bulk_move**: Move multiple emails to a mailbox. **Replaces each message's entire mailbox membership** - every other label or folder each one was filed under is removed. To file them somewhere while keeping those, use `bulk_add_labels` - which takes the Inbox and the account's own labels only, so a folder is reachable by moving alone (archiving is the exception: `archive_email` keeps the rest of the filing). No keyword is changed, so each message keeps its read/unread and flagged state.
-  - Parameters: `emailIds` (required array), `targetMailbox` (required — [id, role, name, or path](#naming-a-mailbox))
+  - Parameters: `emailIds` (required array; duplicates are collapsed), `targetMailbox` (required — [id, role, name, or path](#naming-a-mailbox))
 - **bulk_delete**: Delete multiple emails (move to trash)
-  - Parameters: `emailIds` (required array)
+  - Parameters: `emailIds` (required array; duplicates are collapsed)
 - **bulk_add_labels**: Add labels to multiple emails simultaneously. Labels means the **Inbox and the account's own labels**; a folder (any other role mailbox) is rejected - use `bulk_move`
-  - Parameters: `emailIds` (required array), `mailboxes` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list, as does any entry that resolves to a folder rather than a label)
+  - Parameters: `emailIds` (required array; duplicates are collapsed), `mailboxes` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list, as does any entry that resolves to a folder rather than a label)
 - **bulk_remove_labels**: Remove labels from multiple emails simultaneously. Labels means the **Inbox and the account's own labels**; a folder (any other role mailbox, Archive included) is rejected before anything is written - use `bulk_move`. The last-label archive fallback is decided per message, so one batch can archive some and merely unlabel others; a rejection is not, and aborts the whole batch
-  - Parameters: `emailIds` (required array), `mailboxes` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list, as does any entry that resolves to a folder rather than a label)
+  - Parameters: `emailIds` (required array; duplicates are collapsed), `mailboxes` (required array - each entry [id, role, name, or path](#naming-a-mailbox), resolved like every other mailbox tool; any unresolved or ambiguous entry rejects the whole call with the valid list, as does any entry that resolves to a folder rather than a label)
 
 There is **no `bulk_archive`**. `archive_email` already takes an `emailIds` array and handles a batch in one call, reporting each id's outcome separately - see [Archiving does what the Fastmail client does](#archiving-does-what-the-fastmail-client-does). Reaching for `bulk_move` with a target of `"archive"` instead does the wrong thing: it replaces each message's whole membership, dropping every label, which is the behaviour the archive rewrite exists to stop. Its destination is also resolved [the ordinary way](#naming-a-mailbox), which falls through to matching on name; `archive_email` and `delete_email` do not, resolving by role and nothing else, so a folder named after a role can never become their destination on any account.
 
