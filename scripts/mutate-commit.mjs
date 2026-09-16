@@ -21,8 +21,7 @@
 // receives a mutant is reprinted WHOLE by Stryker's TypeScript printer (@babel/generator over the
 // entire file, not just the mutated node), and every instrumented file also gets a header
 // prepended that itself reads process.env (to learn which mutant is active). Five tests are
-// affected, in three different ways - each measured directly, not inferred from reading the
-// guard's own code:
+// affected, in three different ways - each measured directly:
 //   - index-env.test.ts scans every non-test src/*.ts file for a bare process.env read, and
 //     fails the moment ANY of them carries Stryker's own env-reading header - not because its
 //     own `function findEnvValue(` text match ever breaks. Measured against a commit touching
@@ -79,12 +78,8 @@
 // text-parsing guards above, or is one of the two dist-reading tests above (which either fails
 // outright or exercises the last `npm run build`, not the mutated source). `--tests` is no cure
 // for either. A single past observation, not reproduced in this pass and not to be re-measured:
-// `abc1d9f` (a real index.ts change), run with `--tests` set to the files outside both classes
-// above, scored 5 mutants, 5 survived - every one vacuously. (A sibling observation from that
-// same build - that Stryker placed zero mutants on the version string literal - did not
-// reproduce either: measuring it directly placed one StringLiteral mutant on that literal both
-// in isolation and as part of a realistic single-line commit, so that claim was never written
-// here.)
+// `abc1d9f` (a real index.ts change), run with `--tests` naming only files outside both classes
+// above, scored 5 mutants, 5 survived - every one vacuously.
 //
 // That accounts for two of the three ways the initial run can fail. The third announces itself
 // as a MISSING PACKAGE ("Cannot find package '@modelcontextprotocol/sdk'"), which is the
