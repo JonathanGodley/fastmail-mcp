@@ -226,14 +226,14 @@ method to corroborate them, which is why one pass settles these rows.
 
 | Event kind | What the client wrote |
 | --- | --- |
-| Timed, all defaults | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `DURATION:PT1H`, with an embedded `VTIMEZONE` for the zone |
-| Timed, zone chosen in the picker | `DTSTART;TZID=Asia/Hong_Kong:20260822T090000` + `DTEND;TZID=Asia/Hong_Kong:20260822T100000`, with an embedded `VTIMEZONE` carrying `TZID:Asia/Hong_Kong` |
+| Timed, all defaults | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `DURATION:PT1H`, with a `VTIMEZONE` for the zone that Cyrus's JMAP→iCalendar converter added — the client's own JSCalendar carries no such component (see "The platform" below) |
+| Timed, zone chosen in the picker | `DTSTART;TZID=Asia/Hong_Kong:20260822T090000` + `DTEND;TZID=Asia/Hong_Kong:20260822T100000`, with a Cyrus-added `VTIMEZONE` carrying `TZID:Asia/Hong_Kong` |
 | All-day, single day | `DTSTART;VALUE=DATE:20260822` + `DURATION:P1D`, plus `TRANSP:TRANSPARENT` |
 | All-day, three days | `DTSTART;VALUE=DATE:20260822` + `DTEND;VALUE=DATE:20260825` — an **exclusive** end |
 | Weekly timed series | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `RRULE:FREQ=WEEKLY;COUNT=4` |
 | Yearly all-day series | `DTSTART;VALUE=DATE:20260822` + `RRULE:FREQ=YEARLY;COUNT=3` + `DURATION:P1D` |
-| Weekly timed series ended by a **date** ("Last occurs on") | `DTSTART;TZID=Australia/Sydney:20260826T093000` + `DURATION:PT1H` + `RRULE:FREQ=WEEKLY;UNTIL=20260923T135959Z`, with an embedded `VTIMEZONE` carrying `TZUNTIL:20260923T145959Z`. The `DTSTART` is the **post-edit** value; it was authored at `090000` and moved by the whole-series edit below |
-| Monthly timed series, "every month on the 3rd Tuesday" | `DTSTART;TZID=Australia/Sydney:20260915T090000` + `DURATION:PT1H` + `RRULE:FREQ=MONTHLY;BYDAY=3TU;COUNT=3`, with an embedded `VTIMEZONE` carrying `TZUNTIL:20261116T230000Z` |
+| Weekly timed series ended by a **date** ("Last occurs on") | `DTSTART;TZID=Australia/Sydney:20260826T093000` + `DURATION:PT1H` + `RRULE:FREQ=WEEKLY;UNTIL=20260923T135959Z`, with a Cyrus-added `VTIMEZONE` carrying `TZUNTIL:20260923T145959Z`. The `DTSTART` is the **post-edit** value; it was authored at `090000` and moved by the whole-series edit below |
+| Monthly timed series, "every month on the 3rd Tuesday" | `DTSTART;TZID=Australia/Sydney:20260915T090000` + `DURATION:PT1H` + `RRULE:FREQ=MONTHLY;BYDAY=3TU;COUNT=3`, with a Cyrus-added `VTIMEZONE` carrying `TZUNTIL:20261116T230000Z` |
 | All-day, three days, spanning the Sydney DST change | `DTSTART;VALUE=DATE:20261003` + `DURATION:P3D` + `TRANSP:TRANSPARENT` — no zone, no `VTIMEZONE` |
 | All-day **daily series** across the same DST change | `DTSTART;VALUE=DATE:20261003` + `DURATION:P1D` + `RRULE:FREQ=DAILY;COUNT=3` + `TRANSP:TRANSPARENT` |
 
@@ -425,15 +425,21 @@ Note that all four end with `DTEND`. This server never writes the `DURATION` for
 writes it on some resources and this server's parser reads both — see "Storage serialisation varies
 by path" above.
 
-**A bare `TZID` with no embedded `VTIMEZONE` renders exactly as the client's own events do.** Every
-timed event the client authors carries an embedded `VTIMEZONE` for its zone (the two timed rows in
-the section above both do); this server writes none, and the popup for the explicitly-zoned event is
-identical in format to the client's own zone-picker reference event authored on 22 August, whose
-popup — read on 23 August in the same web client, since the 22 August section records bytes only —
-gave `11:00 AM – 12:00 PM AEST` over `9:00 AM – 10:00 AM HKST`. So the absence has no visible effect
-in the Fastmail client, which resolves the zone name itself. **What this does not measure is
-interoperability**: whether a `VTIMEZONE`-less resource resolves the same way in some *other* CalDAV
-client was not tested here, and is tracked as #166.
+**A bare `TZID` with no `VTIMEZONE` renders exactly as one of the client's own events does.** Every
+timed event the client authors ends up stored with a `VTIMEZONE` for its zone (the two timed rows in
+the section above both do) — but that component is Cyrus's, added by its JMAP→iCalendar converter
+(`icalcomponent_add_required_timezones`, see "The platform" below) as it turns the client's own
+zone-name-only JSCalendar into the iCalendar this measurement reads; the client itself sends no
+`VTIMEZONE`. At the time of this 22-23 August measurement this server wrote none either, and the
+popup for the explicitly-zoned event was identical in format to the client's own zone-picker
+reference event authored on 22 August, whose popup — read on 23 August in the same web client,
+since the 22 August section records bytes only — gave `11:00 AM – 12:00 PM AEST` over
+`9:00 AM – 10:00 AM HKST`. So the absence had no visible effect in the Fastmail client, which
+resolves the zone name itself. **This did not measure interoperability**: whether a
+`VTIMEZONE`-less resource resolves the same way in some *other* CalDAV client was never tested. As
+of 18 September 2026 the point is moot for this server's own writes — `create_calendar_event` and
+`update_calendar_event` now generate and embed a `VTIMEZONE` for every zone they reference (#166,
+`src/vtimezone.ts`; see "The platform" below for where the data comes from).
 
 Also worth recording for the read side: #162 changed only the window filter and the refusals, not the
 create serialiser, which is unchanged since #157 — so that work produced no newly authored bytes to
@@ -462,8 +468,9 @@ These are left explicit rather than blank.
 
 ## The platform: whether the server will hand this one a `VTIMEZONE`
 
-The subsection above ends on #166 — this server writes a bare `TZID` where the client embeds a
-`VTIMEZONE`, and the decision is to match the client. That leaves a question the client cannot
+The subsection above ends on #166 — this server used to write a bare `TZID` where a Fastmail-authored
+event ends up carrying a `VTIMEZONE` (added by Cyrus's JMAP→iCalendar converter, not by the client
+itself), and the decision was to match that stored shape. That left a question the client cannot
 answer, because it is about the server rather than the client: where the block would come from. RFC
 7808 timezone data distribution would supply one by zone name, and Cyrus implements that service, so
 asking for it would be the cheap answer. **Cyrus implementing it is not evidence Fastmail exposes
@@ -500,6 +507,15 @@ here, not that one property happens to be missing.
 **What follows for this server.** Any `VTIMEZONE` it embeds has to come from somewhere other than the
 platform — bundled, or generated from timezone rules it carries itself. #166 cannot be closed by a
 fetch.
+
+**Superseding update, 18 September 2026.** #166 is closed by generating the block instead: Node's
+own ICU timezone data already backs `zoneOffsetMsAt` (`src/coerce.ts`), and `src/vtimezone.ts` walks
+it to synthesise a `VTIMEZONE` per referenced zone — not byte-identical to Cyrus's own (no `RRULE`
+observances, no reproduction of its exact trimming), but resolving to the same offsets across the
+event's span, which is the property a reader needs. `create_calendar_event` writes one for every
+zone `start`/`end` uses; `update_calendar_event` regenerates it whenever `start`/`end` changes. See
+[README.md's "Writing calendar times"](../README.md#writing-calendar-times) and
+`docs/conventions.md`'s "VTIMEZONE residual" for the shipped model.
 
 **Dated, not permanent.** One account, one deployment, one day. A config switch is exactly the kind
 of thing that changes with no announcement, so re-ask rather than cite this row as settled: the probe

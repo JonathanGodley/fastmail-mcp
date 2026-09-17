@@ -11,6 +11,9 @@ import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearF
 // the rest of the server displays, so it reads that value instead of re-deriving its own
 // from the environment.
 import { getDefaultTimezone } from './email-formatter.js';
+// generateVTimezone lives in its own module rather than here so it can import zoneOffsetMsAt
+// from coerce.ts without this file importing it back — see vtimezone.ts's own header comment.
+import { generateVTimezone } from './vtimezone.js';
 
 export interface CalDAVConfig {
   username: string;
@@ -2256,6 +2259,151 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
     `DTEND must be later than DTSTART per RFC 5545 §3.8.2.2 — start "${echoCallerText(start.display)}" ` +
     `is not before end "${echoCallerText(end.display)}". Pass an end later than the start.`
   );
+}
+
+/**
+ * The UTC instant range each usable zoned TZID among `frames` needs a VTIMEZONE to cover —
+ * keyed on the TZID string as WRITTEN (not canonicalised), so the generated block's own `TZID:`
+ * line matches the parameter a reader will look it up by. A frame that is `date`/`floating`/
+ * `utc`, or whose TZID `isUsableTimezone` rejects (a vendor id like `AUS Eastern Standard
+ * Time`), contributes nothing: there is no zone to generate for the first three, and no ICU
+ * data to generate FROM for the fourth — see `validateDateConsistency`'s own stand-down on the
+ * same check for why an unresolvable name is left alone rather than refused.
+ */
+function zonedInstantSpans(frames: DatePropertyFrame[]): Map<string, { minMs: number; maxMs: number }> {
+  const spans = new Map<string, { minMs: number; maxMs: number }>();
+  for (const frame of frames) {
+    if (frame.frame !== 'zoned' || !frame.tzid || !isUsableTimezone(frame.tzid)) continue;
+    const ms = resolveCalendarInstantMs(formatICalDate(frame.value), frame.tzid);
+    if (Number.isNaN(ms)) continue;
+    const existing = spans.get(frame.tzid);
+    if (existing) {
+      existing.minMs = Math.min(existing.minMs, ms);
+      existing.maxMs = Math.max(existing.maxMs, ms);
+    } else {
+      spans.set(frame.tzid, { minMs: ms, maxMs: ms });
+    }
+  }
+  return spans;
+}
+
+/**
+ * True when `vevent`'s RRULE (RFC 5545 §3.8.5.3) has no `COUNT` and no `UNTIL` — an unbounded
+ * series with no last occurrence. `regenerateVTimezones` reads this because there is no span a
+ * `TZUNTIL` could honestly cover for a series that never ends.
+ */
+export function isUnboundedSeriesMaster(vevent: string): boolean {
+  return parseAllICalProperties(vevent, 'RRULE').some(line => {
+    const colonIdx = findValueBoundary(line);
+    const value = colonIdx === -1 ? '' : line.slice(colonIdx + 1);
+    return !/(^|;)(COUNT|UNTIL)=/.test(value);
+  });
+}
+
+/**
+ * Every VTIMEZONE block in `lines`, with its TZID and its line-index span (inclusive of both
+ * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`) — the same structural scan `removeOrphanedVTimezones`
+ * uses, kept separate from it because these two callers splice on the result rather than only
+ * filtering it, and duplicating the ~15-line scan reads clearer than threading an extra
+ * indirection through an already-heavily-commented function.
+ */
+function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
+  const blocks: Array<{ tzid: string; start: number; end: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (structuralLine(lines[i]) === 'BEGIN:VTIMEZONE') {
+      const start = i;
+      let end = -1;
+      for (let j = i + 1; j < lines.length; j++) {
+        if (structuralLine(lines[j]) === 'END:VTIMEZONE') { end = j; break; }
+      }
+      if (end === -1) break;
+      const tzid = (parseICalValue(lines.slice(start, end + 1).join('\n'), 'TZID') || '').trim();
+      blocks.push({ tzid, start, end });
+      i = end;
+    }
+  }
+  return blocks;
+}
+
+function hasVTimezoneBlockFor(icalData: string, tzid: string): boolean {
+  return extractVTimezoneBlocks(icalData.split(/\r?\n/)).some(b => zoneNamesEqual(b.tzid, tzid));
+}
+
+/**
+ * Remove any existing VTIMEZONE block(s) for `tzid`, so a stale one is never left beside the
+ * freshly generated replacement `regenerateVTimezones` is about to insert — two blocks
+ * disagreeing about the same TZID would leave a reader to pick between them.
+ */
+function stripVTimezoneBlockFor(icalData: string, tzid: string): string {
+  const lineEnding = detectLineEnding(icalData);
+  const lines = icalData.split(/\r?\n/);
+  const toRemove = extractVTimezoneBlocks(lines).filter(b => zoneNamesEqual(b.tzid, tzid));
+  for (let i = toRemove.length - 1; i >= 0; i--) {
+    lines.splice(toRemove[i].start, toRemove[i].end - toRemove[i].start + 1);
+  }
+  return lines.join(lineEnding);
+}
+
+/**
+ * Insert a generated VTIMEZONE `block` right before the first VEVENT — the same position
+ * `createCalendarEvent` places one, between `PRODID` (and any earlier VTIMEZONE) and the event
+ * itself.
+ */
+function insertVTimezoneBlock(icalData: string, block: string, lineEnding: string): string {
+  const lines = icalData.split(/\r?\n/);
+  const veventIdx = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  lines.splice(veventIdx === -1 ? lines.length : veventIdx, 0, ...block.split(/\r?\n/));
+  return lines.join(lineEnding);
+}
+
+/**
+ * Recompute the VTIMEZONE block(s) the master VEVENT's current DTSTART/DTEND need, after
+ * `updateCalendarEvent` has patched them (#166). Called only when `timeChanged`, and only after
+ * every other patch has landed, so it reads the FINAL start/end rather than a value about to be
+ * overwritten again below it — and before `removeOrphanedVTimezones`, which then drops any block
+ * (this function's included) that the patched event no longer references at all.
+ *
+ * Exported, and directly unit-tested with hand-built RRULE fixtures, rather than folded silently
+ * into `updateCalendarEvent`'s body: `isRecurringSeriesResource` refuses every RRULE-bearing
+ * update before this point ever runs, so the unbounded-series branch below cannot fire through
+ * the public API today. It is kept and tested anyway as the VTIMEZONE half of the primitive
+ * `removeExceptionVEvents` already names as what a series-aware update needs back (#146) — a
+ * future series-aware update inherits a tested VTIMEZONE story instead of a fresh guess at one.
+ */
+export function regenerateVTimezones(icalData: string, lineEnding: string): string {
+  const vevent = extractVEvent(icalData);
+  if (!vevent) return icalData;
+
+  const startLine = parseAllICalProperties(vevent, 'DTSTART')[0];
+  const endLine = parseAllICalProperties(vevent, 'DTEND')[0];
+  const frames = [startLine, endLine]
+    .filter((l): l is string => l !== undefined)
+    .map(l => describeDateProperty(l));
+  const spans = zonedInstantSpans(frames);
+
+  if (isUnboundedSeriesMaster(vevent)) {
+    // No last occurrence, so no span a TZUNTIL could honestly cover. A zone this series was
+    // already carrying a block for is left exactly as it stood; a genuinely new one has no
+    // existing block to fall back on, so re-zoning an unbounded series is refused rather than
+    // given a TZUNTIL that is wrong the moment the series recurs past this span.
+    for (const tzid of spans.keys()) {
+      if (!hasVTimezoneBlockFor(icalData, tzid)) {
+        throw new InvalidInputError(
+          `Cannot compute a VTIMEZONE for time zone "${echoCallerText(tzid, ZONE_ECHO_LIMIT)}" on an ` +
+          `unbounded recurring series — it has no last occurrence, so there is no span a VTIMEZONE ` +
+          `could honestly cover. Re-zoning an unbounded series is not supported.`
+        );
+      }
+    }
+    return icalData;
+  }
+
+  let result = icalData;
+  for (const [tzid, span] of spans) {
+    result = stripVTimezoneBlockFor(result, tzid);
+    result = insertVTimezoneBlock(result, generateVTimezone(tzid, span.minMs, span.maxMs, lineEnding), lineEnding);
+  }
+  return result;
 }
 
 // Returns undefined unless the RESULT is a plain `YYYY-MM-DD`, and both halves of that are
@@ -4902,10 +5050,21 @@ export class CalDAVCalendarClient {
     const endFrame = describeDateProperty(endLine, event.end, endFormatted.tzidSource);
     validateDateConsistency(startFrame, endFrame);
 
+    // RFC 5545 §3.6.5 requires a VTIMEZONE for every TZID a component uses. Generated from ICU
+    // (see vtimezone.ts) rather than left for Cyrus to fill in: Cyrus's own attacher
+    // (`icalcomponent_add_required_timezones`) runs on the JMAP write path, gated behind a
+    // `tzbyref` capability this deployment does not advertise, so a CalDAV PUT — this one — never
+    // gets it (docs/conventions.md). One block per distinct usable TZID start/end actually use.
+    const vtimezoneBlocks = Array.from(
+      zonedInstantSpans([startFrame, endFrame]),
+      ([tzid, span]) => generateVTimezone(tzid, span.minMs, span.maxMs, '\r\n'),
+    );
+
     const icalLines = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
       'PRODID:-//fastmail-mcp//CalDAV//EN',
+      ...vtimezoneBlocks.flatMap(block => block.split('\r\n')),
       'BEGIN:VEVENT',
       `UID:${uid}`,
       `DTSTAMP:${now}`,
@@ -5289,8 +5448,11 @@ export class CalDAVCalendarClient {
     data = replaceICalProperty(data, 'DTSTAMP', `DTSTAMP:${now}`);
     data = replaceICalProperty(data, 'LAST-MODIFIED', `LAST-MODIFIED:${now}`);
 
-    // --- Orphaned VTIMEZONE cleanup (LAST — after all modifications) ---
+    // --- VTIMEZONE regeneration + orphan cleanup (LAST — after all modifications) ---
+    // regenerateVTimezones runs first: a re-zoned or re-timed event needs a freshly computed
+    // block (new span, new TZUNTIL) before the orphan sweep decides what is still referenced.
     if (timeChanged) {
+      data = regenerateVTimezones(data, lineEnding);
       data = removeOrphanedVTimezones(data);
     }
 

@@ -26,6 +26,8 @@ import {
   replaceICalProperty,
   removeAllICalProperties,
   removeOrphanedVTimezones,
+  regenerateVTimezones,
+  isUnboundedSeriesMaster,
   removeExceptionVEvents,
   insertBeforeEndVEvent,
   validateAttendeeEmail,
@@ -6445,6 +6447,191 @@ describe('timeZone parameter (#157)', () => {
         /DTEND must be later than DTSTART/
       );
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+    });
+  });
+});
+
+// #166: this server writes DTSTART;TZID=<zone> with no accompanying VTIMEZONE component, which
+// RFC 5545 §3.6.5 requires for every TZID used. These two are seen red against the pre-#166
+// code (no VTIMEZONE emitted anywhere) before the create/update wiring lands.
+describe('VTIMEZONE embedding (#166)', () => {
+  describe('create_calendar_event', () => {
+    before(() => setDefaultTimezone('America/New_York'));
+    after(() => setDefaultTimezone(undefined));
+
+    function createMockedClient() {
+      const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+      const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+        createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
+      });
+      (client as any).client = mockDAVClient;
+      return { client, mockDAVClient };
+    }
+
+    it('embeds a VTIMEZONE block, between PRODID and BEGIN:VEVENT, for a zoned pair', async () => {
+      const { client, mockDAVClient } = createMockedClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T',
+        start: '2026-09-20T08:00:00', end: '2026-09-20T09:00:00',
+        timeZone: 'Australia/Sydney',
+      });
+      const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+      assert.ok(ical.includes('BEGIN:VTIMEZONE'), ical);
+      assert.ok(ical.includes('TZID:Australia/Sydney'), ical);
+      const prodidIdx = ical.indexOf('PRODID:');
+      const vtzIdx = ical.indexOf('BEGIN:VTIMEZONE');
+      const veventIdx = ical.indexOf('BEGIN:VEVENT');
+      assert.ok(prodidIdx !== -1 && prodidIdx < vtzIdx && vtzIdx < veventIdx, ical);
+    });
+
+    it('embeds a VTIMEZONE in the account-configured zone for a designator-less pair (#157 default)', async () => {
+      const { client, mockDAVClient } = createMockedClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T',
+        start: '2026-09-20T08:00:00', end: '2026-09-20T09:00:00',
+      });
+      const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+      assert.ok(ical.includes('BEGIN:VTIMEZONE'), ical);
+      assert.ok(ical.includes('TZID:America/New_York'), ical);
+    });
+
+    it('writes no VTIMEZONE for an all-day event', async () => {
+      const { client, mockDAVClient } = createMockedClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T', start: '2026-09-20', end: '2026-09-21',
+      });
+      const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+      assert.ok(!ical.includes('BEGIN:VTIMEZONE'), ical);
+    });
+
+    it('writes no VTIMEZONE for a UTC-designated pair', async () => {
+      const { client, mockDAVClient } = createMockedClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T',
+        start: '2026-09-20T08:00:00Z', end: '2026-09-20T09:00:00Z',
+      });
+      const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+      assert.ok(!ical.includes('BEGIN:VTIMEZONE'), ical);
+    });
+  });
+
+  describe('update_calendar_event', () => {
+    before(() => setDefaultTimezone('America/New_York'));
+    after(() => setDefaultTimezone(undefined));
+
+    function storedEvent(uid: string, dtstart: string, dtend: string): string {
+      return [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        `UID:${uid}`, 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Stored',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+    }
+
+    function updateMockedClient(icalData: string) {
+      const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+      const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+        fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+        updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+      });
+      (client as any).client = mockDAVClient;
+      return { client, mockDAVClient };
+    }
+
+    it('adds a VTIMEZONE block when re-zoning start/end into a new zone', async () => {
+      const stored = storedEvent('vtz@fm', 'DTSTART;TZID=Europe/London:20260320T090000', 'DTEND;TZID=Europe/London:20260320T100000');
+      const { client, mockDAVClient } = updateMockedClient(stored);
+      await client.updateCalendarEvent('vtz@fm', {
+        start: '2026-09-20T08:00:00', end: '2026-09-20T09:00:00', timeZone: 'Australia/Sydney',
+      });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(written.includes('BEGIN:VTIMEZONE'), written);
+      assert.ok(written.includes('TZID:Australia/Sydney'), written);
+    });
+
+    it('refreshes an existing block\'s TZUNTIL (and does not duplicate it) when start/end move within the same zone', async () => {
+      const stale = [
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney', 'TZUNTIL:20260101T000000Z',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\r\n');
+      const stored = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', stale, 'BEGIN:VEVENT',
+        'UID:refresh@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'SUMMARY:Stored', 'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const { client, mockDAVClient } = updateMockedClient(stored);
+      await client.updateCalendarEvent('refresh@fm', { start: '2026-11-20T09:00:00', end: '2026-11-20T10:00:00' });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.equal((written.match(/TZID:Australia\/Sydney/g) || []).length, 1, written);
+      assert.ok(!written.includes('TZUNTIL:20260101T000000Z'), written);
+    });
+
+    it('leaves an unresolvable stored TZID\'s VTIMEZONE block untouched, verbatim', async () => {
+      const vendorBlock = [
+        'BEGIN:VTIMEZONE', 'TZID:AUS Eastern Standard Time',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\r\n');
+      const stored = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', vendorBlock, 'BEGIN:VEVENT',
+        'UID:vendor@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=AUS Eastern Standard Time:20260320T090000', 'DTEND;TZID=AUS Eastern Standard Time:20260320T100000',
+        'SUMMARY:Stored', 'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const { client, mockDAVClient } = updateMockedClient(stored);
+      await client.updateCalendarEvent('vendor@fm', { start: '2026-11-20T09:00:00', end: '2026-11-20T10:00:00' });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(written.includes(vendorBlock), written);
+    });
+  });
+
+  describe('regenerateVTimezones — unbounded recurring series (#166)', () => {
+    // isRecurringSeriesResource refuses every RRULE-bearing updateCalendarEvent call outright
+    // (see recurringSeriesRefusal), so these two scenarios can never reach this function through
+    // the public API today. Exercised directly against hand-built fixtures instead — see this
+    // function's own doc comment in caldav-client.ts.
+    function unboundedSeries(dtstart: string, dtend: string, extraVTimezone?: string): string {
+      return [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        ...(extraVTimezone ? [extraVTimezone] : []),
+        'BEGIN:VEVENT',
+        'UID:series@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'RRULE:FREQ=DAILY', 'SUMMARY:Series',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+    }
+
+    it('leaves the data unchanged when the series already carries a block for its zone', () => {
+      const existingBlock = [
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\r\n');
+      const data = unboundedSeries(
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        existingBlock,
+      );
+      assert.equal(regenerateVTimezones(data, '\r\n'), data);
+    });
+
+    it('refuses to introduce a VTIMEZONE for a zone the unbounded series does not already have one for', () => {
+      const data = unboundedSeries('DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000');
+      assert.throws(
+        () => regenerateVTimezones(data, '\r\n'),
+        /unbounded recurring series/,
+      );
+    });
+
+    it('confirms an unbounded RRULE with no COUNT/UNTIL is detected as unbounded', () => {
+      const vevent = 'BEGIN:VEVENT\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT';
+      assert.equal(isUnboundedSeriesMaster(vevent), true);
+    });
+
+    it('confirms a bounded RRULE (COUNT or UNTIL) is not detected as unbounded', () => {
+      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT'), false);
+      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:FREQ=DAILY;UNTIL=20261231T000000Z\r\nEND:VEVENT'), false);
     });
   });
 });
