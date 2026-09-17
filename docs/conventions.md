@@ -2150,19 +2150,23 @@ be discoverable only by reading the event back.
 
 **The VTIMEZONE residual.** This server writes `DTSTART;TZID=<name>` / `DTEND;TZID=<name>` with
 no accompanying `VTIMEZONE` component — `createCalendarEvent`'s iCal assembly never emits one,
-and never has. Read from Cyrus's own source, not
-verified against a live probe: `caldav_store_resource` (the function behind every `caldav_put`
-path in `imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so a bare `TZID=` reference
-with nothing defining it is accepted at write time. On the server's OWN read/export paths (the
-`GET`/`multiget` handlers in `imap/http_caldav.c`, and the JMAP/JSCalendar converters in
-`imap/jmap_calendar.c` and `imap/jmap_ical.c`), Cyrus re-attaches the matching `VTIMEZONE` itself
-via `icalcomponent_add_required_timezones` (`imap/ical_support.c`) before handing the object back
-out — so a client reading the event back from Fastmail (including this server's own read path)
-always sees a complete, self-describing object regardless of what was actually stored. This is
-also the mechanism `ALLOW_CAL_NOTZ`'s `tzbyref` mode formalises server-side: `strip_vtimezones`
-(`imap/caldav_util.c`) actively REMOVES a client-supplied `VTIMEZONE` on write when the namespace
-allows it, on the same premise — the component is reconstructible from the `TZID` name alone, so
-storing it is pure overhead Cyrus elects not to keep. The residual this leaves: an IANA name ICU
+and never has. `caldav_store_resource` (the function behind every `caldav_put` path in
+`imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so a bare `TZID=` reference with
+nothing defining it is accepted at write time. **It is not repaired on the way out.** Cyrus does
+have a re-attach step, `icalcomponent_add_required_timezones` (`imap/ical_support.c`), called from
+the CalDAV `GET` and `multiget` handlers in `imap/http_caldav.c` — but both call sites sit inside
+`if (cdata->comp_flags.tzbyref)` (`:2600`, `:5713`), and `GET` additionally requires a
+`CalDAV-Timezones: T` request header. `tzbyref` is a per-resource flag set only by
+`strip_vtimezones` (`imap/caldav_util.c:1082`), which runs only under `ALLOW_CAL_NOTZ`: a
+deployment serving time zones by reference strips a client-supplied `VTIMEZONE` at write, marks
+the resource, and re-attaches on read, on the premise that the component is reconstructible from
+the `TZID` name alone. This deployment does not serve them (measured 17 Sep 2026,
+`scripts/probes/calendar-tzdist.probe.mjs`), and this server's resources carry nothing to strip, so
+the flag is never set on them and the re-attach never runs. A client fetching one of these events
+back over CalDAV receives the bare `TZID` exactly as written, which is what #166's fetch-back
+measured. (The JMAP/JSCalendar converters in `imap/jmap_calendar.c` and `imap/jmap_ical.c` also
+call the re-attach; whether those calls carry the same guard was not checked, and this server's
+own read path goes through CalDAV.) The residual this leaves: an IANA name ICU
 resolves but the SERVER's own tzdata does not recognise would round-trip as an unresolvable
 reference with nothing here to catch it before the write — another argument, alongside the ones
 in `validateCallerTimezone` itself, for keeping that gate narrow rather than widening it to
