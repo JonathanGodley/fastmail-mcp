@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, zoneOffsetMsAt, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -2052,6 +2052,34 @@ describe('startOfLocalDayUtcIso', () => {
     // from starting on the wrong date.
     const middayThere = Date.parse('2026-03-08T16:00:00Z');
     assert.equal(startOfLocalDayUtcIso(middayThere, 'America/Havana'), '2026-03-08T05:00:00Z');
+  });
+});
+
+describe('zoneOffsetMsAt', () => {
+  it('floors a sub-second instant to its own whole second, at a Sydney transition boundary', () => {
+    // 2026-10-03T16:00:00Z is Sydney's spring-forward instant (02:00 -> 03:00 local, +10:00 to
+    // +11:00). Reading a sub-second `utcMs` without flooring first reconstructs the SAME
+    // whole-second wall-clock reading (Intl has no sub-second component to read), then subtracts
+    // the UNFLOORED input from it — leaking the sub-second remainder straight into the "offset"
+    // as a spurious few hundred milliseconds, exactly the corruption vtimezone.ts's
+    // bisectTransition comment describes for a caller that skips this floor.
+    const wholeSecondMs = Date.parse('2026-10-03T15:59:59Z');
+    const subSecondMs = wholeSecondMs + 500;
+    assert.equal(zoneOffsetMsAt(subSecondMs, 'Australia/Sydney'), zoneOffsetMsAt(wholeSecondMs, 'Australia/Sydney'));
+  });
+
+  it('does not let a "" zone call cache a null formatter into the SAME slot undefined uses', () => {
+    // "" fails to construct and used to cache null under the SAME key `undefined` (the host
+    // zone) coalesced onto, so a later undefined call reused that null and returned 0 rather
+    // than ever building the host formatter. Checked against `Date.prototype.getTimezoneOffset`
+    // (unrelated to this cache) rather than a second `zoneOffsetMsAt` call, so the assertion
+    // cannot be satisfied by two calls sharing the same corrupted entry. A no-op on a host
+    // actually configured to UTC (this dev machine is Australia/Sydney). Whole-second `ms`,
+    // not `Date.now()`, keeps this independent of the separate floor fix above.
+    const ms = Math.floor(Date.now() / 1000) * 1000;
+    const groundTruthHostOffsetMs = -new Date(ms).getTimezoneOffset() * 60000;
+    zoneOffsetMsAt(ms, '');
+    assert.equal(zoneOffsetMsAt(ms, undefined), groundTruthHostOffsetMs);
   });
 });
 
