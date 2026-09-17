@@ -61,6 +61,9 @@ import { setDefaultTimezone } from './email-formatter.js';
 // renders through, `formatQueryResult` is the one list_calendar_events renders through.
 import { toolJson, isUsableTimezone, resolveCalendarInstantMs, InvalidInputError } from './coerce.js';
 import { buildBrokenCollectionNote, formatQueryResult } from './response-formatters.js';
+// For hand-computing the exact block regenerateVTimezones should produce, so a structural test
+// can assert byte-for-byte equality rather than a handful of substring checks.
+import { generateVTimezone } from './vtimezone.js';
 
 // The mocked DAVClient methods below declare these parameter lists rather than
 // taking no arguments. A `mock.fn(async () => …)` stub records its arguments as an
@@ -6513,6 +6516,22 @@ describe('VTIMEZONE embedding (#166)', () => {
       const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
       assert.ok(!ical.includes('BEGIN:VTIMEZONE'), ical);
     });
+
+    it('joins the embedded block with real CRLF line endings, not a flattened run-on', async () => {
+      const { client, mockDAVClient } = createMockedClient();
+      await client.createCalendarEvent({
+        calendarId: 'Personal', title: 'T',
+        start: '2026-09-20T08:00:00', end: '2026-09-20T09:00:00',
+        timeZone: 'Australia/Sydney',
+      });
+      const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+      // Substring checks alone pass even on a run-on joined with '' (BEGIN:VTIMEZONE and
+      // TZID:... are still adjacent substrings); split on the real separator and check the
+      // exact line array instead.
+      const lines = ical.split('\r\n');
+      assert.ok(lines.includes('BEGIN:VTIMEZONE'), ical);
+      assert.ok(lines.includes('TZID:Australia/Sydney'), ical);
+    });
   });
 
   describe('update_calendar_event', () => {
@@ -6587,6 +6606,96 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
   });
 
+  describe('regenerateVTimezones — span computation and block replacement (#166)', () => {
+    it('computes the span from BOTH DTSTART and DTEND, not just one, when they straddle a DST transition', () => {
+      // Sydney's own 2026 October transition (STANDARD +1000 -> DAYLIGHT +1100 at
+      // 2026-10-04T02:00 local, per src/vtimezone.test.ts). DTSTART sits before it, DTEND
+      // after: using only one end's instant for both the lookback start and the TZUNTIL would
+      // yield a single observance and the wrong TZUNTIL. BEGIN:VEVENT is deliberately the
+      // second line, so the "no VEVENT found" fallback position (append at the very end) is
+      // distinguishable from the real one even when the real index is small.
+      const dtstart = 'DTSTART;TZID=Australia/Sydney:20261003T010000';
+      // 04:00, not 03:00: the transition's own UTC instant coincides exactly with 03:00 local
+      // (clocks jump 02:00 -> 03:00, both readings of the same instant), so 03:00 would sit on
+      // findTransitions' own exclusive boundary rather than safely past it.
+      const dtend = 'DTEND;TZID=Australia/Sydney:20261004T040000';
+      const data = [
+        'BEGIN:VCALENDAR', 'BEGIN:VEVENT',
+        'UID:straddle@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Straddle',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.equal((block.match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 2, block);
+      assert.ok(block.includes('TZOFFSETTO:+1000'), block);
+      assert.ok(block.includes('TZOFFSETTO:+1100'), block);
+      const endMs = resolveCalendarInstantMs('2026-10-04T04:00:00', 'Australia/Sydney');
+      const expectedTzuntil = new Date(endMs).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
+      const lines = result.split('\r\n');
+      assert.equal(lines[0], 'BEGIN:VCALENDAR');
+      assert.equal(lines[1], 'BEGIN:VTIMEZONE');
+      assert.equal(lines[lines.indexOf('BEGIN:VEVENT') - 1], 'END:VTIMEZONE');
+    });
+
+    it('replaces exactly the stale block for the re-zoned TZID, leaving an unrelated zone\'s block untouched and in place', () => {
+      const nyBlock = [
+        'BEGIN:VTIMEZONE', 'TZID:America/New_York',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:-0500', 'TZOFFSETTO:-0500', 'TZNAME:EST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\r\n');
+      const staleSydneyBlock = [
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney', 'TZUNTIL:20260101T000000Z',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\r\n');
+      const dtstart = 'DTSTART;TZID=Australia/Sydney:20260320T090000';
+      const dtend = 'DTEND;TZID=Australia/Sydney:20260320T100000';
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//', nyBlock, staleSydneyBlock,
+        'BEGIN:VEVENT', 'UID:two-blocks@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Two blocks',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const startMs = resolveCalendarInstantMs('2026-03-20T09:00:00', 'Australia/Sydney');
+      const endMs = resolveCalendarInstantMs('2026-03-20T10:00:00', 'Australia/Sydney');
+      const freshSydneyBlock = generateVTimezone('Australia/Sydney', startMs, endMs, '\r\n');
+      const expected = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//', nyBlock, freshSydneyBlock,
+        'BEGIN:VEVENT', 'UID:two-blocks@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Two blocks',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.equal(result, expected);
+    });
+
+    it('returns the data unchanged when there is no VEVENT to read a span from', () => {
+      const data = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR';
+      assert.equal(regenerateVTimezones(data, '\r\n'), data);
+    });
+
+    it('tolerates bare-LF stored data when replacing a stale block', () => {
+      const staleBlock = [
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney', 'TZUNTIL:20260101T000000Z',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\n');
+      const dtstart = 'DTSTART;TZID=Australia/Sydney:20260320T090000';
+      const dtend = 'DTEND;TZID=Australia/Sydney:20260320T100000';
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', staleBlock,
+        'BEGIN:VEVENT', 'UID:lf-only@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:LF',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\n');
+      const result = regenerateVTimezones(data, '\n');
+      assert.ok(!result.includes('TZUNTIL:20260101T000000Z'), result);
+      assert.equal((result.match(/TZID:Australia\/Sydney/g) || []).length, 1, result);
+    });
+  });
+
   describe('regenerateVTimezones — unbounded recurring series (#166)', () => {
     // isRecurringSeriesResource refuses every RRULE-bearing updateCalendarEvent call outright
     // (see recurringSeriesRefusal), so these two scenarios can never reach this function through
@@ -6632,6 +6741,35 @@ describe('VTIMEZONE embedding (#166)', () => {
     it('confirms a bounded RRULE (COUNT or UNTIL) is not detected as unbounded', () => {
       assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT'), false);
       assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:FREQ=DAILY;UNTIL=20261231T000000Z\r\nEND:VEVENT'), false);
+    });
+
+    it('treats an RRULE with no unquoted colon as unbounded — there is no value to read COUNT/UNTIL from', () => {
+      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE;COUNT=5\r\nEND:VEVENT'), true);
+    });
+
+    it('reads COUNT/UNTIL from the property VALUE only, matching at the start of it as well as after a \';\'', () => {
+      // COUNT/UNTIL sits right after the colon here, with no leading "FREQ=...;" — exercises
+      // the value slice's own start boundary and the regex's `^` alternative, not only its `;`
+      // one; a slice that leaked the property name back in, or a regex missing the `^` case,
+      // would both misread this as unbounded.
+      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:COUNT=5\r\nEND:VEVENT'), false);
+      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:UNTIL=20261231T000000Z\r\nEND:VEVENT'), false);
+    });
+
+    it('recognises an existing block for the zone even when the stored data uses bare-LF line endings', () => {
+      const existingBlock = [
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\n');
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', existingBlock,
+        'BEGIN:VEVENT', 'UID:series-lf@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'RRULE:FREQ=DAILY', 'SUMMARY:Series',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\n');
+      assert.equal(regenerateVTimezones(data, '\n'), data);
     });
   });
 });

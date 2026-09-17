@@ -42,6 +42,16 @@ interface Observance {
  * between two day-apart samples can only have one transition behind it. Coarse only in WHERE it
  * looks — each change found is then refined to the exact SECOND by `bisectTransition`.
  *
+ * A real calendar event's own span is almost always well under a day, unlike the day-spaced
+ * sampling grid: `toMs - fromMs < DAY_MS` left the loop below with no sample point inside the
+ * span at all, so a transition strictly between the two endpoints went undetected regardless of
+ * how close either sat to it — an overnight event straddling a clock change generated a
+ * single-observance VTIMEZONE with the wrong (or right-by-luck) offset for whichever end the
+ * lookback happened to match. The tail check closes exactly that gap: once the day-stepping
+ * loop stops short of `toMs` (it always does, unless `toMs - fromMs` happens to be an exact
+ * multiple of `DAY_MS`), one last comparison against `toMs` itself catches a transition in the
+ * remaining partial day the loop never got to sample.
+ *
  * `fromMs` is floored to a whole second first, and stays whole-second-aligned at every sample
  * after that (`DAY_MS` is itself a whole number of seconds) — see `bisectTransition` for why that
  * matters.
@@ -57,6 +67,12 @@ function findTransitions(zone: string, fromMs: number, toMs: number): Transition
       prevOffsetMs = offsetMs;
     }
     prevMs = t;
+  }
+  if (prevMs < toMs) {
+    const offsetMs = zoneOffsetMsAt(toMs, zone);
+    if (offsetMs !== prevOffsetMs) {
+      transitions.push({ utcMs: bisectTransition(zone, prevMs, toMs, prevOffsetMs), fromOffsetMs: prevOffsetMs, toOffsetMs: offsetMs });
+    }
   }
   return transitions;
 }

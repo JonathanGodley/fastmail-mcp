@@ -72,6 +72,23 @@ describe('generateVTimezone', () => {
     assert.equal(daylight!.to, '+1100');
   });
 
+  it('detects a transition even when the span itself is under a day — an overnight event straddling the October transition', () => {
+    // A realistic calendar event's own span is almost always well under 24 hours, unlike the
+    // month-wide spans the other transition tests use. findTransitions samples once every
+    // DAY_MS starting at fromMs + DAY_MS, so a span shorter than that had no sample point
+    // inside it at all — the loop body never ran, and a transition strictly between fromMs and
+    // toMs went undetected regardless of how close either end sat to it.
+    const block = generateVTimezone(
+      'Australia/Sydney',
+      utc('2026-10-03T23:00:00+10:00'),
+      utc('2026-10-04T05:00:00+11:00'),
+    );
+    const obs = observances(block);
+    assert.equal(obs.length, 2, block);
+    assert.ok(obs.some(o => o.kind === 'STANDARD' && o.to === '+1000'), block);
+    assert.ok(obs.some(o => o.kind === 'DAYLIGHT' && o.to === '+1100'), block);
+  });
+
   it('emits the STANDARD onset for America/New_York crossing the November fall-back', () => {
     const block = generateVTimezone(
       'America/New_York',
