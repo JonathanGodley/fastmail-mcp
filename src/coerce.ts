@@ -986,11 +986,22 @@ export function describeTimezone(zone: string | undefined): string {
  * fallback is not reachable in production today. It stays because this is a low-level helper
  * with no way to enforce that every future caller pre-validates its `zone` argument the same
  * way, and because it is covered directly by its own unit tests.
+ *
+ * Exported for `src/vtimezone.ts` (#166), which samples a zone's offset at many instants — a
+ * day-by-day scan across a year plus a span, then a bisection per transition found — to locate
+ * its DST transitions. The formatter is cached per zone (below) for exactly that caller: one
+ * `generateVTimezone` call can make hundreds of these calls, and constructing an
+ * `Intl.DateTimeFormat` is the expensive part of each one.
  */
-function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
-  let parts;
+const zoneOffsetFormatterCache = new Map<string, Intl.DateTimeFormat | null>();
+
+function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
+  const key = zone ?? '';
+  const cached = zoneOffsetFormatterCache.get(key);
+  if (cached !== undefined) return cached;
+  let formatter: Intl.DateTimeFormat | null;
   try {
-    parts = new Intl.DateTimeFormat('en-US', {
+    formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
       hour12: false,
       // ERA IS REQUESTED BECAUSE THE YEAR IS READ BACK, and without it `Intl` prints the
@@ -1003,11 +1014,21 @@ function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
       era: 'short',
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(new Date(utcMs));
+    });
   } catch {
+    formatter = null;
+  }
+  zoneOffsetFormatterCache.set(key, formatter);
+  return formatter;
+}
+
+export function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
+  const formatter = zoneOffsetFormatterFor(zone);
+  if (!formatter) {
     if (zone === undefined) return 0;
     return zoneOffsetMsAt(utcMs, undefined);
   }
+  const parts = formatter.formatToParts(new Date(utcMs));
   const get = (type: string) => Number(parts.find(p => p.type === type)?.value);
   // ISO 8601 / proleptic Gregorian has a year 0; the BC/AD scale does not. 1 BC IS year 0,
   // 2 BC is year -1, so the mapping is `1 - n`.
