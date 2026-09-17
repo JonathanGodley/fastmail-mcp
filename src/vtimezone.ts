@@ -12,6 +12,7 @@
 // separate, harder problem this does not attempt.
 
 import { zoneOffsetMsAt } from './coerce.js';
+import { foldICalLine } from './ical-fold.js';
 
 const SECOND_MS = 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -104,30 +105,6 @@ function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffset
   return highSec * SECOND_MS;
 }
 
-/**
- * Fold a content line at 75 octets (RFC 5545 §3.1).
- *
- * A second copy of `caldav-client.ts`'s `foldICalLine`, not an import of it: that module
- * imports `generateVTimezone` from this one, so importing back would be a cycle. Byte-identical
- * algorithm; exported only so its own fold-width behaviour has direct unit coverage here rather
- * than relying on a generated zone name happening to be long enough to exercise it.
- */
-export function foldVTimezoneLine(line: string, lineEnding: string): string {
-  const parts: string[] = [];
-  while (Buffer.byteLength(line, 'utf8') > 75) {
-    let cut = 75;
-    while (cut > 0 && Buffer.byteLength(line.slice(0, cut), 'utf8') > 75) cut--;
-    if (cut > 0 && cut < line.length) {
-      const code = line.charCodeAt(cut);
-      if (code >= 0xDC00 && code <= 0xDFFF) cut--; // don't split a surrogate pair
-    }
-    parts.push(line.slice(0, cut));
-    line = ' ' + line.slice(cut);
-  }
-  parts.push(line);
-  return parts.join(lineEnding);
-}
-
 function pad(n: number, width = 2): string {
   return String(n).padStart(width, '0');
 }
@@ -160,21 +137,31 @@ function toUtcStamp(utcMs: number): string {
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
 }
 
-const abbreviationFormatterCache = new Map<string, Intl.DateTimeFormat>();
+const abbreviationFormatterCache = new Map<string, Intl.DateTimeFormat | null>();
 
 /** ICU's `en-US` short name for `zone` at `utcMs` (e.g. `AEDT`, or `GMT+11` where ICU has no
  * abbreviation for it) — the `TZNAME` value. Cached per zone for the same reason
- * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times. */
+ * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times.
+ *
+ * Construction failure (a name ICU's `Intl.DateTimeFormat` rejects outright) falls back to
+ * `zone` itself, the same fallback already used below for a formatter that built but has no
+ * abbreviation to offer — mirroring `zoneOffsetMsAt`'s own formatter cache in `coerce.ts`,
+ * which guards the identical construction the same way. */
 function zoneAbbreviation(zone: string, utcMs: number): string {
   let formatter = abbreviationFormatterCache.get(zone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: zone, timeZoneName: 'short',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-    });
+  if (formatter === undefined) {
+    try {
+      formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: zone, timeZoneName: 'short',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      });
+    } catch {
+      formatter = null;
+    }
     abbreviationFormatterCache.set(zone, formatter);
   }
+  if (!formatter) return zone;
   const name = formatter.formatToParts(new Date(utcMs)).find(p => p.type === 'timeZoneName')?.value;
   return name ?? zone;
 }
@@ -249,5 +236,5 @@ export function generateVTimezone(
   }
   lines.push('END:VTIMEZONE');
 
-  return lines.map(l => foldVTimezoneLine(l, lineEnding)).join(lineEnding);
+  return lines.map(l => foldICalLine(l, lineEnding)).join(lineEnding);
 }

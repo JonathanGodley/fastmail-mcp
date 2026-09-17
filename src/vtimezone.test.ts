@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateVTimezone, foldVTimezoneLine } from './vtimezone.js';
+import { generateVTimezone } from './vtimezone.js';
 
 function utc(iso: string): number {
   return Date.parse(iso);
@@ -157,26 +157,17 @@ describe('generateVTimezone', () => {
       assert.ok(obs.name && obs.name.length > 0, block);
     }
   });
-});
 
-describe('foldVTimezoneLine', () => {
-  it('returns short lines unchanged', () => {
-    assert.equal(foldVTimezoneLine('TZID:Australia/Sydney', '\r\n'), 'TZID:Australia/Sydney');
-  });
-
-  it('folds lines longer than 75 octets, continuation lines leading with a space', () => {
-    const long = 'TZID:' + 'x'.repeat(80);
-    const folded = foldVTimezoneLine(long, '\r\n');
-    const lines = folded.split('\r\n');
-    assert.ok(Buffer.byteLength(lines[0], 'utf8') <= 75);
-    assert.ok(lines[1].startsWith(' '));
-  });
-
-  it('keeps every segment within 75 octets for a much longer line', () => {
-    const long = 'TZID:' + 'y'.repeat(200);
-    const folded = foldVTimezoneLine(long, '\r\n');
-    for (const line of folded.split('\r\n')) {
-      assert.ok(Buffer.byteLength(line, 'utf8') <= 75);
+  it('folds a long TZID line at 75 octets, per RFC 5545 §3.1 (shared foldICalLine, #166)', () => {
+    // No real IANA zone name is remotely this long; the fold itself is now `ical-fold.ts`'s own
+    // unit-tested responsibility (shared with caldav-client.ts), so this only needs to prove the
+    // generator actually wires its output through it, with a continuation line to show for it.
+    const zone = 'Fake/' + 'x'.repeat(200);
+    const block = generateVTimezone(zone, utc('2026-06-01T00:00:00Z'), utc('2026-06-01T01:00:00Z'));
+    const lines = block.split('\r\n');
+    for (const line of lines) {
+      assert.ok(Buffer.byteLength(line, 'utf8') <= 75, line);
     }
+    assert.ok(lines.some(l => l.startsWith(' ')), block);
   });
 });

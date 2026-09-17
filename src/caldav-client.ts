@@ -5,6 +5,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
 import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { foldICalLine } from './ical-fold.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
@@ -852,29 +853,9 @@ export function toICalUTC(isoString: string): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 }
 
-/**
- * Fold an iCalendar content line at 75 octets per RFC 5545 §3.1.
- * @param lineEnding Line ending to use for fold breaks (default '\r\n')
- */
-export function foldICalLine(line: string, lineEnding: string = '\r\n'): string {
-  const parts: string[] = [];
-  while (Buffer.byteLength(line, 'utf8') > 75) {
-    // Find the largest character count that fits in 75 bytes
-    let cut = 75;
-    while (cut > 0 && Buffer.byteLength(line.slice(0, cut), 'utf8') > 75) {
-      cut--;
-    }
-    // Don't split a surrogate pair (characters outside BMP like emoji)
-    if (cut > 0 && cut < line.length) {
-      const code = line.charCodeAt(cut);
-      if (code >= 0xDC00 && code <= 0xDFFF) cut--;
-    }
-    parts.push(line.slice(0, cut));
-    line = ' ' + line.slice(cut);
-  }
-  parts.push(line);
-  return parts.join(lineEnding);
-}
+// Re-exported so existing importers of `foldICalLine` from this module keep working — the
+// implementation itself lives in `ical-fold.ts` now, shared with `vtimezone.ts` (#166).
+export { foldICalLine };
 
 /**
  * Detect line ending style from iCal data.
