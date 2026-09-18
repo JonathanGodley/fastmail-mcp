@@ -11,20 +11,22 @@
 //
 // It creates ONE timed event through the BUILT server (dist/index.js, via
 // scripts/mcp-harness.mjs) in Australia/Sydney — a zone with DST, so the block is a real
-// STANDARD/DAYLIGHT observance rather than the single-offset case — on a date deliberately clear
-// of Sydney's own April/October transitions, so the event's short span crosses no transition and
-// carries exactly one observance to check. (The generator's transition-finding and its
-// DAYLIGHT-vs-STANDARD classification across a transition are what src/vtimezone.test.ts proves;
-// this probe is about the wire, not the arithmetic.) It then fetches the stored resource back
-// RAW over CalDAV — bare `fetch`, no tsdav, nothing this server's own parser touches — and
-// checks the bytes themselves:
+// STANDARD/DAYLIGHT observance rather than the single-offset case — sitting directly ON Sydney's
+// own October 2026 spring-forward transition (clocks jump from 02:00 AEST straight to 03:00
+// AEDT), so the event's own short span crosses it and carries exactly two observances to check.
+// (The generator's transition-finding and its DAYLIGHT-vs-STANDARD classification across a
+// transition are what src/vtimezone.test.ts proves; this probe is about the wire, not the
+// arithmetic.) It then fetches the stored resource back RAW over CalDAV — bare `fetch`, no
+// tsdav, nothing this server's own parser touches — and checks the bytes themselves:
 //
 //   - exactly one VTIMEZONE block is present, carrying TZID:Australia/Sydney
 //   - it carries a TZUNTIL equal to the event's own DTEND, in UTC
-//   - its single observance's TZOFFSETTO matches the offset Intl reports for Australia/Sydney
-//     independently, at both the DTSTART and the DTEND instant (computed by this probe's own
-//     Intl call, not by importing src/vtimezone.ts — a shared bug in both would otherwise agree
-//     with itself)
+//   - it carries exactly two observances, one STANDARD and one DAYLIGHT
+//   - the STANDARD observance's TZOFFSETTO matches the pre-transition offset Intl reports for
+//     Australia/Sydney at the DTSTART instant, and the DAYLIGHT observance's TZOFFSETTO matches
+//     the post-transition offset Intl reports at the DTEND instant (both computed by this
+//     probe's own Intl call, not by importing src/vtimezone.ts — a shared bug in both would
+//     otherwise agree with itself)
 //
 // The fixture goes into a temporary collection minted by MKCALENDAR, the same provenance
 // discipline calendar-window-frames.probe.mjs uses: this runs against a live personal account,
@@ -41,7 +43,7 @@
 // three from the local MCP client config. Build first: npm run build.
 
 import { createClient } from '../mcp-harness.mjs';
-import { makeChecker, text, jsonOf } from './probelib.mjs';
+import { makeChecker, text } from './probelib.mjs';
 
 const USERNAME = process.env.FASTMAIL_CALDAV_USERNAME;
 const PASSWORD = process.env.FASTMAIL_CALDAV_PASSWORD;
@@ -154,20 +156,23 @@ try {
     tempCalendarUrl = candidateUrl;
 
     // --- create one timed event through the built server ------------------------------
-    // Well clear of Sydney's own April/October transitions, so this short event carries
-    // exactly one observance — the DAYLIGHT one, Sydney being on daylight time in January.
+    // Straddling Sydney's own 2026-10-04 spring-forward: 02:00 AEST jumps straight to 03:00
+    // AEDT, so a 01:00-04:00 local span sits on both sides and this short event carries exactly
+    // two observances — one STANDARD (pre-transition), one DAYLIGHT (post-transition).
     const createRes = await client.call('create_calendar_event', {
       calendarId: candidateUrl,
       title: 'probe-166 fixture',
-      start: '2027-01-20T09:00:00',
-      end: '2027-01-20T10:00:00',
+      start: '2026-10-04T01:00:00',
+      end: '2026-10-04T04:00:00',
       timeZone: 'Australia/Sydney',
     });
     const createBody = text(createRes);
     // The id never contains '.' or whitespace (`${Date.now()}-${random}@fastmail-mcp`); the
-    // response sentence ends it with a literal period, which a bare \S+ would swallow.
+    // response sentence ends it with a literal period, which a bare \S+ would swallow. Only
+    // whether an id was parsed is ever printed below — the response text itself carries the
+    // event's UID and is never put on stdout.
     const eventId = /Event ID: ([^\s.]+)\.?/.exec(createBody)?.[1];
-    check('create_calendar_event returned an event id', !!eventId, redact(createBody));
+    check('create_calendar_event returned an event id', !!eventId, eventId ? 'an id was parsed' : 'no id was parsed');
     if (!eventId) throw new Error('stopping: no event id to fetch back');
 
     // --- fetch the resource back RAW over CalDAV, exactly as written ------------------
@@ -194,31 +199,41 @@ try {
     const endWall = wallClockOf(dtendLine);
     check('DTSTART/DTEND are still zoned wall clocks, not rewritten', !!startWall && !!endWall, `DTSTART=${dtstartLine.split(':')[0]} DTEND=${dtendLine.split(':')[0]}`);
 
-    // The instant each wall clock names, resolved via the SAME offset this probe computed
-    // independently above (fixed point in one iteration: neither candidate date is within a
-    // day of a transition, so the naive guess is already exact).
+    // The instant each wall clock names, via the same offsetMsAt used above. Both wall clocks
+    // sit deliberately close to the transition, so a single `naive - offsetMsAt(naive)` can read
+    // the offset off the wrong side of it; a second pass, off the first pass's own corrected
+    // instant, converges (neither wall clock falls in the skipped 02:00-03:00 local gap itself).
     const wallToUtcMs = wall => {
       const y = +wall.slice(0, 4), mo = +wall.slice(4, 6), d = +wall.slice(6, 8);
       const h = +wall.slice(9, 11), mi = +wall.slice(11, 13), s = +wall.slice(13, 15);
-      const guess = Date.UTC(y, mo - 1, d, h, mi, s);
-      return guess - offsetMsAt(guess);
+      const naive = Date.UTC(y, mo - 1, d, h, mi, s);
+      const firstPass = naive - offsetMsAt(naive);
+      return naive - offsetMsAt(firstPass);
     };
     const startMs = startWall ? wallToUtcMs(startWall) : NaN;
     const endMs = endWall ? wallToUtcMs(endWall) : NaN;
 
     const obs = observances(block);
-    check('the block carries exactly one observance (span crosses no transition)', obs.length === 1, `found ${obs.length}`);
+    check('the block carries exactly two observances (span crosses the October transition)', obs.length === 2, `found ${obs.length}`);
+    const standardObs = obs.find(o => o.kind === 'STANDARD');
+    const daylightObs = obs.find(o => o.kind === 'DAYLIGHT');
+    check('one observance is STANDARD and the other DAYLIGHT', !!standardObs && !!daylightObs, `kinds=${obs.map(o => o.kind).join(',')}`);
     const expectedOffset = offsetToken(offsetMsAt(startMs));
     const expectedOffsetAtEnd = offsetToken(offsetMsAt(endMs));
     check(
-      'independently-computed offsets at DTSTART and DTEND agree (span crosses no transition)',
-      expectedOffset === expectedOffsetAtEnd,
+      'independently-computed offsets at DTSTART and DTEND differ (the span crosses the transition)',
+      expectedOffset !== expectedOffsetAtEnd,
       `start=${expectedOffset} end=${expectedOffsetAtEnd}`,
     );
     check(
-      "the observance's TZOFFSETTO matches Intl's independently-computed offset",
-      obs[0]?.to === expectedOffset,
-      `block=${obs[0]?.to} intl=${expectedOffset}`,
+      "the STANDARD observance's TZOFFSETTO matches Intl's independently-computed pre-transition offset",
+      standardObs?.to === expectedOffset,
+      `block=${standardObs?.to} intl=${expectedOffset}`,
+    );
+    check(
+      "the DAYLIGHT observance's TZOFFSETTO matches Intl's independently-computed post-transition offset",
+      daylightObs?.to === expectedOffsetAtEnd,
+      `block=${daylightObs?.to} intl=${expectedOffsetAtEnd}`,
     );
 
     const tzuntilLine = (block.match(/^TZUNTIL:(\d{8}T\d{6}Z)$/m) ?? [])[1];
