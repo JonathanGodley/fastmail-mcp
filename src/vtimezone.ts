@@ -11,7 +11,7 @@
 // `VTIMEZONE` needs for CalDAV round-tripping — reproducing a zone's recurrence RULE is a
 // separate, harder problem this does not attempt.
 
-import { zoneOffsetMsAt } from './coerce.js';
+import { zoneOffsetMsAt, InvalidInputError } from './coerce.js';
 import { foldICalLine } from './ical-fold.js';
 
 const SECOND_MS = 1000;
@@ -21,6 +21,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // findable even for a zone whose transitions are six months apart, narrow enough that a
 // day-by-day scan over it stays cheap. 366 covers a leap year's extra day.
 const LOOKBACK_MS = 366 * DAY_MS;
+
+// One day short of 0001-01-01T00:00:00Z: `pad`'s 4-digit year prints a NEGATIVE number (e.g.
+// `pad(-1, 4)` is "00-1", not "-0001") the moment the lookback window reaches back before year
+// 1, since RFC 5545 has no year-0 or negative-year DATE-TIME form to fall back on. Refused
+// outright rather than clamped to year 1: a clamped lookback would misreport which observance
+// was "in force" at a window start that never really existed.
+const MIN_LOOKBACK_START_MS = Date.UTC(1, 0, 2);
 
 interface Transition {
   utcMs: number;
@@ -202,6 +209,9 @@ export function generateVTimezone(
   const spanStartUtcMs = Math.floor(spanStartUtcMsInput / SECOND_MS) * SECOND_MS;
   const spanEndUtcMs = Math.floor(spanEndUtcMsInput / SECOND_MS) * SECOND_MS;
   const lookbackStartMs = spanStartUtcMs - LOOKBACK_MS;
+  if (lookbackStartMs < MIN_LOOKBACK_START_MS) {
+    throw new InvalidInputError('Cannot generate a VTIMEZONE this far back before year 1.');
+  }
   const priorTransitions = findTransitions(zone, lookbackStartMs, spanStartUtcMs);
 
   let initial: Observance;

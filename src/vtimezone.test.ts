@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateVTimezone } from './vtimezone.js';
+import { InvalidInputError } from './coerce.js';
 
 function utc(iso: string): number {
   return Date.parse(iso);
@@ -180,5 +181,15 @@ describe('generateVTimezone', () => {
     assert.equal(obs.length, 1, block);
     assert.equal(obs[0].kind, 'DAYLIGHT');
     assert.equal(obs[0].to, '+1100');
+  });
+
+  it('refuses a span whose lookback window would reach back before year 1', () => {
+    // Unrefused, `pad`'s 4-digit year prints a negative number for a year before 1 (e.g.
+    // `pad(-1, 4)` is "00-1", not "-0001"), producing a malformed DTSTART rather than an error.
+    const spanStart = Date.UTC(1, 0, 15); // 0001-01-15: the 366-day lookback reaches into year 0
+    assert.throws(
+      () => generateVTimezone('UTC', spanStart, spanStart + 1000),
+      InvalidInputError,
+    );
   });
 });
