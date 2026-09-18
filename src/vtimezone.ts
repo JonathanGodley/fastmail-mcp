@@ -219,7 +219,13 @@ export function generateVTimezone(
     ...spanTransitions.map(t => ({ onsetUtcMs: t.utcMs, fromOffsetMs: t.fromOffsetMs, toOffsetMs: t.toOffsetMs })),
   ];
 
-  const distinctOffsets = Array.from(new Set(observances.map(o => o.toOffsetMs)));
+  // Both offsets of every observance, not just what it changes TO: a span with a single
+  // observance (no transition inside it) still has a `fromOffsetMs` inherited from whatever
+  // observance preceded it — a Sydney span sitting entirely inside daylight saving carries only
+  // one observance, `to: +1100`, but its `from: +1000` is what makes the +1000/+1100 PAIR
+  // visible at all. Reading `to` alone saw one offset, called the zone fixed-offset, and
+  // labelled that lone DAYLIGHT observance STANDARD.
+  const distinctOffsets = Array.from(new Set(observances.flatMap(o => [o.fromOffsetMs, o.toOffsetMs])));
   const daylightOffsetMs = distinctOffsets.length > 1 ? Math.max(...distinctOffsets) : null;
 
   const lines: string[] = ['BEGIN:VTIMEZONE', `TZID:${zone}`, `TZUNTIL:${toUtcStamp(spanEndUtcMs)}`];

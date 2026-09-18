@@ -170,4 +170,15 @@ describe('generateVTimezone', () => {
     }
     assert.ok(lines.some(l => l.startsWith(' ')), block);
   });
+
+  it('labels a lone observance DAYLIGHT when it is the higher of the two offsets a prior transition set up, even with no transition IN the span', () => {
+    // January is peak daylight saving in Sydney (+1100), reached by the October transition
+    // outside this span. Classifying by `to`-offsets alone saw one distinct value here and
+    // called the zone fixed-offset, mislabelling this DAYLIGHT observance STANDARD.
+    const block = generateVTimezone('Australia/Sydney', utc('2027-01-05T00:00:00+11:00'), utc('2027-01-06T00:00:00+11:00'));
+    const obs = observances(block);
+    assert.equal(obs.length, 1, block);
+    assert.equal(obs[0].kind, 'DAYLIGHT');
+    assert.equal(obs[0].to, '+1100');
+  });
 });
