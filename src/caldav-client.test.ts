@@ -27,7 +27,6 @@ import {
   removeAllICalProperties,
   removeOrphanedVTimezones,
   regenerateVTimezones,
-  isUnboundedSeriesMaster,
   removeExceptionVEvents,
   insertBeforeEndVEvent,
   validateAttendeeEmail,
@@ -6696,80 +6695,28 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
   });
 
-  describe('regenerateVTimezones — unbounded recurring series (#166)', () => {
-    // isRecurringSeriesResource refuses every RRULE-bearing updateCalendarEvent call outright
-    // (see recurringSeriesRefusal), so these two scenarios can never reach this function through
-    // the public API today. Exercised directly against hand-built fixtures instead — see this
-    // function's own doc comment in caldav-client.ts.
-    function unboundedSeries(dtstart: string, dtend: string, extraVTimezone?: string): string {
-      return [
-        'BEGIN:VCALENDAR', 'VERSION:2.0',
-        ...(extraVTimezone ? [extraVTimezone] : []),
-        'BEGIN:VEVENT',
+  describe('regenerateVTimezones — recurring VEVENT invariant (#166)', () => {
+    // isRecurringSeriesResource refuses every RRULE/RDATE-bearing updateCalendarEvent call
+    // outright (see recurringSeriesRefusal), so this can never fire through the public API
+    // today — exercised directly against hand-built fixtures as the invariant statement it is.
+    it('refuses a VEVENT carrying RRULE or RDATE, rather than computing a span from a single occurrence', () => {
+      const withRrule = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
         'UID:series@fm', 'DTSTAMP:20260301T000000Z',
-        dtstart, dtend, 'RRULE:FREQ=DAILY', 'SUMMARY:Series',
-        'END:VEVENT', 'END:VCALENDAR',
-      ].join('\r\n');
-    }
-
-    it('leaves the data unchanged when the series already carries a block for its zone', () => {
-      const existingBlock = [
-        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
-        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
-        'END:VTIMEZONE',
-      ].join('\r\n');
-      const data = unboundedSeries(
-        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
-        existingBlock,
-      );
-      assert.equal(regenerateVTimezones(data, '\r\n'), data);
-    });
-
-    it('refuses to introduce a VTIMEZONE for a zone the unbounded series does not already have one for', () => {
-      const data = unboundedSeries('DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000');
-      assert.throws(
-        () => regenerateVTimezones(data, '\r\n'),
-        /unbounded recurring series/,
-      );
-    });
-
-    it('confirms an unbounded RRULE with no COUNT/UNTIL is detected as unbounded', () => {
-      const vevent = 'BEGIN:VEVENT\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT';
-      assert.equal(isUnboundedSeriesMaster(vevent), true);
-    });
-
-    it('confirms a bounded RRULE (COUNT or UNTIL) is not detected as unbounded', () => {
-      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:FREQ=DAILY;COUNT=5\r\nEND:VEVENT'), false);
-      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:FREQ=DAILY;UNTIL=20261231T000000Z\r\nEND:VEVENT'), false);
-    });
-
-    it('treats an RRULE with no unquoted colon as unbounded — there is no value to read COUNT/UNTIL from', () => {
-      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE;COUNT=5\r\nEND:VEVENT'), true);
-    });
-
-    it('reads COUNT/UNTIL from the property VALUE only, matching at the start of it as well as after a \';\'', () => {
-      // COUNT/UNTIL sits right after the colon here, with no leading "FREQ=...;" — exercises
-      // the value slice's own start boundary and the regex's `^` alternative, not only its `;`
-      // one; a slice that leaked the property name back in, or a regex missing the `^` case,
-      // would both misread this as unbounded.
-      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:COUNT=5\r\nEND:VEVENT'), false);
-      assert.equal(isUnboundedSeriesMaster('BEGIN:VEVENT\r\nRRULE:UNTIL=20261231T000000Z\r\nEND:VEVENT'), false);
-    });
-
-    it('recognises an existing block for the zone even when the stored data uses bare-LF line endings', () => {
-      const existingBlock = [
-        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
-        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
-        'END:VTIMEZONE',
-      ].join('\n');
-      const data = [
-        'BEGIN:VCALENDAR', 'VERSION:2.0', existingBlock,
-        'BEGIN:VEVENT', 'UID:series-lf@fm', 'DTSTAMP:20260301T000000Z',
         'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
         'RRULE:FREQ=DAILY', 'SUMMARY:Series',
         'END:VEVENT', 'END:VCALENDAR',
-      ].join('\n');
-      assert.equal(regenerateVTimezones(data, '\n'), data);
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(withRrule, '\r\n'), /recurring VEVENT/);
+
+      const withRdate = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:rdate@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'RDATE;TZID=Australia/Sydney:20260327T090000', 'SUMMARY:Series',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(withRdate, '\r\n'), /recurring VEVENT/);
     });
   });
 });

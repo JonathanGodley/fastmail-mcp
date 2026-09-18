@@ -2269,19 +2269,6 @@ function zonedInstantSpans(frames: DatePropertyFrame[]): Map<string, { minMs: nu
 }
 
 /**
- * True when `vevent`'s RRULE (RFC 5545 §3.8.5.3) has no `COUNT` and no `UNTIL` — an unbounded
- * series with no last occurrence. `regenerateVTimezones` reads this because there is no span a
- * `TZUNTIL` could honestly cover for a series that never ends.
- */
-export function isUnboundedSeriesMaster(vevent: string): boolean {
-  return parseAllICalProperties(vevent, 'RRULE').some(line => {
-    const colonIdx = findValueBoundary(line);
-    const value = colonIdx === -1 ? '' : line.slice(colonIdx + 1);
-    return !/(^|;)(COUNT|UNTIL)=/.test(value);
-  });
-}
-
-/**
  * Every VTIMEZONE block in `lines`, with its TZID and its line-index span (inclusive of both
  * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`) — the same structural scan `removeOrphanedVTimezones`
  * uses, kept separate from it because these two callers splice on the result rather than only
@@ -2304,10 +2291,6 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
     }
   }
   return blocks;
-}
-
-function hasVTimezoneBlockFor(icalData: string, tzid: string): boolean {
-  return extractVTimezoneBlocks(icalData.split(/\r?\n/)).some(b => zoneNamesEqual(b.tzid, tzid));
 }
 
 /**
@@ -2344,16 +2327,22 @@ function insertVTimezoneBlock(icalData: string, block: string, lineEnding: strin
  * overwritten again below it — and before `removeOrphanedVTimezones`, which then drops any block
  * (this function's included) that the patched event no longer references at all.
  *
- * Exported, and directly unit-tested with hand-built RRULE fixtures, rather than folded silently
- * into `updateCalendarEvent`'s body: `isRecurringSeriesResource` refuses every RRULE-bearing
- * update before this point ever runs, so the unbounded-series branch below cannot fire through
- * the public API today. It is kept and tested anyway as the VTIMEZONE half of the primitive
- * `removeExceptionVEvents` already names as what a series-aware update needs back (#146) — a
- * future series-aware update inherits a tested VTIMEZONE story instead of a fresh guess at one.
+ * Exported, and directly unit-tested with hand-built fixtures, rather than folded silently into
+ * `updateCalendarEvent`'s body: `isRecurringSeriesResource` refuses every RRULE/RDATE-bearing
+ * update before this point ever runs, so the invariant check just below cannot fire through the
+ * public API today. A series-aware span (the series' LAST occurrence, not the master) is
+ * designed under #146.
  */
 export function regenerateVTimezones(icalData: string, lineEnding: string): string {
   const vevent = extractVEvent(icalData);
   if (!vevent) return icalData;
+
+  if (hasICalProperty(vevent, 'RRULE') || hasICalProperty(vevent, 'RDATE')) {
+    throw new InvalidInputError(
+      'Cannot compute a VTIMEZONE span for a recurring VEVENT (RRULE/RDATE present) — a single ' +
+      'occurrence\'s own DTSTART/DTEND is the wrong span for a series.'
+    );
+  }
 
   const startLine = parseAllICalProperties(vevent, 'DTSTART')[0];
   const endLine = parseAllICalProperties(vevent, 'DTEND')[0];
@@ -2361,23 +2350,6 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
     .filter((l): l is string => l !== undefined)
     .map(l => describeDateProperty(l));
   const spans = zonedInstantSpans(frames);
-
-  if (isUnboundedSeriesMaster(vevent)) {
-    // No last occurrence, so no span a TZUNTIL could honestly cover. A zone this series was
-    // already carrying a block for is left exactly as it stood; a genuinely new one has no
-    // existing block to fall back on, so re-zoning an unbounded series is refused rather than
-    // given a TZUNTIL that is wrong the moment the series recurs past this span.
-    for (const tzid of spans.keys()) {
-      if (!hasVTimezoneBlockFor(icalData, tzid)) {
-        throw new InvalidInputError(
-          `Cannot compute a VTIMEZONE for time zone "${echoCallerText(tzid, ZONE_ECHO_LIMIT)}" on an ` +
-          `unbounded recurring series — it has no last occurrence, so there is no span a VTIMEZONE ` +
-          `could honestly cover. Re-zoning an unbounded series is not supported.`
-        );
-      }
-    }
-    return icalData;
-  }
 
   let result = icalData;
   for (const [tzid, span] of spans) {

@@ -2173,11 +2173,13 @@ it either — the same argument, alongside the ones in `validateCallerTimezone` 
 that gate narrow rather than widening it to accept anything ICU-shaped; (2) a `TZID` ICU cannot
 resolve at all (a vendor id from an external invite) is passed through untouched, on a stored
 event or a freshly patched one alike — there being no ICU data to generate a replacement from, its
-existing block (if any) is left exactly as found rather than stripped; (3) a recurring series
-carrying `RRULE` with no `COUNT`/`UNTIL` has no span a `VTIMEZONE` could honestly cover, so
-introducing a new zone on one is refused — moot today, since `update_calendar_event` already
-refuses every repeating event outright (`recurringSeriesRefusal`), but kept as a defended
-invariant in `regenerateVTimezones` for whenever a series-aware update exists to reach it.
+existing block (if any) is left exactly as found rather than stripped; (3) `regenerateVTimezones`
+refuses outright on any VEVENT carrying `RRULE` or `RDATE` — a single occurrence's own
+DTSTART/DTEND is the wrong span for a series, which has no one instant range a `TZUNTIL` could
+honestly cover. This is a defended invariant rather than a live path: `update_calendar_event`
+already refuses every repeating event outright (`recurringSeriesRefusal`), so the check can never
+fire through the public API today. A series-aware span (the series' LAST occurrence, not the
+master) is designed under #146.
 
 ### A calendar window's DAY is a local day
 
