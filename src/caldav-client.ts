@@ -2243,29 +2243,46 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
 }
 
 /**
- * The UTC instant range each usable zoned TZID among `frames` needs a VTIMEZONE to cover —
- * keyed on the TZID string as WRITTEN (not canonicalised), so the generated block's own `TZID:`
- * line matches the parameter a reader will look it up by. A frame that is `date`/`floating`/
- * `utc`, or whose TZID `isUsableTimezone` rejects (a vendor id like `AUS Eastern Standard
- * Time`), contributes nothing: there is no zone to generate for the first three, and no ICU
- * data to generate FROM for the fourth — see `validateDateConsistency`'s own stand-down on the
- * same check for why an unresolvable name is left alone rather than refused.
+ * The literal TZID spelling of every usable zoned frame among `frames` — as WRITTEN, not
+ * canonicalised, so each generated block's own `TZID:` line matches the parameter a reader will
+ * look it up by. Two alias-equivalent but differently spelled TZIDs (`US/Pacific` and
+ * `America/Los_Angeles`) each get their own entry: a VEVENT referencing both needs one block per
+ * spelling actually on the wire, not one per zone identity (#166 round-1 review item 2). A frame
+ * that is `date`/`floating`/`utc`, or whose TZID `isUsableTimezone` rejects (a vendor id like
+ * `AUS Eastern Standard Time`), contributes nothing — see `validateDateConsistency`'s own
+ * stand-down on the same check for why an unresolvable name is left alone rather than refused.
  */
-function zonedInstantSpans(frames: DatePropertyFrame[]): Map<string, { minMs: number; maxMs: number }> {
-  const spans = new Map<string, { minMs: number; maxMs: number }>();
+function referencedZoneTzids(frames: DatePropertyFrame[]): Set<string> {
+  const tzids = new Set<string>();
   for (const frame of frames) {
+    if (frame.frame === 'zoned' && frame.tzid && isUsableTimezone(frame.tzid)) tzids.add(frame.tzid);
+  }
+  return tzids;
+}
+
+/**
+ * The UTC instant each labelled, usable zoned frame resolves to — feeding ONE combined span
+ * across every zone a VEVENT references (#166 round-1 review item 1), rather than a separate
+ * span per zone. A cross-zone event (DTSTART in one zone, DTEND in another — a flight) needs
+ * BOTH zones' VTIMEZONE blocks to cover the SAME [min,max] range: the departure zone's block
+ * must still cover the moment the event moves into the arrival zone, not stop at its own single
+ * instant.
+ *
+ * `label` names the source property in the thrown message: a frame whose value cannot be
+ * resolved to an instant throws rather than being silently skipped (#166 round-1 review item 4)
+ * — a span silently missing one of its two endpoints is a wrong span, not a smaller correct one.
+ */
+function collectZoneInstants(labeled: Array<{ label: string; frame: DatePropertyFrame }>): number[] {
+  const instants: number[] = [];
+  for (const { label, frame } of labeled) {
     if (frame.frame !== 'zoned' || !frame.tzid || !isUsableTimezone(frame.tzid)) continue;
     const ms = resolveCalendarInstantMs(formatICalDate(frame.value), frame.tzid);
-    if (Number.isNaN(ms)) continue;
-    const existing = spans.get(frame.tzid);
-    if (existing) {
-      existing.minMs = Math.min(existing.minMs, ms);
-      existing.maxMs = Math.max(existing.maxMs, ms);
-    } else {
-      spans.set(frame.tzid, { minMs: ms, maxMs: ms });
+    if (Number.isNaN(ms)) {
+      throw new InvalidInputError(`Cannot resolve ${label} to an instant for VTIMEZONE generation.`);
     }
+    instants.push(ms);
   }
-  return spans;
+  return instants;
 }
 
 /**
@@ -2353,15 +2370,56 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
 
   const startLine = parseAllICalProperties(vevent, 'DTSTART')[0];
   const endLine = parseAllICalProperties(vevent, 'DTEND')[0];
-  const frames = [startLine, endLine]
-    .filter((l): l is string => l !== undefined)
-    .map(l => describeDateProperty(l));
-  const spans = zonedInstantSpans(frames);
+  // Only DTSTART, DTEND, and DURATION (RFC 5545 §3.6.1's alternative to DTEND) bound the
+  // VEVENT's own occurrence — nothing else in the component defines an instant range a
+  // VTIMEZONE needs to cover.
+  const startFrame = startLine ? describeDateProperty(startLine) : undefined;
+  const endFrame = endLine ? describeDateProperty(endLine) : undefined;
+  const frames = [startFrame, endFrame].filter((f): f is DatePropertyFrame => f !== undefined);
 
+  const zoneTzids = referencedZoneTzids(frames);
+  if (zoneTzids.size === 0) return icalData;
+
+  const labeled: Array<{ label: string; frame: DatePropertyFrame }> = [];
+  if (startFrame) labeled.push({ label: 'DTSTART', frame: startFrame });
+  if (endFrame) labeled.push({ label: 'DTEND', frame: endFrame });
+  const instants = collectZoneInstants(labeled);
+
+  // DTEND absent, DURATION present: derive the implicit end from DTSTART + DURATION. The
+  // computed end shares DTSTART's own zone (DURATION carries no TZID of its own), so it extends
+  // this SAME combined span rather than introducing a second zone (#166 round-1 review item 1).
+  if (!endLine && startFrame && startFrame.frame === 'zoned' && startFrame.tzid && isUsableTimezone(startFrame.tzid)) {
+    const durationLine = parseAllICalProperties(vevent, 'DURATION')[0];
+    if (durationLine) {
+      const colonIdx = findValueBoundary(durationLine);
+      const durationValue = colonIdx === -1 ? '' : durationLine.slice(colonIdx + 1).trim();
+      const startIso = formatICalDate(startFrame.value);
+      const endIso = startIso ? parseICalDuration(durationValue, startIso) : undefined;
+      if (endIso) {
+        const endMs = resolveCalendarInstantMs(endIso, startFrame.tzid);
+        if (Number.isNaN(endMs)) {
+          throw new InvalidInputError('Cannot resolve DURATION to an instant for VTIMEZONE generation.');
+        }
+        instants.push(endMs);
+      }
+    }
+  }
+
+  const spanMinMs = Math.min(...instants);
+  const spanMaxMs = Math.max(...instants);
+
+  // Strip every referenced zone's stored block(s) FIRST, then insert one freshly generated block
+  // per literal TZID spelling — never interleaved strip-then-insert per zone. Interleaving left
+  // a dangling TZID when two referenced zones were alias-equivalent but differently spelled
+  // (`US/Pacific` and `America/Los_Angeles`): `stripVTimezoneBlockFor` matches by zone IDENTITY
+  // (`zoneNamesEqual`), so stripping the SECOND alias-equal spelling also removed the block the
+  // first iteration had just inserted for the first spelling (#166 round-1 review item 2).
   let result = icalData;
-  for (const [tzid, span] of spans) {
+  for (const tzid of zoneTzids) {
     result = stripVTimezoneBlockFor(result, tzid);
-    result = insertVTimezoneBlock(result, generateVTimezone(tzid, span.minMs, span.maxMs, lineEnding), lineEnding);
+  }
+  for (const tzid of zoneTzids) {
+    result = insertVTimezoneBlock(result, generateVTimezone(tzid, spanMinMs, spanMaxMs, lineEnding), lineEnding);
   }
   return result;
 }
@@ -5014,10 +5072,20 @@ export class CalDAVCalendarClient {
     // (see vtimezone.ts) rather than left for Cyrus to fill in: Cyrus's own attacher
     // (`icalcomponent_add_required_timezones`) runs on the JMAP write path, gated behind a
     // `tzbyref` capability this deployment does not advertise, so a CalDAV PUT — this one — never
-    // gets it (docs/conventions.md). One block per distinct usable TZID start/end actually use.
-    const vtimezoneBlocks = Array.from(
-      zonedInstantSpans([startFrame, endFrame]),
-      ([tzid, span]) => generateVTimezone(tzid, span.minMs, span.maxMs, '\r\n'),
+    // gets it (docs/conventions.md). One block per distinct usable literal TZID start/end
+    // actually use, every block covering the SAME combined [min,max] instant range rather than
+    // its own zone's narrower span — a cross-zone event (DTSTART in one zone, DTEND in another,
+    // e.g. a flight) needs BOTH zones' blocks to reach the OTHER zone's endpoint too, or the
+    // departure zone's block would stop covering the moment the event moves into the arrival
+    // zone (#166 round-1 review item 1).
+    const createZoneTzids = referencedZoneTzids([startFrame, endFrame]);
+    const createInstants = collectZoneInstants([
+      { label: 'start', frame: startFrame },
+      { label: 'end', frame: endFrame },
+    ]);
+    const vtimezoneBlocks = createInstants.length === 0 ? [] : Array.from(
+      createZoneTzids,
+      tzid => generateVTimezone(tzid, Math.min(...createInstants), Math.max(...createInstants), '\r\n'),
     );
 
     const icalLines = [

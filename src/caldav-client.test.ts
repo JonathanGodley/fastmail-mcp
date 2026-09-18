@@ -5369,19 +5369,25 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     });
   }
 
-  it('stands down when the stored side of a cross-zone pair holds a value naming no instant', async () => {
+  it('refuses a cross-zone update when the stored side of the pair holds a value naming no instant', async () => {
     // Both zones resolve; the stored END's value does not parse as a date at all, which a
-    // third-party client is free to have written. There is nothing to order on, so the edit
-    // goes through rather than being refused on a reading this server does not have - the same
-    // answer an unresolvable zone gets, for the same reason.
+    // third-party client is free to have written. validateDateConsistency still stands down on
+    // ordering here (nothing to order on), but regenerateVTimezones now computes ONE combined
+    // span shared by every referenced zone (#166 round-1 review item 1) — silently dropping this
+    // endpoint the way a per-zone `continue` once did would corrupt the shared span used for the
+    // OTHER, genuinely resolvable zone too, so this refuses instead (item 4). Unlike the vendor
+    // TZID stand-down above, there was never an instant here to lose in the first place.
     const garbageEnd = stored(
       'garbage@fm',
       'DTSTART;TZID=America/New_York:20260320T060000',
       'DTEND;TZID=Europe/Rome:whenever',
     );
     const { client, mockDAVClient } = mockClient(garbageEnd);
-    await client.updateCalendarEvent('garbage@fm', { start: '2026-03-20T07:00:00' });
-    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
+    await assert.rejects(
+      () => client.updateCalendarEvent('garbage@fm', { start: '2026-03-20T07:00:00' }),
+      /Cannot resolve DTEND to an instant/,
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
   });
 
   it('accepts a start change on a DURATION-based event with no stored DTEND', async () => {
@@ -6707,6 +6713,78 @@ describe('VTIMEZONE embedding (#166)', () => {
         'END:VEVENT', 'END:VCALENDAR',
       ].join('\r\n');
       assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+    });
+
+    it('computes the span from DTSTART + DURATION when DTEND is absent, after a start-only update', () => {
+      // Same Sydney October transition the DTSTART/DTEND test above uses. No stored DTEND: the
+      // 6-hour DURATION (RFC 5545 §3.6.1's alternative to DTEND) has to supply the span's real
+      // end, and that computed end crosses the transition just as a real DTEND would (#166
+      // round-1 review item 1). The DURATION-derived end is naive wall-clock arithmetic
+      // (23:00 + 6h = 05:00 the next day), not real elapsed time, matching parseICalDuration's
+      // own floating-value behaviour.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:duration-span@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20261003T230000', 'DURATION:PT6H', 'SUMMARY:Duration',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.equal((block.match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 2, block);
+      const endMs = resolveCalendarInstantMs('2026-10-04T05:00:00', 'Australia/Sydney');
+      const expectedTzuntil = new Date(endMs).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
+    });
+
+    it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166 review item 1)', () => {
+      // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span (the old
+      // per-zone behaviour) would leave the departure zone's block stopping at takeoff instead
+      // of covering the moment the event moves into the arrival zone — both blocks must share
+      // ONE combined [min,max] range instead.
+      const dtstart = 'DTSTART;TZID=America/New_York:20260320T090000';
+      const dtend = 'DTEND;TZID=Europe/London:20260320T150000';
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:cross-zone@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Flight',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const endMs = resolveCalendarInstantMs('2026-03-20T15:00:00', 'Europe/London');
+      const expectedTzuntil = new Date(endMs).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      const blocks = [...result.matchAll(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/g)].map(m => m[0]);
+      assert.equal(blocks.length, 2, result);
+      const nyBlock = blocks.find(b => b.includes('TZID:America/New_York'));
+      const londonBlock = blocks.find(b => b.includes('TZID:Europe/London'));
+      assert.ok(nyBlock && nyBlock.includes(`TZUNTIL:${expectedTzuntil}`), result);
+      assert.ok(londonBlock && londonBlock.includes(`TZUNTIL:${expectedTzuntil}`), result);
+    });
+
+    it('gives an alias pair (differently spelled but zone-identical TZIDs) each their own literal block, none dangling (#166 review item 2)', () => {
+      // US/Pacific and America/Los_Angeles name the same physical zone. Stripping and inserting
+      // one zone at a time — strip US/Pacific, insert US/Pacific, strip America/Los_Angeles,
+      // insert America/Los_Angeles — let the second strip (alias-equal to the first) remove the
+      // block the first iteration had JUST inserted, since stripVTimezoneBlockFor matches by
+      // zone identity, not literal spelling. Only a stale block for one spelling exists to start
+      // with, standing in for "start-only update, end already stored under the other spelling".
+      const staleBlock = [
+        'BEGIN:VTIMEZONE', 'TZID:US/Pacific',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:-0800', 'TZOFFSETTO:-0800', 'TZNAME:PST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\r\n');
+      const dtstart = 'DTSTART;TZID=US/Pacific:20260320T090000';
+      const dtend = 'DTEND;TZID=America/Los_Angeles:20260320T100000';
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', staleBlock,
+        'BEGIN:VEVENT', 'UID:alias-pair@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Alias pair',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      let result = regenerateVTimezones(data, '\r\n');
+      result = removeOrphanedVTimezones(result);
+      assert.ok(result.includes('TZID:US/Pacific'), result);
+      assert.ok(result.includes('TZID:America/Los_Angeles'), result);
+      assert.equal((result.match(/BEGIN:VTIMEZONE/g) || []).length, 2, result);
     });
   });
 
