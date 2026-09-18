@@ -2159,11 +2159,15 @@ way — its two CalDAV call sites (`imap/http_caldav.c:2600`, `:5713`) sit insid
 `if (cdata->comp_flags.tzbyref)`, a per-resource flag set only by `strip_vtimezones`
 (`imap/caldav_util.c:1082`) under `ALLOW_CAL_NOTZ`, which this deployment does not enable
 (measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
-data distribution served here for the generator to draw from instead (same probe, same date): the
-tzdist service answers none of the three routes it tries. (The JMAP/JSCalendar converters in
-`imap/jmap_calendar.c` and `imap/jmap_ical.c` also call the re-attach; whether those calls carry
-the same guard was not checked, and this server's own read/write path goes through CalDAV either
-way — a client fetching one of these events back now finds the generated block already there.)
+data distribution served here for the generator to draw from instead (same probe, same date): all
+four routes the probe tries to discover the tzdist base URL come back empty, so none of the three
+conditions it checks (the service answering at all, a named zone returning one parseable
+VTIMEZONE, and start/end truncation being honoured) can even be exercised. (The JMAP/JSCalendar
+converters carry the same guard on one side, not the other: `imap/jmap_ical.c:8190` calls
+`icalcomponent_add_required_timezones` unconditionally on its write path — no `tzbyref` check
+anywhere nearby — while `imap/jmap_calendar.c`'s call site was not checked; either way this
+server's own read/write path goes through CalDAV, never JMAP, so neither call site's guard, or
+lack of one, changes what a client fetching one of these events back here finds.)
 `createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`
 regenerates it whenever `start`/`end` changes (stripping the stale one first, so a moved event's
 `TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain,

@@ -5070,9 +5070,10 @@ export class CalDAVCalendarClient {
 
     // RFC 5545 §3.6.5 requires a VTIMEZONE for every TZID a component uses. Generated from ICU
     // (see vtimezone.ts) rather than left for Cyrus to fill in: Cyrus's own attacher
-    // (`icalcomponent_add_required_timezones`) runs on the JMAP write path, gated behind a
-    // `tzbyref` capability this deployment does not advertise, so a CalDAV PUT — this one — never
-    // gets it (docs/conventions.md). One block per distinct usable literal TZID start/end
+    // (`icalcomponent_add_required_timezones`) has a CalDAV call site too, but THAT one — unlike
+    // the unconditional JMAP write-path call at `imap/jmap_ical.c:8190` — sits behind a
+    // `tzbyref` capability this deployment does not advertise (docs/conventions.md), so a CalDAV
+    // PUT — this one — never gets it. One block per distinct usable literal TZID start/end
     // actually use, every block covering the SAME combined [min,max] instant range rather than
     // its own zone's narrower span — a cross-zone event (DTSTART in one zone, DTEND in another,
     // e.g. a flight) needs BOTH zones' blocks to reach the OTHER zone's endpoint too, or the

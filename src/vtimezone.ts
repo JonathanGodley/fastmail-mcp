@@ -192,9 +192,9 @@ function zoneAbbreviation(zone: string, utcMs: number): string {
  * advances the clock in every hemisphere, so this holds regardless of which side of the equator
  * `zone` is on — and a zone with only one offset in range is `STANDARD` outright.
  *
- * `TZUNTIL` (a Cyrus/Apple extension, not in RFC 5545 itself) is always set to `spanEndUtcMs`,
- * matching the bound Cyrus's own `icalcomponent_add_required_timezones` puts on the block it
- * attaches server-side — see `docs/conventions.md`'s VTIMEZONE section.
+ * `TZUNTIL` (RFC 7808 §7.2, not RFC 5545 itself — a later RFC, not a vendor extension) is always
+ * set to `spanEndUtcMs`, matching the bound Cyrus's own `icalcomponent_add_required_timezones`
+ * puts on the block it attaches server-side — see `docs/conventions.md`'s VTIMEZONE section.
  */
 export function generateVTimezone(
   zone: string,
