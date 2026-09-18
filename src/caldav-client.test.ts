@@ -6693,6 +6693,21 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(!result.includes('TZUNTIL:20260101T000000Z'), result);
       assert.equal((result.match(/TZID:Australia\/Sydney/g) || []).length, 1, result);
     });
+
+    it('refuses a stored resource whose VTIMEZONE block is missing its END:VTIMEZONE', () => {
+      // Previously silently discarded rather than refused, leaving the malformed original block
+      // untouched and inserting a second, fresh one beside it — a stored resource this broken
+      // cannot be edited safely at all.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'BEGIN:VEVENT', 'UID:malformed@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'SUMMARY:Malformed',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+    });
   });
 
   describe('regenerateVTimezones — recurring VEVENT invariant (#166)', () => {

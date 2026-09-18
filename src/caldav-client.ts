@@ -2284,7 +2284,14 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
       for (let j = i + 1; j < lines.length; j++) {
         if (structuralLine(lines[j]) === 'END:VTIMEZONE') { end = j; break; }
       }
-      if (end === -1) break;
+      // An unterminated block used to `break` here, silently discarding the scan — the caller
+      // (stripVTimezoneBlockFor) then reported zero blocks for a resource that plainly has one,
+      // and went on to insert a fresh block beside the untouched, still-malformed original
+      // rather than replacing it. A stored resource this broken cannot be edited safely at all,
+      // so it is refused outright instead.
+      if (end === -1) {
+        throw new InvalidInputError('Stored calendar resource has an unterminated VTIMEZONE block.');
+      }
       const tzid = (parseICalValue(lines.slice(start, end + 1).join('\n'), 'TZID') || '').trim();
       blocks.push({ tzid, start, end });
       i = end;
