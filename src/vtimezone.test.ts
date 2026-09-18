@@ -192,4 +192,59 @@ describe('generateVTimezone', () => {
       InvalidInputError,
     );
   });
+
+  it('gives Sydney\'s STANDARD and DAYLIGHT observances distinct TZNAMEs, each a plausible shape (#166 review item 12)', () => {
+    // A TZNAME mutation that always emitted the SAME string for every observance, or one that
+    // stopped constraining its shape to an abbreviation/GMT-offset form at all, would pass every
+    // other test here — none of them compares the two names to each other.
+    const block = generateVTimezone(
+      'Australia/Sydney',
+      utc('2026-09-20T00:00:00+10:00'),
+      utc('2026-10-20T00:00:00+11:00'),
+    );
+    const obs = observances(block);
+    assert.equal(obs.length, 2, block);
+    for (const o of obs) {
+      assert.ok(/^[A-Za-z]+$/.test(o.name) || /^GMT[+-]\d+(:\d{2})?$/.test(o.name), `unexpected TZNAME shape: ${o.name}`);
+    }
+    assert.notEqual(obs[0].name, obs[1].name, block);
+  });
+
+  it('pins the initial observance\'s DTSTART for a Sydney span entirely after the April 2026 fallback', () => {
+    // A span with no transition of its own still has to find the RIGHT prior onset by scanning
+    // backwards — this pins that onset to the exact date/offsets rather than just its count.
+    const block = generateVTimezone('Australia/Sydney', utc('2026-04-10T00:00:00+10:00'), utc('2026-04-11T00:00:00+10:00'));
+    const obs = observances(block);
+    assert.equal(obs.length, 1, block);
+    assert.equal(obs[0].dtstart, '20260405T030000', block);
+    assert.equal(obs[0].from, '+1100');
+    assert.equal(obs[0].to, '+1000');
+  });
+
+  it('finds both transitions in a six-month span crossing Sydney\'s April and October changes', () => {
+    // The other transition tests each cross exactly one change; nothing before this pinned a
+    // span containing TWO, which a mutation that stops the day-stepping loop after its first
+    // find (or that overwrites rather than accumulates `transitions`) would still pass.
+    const block = generateVTimezone('Australia/Sydney', utc('2026-04-01T00:00:00+11:00'), utc('2026-10-05T01:00:00+11:00'));
+    const obs = observances(block);
+    assert.equal(obs.length, 3, block); // in-force-at-start, April fallback, October springforward
+    const april = obs.find(o => o.dtstart === '20260405T030000');
+    const october = obs.find(o => o.dtstart === '20261004T020000');
+    assert.ok(april, block);
+    assert.equal(april!.from, '+1100');
+    assert.equal(april!.to, '+1000');
+    assert.ok(october, block);
+    assert.equal(october!.from, '+1000');
+    assert.equal(october!.to, '+1100');
+  });
+
+  it('formats Africa/Monrovia\'s pre-1972 -00:44:30 offset with seconds, per the utc-offset ABNF', () => {
+    // Liberia ran 44 minutes 30 seconds behind UTC until 1972 — one of the few IANA zones whose
+    // historical offset is not a whole minute, exercising formatOffset's seconds branch, which
+    // every other fixture here (all whole-minute offsets) leaves untouched.
+    const block = generateVTimezone('Africa/Monrovia', utc('1970-06-01T00:00:00Z'), utc('1970-06-02T00:00:00Z'));
+    const obs = observances(block);
+    assert.equal(obs.length, 1, block);
+    assert.equal(obs[0].to, '-004430', block);
+  });
 });

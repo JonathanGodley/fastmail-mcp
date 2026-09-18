@@ -6786,6 +6786,52 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(result.includes('TZID:America/Los_Angeles'), result);
       assert.equal((result.match(/BEGIN:VTIMEZONE/g) || []).length, 2, result);
     });
+
+    it('keeps a bare-LF resource entirely LF, the freshly generated block included (#166 review item 12)', () => {
+      // generateVTimezone's own lineEnding parameter DEFAULTS to '\r\n' when not given one
+      // explicitly — this only proves something if regenerateVTimezones actually threads the
+      // caller's lineEnding through to it rather than relying on that default, which would
+      // splice a CRLF block into an otherwise bare-LF file.
+      const dtstart = 'DTSTART;TZID=Australia/Sydney:20260320T090000';
+      const dtend = 'DTEND;TZID=Australia/Sydney:20260320T100000';
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:bare-lf-fresh@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:Bare LF',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\n');
+      const result = regenerateVTimezones(data, '\n');
+      assert.ok(!result.includes('\r'), result);
+      assert.ok(result.includes('BEGIN:VTIMEZONE\nTZID:Australia/Sydney'), result);
+    });
+
+    it('matches a stale VTIMEZONE block by its TZID even when TZID is not the first line inside it (#166 review item 12)', () => {
+      // extractVTimezoneBlocks reads TZID with parseICalValue, which scans every content line in
+      // the block rather than assuming a fixed position — real generators (this one included)
+      // always put TZID first, so nothing else here would catch a regression that started
+      // assuming the same.
+      const staleBlock = [
+        'BEGIN:VTIMEZONE',
+        'LAST-MODIFIED:20240101T000000Z',
+        'TZID:Australia/Sydney',
+        'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:+1000', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+      ].join('\r\n');
+      const dtstart = 'DTSTART;TZID=Australia/Sydney:20260320T090000';
+      const dtend = 'DTEND;TZID=Australia/Sydney:20260320T100000';
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', staleBlock,
+        'BEGIN:VEVENT', 'UID:tzid-not-first@fm', 'DTSTAMP:20260301T000000Z',
+        dtstart, dtend, 'SUMMARY:TZID not first',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      // Exactly one VTIMEZONE block remains: the stale one was recognised as Sydney's own (by
+      // matching TZID anywhere inside the block) and replaced, rather than left in place beside
+      // a second, freshly-inserted one.
+      assert.equal((result.match(/BEGIN:VTIMEZONE/g) || []).length, 1, result);
+      assert.ok(!result.includes('LAST-MODIFIED:20240101T000000Z'), result);
+    });
   });
 
   describe('regenerateVTimezones — recurring VEVENT invariant (#166)', () => {
