@@ -2068,18 +2068,32 @@ describe('zoneOffsetMsAt', () => {
     assert.equal(zoneOffsetMsAt(subSecondMs, 'Australia/Sydney'), zoneOffsetMsAt(wholeSecondMs, 'Australia/Sydney'));
   });
 
-  it('does not let a "" zone call cache a null formatter into the SAME slot undefined uses', () => {
-    // "" fails to construct and used to cache null under the SAME key `undefined` (the host
-    // zone) coalesced onto, so a later undefined call reused that null and returned 0 rather
-    // than ever building the host formatter. Checked against `Date.prototype.getTimezoneOffset`
-    // (unrelated to this cache) rather than a second `zoneOffsetMsAt` call, so the assertion
-    // cannot be satisfied by two calls sharing the same corrupted entry. A no-op on a host
-    // actually configured to UTC (this dev machine is Australia/Sydney). Whole-second `ms`,
-    // not `Date.now()`, keeps this independent of the separate floor fix above.
-    const ms = Math.floor(Date.now() / 1000) * 1000;
-    const groundTruthHostOffsetMs = -new Date(ms).getTimezoneOffset() * 60000;
-    zoneOffsetMsAt(ms, '');
-    assert.equal(zoneOffsetMsAt(ms, undefined), groundTruthHostOffsetMs);
+  it('does not let a "" zone call cache a null formatter into the SAME slot undefined uses', async () => {
+    // Comparing the RETURNED OFFSET cannot prove this on CI: ubuntu-latest runs at TZ=UTC, where
+    // both "" (which falls back to the host zone on failure) and undefined resolve to 0 whether
+    // or not the cache collision is fixed — the old bug and the fix are indistinguishable by
+    // value there. Testing the KEYING instead: a fresh module instance (a cache-busted import
+    // gets its own empty `zoneOffsetFormatterCache`, since that Map is module-private state) lets
+    // "" cache a null formatter first, then intercepting the real `Intl.DateTimeFormat`
+    // constructor proves `undefined` still gets its OWN construction attempt afterward — a
+    // coalesced key would instead reuse "" 's cached null and never construct anything for it.
+    const fresh: typeof import('./coerce.js') =
+      await import(`./coerce.js?zone-cache-keying-test=${Date.now()}-${Math.random()}`);
+    const OriginalDateTimeFormat = Intl.DateTimeFormat;
+    let undefinedZoneConstructions = 0;
+    function SpyDateTimeFormat(this: unknown, locale?: string | string[], options?: Intl.DateTimeFormatOptions) {
+      if (options && 'timeZone' in options && options.timeZone === undefined) undefinedZoneConstructions++;
+      return new OriginalDateTimeFormat(locale, options);
+    }
+    Intl.DateTimeFormat = SpyDateTimeFormat as unknown as typeof Intl.DateTimeFormat;
+    try {
+      const ms = Math.floor(Date.now() / 1000) * 1000;
+      fresh.zoneOffsetMsAt(ms, '');
+      fresh.zoneOffsetMsAt(ms, undefined);
+    } finally {
+      Intl.DateTimeFormat = OriginalDateTimeFormat;
+    }
+    assert.equal(undefinedZoneConstructions, 1, 'undefined must get its own construction attempt, not reuse "" \'s cached null');
   });
 });
 
