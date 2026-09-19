@@ -183,6 +183,29 @@ describe('generateVTimezone', () => {
     assert.equal(obs[0].to, '+1100');
   });
 
+  it('keeps Europe/Moscow STANDARD across its 2011 permanent step from +0300 to +0400', () => {
+    // Moscow abolished its fall-back after 2011's spring-forward: the offset touches exactly two
+    // values, the same shape a real DST cycle has, but never reverts. The lookback window (a
+    // year plus a day before the span) stays after 2010's last REAL fall-back (31 Oct 2010), so
+    // only the permanent step is in range — nothing here reverts +0400 back to +0300.
+    const block = generateVTimezone('Europe/Moscow', utc('2011-12-01T00:00:00Z'), utc('2011-12-02T00:00:00Z'));
+    const obs = observances(block);
+    assert.equal(obs.length, 1, block);
+    assert.equal(obs[0].kind, 'STANDARD', block);
+    assert.equal(obs[0].to, '+0400');
+  });
+
+  it('keeps Asia/Pyongyang STANDARD across its 2018 permanent step from +0830 to +0900', () => {
+    // Pyongyang reversed its 2015 shift to +08:30 in 2018, moving back to +09:00 permanently.
+    // The lookback window stays after the 2015 change, so only the 2018 step is in range, and it
+    // never reverts either.
+    const block = generateVTimezone('Asia/Pyongyang', utc('2018-06-01T00:00:00Z'), utc('2018-06-02T00:00:00Z'));
+    const obs = observances(block);
+    assert.equal(obs.length, 1, block);
+    assert.equal(obs[0].kind, 'STANDARD', block);
+    assert.equal(obs[0].to, '+0900');
+  });
+
   it('refuses a span whose lookback window would reach back before year 1', () => {
     // `Date.UTC(1, 0, 15)` is NOT year 1 — JS maps a year in 0..99 to 1900+n, so that call is
     // 1901-01-15. `utcMsFromComponents` (shared with the production constant) defeats the same

@@ -188,9 +188,12 @@ function zoneAbbreviation(zone: string, utcMs: number): string {
  * wall clock reading immediately before the jump, e.g. Sydney's `20261004T020000` immediately
  * before the local clock skips to 3am.
  *
- * The larger UTC offset among the observances found is `DAYLIGHT` and the rest `STANDARD` — DST
- * advances the clock in every hemisphere, so this holds regardless of which side of the equator
- * `zone` is on — and a zone with only one offset in range is `STANDARD` outright.
+ * The higher of two offsets is `DAYLIGHT` only when some transition in range is actually seen
+ * FALLING BACK from it to the lower one — DST advances the clock and later reverts, in every
+ * hemisphere, so this holds regardless of which side of the equator `zone` is on. A permanent
+ * one-way step (Asia/Pyongyang's 2018 move to +09:00, Europe/Moscow's 2011 move to +04:00)
+ * touches exactly two offsets the same way a DST cycle does but never reverts, so it stays
+ * `STANDARD` throughout. A zone with only one offset in range is `STANDARD` outright.
  *
  * `TZUNTIL` (RFC 7808 §7.2, not RFC 5545 itself — a later RFC, not a vendor extension) is always
  * set to `spanEndUtcMs`, matching the bound Cyrus's own `icalcomponent_add_required_timezones`
@@ -236,7 +239,16 @@ export function generateVTimezone(
   // visible at all. Reading `to` alone saw one offset, called the zone fixed-offset, and
   // labelled that lone DAYLIGHT observance STANDARD.
   const distinctOffsets = Array.from(new Set(observances.flatMap(o => [o.fromOffsetMs, o.toOffsetMs])));
-  const daylightOffsetMs = distinctOffsets.length > 1 ? Math.max(...distinctOffsets) : null;
+  const lowerOffsetMs = distinctOffsets.length > 1 ? Math.min(...distinctOffsets) : null;
+  const higherOffsetMs = distinctOffsets.length > 1 ? Math.max(...distinctOffsets) : null;
+  // A permanent step (Asia/Pyongyang's 2018 change to +09:00, Europe/Moscow's 2011 change to
+  // +04:00) touches exactly the same kind of offset pair a real DST cycle does, but never
+  // reverts — so the higher offset only counts as DAYLIGHT once some transition in the lookback
+  // or the span itself is actually seen falling back to the lower one.
+  const seenReturnToLower = higherOffsetMs !== null && [...priorTransitions, ...spanTransitions].some(
+    t => t.fromOffsetMs === higherOffsetMs && t.toOffsetMs === lowerOffsetMs,
+  );
+  const daylightOffsetMs = seenReturnToLower ? higherOffsetMs : null;
 
   const lines: string[] = ['BEGIN:VTIMEZONE', `TZID:${zone}`, `TZUNTIL:${toUtcStamp(spanEndUtcMs)}`];
   for (const obs of observances) {
