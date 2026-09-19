@@ -11,7 +11,7 @@
 // `VTIMEZONE` needs for CalDAV round-tripping — reproducing a zone's recurrence RULE is a
 // separate, harder problem this does not attempt.
 
-import { zoneOffsetMsAt, InvalidInputError } from './coerce.js';
+import { zoneOffsetMsAt, InvalidInputError, utcMsFromComponents } from './coerce.js';
 import { foldICalLine } from './ical-fold.js';
 
 const SECOND_MS = 1000;
@@ -27,7 +27,7 @@ const LOOKBACK_MS = 366 * DAY_MS;
 // 1, since RFC 5545 has no year-0 or negative-year DATE-TIME form to fall back on. Refused
 // outright rather than clamped to year 1: a clamped lookback would misreport which observance
 // was "in force" at a window start that never really existed.
-const MIN_LOOKBACK_START_MS = Date.UTC(1, 0, 2);
+const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 
 interface Transition {
   utcMs: number;

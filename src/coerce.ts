@@ -1068,8 +1068,12 @@ const GREGORIAN_CYCLE_MS = 146097 * 24 * 60 * 60 * 1000;
  * value correctly returns the year 26. Shifting by one whole Gregorian cycle steps over the
  * mapping and back without disturbing the arithmetic, so a leap day still lands on the day
  * the proleptic Gregorian calendar puts it.
+ *
+ * Exported for `src/vtimezone.ts` (#166), whose year-1 lookback boundary needs the same
+ * two-digit-year mapping defeated the same way rather than a second copy of the cycle-shift
+ * trick.
  */
-function utcMsFromComponents(y: number, mo: number, d: number, h: number, mi: number, s: number): number {
+export function utcMsFromComponents(y: number, mo: number, d: number, h: number, mi: number, s: number): number {
   if (y >= 0 && y <= 99) {
     return Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d, h, mi, s) - GREGORIAN_CYCLE_MS;
   }

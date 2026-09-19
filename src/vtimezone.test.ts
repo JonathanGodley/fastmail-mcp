@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateVTimezone } from './vtimezone.js';
-import { InvalidInputError } from './coerce.js';
+import { InvalidInputError, utcMsFromComponents } from './coerce.js';
 
 function utc(iso: string): number {
   return Date.parse(iso);
@@ -184,13 +184,22 @@ describe('generateVTimezone', () => {
   });
 
   it('refuses a span whose lookback window would reach back before year 1', () => {
-    // Unrefused, `pad`'s 4-digit year prints a negative number for a year before 1 (e.g.
-    // `pad(-1, 4)` is "00-1", not "-0001"), producing a malformed DTSTART rather than an error.
-    const spanStart = Date.UTC(1, 0, 15); // 0001-01-15: the 366-day lookback reaches into year 0
+    // `Date.UTC(1, 0, 15)` is NOT year 1 — JS maps a year in 0..99 to 1900+n, so that call is
+    // 1901-01-15. `utcMsFromComponents` (shared with the production constant) defeats the same
+    // mapping, giving a genuine year-1 instant whose 366-day lookback reaches into year 0.
+    const spanStart = utcMsFromComponents(1, 1, 15, 0, 0, 0); // 0001-01-15
     assert.throws(
       () => generateVTimezone('UTC', spanStart, spanStart + 1000),
       InvalidInputError,
     );
+  });
+
+  it('does not refuse a span whose lookback window stays within year 1 or later', () => {
+    // Pins that the year-1 guard above is a real boundary rather than something that rejects
+    // every early date: an 1850 span, whose 366-day lookback stays comfortably after year 1,
+    // must succeed.
+    const spanStart = utcMsFromComponents(1850, 1, 15, 0, 0, 0);
+    assert.doesNotThrow(() => generateVTimezone('UTC', spanStart, spanStart + 1000));
   });
 
   it('gives Sydney\'s STANDARD and DAYLIGHT observances distinct TZNAMEs, each a plausible shape (#166 review item 12)', () => {
