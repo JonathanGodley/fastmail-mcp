@@ -5196,11 +5196,14 @@ export class CalDAVCalendarClient {
 
     // RFC 5545 §3.6.5 requires a VTIMEZONE for every TZID a component uses. Generated from ICU
     // (see vtimezone.ts) rather than left for Cyrus to fill in: Cyrus's own attacher
-    // (`icalcomponent_add_required_timezones`) has a CalDAV call site too, but THAT one — unlike
-    // the unconditional JMAP write-path call at `imap/jmap_ical.c:8190` — sits behind a
-    // `tzbyref` capability this deployment does not advertise (docs/conventions.md), so a CalDAV
-    // PUT — this one — never gets it. One block per distinct usable literal TZID start/end
-    // actually use, each covering the combined span `collectZoneInstants` computes (#166).
+    // (`icalcomponent_add_required_timezones`) is called unconditionally only on its JMAP write
+    // path (`imap/jmap_ical.c:8190`). Its two CalDAV call sites are read-side, not write-side —
+    // the GET handler and the multiget REPORT handler — and both sit behind a `tzbyref`
+    // capability this deployment does not advertise (docs/conventions.md). `caldav_put` itself
+    // never calls the attacher at all, so a CalDAV PUT — this one — gets no VTIMEZONE from Cyrus
+    // regardless of that capability; this generator is the only thing that ever attaches one on
+    // our write path. One block per distinct usable literal TZID start/end actually use, each
+    // covering the combined span `collectZoneInstants` computes (#166).
     const createZoneTzids = referencedZoneTzids([startFrame, endFrame]);
     const createInstants = collectZoneInstants([
       { label: 'start', frame: startFrame },
