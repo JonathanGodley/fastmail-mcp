@@ -2155,9 +2155,10 @@ data rather than fetched from the platform: `caldav_store_resource` (the functio
 `caldav_put` path in `imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so nothing on
 the write path would catch a bare, undefined `TZID=` reference, and Cyrus's own re-attach step,
 `icalcomponent_add_required_timezones` (`imap/ical_support.c`), never runs for our writes either
-way — its two CalDAV call sites (`imap/http_caldav.c:2600`, `:5713`) sit inside
-`if (cdata->comp_flags.tzbyref)`, a per-resource flag set only by `strip_vtimezones`
-(`imap/caldav_util.c:1082`) under `ALLOW_CAL_NOTZ`, which this deployment does not enable
+way — its two CalDAV call sites (`imap/http_caldav.c:2617`, `:5719`) sit inside
+`if (cdata->comp_flags.tzbyref)`, a per-resource flag set not BY `strip_vtimezones` but
+alongside it, in the same `if (namespace_calendar.allow & ALLOW_CAL_NOTZ)` block
+(`imap/caldav_util.c:1081-1082`), which this deployment does not enable
 (measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
 data distribution served here for the generator to draw from instead (same probe, same date): all
 four routes the probe tries to discover the tzdist base URL come back empty, so none of the three
