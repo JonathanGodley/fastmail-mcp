@@ -994,10 +994,7 @@ export function describeTimezone(zone: string | undefined): string {
  * `Intl.DateTimeFormat` is the expensive part of each one.
  */
 // Keyed on `zone` itself, not `zone ?? ''`: `undefined` (the host zone) and `''` (a genuinely
-// empty zone string) are different `Map` keys on their own, and coalescing them onto one slot
-// meant whichever was cached FIRST answered for both — a `''` call (which fails, caching `null`)
-// left every later host-zone call reading that same cached `null` and falling back to a raw
-// UTC offset of 0 instead of ever constructing the host-zone formatter `undefined` should get.
+// empty zone string) are different `Map` keys.
 const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat | null>();
 
 function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
@@ -1031,8 +1028,7 @@ export function zoneOffsetMsAt(utcMsInput: number, zone: string | undefined): nu
   // (there is no sub-second component below), so a sub-second `utcMs` and its own floor read
   // identical wall-clock components here and must return the identical offset — see
   // `vtimezone.ts`'s `bisectTransition` comment for why a caller that skipped this floor once
-  // read a corrupted offset near a transition boundary. `vtimezone.ts` still floors its own
-  // inputs before calling this; the floor belongs here too so every OTHER caller gets it free.
+  // read a corrupted offset near a transition boundary.
   const utcMs = Math.floor(utcMsInput / 1000) * 1000;
   const formatter = zoneOffsetFormatterFor(zone);
   if (!formatter) {

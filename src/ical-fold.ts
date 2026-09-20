@@ -1,7 +1,7 @@
 // Content-line folding (RFC 5545 §3.1), shared by `caldav-client.ts` (every property line it
-// writes) and `vtimezone.ts` (every line of a generated VTIMEZONE, #166) — one algorithm rather
-// than two copies that could drift, now that `vtimezone.ts` no longer needs its own to avoid an
-// import cycle (it moved out from under `caldav-client.ts`, which imports `generateVTimezone`).
+// writes) and `vtimezone.ts` (every line of a generated VTIMEZONE, #166). Lives here, not in
+// `caldav-client.ts`, to avoid an import cycle: `caldav-client.ts` imports `generateVTimezone`
+// from `vtimezone.ts`, so `vtimezone.ts` cannot import back from it.
 
 /**
  * Fold an iCalendar content line at 75 octets per RFC 5545 §3.1.

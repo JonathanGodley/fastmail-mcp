@@ -2165,9 +2165,8 @@ conditions it checks (the service answering at all, a named zone returning one p
 VTIMEZONE, and start/end truncation being honoured) can even be exercised. (The JMAP/JSCalendar
 converters carry the same guard on one side, not the other: `imap/jmap_ical.c:8190` calls
 `icalcomponent_add_required_timezones` unconditionally on its write path — no `tzbyref` check
-anywhere nearby — while `imap/jmap_calendar.c`'s call site was not checked; either way this
-server's own read/write path goes through CalDAV, never JMAP, so neither call site's guard, or
-lack of one, changes what a client fetching one of these events back here finds.)
+anywhere nearby — while `imap/jmap_calendar.c`'s call site was not checked; neither matters here,
+since this server's own path is CalDAV, not JMAP.)
 `createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`
 regenerates it whenever `start`/`end` changes (stripping the stale one first, so a moved event's
 `TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain,

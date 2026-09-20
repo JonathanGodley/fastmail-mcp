@@ -5313,11 +5313,11 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   it('refuses a cross-zone update when the stored side of the pair holds a value naming no instant', async () => {
     // Both zones resolve; the stored END's value does not parse as a date at all, which a
     // third-party client is free to have written. validateDateConsistency still stands down on
-    // ordering here (nothing to order on), but regenerateVTimezones now computes ONE combined
-    // span shared by every referenced zone (#166 round-1 review item 1) — silently dropping this
-    // endpoint the way a per-zone `continue` once did would corrupt the shared span used for the
-    // OTHER, genuinely resolvable zone too, so this refuses instead (item 4). Unlike the vendor
-    // TZID stand-down above, there was never an instant here to lose in the first place.
+    // ordering here (nothing to order on), but regenerateVTimezones computes ONE combined span
+    // shared by every referenced zone (#166) — silently dropping this endpoint would corrupt the
+    // shared span used for the OTHER, genuinely resolvable zone too, so this refuses instead.
+    // Unlike the vendor TZID stand-down above, there was never an instant here to lose in the
+    // first place.
     const garbageEnd = stored(
       'garbage@fm',
       'DTSTART;TZID=America/New_York:20260320T060000',
@@ -6642,9 +6642,6 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
 
     it('refuses a stored resource whose VTIMEZONE block is missing its END:VTIMEZONE', () => {
-      // Previously silently discarded rather than refused, leaving the malformed original block
-      // untouched and inserting a second, fresh one beside it — a stored resource this broken
-      // cannot be edited safely at all.
       const data = [
         'BEGIN:VCALENDAR', 'VERSION:2.0',
         'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
@@ -6716,7 +6713,7 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
     });
 
-    it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166 review item 1)', () => {
+    it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166)', () => {
       // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span (the old
       // per-zone behaviour) would leave the departure zone's block stopping at takeoff instead
       // of covering the moment the event moves into the arrival zone — both blocks must share
@@ -6740,13 +6737,10 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(londonBlock && londonBlock.includes(`TZUNTIL:${expectedTzuntil}`), result);
     });
 
-    it('gives an alias pair (differently spelled but zone-identical TZIDs) each their own literal block, none dangling (#166 review item 2)', () => {
-      // US/Pacific and America/Los_Angeles name the same physical zone. Stripping and inserting
-      // one zone at a time — strip US/Pacific, insert US/Pacific, strip America/Los_Angeles,
-      // insert America/Los_Angeles — let the second strip (alias-equal to the first) remove the
-      // block the first iteration had JUST inserted, since stripVTimezoneBlockFor matches by
-      // zone identity, not literal spelling. Only a stale block for one spelling exists to start
-      // with, standing in for "start-only update, end already stored under the other spelling".
+    it('gives an alias pair (differently spelled but zone-identical TZIDs) each their own literal block, none dangling (#166)', () => {
+      // US/Pacific and America/Los_Angeles name the same physical zone. Only a stale block for
+      // one spelling exists to start with, standing in for "start-only update, end already
+      // stored under the other spelling".
       const staleBlock = [
         'BEGIN:VTIMEZONE', 'TZID:US/Pacific',
         'BEGIN:STANDARD', 'DTSTART:20250101T000000', 'TZOFFSETFROM:-0800', 'TZOFFSETTO:-0800', 'TZNAME:PST', 'END:STANDARD',
@@ -6767,11 +6761,8 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.equal((result.match(/BEGIN:VTIMEZONE/g) || []).length, 2, result);
     });
 
-    it('keeps a bare-LF resource entirely LF, the freshly generated block included (#166 review item 12)', () => {
-      // generateVTimezone's own lineEnding parameter DEFAULTS to '\r\n' when not given one
-      // explicitly — this only proves something if regenerateVTimezones actually threads the
-      // caller's lineEnding through to it rather than relying on that default, which would
-      // splice a CRLF block into an otherwise bare-LF file.
+    it('keeps a bare-LF resource entirely LF, the freshly generated block included (#166)', () => {
+      // generateVTimezone's own lineEnding parameter DEFAULTS to '\r\n' when not given one explicitly.
       const dtstart = 'DTSTART;TZID=Australia/Sydney:20260320T090000';
       const dtend = 'DTEND;TZID=Australia/Sydney:20260320T100000';
       const data = [
@@ -6785,11 +6776,9 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(result.includes('BEGIN:VTIMEZONE\nTZID:Australia/Sydney'), result);
     });
 
-    it('matches a stale VTIMEZONE block by its TZID even when TZID is not the first line inside it (#166 review item 12)', () => {
+    it('matches a stale VTIMEZONE block by its TZID even when TZID is not the first line inside it (#166)', () => {
       // extractVTimezoneBlocks reads TZID with parseICalValue, which scans every content line in
-      // the block rather than assuming a fixed position — real generators (this one included)
-      // always put TZID first, so nothing else here would catch a regression that started
-      // assuming the same.
+      // the block rather than assuming a fixed position.
       const staleBlock = [
         'BEGIN:VTIMEZONE',
         'LAST-MODIFIED:20240101T000000Z',
@@ -6815,9 +6804,6 @@ describe('VTIMEZONE embedding (#166)', () => {
   });
 
   describe('regenerateVTimezones — recurring VEVENT invariant (#166)', () => {
-    // isRecurringSeriesResource refuses every RRULE/RDATE-bearing updateCalendarEvent call
-    // outright (see recurringSeriesRefusal), so this can never fire through the public API
-    // today — exercised directly against hand-built fixtures as the invariant statement it is.
     it('refuses a VEVENT carrying RRULE or RDATE, rather than computing a span from a single occurrence', () => {
       const withRrule = [
         'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',

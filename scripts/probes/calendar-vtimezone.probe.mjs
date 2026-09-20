@@ -17,16 +17,9 @@
 // (The generator's transition-finding and its DAYLIGHT-vs-STANDARD classification across a
 // transition are what src/vtimezone.test.ts proves; this probe is about the wire, not the
 // arithmetic.) It then fetches the stored resource back RAW over CalDAV — bare `fetch`, no
-// tsdav, nothing this server's own parser touches — and checks the bytes themselves:
-//
-//   - exactly one VTIMEZONE block is present, carrying TZID:Australia/Sydney
-//   - it carries a TZUNTIL equal to the event's own DTEND, in UTC
-//   - it carries exactly two observances, one STANDARD and one DAYLIGHT
-//   - the STANDARD observance's TZOFFSETTO matches the pre-transition offset Intl reports for
-//     Australia/Sydney at the DTSTART instant, and the DAYLIGHT observance's TZOFFSETTO matches
-//     the post-transition offset Intl reports at the DTEND instant (both computed by this
-//     probe's own Intl call, not by importing src/vtimezone.ts — a shared bug in both would
-//     otherwise agree with itself)
+// tsdav, nothing this server's own parser touches — and checks the bytes themselves, computing
+// its own expected offsets independently via Intl rather than by importing src/vtimezone.ts, so
+// a shared bug in both would not agree with itself.
 //
 // The fixture goes into a temporary collection minted by MKCALENDAR, the same provenance
 // discipline calendar-window-frames.probe.mjs uses: this runs against a live personal account,

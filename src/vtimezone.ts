@@ -148,12 +148,7 @@ const abbreviationFormatterCache = new Map<string, Intl.DateTimeFormat | null>()
 
 /** ICU's `en-US` short name for `zone` at `utcMs` (e.g. `AEDT`, or `GMT+11` where ICU has no
  * abbreviation for it) — the `TZNAME` value. Cached per zone for the same reason
- * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times.
- *
- * Construction failure (a name ICU's `Intl.DateTimeFormat` rejects outright) falls back to
- * `zone` itself, the same fallback already used below for a formatter that built but has no
- * abbreviation to offer — mirroring `zoneOffsetMsAt`'s own formatter cache in `coerce.ts`,
- * which guards the identical construction the same way. */
+ * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times. */
 function zoneAbbreviation(zone: string, utcMs: number): string {
   let formatter = abbreviationFormatterCache.get(zone);
   if (formatter === undefined) {
@@ -236,8 +231,7 @@ export function generateVTimezone(
   // observance (no transition inside it) still has a `fromOffsetMs` inherited from whatever
   // observance preceded it — a Sydney span sitting entirely inside daylight saving carries only
   // one observance, `to: +1100`, but its `from: +1000` is what makes the +1000/+1100 PAIR
-  // visible at all. Reading `to` alone saw one offset, called the zone fixed-offset, and
-  // labelled that lone DAYLIGHT observance STANDARD.
+  // visible at all.
   const distinctOffsets = Array.from(new Set(observances.flatMap(o => [o.fromOffsetMs, o.toOffsetMs])));
   const lowerOffsetMs = distinctOffsets.length > 1 ? Math.min(...distinctOffsets) : null;
   const higherOffsetMs = distinctOffsets.length > 1 ? Math.max(...distinctOffsets) : null;

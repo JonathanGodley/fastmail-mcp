@@ -2221,7 +2221,7 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
  * canonicalised, so each generated block's own `TZID:` line matches the parameter a reader will
  * look it up by. Two alias-equivalent but differently spelled TZIDs (`US/Pacific` and
  * `America/Los_Angeles`) each get their own entry: a VEVENT referencing both needs one block per
- * spelling actually on the wire, not one per zone identity (#166 round-1 review item 2). A frame
+ * spelling actually on the wire, not one per zone identity (#166). A frame
  * that is `date`/`floating`/`utc`, or whose TZID `isUsableTimezone` rejects (a vendor id like
  * `AUS Eastern Standard Time`), contributes nothing — see `validateDateConsistency`'s own
  * stand-down on the same check for why an unresolvable name is left alone rather than refused.
@@ -2236,14 +2236,14 @@ function referencedZoneTzids(frames: DatePropertyFrame[]): Set<string> {
 
 /**
  * The UTC instant each labelled, usable zoned frame resolves to — feeding ONE combined span
- * across every zone a VEVENT references (#166 round-1 review item 1), rather than a separate
+ * across every zone a VEVENT references (#166), rather than a separate
  * span per zone. A cross-zone event (DTSTART in one zone, DTEND in another — a flight) needs
  * BOTH zones' VTIMEZONE blocks to cover the SAME [min,max] range: the departure zone's block
  * must still cover the moment the event moves into the arrival zone, not stop at its own single
  * instant.
  *
  * `label` names the source property in the thrown message: a frame whose value cannot be
- * resolved to an instant throws rather than being silently skipped (#166 round-1 review item 4)
+ * resolved to an instant throws rather than being silently skipped (#166)
  * — a span silently missing one of its two endpoints is a wrong span, not a smaller correct one.
  */
 function collectZoneInstants(labeled: Array<{ label: string; frame: DatePropertyFrame }>): number[] {
@@ -2371,11 +2371,9 @@ function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid:
  * overwritten again below it — and before `removeOrphanedVTimezones`, which then drops any block
  * (this function's included) that the patched event no longer references at all.
  *
- * Exported, and directly unit-tested with hand-built fixtures, rather than folded silently into
- * `updateCalendarEvent`'s body: `isRecurringSeriesResource` refuses every RRULE/RDATE-bearing
- * update before this point ever runs, so the invariant check just below cannot fire through the
- * public API today. A series-aware span (the series' LAST occurrence, not the master) is
- * designed under #146.
+ * `isRecurringSeriesResource` refuses every RRULE/RDATE-bearing update before this point ever
+ * runs, so the invariant check just below cannot fire through the public API today. A
+ * series-aware span (the series' LAST occurrence, not the master) is designed under #146.
  */
 export function regenerateVTimezones(icalData: string, lineEnding: string): string {
   const vevent = extractVEvent(icalData);
@@ -2407,7 +2405,7 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
 
   // DTEND absent, DURATION present: derive the implicit end from DTSTART + DURATION. The
   // computed end shares DTSTART's own zone (DURATION carries no TZID of its own), so it extends
-  // this SAME combined span rather than introducing a second zone (#166 round-1 review item 1).
+  // this SAME combined span rather than introducing a second zone (#166).
   if (!endLine && startFrame && startFrame.frame === 'zoned' && startFrame.tzid && isUsableTimezone(startFrame.tzid)) {
     const durationLine = parseAllICalProperties(vevent, 'DURATION')[0];
     if (durationLine) {
@@ -2432,7 +2430,7 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   // a dangling TZID when two referenced zones were alias-equivalent but differently spelled
   // (`US/Pacific` and `America/Los_Angeles`): `stripVTimezoneBlockFor` matches by zone IDENTITY
   // (`zoneNamesEqual`), so stripping the SECOND alias-equal spelling also removed the block the
-  // first iteration had just inserted for the first spelling (#166 round-1 review item 2).
+  // first iteration had just inserted for the first spelling (#166).
   let result = icalData;
   for (const tzid of zoneTzids) {
     result = stripVTimezoneBlockFor(result, tzid);
@@ -5093,11 +5091,7 @@ export class CalDAVCalendarClient {
     // the unconditional JMAP write-path call at `imap/jmap_ical.c:8190` — sits behind a
     // `tzbyref` capability this deployment does not advertise (docs/conventions.md), so a CalDAV
     // PUT — this one — never gets it. One block per distinct usable literal TZID start/end
-    // actually use, every block covering the SAME combined [min,max] instant range rather than
-    // its own zone's narrower span — a cross-zone event (DTSTART in one zone, DTEND in another,
-    // e.g. a flight) needs BOTH zones' blocks to reach the OTHER zone's endpoint too, or the
-    // departure zone's block would stop covering the moment the event moves into the arrival
-    // zone (#166 round-1 review item 1).
+    // actually use, each covering the combined span `collectZoneInstants` computes (#166).
     const createZoneTzids = referencedZoneTzids([startFrame, endFrame]);
     const createInstants = collectZoneInstants([
       { label: 'start', frame: startFrame },

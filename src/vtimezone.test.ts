@@ -225,10 +225,7 @@ describe('generateVTimezone', () => {
     assert.doesNotThrow(() => generateVTimezone('UTC', spanStart, spanStart + 1000));
   });
 
-  it('gives Sydney\'s STANDARD and DAYLIGHT observances distinct TZNAMEs, each a plausible shape (#166 review item 12)', () => {
-    // A TZNAME mutation that always emitted the SAME string for every observance, or one that
-    // stopped constraining its shape to an abbreviation/GMT-offset form at all, would pass every
-    // other test here — none of them compares the two names to each other.
+  it('gives Sydney\'s STANDARD and DAYLIGHT observances distinct TZNAMEs, each a plausible shape (#166)', () => {
     const block = generateVTimezone(
       'Australia/Sydney',
       utc('2026-09-20T00:00:00+10:00'),
@@ -254,9 +251,6 @@ describe('generateVTimezone', () => {
   });
 
   it('finds both transitions in a six-month span crossing Sydney\'s April and October changes', () => {
-    // The other transition tests each cross exactly one change; nothing before this pinned a
-    // span containing TWO, which a mutation that stops the day-stepping loop after its first
-    // find (or that overwrites rather than accumulates `transitions`) would still pass.
     const block = generateVTimezone('Australia/Sydney', utc('2026-04-01T00:00:00+11:00'), utc('2026-10-05T01:00:00+11:00'));
     const obs = observances(block);
     assert.equal(obs.length, 3, block); // in-force-at-start, April fallback, October springforward
@@ -272,8 +266,7 @@ describe('generateVTimezone', () => {
 
   it('formats Africa/Monrovia\'s pre-1972 -00:44:30 offset with seconds, per the utc-offset ABNF', () => {
     // Liberia ran 44 minutes 30 seconds behind UTC until 1972 — one of the few IANA zones whose
-    // historical offset is not a whole minute, exercising formatOffset's seconds branch, which
-    // every other fixture here (all whole-minute offsets) leaves untouched.
+    // historical offset is not a whole minute.
     const block = generateVTimezone('Africa/Monrovia', utc('1970-06-01T00:00:00Z'), utc('1970-06-02T00:00:00Z'));
     const obs = observances(block);
     assert.equal(obs.length, 1, block);
