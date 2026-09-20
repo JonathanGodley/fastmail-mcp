@@ -1163,13 +1163,27 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
   return lines.join(lineEnding);
 }
 
+/** RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]. The one pattern every DURATION parse in this file matches against. */
+const ICAL_DURATION_RE = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
+
+interface ParsedICalDuration {
+  sign: 1 | -1;
+  weeks: number;
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+}
+
 /**
- * Parse an iCalendar DURATION value and compute end datetime.
- * RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]
- * Returns ISO 8601 end datetime, or undefined for malformed input.
+ * Parse a DURATION value into its components, or undefined if malformed. The one parse
+ * `parseICalDuration` (the user-visible implicit-DTEND computation) and
+ * `resolveDurationSpanEndMs` (the VTIMEZONE span computation) both build on, so the two agree
+ * on what counts as a valid DURATION rather than each carrying its own copy of the pattern and
+ * its guards that could silently drift apart.
  */
-export function parseICalDuration(duration: string, start: string): string | undefined {
-  const m = duration.match(/^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+function parseICalDurationComponents(duration: string): ParsedICalDuration | undefined {
+  const m = duration.match(ICAL_DURATION_RE);
   if (!m) return undefined;
 
   const [, sign, weeks, days, hours, minutes, seconds] = m;
@@ -1179,17 +1193,32 @@ export function parseICalDuration(duration: string, start: string): string | und
   // If T is present in input, at least one time component must exist (reject "P1DT")
   if (duration.includes('T') && !hours && !minutes && !seconds) return undefined;
 
-  const ms =
-    (parseInt(weeks || '0', 10) * 7 * 86400000) +
-    (parseInt(days || '0', 10) * 86400000) +
-    (parseInt(hours || '0', 10) * 3600000) +
-    (parseInt(minutes || '0', 10) * 60000) +
-    (parseInt(seconds || '0', 10) * 1000);
+  return {
+    sign: sign === '-' ? -1 : 1,
+    weeks: parseInt(weeks || '0', 10),
+    days: parseInt(days || '0', 10),
+    hours: parseInt(hours || '0', 10),
+    minutes: parseInt(minutes || '0', 10),
+    seconds: parseInt(seconds || '0', 10),
+  };
+}
+
+/**
+ * Parse an iCalendar DURATION value and compute end datetime.
+ * RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]
+ * Returns ISO 8601 end datetime, or undefined for malformed input.
+ */
+export function parseICalDuration(duration: string, start: string): string | undefined {
+  const parsed = parseICalDurationComponents(duration);
+  if (!parsed) return undefined;
+  const { sign, weeks, days, hours, minutes, seconds } = parsed;
+
+  const ms = (weeks * 7 * 86400000) + (days * 86400000) + (hours * 3600000) + (minutes * 60000) + (seconds * 1000);
 
   const startDate = new Date(start);
   if (isNaN(startDate.getTime())) return undefined;
 
-  const endMs = sign === '-' ? startDate.getTime() - ms : startDate.getTime() + ms;
+  const endMs = startDate.getTime() + sign * ms;
   const endDate = new Date(endMs);
 
   // Return in same format as input start
@@ -1208,7 +1237,7 @@ export function parseICalDuration(duration: string, start: string): string | und
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, s] = timePart.split(':').map(Number);
     const utcStart = Date.UTC(y, mo - 1, d, h, mi, s);
-    const utcEnd = sign === '-' ? utcStart - ms : utcStart + ms;
+    const utcEnd = utcStart + sign * ms;
     const e = new Date(utcEnd);
     const pad = (n: number) => String(n).padStart(2, '0');
     return `${e.getUTCFullYear()}-${pad(e.getUTCMonth() + 1)}-${pad(e.getUTCDate())}T${pad(e.getUTCHours())}:${pad(e.getUTCMinutes())}:${pad(e.getUTCSeconds())}`;
@@ -2331,8 +2360,6 @@ function insertVTimezoneBlock(icalData: string, block: string, lineEnding: strin
   return lines.join(lineEnding);
 }
 
-const ICAL_DURATION_RE = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
-
 /**
  * The end instant of a DURATION applied to a zoned `startIso` wall clock, for the VTIMEZONE span
  * only (RFC 5545 §3.3.6): the week/day components are nominal — "the same wall-clock time N days
@@ -2343,18 +2370,17 @@ const ICAL_DURATION_RE = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)
  * wall clock to an instant FIRST, then adding the time components as exact milliseconds to that
  * instant, keeps the two kinds of arithmetic from being conflated.
  *
- * `parseICalDuration` itself is deliberately untouched: its other caller (line 1389) computes an
- * implicit DTEND on the read path, a user-visible value outside this fix.
+ * `parseICalDuration` itself computes a different thing from the same parse: its other caller
+ * (the implicit-DTEND path) wants a user-visible end sharing `start`'s own spelling, a plain
+ * ms-add outside this split. The two share `parseICalDurationComponents` so a DURATION judged
+ * valid for one purpose is judged valid for the other the same way.
  */
 function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid: string): number | undefined {
-  const m = durationValue.match(ICAL_DURATION_RE);
-  if (!m) return undefined;
-  const [, sign, weeks, days, hours, minutes, seconds] = m;
-  if (!weeks && !days && !hours && !minutes && !seconds) return undefined;
-  if (durationValue.includes('T') && !hours && !minutes && !seconds) return undefined;
+  const parsed = parseICalDurationComponents(durationValue);
+  if (!parsed) return undefined;
+  const { sign, weeks, days, hours, minutes, seconds } = parsed;
 
-  const signMul = sign === '-' ? -1 : 1;
-  const nominalDays = signMul * ((parseInt(weeks || '0', 10) * 7) + parseInt(days || '0', 10));
+  const nominalDays = sign * ((weeks * 7) + days);
 
   const [datePart, timePart] = startIso.split('T');
   const [y, mo, d] = datePart.split('-').map(Number);
@@ -2370,11 +2396,7 @@ function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid:
   const nominalMs = resolveCalendarInstantMs(nominalIso, tzid);
   if (Number.isNaN(nominalMs)) return NaN;
 
-  const exactMs = signMul * (
-    (parseInt(hours || '0', 10) * 3600000) +
-    (parseInt(minutes || '0', 10) * 60000) +
-    (parseInt(seconds || '0', 10) * 1000)
-  );
+  const exactMs = sign * ((hours * 3600000) + (minutes * 60000) + (seconds * 1000));
   return nominalMs + exactMs;
 }
 
