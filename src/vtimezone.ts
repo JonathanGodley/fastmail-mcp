@@ -106,13 +106,9 @@ function findTransitions(zone: string, fromMs: number, toMs: number): Transition
  *
  * Bisection stays on WHOLE-SECOND instants throughout (both inputs are already whole-second —
  * see `findTransitions` — and every midpoint computed here is too), never probing a sub-second
- * instant. `zoneOffsetMsAt` reads the offset by formatting an instant to WHOLE SECONDS and
- * comparing that reconstructed instant back to the original `utcMs`: fed a `utcMs` that itself
- * carries a sub-second remainder, the remainder leaks into the "offset" it returns, and bisecting
- * past a two-second gap did exactly that — the noise made the step function look like it crossed
- * the boundary up to several minutes early, at whichever millisecond happened to zero out its own
- * remainder. Every real IANA transition lands on a whole minute regardless, so second resolution
- * loses nothing.
+ * instant: `zoneOffsetMsAt` resolves to whole seconds internally regardless of what it is given,
+ * so a finer probe here buys nothing, and every real IANA transition lands on a whole minute
+ * anyway.
  */
 function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
   let lowSec = lowMs / SECOND_MS;

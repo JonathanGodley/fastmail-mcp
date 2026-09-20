@@ -2061,8 +2061,8 @@ describe('zoneOffsetMsAt', () => {
     // +11:00). Reading a sub-second `utcMs` without flooring first reconstructs the SAME
     // whole-second wall-clock reading (Intl has no sub-second component to read), then subtracts
     // the UNFLOORED input from it — leaking the sub-second remainder straight into the "offset"
-    // as a spurious few hundred milliseconds, exactly the corruption vtimezone.ts's
-    // bisectTransition comment describes for a caller that skips this floor.
+    // as a spurious few hundred milliseconds, exactly the corruption zoneOffsetMsAt's own comment
+    // describes for a caller that skips this floor.
     const wholeSecondMs = Date.parse('2026-10-03T15:59:59Z');
     const subSecondMs = wholeSecondMs + 500;
     assert.equal(zoneOffsetMsAt(subSecondMs, 'Australia/Sydney'), zoneOffsetMsAt(wholeSecondMs, 'Australia/Sydney'));

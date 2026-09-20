@@ -1025,11 +1025,13 @@ function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat |
 }
 
 export function zoneOffsetMsAt(utcMsInput: number, zone: string | undefined): number {
-  // Floored to a whole second: `formatter.formatToParts` reads whole seconds off `utcMs`
-  // (there is no sub-second component below), so a sub-second `utcMs` and its own floor read
-  // identical wall-clock components here and must return the identical offset — see
-  // `vtimezone.ts`'s `bisectTransition` comment for why a caller that skipped this floor once
-  // read a corrupted offset near a transition boundary.
+  // Floored to a whole second: `formatter.formatToParts` reads whole seconds off `utcMs` (there
+  // is no sub-second component below), so a sub-second `utcMs` and its own floor must read
+  // identical wall-clock components and return the identical offset. Before this floor lived
+  // here, `vtimezone.ts`'s `bisectTransition` fed this function midpoints that could carry a
+  // sub-second remainder, and the mismatch made its step function look like it crossed a
+  // transition boundary up to several minutes early. Flooring internally means every caller gets
+  // a consistent offset regardless of the precision it passes in.
   const utcMs = Math.floor(utcMsInput / 1000) * 1000;
   const formatter = zoneOffsetFormatterFor(zone);
   if (!formatter) {
