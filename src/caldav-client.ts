@@ -1057,29 +1057,7 @@ export function removeOrphanedVTimezones(icalData: string): string {
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
 
-  // Find all VTIMEZONE blocks and their TZIDs
-  const tzBlocks: Array<{ tzid: string; start: number; end: number }> = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (structuralLine(lines[i]) === 'BEGIN:VTIMEZONE') {
-      const blockStart = i;
-      let blockEnd = -1;
-      for (let j = i + 1; j < lines.length; j++) {
-        if (structuralLine(lines[j]) === 'END:VTIMEZONE') {
-          blockEnd = j;
-          break;
-        }
-      }
-      if (blockEnd === -1) { i = lines.length; break; }
-      // Use parseICalValue for proper unfolding support
-      const tzBlock = lines.slice(blockStart, blockEnd + 1).join('\n');
-      // Trimmed here because this feeds an exact-equality comparison against the parsed TZID
-      // parameter of every non-VTIMEZONE line below.
-      const tzid = (parseICalValue(tzBlock, 'TZID') || '').trim();
-      tzBlocks.push({ tzid, start: blockStart, end: blockEnd });
-      i = blockEnd;
-    }
-  }
-
+  const tzBlocks = extractVTimezoneBlocks(lines);
   if (tzBlocks.length === 0) return icalData;
 
   // Build content outside VTIMEZONE blocks for reference scanning
@@ -2283,10 +2261,12 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
 
 /**
  * Every VTIMEZONE block in `lines`, with its TZID and its line-index span (inclusive of both
- * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`) — the same structural scan `removeOrphanedVTimezones`
- * uses, kept separate from it because these two callers splice on the result rather than only
- * filtering it, and duplicating the ~15-line scan reads clearer than threading an extra
- * indirection through an already-heavily-commented function.
+ * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`). The one scan every caller that needs VTIMEZONE
+ * boundaries uses — stripVTimezoneBlockFor, removeOrphanedVTimezones — so a resource this
+ * malformed is refused identically everywhere rather than only on some paths. Refuses
+ * (`InvalidInputError`) a block with no matching END:VTIMEZONE, including one whose "END" would
+ * otherwise belong to a LATER block — a BEGIN:VTIMEZONE encountered before this one's own END is
+ * itself proof of malformation, since VTIMEZONE does not nest.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
@@ -2295,13 +2275,14 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
       const start = i;
       let end = -1;
       for (let j = i + 1; j < lines.length; j++) {
-        if (structuralLine(lines[j]) === 'END:VTIMEZONE') { end = j; break; }
+        const structural = structuralLine(lines[j]);
+        if (structural === 'END:VTIMEZONE') { end = j; break; }
+        // VTIMEZONE does not nest, so a second BEGIN before this one's own END is itself proof
+        // of malformation — without this check, an unterminated block silently "borrows" a
+        // later, unrelated block's END line, merging the two into one bogus block.
+        if (structural === 'BEGIN:VTIMEZONE') break;
       }
-      // An unterminated block used to `break` here, silently discarding the scan — the caller
-      // (stripVTimezoneBlockFor) then reported zero blocks for a resource that plainly has one,
-      // and went on to insert a fresh block beside the untouched, still-malformed original
-      // rather than replacing it. A stored resource this broken cannot be edited safely at all,
-      // so it is refused outright instead.
+      // A stored resource this broken cannot be edited safely at all, so it is refused outright.
       if (end === -1) {
         throw new InvalidInputError('Stored calendar resource has an unterminated VTIMEZONE block.');
       }

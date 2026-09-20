@@ -6656,6 +6656,45 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
     });
 
+    it('refuses when an unterminated VTIMEZONE block is followed by a complete one, rather than borrowing its END', () => {
+      // Evil/Zone's BEGIN:VTIMEZONE has no END:VTIMEZONE of its own. Without a nested-BEGIN
+      // check, the scan would keep looking forward and use the COMPLETE Sydney block's own
+      // END:VTIMEZONE to close it instead, merging the two into one bogus block and never
+      // reporting anything malformed.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Evil/Zone',
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'BEGIN:STANDARD', 'DTSTART:20250405T030000', 'TZOFFSETFROM:+1100', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:evil-zone@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'SUMMARY:Bypass attempt',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+    });
+
+    it('refuses removeOrphanedVTimezones input whose first VTIMEZONE is unterminated, rather than deleting the block a later reference still needs', () => {
+      // Same shape as the bypass above, hit directly against the orphan sweep rather than through
+      // regenerateVTimezones: DTSTART/DTEND are plain UTC, so regenerateVTimezones's own early
+      // return (no usable zone referenced there) would otherwise let this reach the sweep
+      // unchecked — only the EXDATE references Australia/Sydney.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Evil/Zone',
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'BEGIN:STANDARD', 'DTSTART:20250405T030000', 'TZOFFSETFROM:+1100', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:orphan-sweep@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART:20260320T090000Z', 'DTEND:20260320T100000Z',
+        'EXDATE;TZID=Australia/Sydney:20260327T090000',
+        'SUMMARY:Orphan sweep bypass',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), InvalidInputError);
+    });
+
     it('computes the span from DTSTART + DURATION when DTEND is absent, after a start-only update', () => {
       // Same Sydney October transition the DTSTART/DTEND test above uses. No stored DTEND: the
       // 6-hour DURATION (RFC 5545 §3.6.1's alternative to DTEND) has to supply the span's real
