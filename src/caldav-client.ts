@@ -853,10 +853,6 @@ export function toICalUTC(isoString: string): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 }
 
-// Re-exported so existing importers of `foldICalLine` from this module keep working — the
-// implementation itself lives in `ical-fold.ts` now, shared with `vtimezone.ts` (#166).
-export { foldICalLine };
-
 /**
  * Detect line ending style from iCal data.
  */
