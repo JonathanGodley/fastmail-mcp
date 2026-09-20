@@ -6894,6 +6894,9 @@ describe('VTIMEZONE embedding (#166)', () => {
 
   describe('regenerateVTimezones — recurring VEVENT invariant (#166)', () => {
     it('refuses a VEVENT carrying RRULE or RDATE, rather than computing a span from a single occurrence', () => {
+      // A plain Error, not InvalidInputError: isRecurringSeriesResource refuses every such
+      // update before this point is ever reached through the public API, so firing here would
+      // mean that upstream guard itself failed — a server bug, not a caller-fixable argument.
       const withRrule = [
         'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
         'UID:series@fm', 'DTSTAMP:20260301T000000Z',
@@ -6901,7 +6904,11 @@ describe('VTIMEZONE embedding (#166)', () => {
         'RRULE:FREQ=DAILY', 'SUMMARY:Series',
         'END:VEVENT', 'END:VCALENDAR',
       ].join('\r\n');
-      assert.throws(() => regenerateVTimezones(withRrule, '\r\n'), /recurring VEVENT/);
+      assert.throws(() => regenerateVTimezones(withRrule, '\r\n'), (err: Error) => {
+        assert.notEqual(err.name, 'InvalidInputError');
+        assert.match(err.message, /recurring VEVENT/);
+        return true;
+      });
 
       const withRdate = [
         'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
@@ -6910,7 +6917,11 @@ describe('VTIMEZONE embedding (#166)', () => {
         'RDATE;TZID=Australia/Sydney:20260327T090000', 'SUMMARY:Series',
         'END:VEVENT', 'END:VCALENDAR',
       ].join('\r\n');
-      assert.throws(() => regenerateVTimezones(withRdate, '\r\n'), /recurring VEVENT/);
+      assert.throws(() => regenerateVTimezones(withRdate, '\r\n'), (err: Error) => {
+        assert.notEqual(err.name, 'InvalidInputError');
+        assert.match(err.message, /recurring VEVENT/);
+        return true;
+      });
     });
   });
 });

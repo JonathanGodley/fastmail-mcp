@@ -2415,8 +2415,12 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   const vevent = extractVEvent(icalData);
   if (!vevent) return icalData;
 
+  // Also a plain Error, matching updateCalendarEvent's own "no VEVENT block found": if this
+  // fires at all, the upstream isRecurringSeriesResource refusal has already failed to stop a
+  // recurring VEVENT from reaching here, which is a server bug, not a caller input fault — no
+  // argument this caller could re-form reaches this check.
   if (hasICalProperty(vevent, 'RRULE') || hasICalProperty(vevent, 'RDATE')) {
-    throw new InvalidInputError(
+    throw new Error(
       'Cannot compute a VTIMEZONE span for a recurring VEVENT (RRULE/RDATE present) — a single ' +
       'occurrence\'s own DTSTART/DTEND is the wrong span for a series.'
     );
