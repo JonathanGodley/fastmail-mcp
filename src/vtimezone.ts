@@ -240,6 +240,11 @@ export function generateVTimezone(
   // +04:00) touches exactly the same kind of offset pair a real DST cycle does, but never
   // reverts — so the higher offset only counts as DAYLIGHT once some transition in the lookback
   // or the span itself is actually seen falling back to the lower one.
+  // Two known limits, both labelling-only — every offset's own value stays exact either way: a
+  // zone's first-ever DST season reads as STANDARD, because the reversion it will eventually make
+  // has not happened yet inside this lookback/span window; and with three or more distinct
+  // offsets in range, this only looks for a reversion to the LOWEST one, so a reversion to a
+  // middle offset is not counted as "returned".
   const seenReturnToLower = higherOffsetMs !== null && [...priorTransitions, ...spanTransitions].some(
     t => t.fromOffsetMs === higherOffsetMs && t.toOffsetMs === lowerOffsetMs,
   );
