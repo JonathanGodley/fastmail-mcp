@@ -225,6 +225,24 @@ describe('generateVTimezone', () => {
     assert.doesNotThrow(() => generateVTimezone('UTC', spanStart, spanStart + 1000));
   });
 
+  it('refuses a span of 101 years (#166)', () => {
+    // findTransitions samples once per day and generateVTimezone emits one observance per
+    // transition found — both linear in the span itself, which is caller-controlled up to a
+    // DTEND in year 9999 (validateAndFormatICalDate's own ceiling). MAX_VTIMEZONE_SPAN_DAYS
+    // bounds that before either cost is paid.
+    const spanStart = utcMsFromComponents(2000, 1, 1, 0, 0, 0);
+    const spanEnd = utcMsFromComponents(2101, 1, 1, 0, 0, 0);
+    assert.throws(() => generateVTimezone('Australia/Sydney', spanStart, spanEnd), InvalidInputError);
+  });
+
+  it('does not refuse a span of 99 years', () => {
+    // Guards against an over-tight constant: a span comfortably inside the limit must still
+    // succeed.
+    const spanStart = utcMsFromComponents(2000, 1, 1, 0, 0, 0);
+    const spanEnd = utcMsFromComponents(2099, 1, 1, 0, 0, 0);
+    assert.doesNotThrow(() => generateVTimezone('Australia/Sydney', spanStart, spanEnd));
+  });
+
   it('gives Sydney\'s STANDARD and DAYLIGHT observances distinct TZNAMEs, each a plausible shape (#166)', () => {
     const block = generateVTimezone(
       'Australia/Sydney',

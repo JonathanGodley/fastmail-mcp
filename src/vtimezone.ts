@@ -30,6 +30,18 @@ const LOOKBACK_MS = 366 * DAY_MS;
 // which observance was "in force" at a window start that never really existed.
 const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 
+// The longest span this generator will compute. Both findTransitions (one sample per day) and
+// generateVTimezone (one observance per transition found) are linear in the span, and nothing
+// else bounds it: the caller controls it, up to validateAndFormatICalDate's own year-9999
+// ceiling. Measured on this code: a century (100 366-day years, this file's own leap-safe unit)
+// costs about 190ms and 201 observances per zone; the reachable ceiling, a DTEND in year 9999,
+// costs about 15 seconds, ~16000 observances and a 1.64 MB payload — for a PUT the server then
+// rejects on size regardless, so the caller pays that whole cost for a guaranteed failure on a
+// single-threaded stdio process, which an LLM client's natural response to is a retry of the
+// same cost. The span is bounded here, rather than the observance count or the output size,
+// because it is the only one of the three known before the cost of finding out is paid.
+export const MAX_VTIMEZONE_SPAN_DAYS = 36600;
+
 interface Transition {
   utcMs: number;
   fromOffsetMs: number;
@@ -210,6 +222,12 @@ export function generateVTimezone(
   const lookbackStartMs = spanStartUtcMs - LOOKBACK_MS;
   if (lookbackStartMs < MIN_LOOKBACK_START_MS) {
     throw new InvalidInputError('Cannot generate a VTIMEZONE this far back before year 1.');
+  }
+  const spanDays = Math.ceil((spanEndUtcMs - spanStartUtcMs) / DAY_MS);
+  if (spanDays > MAX_VTIMEZONE_SPAN_DAYS) {
+    throw new InvalidInputError(
+      `Event spans ${spanDays} days; VTIMEZONE generation is limited to ${MAX_VTIMEZONE_SPAN_DAYS} days. Shorten the event.`
+    );
   }
   const priorTransitions = findTransitions(zone, lookbackStartMs, spanStartUtcMs);
 

@@ -6786,6 +6786,22 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(block.includes('TZID:Australia/Sydney') && /TZUNTIL:08260320T\d{6}Z/.test(block), block);
     });
 
+    it('refuses a DTEND far enough out that generating its VTIMEZONE would be unbounded work (#166)', () => {
+      // A DTEND in year 9999 is the reachable ceiling (validateAndFormatICalDate's own limit):
+      // unbounded, this costs 15 seconds and ~16000 observances for a PUT the server rejects on
+      // size regardless, so the caller pays the whole cost for a guaranteed failure. The span
+      // bound in generateVTimezone has to be reachable through this wired-up path, not just
+      // directly against the generator.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:huge-span@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260101T000000', 'DTEND;TZID=Australia/Sydney:99991230T230000',
+        'SUMMARY:Too long',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+    });
+
     it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166)', () => {
       // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span (the old
       // per-zone behaviour) would leave the departure zone's block stopping at takeoff instead
