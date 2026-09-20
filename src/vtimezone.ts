@@ -22,11 +22,12 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // day-by-day scan over it stays cheap. 366 covers a leap year's extra day.
 const LOOKBACK_MS = 366 * DAY_MS;
 
-// One day short of 0001-01-01T00:00:00Z: `pad`'s 4-digit year prints a NEGATIVE number (e.g.
-// `pad(-1, 4)` is "00-1", not "-0001") the moment the lookback window reaches back before year
-// 1, since RFC 5545 has no year-0 or negative-year DATE-TIME form to fall back on. Refused
-// outright rather than clamped to year 1: a clamped lookback would misreport which observance
-// was "in force" at a window start that never really existed.
+// The earliest lookback start allowed, one day INTO year 1 so that rendering it as local wall
+// time in a zone behind UTC cannot land in year 0: `pad`'s 4-digit year prints a NEGATIVE
+// number (e.g. `pad(-1, 4)` is "00-1", not "-0001") the moment the lookback window reaches
+// back before year 1, since RFC 5545 has no year-0 or negative-year DATE-TIME form to fall
+// back on. Refused outright rather than clamped to year 1: a clamped lookback would misreport
+// which observance was "in force" at a window start that never really existed.
 const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 
 interface Transition {
