@@ -1065,14 +1065,15 @@ export function removeOrphanedVTimezones(icalData: string): string {
   const tzBlocks = extractVTimezoneBlocks(lines);
   if (tzBlocks.length === 0) return icalData;
 
-  // Build content outside VTIMEZONE blocks for reference scanning
-  const nonTzLines: string[] = [];
-  let inTz = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (structuralLine(lines[i]) === 'BEGIN:VTIMEZONE') { inTz = true; continue; }
-    if (structuralLine(lines[i]) === 'END:VTIMEZONE') { inTz = false; continue; }
-    if (!inTz) nonTzLines.push(lines[i]);
+  // Content outside VTIMEZONE blocks, for reference scanning — derived from the SAME blocks
+  // extractVTimezoneBlocks just found, not a second, looser BEGIN:VTIMEZONE/END:VTIMEZONE scan of
+  // its own that could disagree with it about where a block's boundaries actually are. One scan,
+  // one answer.
+  const excludedLines = new Set<number>();
+  for (const block of tzBlocks) {
+    for (let i = block.start; i <= block.end; i++) excludedLines.add(i);
   }
+  const nonTzLines = lines.filter((_, i) => !excludedLines.has(i));
   // Unfold before scanning so a reference split across a folded line isn't missed, but stay in
   // LINES: a TZID parameter is a property of one line, and the parser below reads one at a time.
   const unfoldedNonTzLines = nonTzLines.join('\n').replace(/\n[ \t]/g, '').split('\n');
@@ -2297,38 +2298,72 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * Every VTIMEZONE block in `lines`, with its TZID and its line-index span (inclusive of both
  * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`). The one scan every caller that needs VTIMEZONE
  * boundaries uses — stripVTimezoneBlockFor, removeOrphanedVTimezones — so a resource this
- * malformed is refused identically everywhere rather than only on some paths. Refuses
- * (`InvalidInputError`) a block with no matching END:VTIMEZONE, and refuses one containing a
- * BEGIN: line for anything other than STANDARD/DAYLIGHT — another VTIMEZONE, a VEVENT, or a
- * mixed-case `begin:vtimezone` — since unrefused, this scan would otherwise borrow whatever
- * END:VTIMEZONE it next reaches, merging everything between into one bogus block. That one
- * component-name comparison is case-insensitive; structuralLine itself stays case-sensitive
+ * malformed is refused identically everywhere rather than only on some paths.
+ *
+ * A VTIMEZONE is a direct child of the VCALENDAR, and its boundaries are its own component's:
+ * found by tracking nesting depth from every structural BEGIN:/END: line, not by scanning forward
+ * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. A stack of open
+ * component names (rather than a bare depth count) makes this exact even where nesting could
+ * otherwise confuse it. Two ways a stored resource is too broken to edit safely — a
+ * BEGIN:VTIMEZONE opening somewhere other than directly under the VCALENDAR, or a VTIMEZONE's own
+ * direct child being anything other than STANDARD/DAYLIGHT (RFC 5545 §3.6.5's `timezonec`
+ * grammar) — are both refused as "malformed". Neither throws the moment it is seen: it is
+ * recorded against the block currently being tracked, and the actual disposition is decided only
+ * once that block's fate is known. If its own matching END:VTIMEZONE is reached, "malformed" is
+ * reported (only) when something was recorded; if the input ends first, it is always
+ * "unterminated" instead, regardless of what else went wrong inside it — a resource that never
+ * closes its VTIMEZONE cannot be edited safely either way, and this is the only way that fault is
+ * ever reached. BEGIN:/END: component names are compared case-insensitively for this one scan
+ * (RFC 5545 §3.1 does not require a matching case); structuralLine itself stays case-sensitive
  * (#57, #111).
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
+  const stack: string[] = [];
+  // The one VTIMEZONE currently being tracked: the line it opened on, the stack depth it opened
+  // at (so its own closing END: is recognisable regardless of what else nested inside it), and
+  // whether anything seen so far inside it violates the criteria above. Only one can ever be
+  // "being tracked" at a time — a second BEGIN:VTIMEZONE while one is already open is itself an
+  // instance of the malformed condition (an illegal direct child), not a second candidate.
+  let candidateStart = -1;
+  let candidateOpenDepth = -1;
+  let malformed = false;
+
   for (let i = 0; i < lines.length; i++) {
-    if (structuralLine(lines[i]) === 'BEGIN:VTIMEZONE') {
-      const start = i;
-      let end = -1;
-      for (let j = i + 1; j < lines.length; j++) {
-        const structural = structuralLine(lines[j]);
-        if (structural === 'END:VTIMEZONE') { end = j; break; }
-        if (structural !== null) {
-          const beginMatch = /^BEGIN:(.*)$/i.exec(structural);
-          if (beginMatch && !['STANDARD', 'DAYLIGHT'].includes(beginMatch[1].toUpperCase())) {
-            throw new InvalidInputError('Stored calendar resource has a malformed VTIMEZONE block.');
-          }
+    const structural = structuralLine(lines[i]);
+    if (structural === null) continue;
+    const match = /^(BEGIN|END):(.+)$/i.exec(structural);
+    if (!match) continue;
+    const name = match[2].toUpperCase();
+
+    if (match[1].toUpperCase() === 'BEGIN') {
+      const openDepth = stack.length;
+      if (candidateStart === -1 && name === 'VTIMEZONE') {
+        candidateStart = i;
+        candidateOpenDepth = openDepth;
+        malformed = openDepth !== 1;
+      } else if (candidateStart !== -1 && stack[stack.length - 1] === 'VTIMEZONE' && !['STANDARD', 'DAYLIGHT'].includes(name)) {
+        malformed = true;
+      }
+      stack.push(name);
+    } else {
+      // An END: whose name does not match what is actually open leaves the stack untouched: it
+      // does not belong to the frame on top, so it cannot be the close a tracked candidate is
+      // waiting for either.
+      if (stack[stack.length - 1] === name) stack.pop();
+      if (candidateStart !== -1 && stack.length === candidateOpenDepth) {
+        if (malformed) {
+          throw new InvalidInputError('Stored calendar resource has a malformed VTIMEZONE block.');
         }
+        const tzid = (parseICalValue(lines.slice(candidateStart, i + 1).join('\n'), 'TZID') || '').trim();
+        blocks.push({ tzid, start: candidateStart, end: i });
+        candidateStart = -1;
       }
-      // A stored resource this broken cannot be edited safely at all, so it is refused outright.
-      if (end === -1) {
-        throw new InvalidInputError('Stored calendar resource has an unterminated VTIMEZONE block.');
-      }
-      const tzid = (parseICalValue(lines.slice(start, end + 1).join('\n'), 'TZID') || '').trim();
-      blocks.push({ tzid, start, end });
-      i = end;
     }
+  }
+  // A stored resource this broken cannot be edited safely at all, so it is refused outright.
+  if (candidateStart !== -1) {
+    throw new InvalidInputError('Stored calendar resource has an unterminated VTIMEZONE block.');
   }
   return blocks;
 }

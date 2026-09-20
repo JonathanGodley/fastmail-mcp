@@ -6726,6 +6726,71 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
     });
 
+    it('refuses a VTIMEZONE nested inside a VEVENT, rather than treating it as a sibling block and splicing out real DTSTART/DTEND with it', () => {
+      // A VTIMEZONE nested inside a VEVENT has no foreign BEGIN: of its own — there is nothing
+      // between its BEGIN and END but the VEVENT's own DTSTART/DTEND — so a check that only
+      // refuses a VTIMEZONE's wrong CHILDREN never notices this one opened at the wrong DEPTH.
+      // Unrefused, the orphan sweep reads Australia/Sydney as unreferenced (its real DTSTART/
+      // DTEND sit inside this stray block rather than as the VEVENT's own properties) and
+      // splices out the whole range, taking the event's actual start/end with it.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VEVENT', 'UID:victim@fm', 'DTSTAMP:20260101T000000Z',
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'DTSTART;TZID=Australia/Sydney:20261004T010000', 'DTEND;TZID=Australia/Sydney:20261004T040000',
+        'END:VTIMEZONE',
+        'SUMMARY:s',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), InvalidInputError);
+    });
+
+    it('recognizes a top-level mixed-case begin:VTIMEZONE/end:VTIMEZONE and replaces it, rather than leaving it beside a freshly inserted duplicate', () => {
+      // Every line here is spelled correctly EXCEPT the top-level BEGIN:/END:VTIMEZONE case —
+      // the shape stripVTimezoneBlockFor's own doc comment says it exists to prevent: two blocks
+      // disagreeing about the same TZID left for a reader to pick between.
+      const staleBlock = [
+        'begin:VTIMEZONE', 'TZID:Australia/Sydney',
+        'BEGIN:STANDARD', 'DTSTART:20250405T030000', 'TZOFFSETFROM:+1100', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'end:VTIMEZONE',
+      ].join('\r\n');
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        staleBlock,
+        'BEGIN:VEVENT', 'UID:mixed-top@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'SUMMARY:Mixed case top-level',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      assert.equal((result.match(/BEGIN:VTIMEZONE/gi) || []).length, 1, result);
+    });
+
+    it('names a VTIMEZONE with no END: at all as unterminated', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), /unterminated/);
+    });
+
+    it('names the fault as unterminated, not malformed, when nothing ever closes the VTIMEZONE a VEVENT was smuggled into', () => {
+      // Same shape as "refuses a stored resource whose VTIMEZONE block is missing its
+      // END:VTIMEZONE" above: no END:VTIMEZONE anywhere in this payload at all. The block never
+      // terminates, which is always the right fault to report regardless of what else went
+      // wrong inside it — a foreign VEVENT child included.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney',
+        'BEGIN:VEVENT', 'UID:malformed@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'SUMMARY:Malformed',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), /unterminated/);
+    });
+
     it('computes the span from DTSTART + DURATION when DTEND is absent, after a start-only update', () => {
       // Same Sydney October transition the DTSTART/DTEND test above uses. No stored DTEND: the
       // 6-hour DURATION (RFC 5545 §3.6.1's alternative to DTEND) has to supply the span's real
