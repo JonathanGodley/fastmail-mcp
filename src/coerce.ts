@@ -993,8 +993,9 @@ export function describeTimezone(zone: string | undefined): string {
  * `generateVTimezone` call can make hundreds of these calls, and constructing an
  * `Intl.DateTimeFormat` is the expensive part of each one.
  */
-// Keyed on `zone` itself, not `zone ?? ''`: `undefined` (the host zone) and `''` (a genuinely
-// empty zone string) are different `Map` keys.
+// Keyed on `zone` itself, not `zone ?? ''`: coalescing `undefined` (the host zone) and `''` (a
+// genuinely empty zone string) onto one key would let whichever is cached first silently answer
+// for both, including a failed `''` lookup's cached `null` standing in for the host zone.
 const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat | null>();
 
 function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
