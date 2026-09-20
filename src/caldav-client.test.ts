@@ -6791,6 +6791,49 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => regenerateVTimezones(data, '\r\n'), /unterminated/);
     });
 
+    it('refuses a VEVENT nested inside a STANDARD, one level below the only depth a foreign BEGIN: was checked at (#166)', () => {
+      // A BEGIN:VEVENT sitting inside a STANDARD has 'STANDARD', not 'VTIMEZONE', on top of the
+      // stack — a check that only looks at a VTIMEZONE's DIRECT children never sees it. Unrefused,
+      // the whole VEVENT ends up inside the recorded block's start..end range, so
+      // removeOrphanedVTimezones's reference scan never sees its DTSTART;TZID=, calls the zone
+      // orphaned, and splices the range — event included — out entirely.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//EN',
+        'BEGIN:VTIMEZONE', 'TZID:America/New_York',
+        'BEGIN:STANDARD', 'DTSTART:19701101T020000', 'TZOFFSETFROM:-0400', 'TZOFFSETTO:-0500',
+        'BEGIN:VEVENT', 'UID:real-event@example.com', 'SUMMARY:The one and only event',
+        'DTSTART;TZID=Europe/London:20260601T090000', 'DTEND;TZID=Europe/London:20260601T100000',
+        'END:VEVENT', 'END:STANDARD', 'END:VTIMEZONE', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(regenerateVTimezones(data, '\r\n')), InvalidInputError);
+    });
+
+    it('refuses the same shape with the VEVENT nested inside a DAYLIGHT instead of a STANDARD (#166)', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//EN',
+        'BEGIN:VTIMEZONE', 'TZID:America/New_York',
+        'BEGIN:DAYLIGHT', 'DTSTART:19700308T020000', 'TZOFFSETFROM:-0500', 'TZOFFSETTO:-0400',
+        'BEGIN:VEVENT', 'UID:real-event@example.com', 'SUMMARY:The one and only event',
+        'DTSTART;TZID=Europe/London:20260601T090000', 'DTEND;TZID=Europe/London:20260601T100000',
+        'END:VEVENT', 'END:DAYLIGHT', 'END:VTIMEZONE', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(regenerateVTimezones(data, '\r\n')), InvalidInputError);
+    });
+
+    it('refuses a second BEGIN:VTIMEZONE nested inside a STANDARD, rather than absorbing its definition into the outer block (#166)', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Outer',
+        'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0000',
+        'BEGIN:VTIMEZONE', 'TZID:Inner',
+        'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0000', 'END:STANDARD',
+        'END:VTIMEZONE',
+        'END:STANDARD',
+        'END:VTIMEZONE', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), InvalidInputError);
+    });
+
     it('computes the span from DTSTART + DURATION when DTEND is absent, after a start-only update', () => {
       // Same Sydney October transition the DTSTART/DTEND test above uses. No stored DTEND: the
       // 6-hour DURATION (RFC 5545 §3.6.1's alternative to DTEND) has to supply the span's real

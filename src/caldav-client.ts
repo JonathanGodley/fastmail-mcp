@@ -2305,26 +2305,28 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. A stack of open
  * component names (rather than a bare depth count) makes this exact even where nesting could
  * otherwise confuse it. Two ways a stored resource is too broken to edit safely — a
- * BEGIN:VTIMEZONE opening somewhere other than directly under the VCALENDAR, or a VTIMEZONE's own
- * direct child being anything other than STANDARD/DAYLIGHT (RFC 5545 §3.6.5's `timezonec`
- * grammar) — are both refused as "malformed". Neither throws the moment it is seen: it is
- * recorded against the block currently being tracked, and the actual disposition is decided only
- * once that block's fate is known. If its own matching END:VTIMEZONE is reached, "malformed" is
- * reported (only) when something was recorded; if the input ends first, it is always
- * "unterminated" instead, regardless of what else went wrong inside it — a resource that never
- * closes its VTIMEZONE cannot be edited safely either way, and this is the only way that fault is
- * ever reached. BEGIN:/END: component names are compared case-insensitively for this one scan
- * (RFC 5545 §3.1 does not require a matching case); structuralLine itself stays case-sensitive
- * (#57, #111).
+ * BEGIN:VTIMEZONE opening somewhere other than directly under the VCALENDAR, or anything at ANY
+ * depth inside a tracked VTIMEZONE other than STANDARD/DAYLIGHT as its own direct children (RFC
+ * 5545 §3.6.5: `standardc`/`daylightc` hold `tzprop` only — no sub-component is legal inside
+ * either one, so a wrong grandchild is exactly as forbidden as a wrong direct child) — are both
+ * refused as "malformed". Neither throws the moment it is seen: it is recorded against the block
+ * currently being tracked, and the actual disposition is decided only once that block's fate is
+ * known. If its own matching END:VTIMEZONE is reached, "malformed" is reported (only) when
+ * something was recorded; if the input ends first, it is always "unterminated" instead,
+ * regardless of what else went wrong inside it — a resource that never closes its VTIMEZONE
+ * cannot be edited safely either way, and this is the only way that fault is ever reached.
+ * BEGIN:/END: component names are compared case-insensitively for this one scan (RFC 5545 §3.1
+ * does not require a matching case); structuralLine itself stays case-sensitive (#57, #111). A
+ * bare `BEGIN:`/`END:` naming no component opens or closes nothing, so it is ignored rather than
+ * refused.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
   const stack: string[] = [];
   // The one VTIMEZONE currently being tracked: the line it opened on, the stack depth it opened
   // at (so its own closing END: is recognisable regardless of what else nested inside it), and
-  // whether anything seen so far inside it violates the criteria above. Only one can ever be
-  // "being tracked" at a time — a second BEGIN:VTIMEZONE while one is already open is itself an
-  // instance of the malformed condition (an illegal direct child), not a second candidate.
+  // whether anything seen so far inside it violates the criteria above. A second BEGIN:VTIMEZONE
+  // while one is already open is itself such a violation (see below), never a second candidate.
   let candidateStart = -1;
   let candidateOpenDepth = -1;
   let malformed = false;
@@ -2342,8 +2344,11 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
         candidateStart = i;
         candidateOpenDepth = openDepth;
         malformed = openDepth !== 1;
-      } else if (candidateStart !== -1 && stack[stack.length - 1] === 'VTIMEZONE' && !['STANDARD', 'DAYLIGHT'].includes(name)) {
-        malformed = true;
+      } else if (candidateStart !== -1) {
+        const isDirectChild = openDepth === candidateOpenDepth + 1;
+        if (!isDirectChild || !['STANDARD', 'DAYLIGHT'].includes(name)) {
+          malformed = true;
+        }
       }
       stack.push(name);
     } else {
