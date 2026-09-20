@@ -6747,6 +6747,45 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
     });
 
+    it('does not remap a short-year zoned DTSTART into the wrong century when a DURATION day-shift is applied', () => {
+      // `Date.UTC` maps a two-digit year (0-99) to 19xx. Year 0026 lands in that range, so a
+      // day-shift built on a bare `Date.UTC(y, mo - 1, d)` reads it as 1926 — a nineteen-century
+      // error the fix works around the same way `nextDateOnly` already does elsewhere in this
+      // file: shift a whole 400-year Gregorian cycle away for the arithmetic, then back.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:short-year-duration@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:00260320T090000', 'DURATION:P1D', 'SUMMARY:Old',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.ok(!block.includes('1926'), block);
+      const endMs = resolveCalendarInstantMs('0026-03-21T09:00:00', 'Australia/Sydney');
+      const expectedTzuntil = new Date(endMs).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
+    });
+
+    it('resolves a DURATION span for a pre-1000 zoned DTSTART instead of throwing on an unpadded year string', () => {
+      // The day-shifted year is read back off a `Date` with `getUTCFullYear()` and dropped
+      // straight into a template string. For a year under 1000 that yields a 1-3 digit year
+      // (e.g. "826"), and the downstream instant resolver requires a strict 4-digit year —
+      // so an unpadded short year fails to parse and this throws, rather than computing a span,
+      // for every zoned DTSTART before 1000 with any DURATION at all.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:pre-1000-duration@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:08260320T090000', 'DURATION:PT6H', 'SUMMARY:Old',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      // No assertion on offset-block count: tzdata's real transition history for this zone does
+      // not reach back this far, so a genuine LMT-only fixed offset with no DST is expected —
+      // the point of this test is that a span is computed at all, rather than throwing.
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.ok(block.includes('TZID:Australia/Sydney') && /TZUNTIL:08260320T\d{6}Z/.test(block), block);
+    });
+
     it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166)', () => {
       // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span (the old
       // per-zone behaviour) would leave the departure zone's block stopping at takeoff instead

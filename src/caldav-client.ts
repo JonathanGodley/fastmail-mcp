@@ -2358,10 +2358,14 @@ function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid:
 
   const [datePart, timePart] = startIso.split('T');
   const [y, mo, d] = datePart.split('-').map(Number);
-  const shifted = new Date(Date.UTC(y, mo - 1, d));
+  // Same cycle-shift `nextDateOnly` uses, generalized from a fixed +1 day to `nominalDays`:
+  // `Date.UTC` maps a two-digit year to 19xx, so construction itself has to happen a whole
+  // Gregorian cycle away and be shifted back on read, the same as there.
+  const shifted = new Date(Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d));
   shifted.setUTCDate(shifted.getUTCDate() + nominalDays);
+  const year = shifted.getUTCFullYear() - GREGORIAN_CYCLE_YEARS;
   const pad = (n: number) => String(n).padStart(2, '0');
-  const nominalIso = `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${timePart}`;
+  const nominalIso = `${String(year).padStart(4, '0')}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${timePart}`;
 
   const nominalMs = resolveCalendarInstantMs(nominalIso, tzid);
   if (Number.isNaN(nominalMs)) return NaN;
