@@ -7000,6 +7000,69 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
   });
 
+  describe('extractVTimezoneBlocks — a folded BEGIN:/END: marker hides a component boundary (#166)', () => {
+    // RFC 5545 §3.1: unfolding is the FIRST step of parsing, before any component is recognised.
+    // A logical line that unfolds to BEGIN:/END: but arrived as more than one physical line hides
+    // that boundary from every reader here that scans physical lines directly, extractVTimezoneBlocks
+    // included. `BEG` plus a folded continuation ` IN:VEVENT` never matches
+    // /^(BEGIN|END):(.+)$/i on either physical line, so no VEVENT frame is ever pushed onto the
+    // depth-tracking stack: the whole event is left sitting, unrecognised, inside the VTIMEZONE
+    // block's own start..end range, and the orphan sweep deletes it along with the block once
+    // Orphan/Zone is judged unreferenced elsewhere.
+    const foldedPayload = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//EN',
+      'BEGIN:VTIMEZONE', 'TZID:Orphan/Zone',
+      'BEGIN:STANDARD', 'DTSTART:19701101T020000', 'TZOFFSETFROM:-0400', 'TZOFFSETTO:-0500', 'END:STANDARD',
+      'BEG',
+      ' IN:VEVENT',
+      'UID:victim@example.com', 'SUMMARY:the only event',
+      'DTSTART;TZID=Europe/London:20260601T090000', 'DTEND;TZID=Europe/London:20260601T100000',
+      'END:VEVENT', 'END:VTIMEZONE', 'END:VCALENDAR',
+    ].join('\r\n');
+
+    it('refuses a folded BEGIN:VEVENT inside a VTIMEZONE, rather than deleting the whole event with an "orphaned" block', () => {
+      assert.throws(() => removeOrphanedVTimezones(foldedPayload), InvalidInputError);
+    });
+
+    it('refuses the same folded payload through the production regenerateVTimezones -> removeOrphanedVTimezones order', () => {
+      assert.throws(() => removeOrphanedVTimezones(regenerateVTimezones(foldedPayload, '\r\n')), InvalidInputError);
+    });
+
+    it('control: the same shape with BEGIN:VEVENT not folded still refuses, isolating the fold as what defeated detection', () => {
+      const unfolded = foldedPayload.replace('BEG\r\n IN:VEVENT', 'BEGIN:VEVENT');
+      assert.throws(() => removeOrphanedVTimezones(unfolded), InvalidInputError);
+    });
+
+    it('does not refuse a folded DESCRIPTION whose continuation text merely contains BEGIN:VEVENT, since the concatenated logical line does not itself start with a marker', () => {
+      const data = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VTIMEZONE', 'TZID:Desc/Zone', 'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:u1',
+        'DESCRIPTION:Sample payload text mentioning ',
+        ' BEGIN:VEVENT as an example, not a real marker',
+        'DTSTART;TZID=Desc/Zone:20260320T093000',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\n');
+      const out = removeOrphanedVTimezones(data);
+      assert.ok(out.includes('BEGIN:VTIMEZONE'), 'referenced VTIMEZONE must survive a folded DESCRIPTION containing BEGIN:VEVENT as text');
+    });
+
+    it('does not refuse a legitimately folded ordinary property inside a VTIMEZONE, such as a folded TZNAME', () => {
+      const data = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VTIMEZONE', 'TZID:Folded/Zone',
+        'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0000',
+        'TZNAME:A Very Long Standard Time Name That Needed ',
+        ' Folding Across Two Physical Lines',
+        'END:STANDARD', 'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:u1', 'DTSTART;TZID=Folded/Zone:20260320T093000',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\n');
+      const out = removeOrphanedVTimezones(data);
+      assert.ok(out.includes('BEGIN:VTIMEZONE'), 'a legitimately folded ordinary property must not trip the marker guard');
+    });
+  });
+
   describe('regenerateVTimezones — recurring VEVENT invariant (#166)', () => {
     it('refuses a VEVENT carrying RRULE or RDATE, rather than computing a span from a single occurrence', () => {
       // A plain Error, not InvalidInputError: isRecurringSeriesResource refuses every such

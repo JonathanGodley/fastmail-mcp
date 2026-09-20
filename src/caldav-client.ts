@@ -2304,12 +2304,15 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * found by tracking nesting depth from every structural BEGIN:/END: line, not by scanning forward
  * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. A stack of open
  * component names (rather than a bare depth count) makes this exact even where nesting could
- * otherwise confuse it. Two ways a stored resource is too broken to edit safely — a
- * BEGIN:VTIMEZONE opening somewhere other than directly under the VCALENDAR, or anything at ANY
+ * otherwise confuse it. Three ways a stored resource is too broken to edit safely — a
+ * BEGIN:VTIMEZONE opening somewhere other than directly under the VCALENDAR; anything at ANY
  * depth inside a tracked VTIMEZONE other than STANDARD/DAYLIGHT as its own direct children (RFC
  * 5545 §3.6.5: `standardc`/`daylightc` hold `tzprop` only — no sub-component is legal inside
- * either one, so a wrong grandchild is exactly as forbidden as a wrong direct child) — are both
- * refused as "malformed". Neither throws the moment it is seen: it is recorded against the block
+ * either one, so a wrong grandchild is exactly as forbidden as a wrong direct child); or a
+ * BEGIN:/END: marker that only exists once its own fold is undone, which hides a component
+ * boundary from this scan entirely (see the guard below) — are all refused as "malformed", the
+ * fold case immediately and the other two only once the block they were seen inside is resolved.
+ * Neither of the depth-tracked two throws the moment it is seen: each is recorded against the block
  * currently being tracked, and the actual disposition is decided only once that block's fate is
  * known. If its own matching END:VTIMEZONE is reached, "malformed" is reported (only) when
  * something was recorded; if the input ends first, it is always "unterminated" instead,
@@ -2321,6 +2324,32 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * refused.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
+  // RFC 5545 §3.1: unfolding precedes component recognition. The stack-tracking scan below reads
+  // PHYSICAL lines (it has to — its {start, end} are physical indices the callers splice), so a
+  // BEGIN:/END: split across a fold is invisible to it: neither physical half matches
+  // /^(BEGIN|END):(.+)$/i, no frame is pushed, and the component it should have opened or closed
+  // is silently absorbed into whatever block happens to be open around it. Checked up front,
+  // across every logical line in the payload, because a hidden marker anywhere makes the
+  // depth-tracking below untrustworthy regardless of where it sits relative to a VTIMEZONE.
+  //
+  // Refusing outright — rather than unfolding and re-deriving physical spans — is deliberate: this
+  // has no legitimate false positive to weigh against. For a logical line to unfold to BEGIN:/END:,
+  // its first physical line must carry no colon at all, which is not a legitimate content line
+  // under RFC 5545 §3.1's `NAME[;params]:VALUE` grammar — no conforming producer emits one. A
+  // folded DESCRIPTION whose continuation text happens to CONTAIN "BEGIN:VEVENT" is unaffected:
+  // its logical line unfolds to `DESCRIPTION:...BEGIN:VEVENT`, which does not itself start with
+  // the marker, so the anchored /^(BEGIN|END):/i test below leaves it untouched.
+  for (let i = 0; i < lines.length; i++) {
+    if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
+    let j = i + 1;
+    while (j < lines.length && isFoldedContinuation(lines[j])) j++;
+    if (j === i + 1) continue; // this logical line was never folded
+    const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
+    if (/^(BEGIN|END):/i.test(logical)) {
+      throw new InvalidInputError('Stored calendar resource has a malformed VTIMEZONE block.');
+    }
+  }
+
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
   const stack: string[] = [];
   // The one VTIMEZONE currently being tracked: the line it opened on, the stack depth it opened
