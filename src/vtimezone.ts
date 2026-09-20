@@ -262,7 +262,9 @@ export function generateVTimezone(
   // zone's first-ever DST season reads as STANDARD, because the reversion it will eventually make
   // has not happened yet inside this lookback/span window; and with three or more distinct
   // offsets in range, this only looks for a reversion to the LOWEST one, so a reversion to a
-  // middle offset is not counted as "returned".
+  // middle offset is not counted as "returned". The two come from the same min/max pair: since
+  // `higherOffsetMs` is always the maximum, a genuinely-daylight MIDDLE offset can never be
+  // labelled DAYLIGHT either, even where a reversion from it is seen.
   const seenReturnToLower = higherOffsetMs !== null && [...priorTransitions, ...spanTransitions].some(
     t => t.fromOffsetMs === higherOffsetMs && t.toOffsetMs === lowerOffsetMs,
   );
