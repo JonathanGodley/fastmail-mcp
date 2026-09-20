@@ -1015,7 +1015,7 @@ that reads `error.message` sees no change.
 
 ## Bounding a quadratic serializer
 
-`foldICalLine` (`src/caldav-client.ts`) folds an iCalendar content line to 75 octets per
+`foldICalLine` (`src/ical-fold.ts`) folds an iCalendar content line to 75 octets per
 RFC 5545 §3.1 by repeatedly re-slicing the remainder of the line, allocating a fresh copy
 of the tail each time. Its cost therefore grows with the square of the field length:
 roughly 135ms to fold a 200KB value, and out of memory somewhere near 800KB. Every
