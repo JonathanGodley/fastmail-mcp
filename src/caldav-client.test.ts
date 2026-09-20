@@ -6698,10 +6698,10 @@ describe('VTIMEZONE embedding (#166)', () => {
     it('computes the span from DTSTART + DURATION when DTEND is absent, after a start-only update', () => {
       // Same Sydney October transition the DTSTART/DTEND test above uses. No stored DTEND: the
       // 6-hour DURATION (RFC 5545 §3.6.1's alternative to DTEND) has to supply the span's real
-      // end, and that computed end crosses the transition just as a real DTEND would (#166
-      // round-1 review item 1). The DURATION-derived end is naive wall-clock arithmetic
-      // (23:00 + 6h = 05:00 the next day), not real elapsed time, matching parseICalDuration's
-      // own floating-value behaviour.
+      // end, and that computed end crosses the transition just as a real DTEND would (#166).
+      // Per RFC 5545 §3.3.6 the hour component is EXACT elapsed time, not wall-clock-nominal: six
+      // real hours from 23:00 crossing the spring-forward lands at local 06:00 the next day, not
+      // the naive 05:00 a plain wall-clock add would give.
       const data = [
         'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
         'UID:duration-span@fm', 'DTSTAMP:20260301T000000Z',
@@ -6711,7 +6711,7 @@ describe('VTIMEZONE embedding (#166)', () => {
       const result = regenerateVTimezones(data, '\r\n');
       const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
       assert.equal((block.match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 2, block);
-      const endMs = resolveCalendarInstantMs('2026-10-04T05:00:00', 'Australia/Sydney');
+      const endMs = resolveCalendarInstantMs('2026-10-04T06:00:00', 'Australia/Sydney');
       const expectedTzuntil = new Date(endMs).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
       assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
     });

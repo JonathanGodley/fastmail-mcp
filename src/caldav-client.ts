@@ -2321,6 +2321,49 @@ function insertVTimezoneBlock(icalData: string, block: string, lineEnding: strin
   return lines.join(lineEnding);
 }
 
+const ICAL_DURATION_RE = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
+
+/**
+ * The end instant of a DURATION applied to a zoned `startIso` wall clock, for the VTIMEZONE span
+ * only (RFC 5545 §3.3.6): the week/day components are nominal — "the same wall-clock time N days
+ * later" — but the hour/minute/second components are exact elapsed time. Sydney
+ * `20261003T230000` + `PT6H` is local 05:00 nominally, but six REAL elapsed hours crossing that
+ * night's spring-forward is local 06:00 — the hour DST skips is exactly the hour a naive
+ * wall-clock add of the whole duration would lose. Resolving the nominal (week/day-shifted only)
+ * wall clock to an instant FIRST, then adding the time components as exact milliseconds to that
+ * instant, keeps the two kinds of arithmetic from being conflated.
+ *
+ * `parseICalDuration` itself is deliberately untouched: its other caller (line 1389) computes an
+ * implicit DTEND on the read path, a user-visible value outside this fix.
+ */
+function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid: string): number | undefined {
+  const m = durationValue.match(ICAL_DURATION_RE);
+  if (!m) return undefined;
+  const [, sign, weeks, days, hours, minutes, seconds] = m;
+  if (!weeks && !days && !hours && !minutes && !seconds) return undefined;
+  if (durationValue.includes('T') && !hours && !minutes && !seconds) return undefined;
+
+  const signMul = sign === '-' ? -1 : 1;
+  const nominalDays = signMul * ((parseInt(weeks || '0', 10) * 7) + parseInt(days || '0', 10));
+
+  const [datePart, timePart] = startIso.split('T');
+  const [y, mo, d] = datePart.split('-').map(Number);
+  const shifted = new Date(Date.UTC(y, mo - 1, d));
+  shifted.setUTCDate(shifted.getUTCDate() + nominalDays);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const nominalIso = `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${timePart}`;
+
+  const nominalMs = resolveCalendarInstantMs(nominalIso, tzid);
+  if (Number.isNaN(nominalMs)) return NaN;
+
+  const exactMs = signMul * (
+    (parseInt(hours || '0', 10) * 3600000) +
+    (parseInt(minutes || '0', 10) * 60000) +
+    (parseInt(seconds || '0', 10) * 1000)
+  );
+  return nominalMs + exactMs;
+}
+
 /**
  * Recompute the VTIMEZONE block(s) the master VEVENT's current DTSTART/DTEND need, after
  * `updateCalendarEvent` has patched them (#166). Called only when `timeChanged`, and only after
@@ -2371,9 +2414,8 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
       const colonIdx = findValueBoundary(durationLine);
       const durationValue = colonIdx === -1 ? '' : durationLine.slice(colonIdx + 1).trim();
       const startIso = formatICalDate(startFrame.value);
-      const endIso = startIso ? parseICalDuration(durationValue, startIso) : undefined;
-      if (endIso) {
-        const endMs = resolveCalendarInstantMs(endIso, startFrame.tzid);
+      const endMs = startIso ? resolveDurationSpanEndMs(durationValue, startIso, startFrame.tzid) : undefined;
+      if (endMs !== undefined) {
         if (Number.isNaN(endMs)) {
           throw new InvalidInputError('Cannot resolve DURATION to an instant for VTIMEZONE generation.');
         }
