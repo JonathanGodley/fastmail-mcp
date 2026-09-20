@@ -74,8 +74,12 @@ interface Observance {
  * remaining partial day the loop never got to sample.
  *
  * `fromMs` is floored to a whole second first, and stays whole-second-aligned at every sample
- * after that (`DAY_MS` is itself a whole number of seconds) — see `bisectTransition` for why that
- * matters.
+ * after that (`DAY_MS` is itself a whole number of seconds). `bisectTransition` itself does not
+ * need this — `zoneOffsetMsAt` floors whatever instant it is given, so a fractional sample would
+ * resolve identically — but the transition instants this function returns become
+ * `generateVTimezone`'s observance onsets, and that caller's own floor (see its comment) needs
+ * every instant on the same whole-second grid its `spanDays` arithmetic and `DTSTART`/`TZUNTIL`
+ * rendering already assume.
  */
 function findTransitions(zone: string, fromMs: number, toMs: number): Transition[] {
   const transitions: Transition[] = [];
@@ -209,15 +213,22 @@ export function generateVTimezone(
   spanEndUtcMsInput: number,
   lineEnding: string = '\r\n',
 ): string {
-  // Floored to a whole second so every instant this function samples is one — see
-  // `bisectTransition`'s comment for why a sub-second instant fed to `zoneOffsetMsAt` reads a
-  // corrupted offset. RFC 5545 has no sub-second datetime form, so every real caller's span is
-  // already whole-second; this only guards a caller that isn't.
+  // Floored to a whole second so every instant this function samples is one. `zoneOffsetMsAt`
+  // floors internally too (see its own comment), so a sub-second instant no longer reads a
+  // corrupted offset the way it once could — but `spanDays` below, and the initial observance's
+  // lookback boundary, are plain arithmetic on `spanStartUtcMs`/`spanEndUtcMs` themselves, not
+  // routed through `zoneOffsetMsAt`. This floor keeps that arithmetic, and the `DTSTART`/
+  // `TZUNTIL` this generates, on the exact same whole-second grid `findTransitions` samples —
+  // rather than computing a span from a fractional instant while every observance in it resolves
+  // against that instant's floor. RFC 5545 has no sub-second datetime form, so every real
+  // caller's span is already whole-second; this only guards a caller that isn't.
   const spanStartUtcMs = Math.floor(spanStartUtcMsInput / SECOND_MS) * SECOND_MS;
   const spanEndUtcMs = Math.floor(spanEndUtcMsInput / SECOND_MS) * SECOND_MS;
   const lookbackStartMs = spanStartUtcMs - LOOKBACK_MS;
   if (lookbackStartMs < MIN_LOOKBACK_START_MS) {
-    throw new InvalidInputError('Cannot generate a VTIMEZONE this far back before year 1.');
+    throw new InvalidInputError(
+      'Cannot generate a VTIMEZONE this far back — the year-long lookback it needs would reach into year 1 or earlier.'
+    );
   }
   const spanDays = Math.ceil((spanEndUtcMs - spanStartUtcMs) / DAY_MS);
   if (spanDays > MAX_VTIMEZONE_SPAN_DAYS) {
