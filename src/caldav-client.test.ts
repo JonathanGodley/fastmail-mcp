@@ -6692,6 +6692,40 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => removeOrphanedVTimezones(data), InvalidInputError);
     });
 
+    it('refuses a VEVENT nested inside a VTIMEZONE, rather than treating the whole thing as one orphaned block and deleting the event', () => {
+      // Nothing here re-opens VTIMEZONE, so the old nested-BEGIN-only check accepted this: the
+      // scan reads the VEVENT's own END:VTIMEZONE as closing Evil/Zone's block, TZID parses as
+      // Evil/Zone, finds it unreferenced, and deletes the entire event along with it.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Evil/Zone',
+        'BEGIN:VEVENT', 'UID:victim@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART:20260320T090000Z', 'DTEND:20260320T100000Z',
+        'SUMMARY:Victim',
+        'END:VEVENT', 'END:VTIMEZONE', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), InvalidInputError);
+    });
+
+    it('refuses a mixed-case begin:vtimezone nested inside a VTIMEZONE block, which the exact-case nested-BEGIN check alone cannot see', () => {
+      // Lower-cased `begin:vtimezone` for the real Australia/Sydney block: structuralLine's
+      // exact-case match reads it as ordinary block content, not as a second BEGIN, so the outer
+      // Evil/Zone block's TZID is what the scan reports and the genuinely-referenced Sydney
+      // block is buried inside it rather than recognized as its own block.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Evil/Zone',
+        'begin:vtimezone', 'TZID:Australia/Sydney',
+        'BEGIN:STANDARD', 'DTSTART:20250405T030000', 'TZOFFSETFROM:+1100', 'TZOFFSETTO:+1000', 'TZNAME:AEST', 'END:STANDARD',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:mixed-case@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260320T090000', 'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'SUMMARY:Mixed case bypass',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+    });
+
     it('computes the span from DTSTART + DURATION when DTEND is absent, after a start-only update', () => {
       // Same Sydney October transition the DTSTART/DTEND test above uses. No stored DTEND: the
       // 6-hour DURATION (RFC 5545 §3.6.1's alternative to DTEND) has to supply the span's real

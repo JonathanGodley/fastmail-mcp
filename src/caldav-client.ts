@@ -651,15 +651,20 @@ export function extractTzidParam(line: string): string | undefined {
  *
  * CASE-SENSITIVE on the property name, unlike `hasICalProperty`, and left that way
  * deliberately. RFC 5545 §3.1 says names are case-insensitive, so a lower-cased `uid:` or
- * `dtstart:` here reads as absent — but every consequence of that is fail-CLOSED, because the
- * structural scan above it is case-sensitive too: `extractVEventBlocks` matches the literal
- * `BEGIN:VEVENT`, so a payload whose keywords are lower-cased yields no blocks at all,
- * `findCalendarObjectByUID` skips the object before it ever reads a value, and the event is
- * simply invisible to every tool rather than editable or destroyable through a mis-read.
- * `hasICalProperty` is the exception because it is the one read that gates a destroy while the
- * surrounding payload IS well-formed — a normal resource with one lower-cased `rrule:` line —
- * so there, missing the property fails open. Making every read case-insensitive is a wider
- * change than that gate needs, and belongs with the RFC conformance audit (#57, #111).
+ * `dtstart:` here reads as absent. For a WHOLLY lower-cased payload that is fail-CLOSED: the
+ * structural scan above it is case-sensitive too, so `extractVEventBlocks` matching only the
+ * literal `BEGIN:VEVENT` yields no blocks at all, `findCalendarObjectByUID` skips the object
+ * before it ever reads a value, and the event is simply invisible rather than editable or
+ * destroyable through a mis-read. A MIXED-case payload is not fail-closed the same way — a
+ * case-sensitive scan can recognize an OUTER boundary while missing an inner one, merging real
+ * content into it rather than seeing nothing. `extractVTimezoneBlocks` is the one place that
+ * now guards against exactly that shape (a nested `begin:vtimezone`, or any other non-
+ * STANDARD/DAYLIGHT component, inside a VTIMEZONE block), comparing that one component name
+ * case-insensitively; the rest of this gap is unaddressed and tracked under the RFC conformance
+ * audit (#57, #111). `hasICalProperty` is the exception because it is the one read that gates a
+ * destroy while the surrounding payload IS well-formed — a normal resource with one lower-cased
+ * `rrule:` line — so there, missing the property fails open. Making every read case-insensitive
+ * is a wider change than either gate needs.
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   // Whole content lines, split on RFC 5545 line breaks only — never a `/m` regex over the
@@ -2264,9 +2269,12 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`). The one scan every caller that needs VTIMEZONE
  * boundaries uses — stripVTimezoneBlockFor, removeOrphanedVTimezones — so a resource this
  * malformed is refused identically everywhere rather than only on some paths. Refuses
- * (`InvalidInputError`) a block with no matching END:VTIMEZONE, including one whose "END" would
- * otherwise belong to a LATER block — a BEGIN:VTIMEZONE encountered before this one's own END is
- * itself proof of malformation, since VTIMEZONE does not nest.
+ * (`InvalidInputError`) a block with no matching END:VTIMEZONE, and refuses one containing a
+ * BEGIN: line for anything other than STANDARD/DAYLIGHT — another VTIMEZONE, a VEVENT, or a
+ * mixed-case `begin:vtimezone` — since unrefused, this scan would otherwise borrow whatever
+ * END:VTIMEZONE it next reaches, merging everything between into one bogus block. That one
+ * component-name comparison is case-insensitive; structuralLine itself stays case-sensitive
+ * (#57, #111).
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
@@ -2277,10 +2285,12 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
       for (let j = i + 1; j < lines.length; j++) {
         const structural = structuralLine(lines[j]);
         if (structural === 'END:VTIMEZONE') { end = j; break; }
-        // VTIMEZONE does not nest, so a second BEGIN before this one's own END is itself proof
-        // of malformation — without this check, an unterminated block silently "borrows" a
-        // later, unrelated block's END line, merging the two into one bogus block.
-        if (structural === 'BEGIN:VTIMEZONE') break;
+        if (structural !== null) {
+          const beginMatch = /^BEGIN:(.*)$/i.exec(structural);
+          if (beginMatch && !['STANDARD', 'DAYLIGHT'].includes(beginMatch[1].toUpperCase())) {
+            throw new InvalidInputError('Stored calendar resource has a malformed VTIMEZONE block.');
+          }
+        }
       }
       // A stored resource this broken cannot be edited safely at all, so it is refused outright.
       if (end === -1) {
