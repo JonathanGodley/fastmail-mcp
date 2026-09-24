@@ -306,12 +306,10 @@ describe('generateVTimezone', () => {
 
 describe('findTransitions', () => {
   it('does not hang on a fractional toMs across a real transition (#166)', () => {
-    // Sydney's 2026 spring-forward instant is 2026-10-03T16:00:00Z (+10:00 -> +11:00). `toMs`
-    // half a second past it means bisectTransition's highSec starts fractional and the real
-    // boundary sits only 0.5s before it: lowSec climbs toward 15:59:59, and once the gap narrows
-    // to (1, 2) seconds, `Math.floor(gap / 2)` is 0 and midSec stalls at lowSec forever unless
-    // findTransitions floors toMs first. This is the reproduction, not a synthetic one — the same
-    // shape hung an unmodified copy of this function under `timeout 20` (exit 124).
+    // Sydney's 2026 spring-forward instant is 2026-10-03T16:00:00Z (+10:00 -> +11:00); toMs here
+    // is half a second past it. This pins that findTransitions' whole-second floor on toMs keeps
+    // bisectTransition's own whole-second precondition satisfied end to end, rather than letting a
+    // fractional bound reach it and be rejected.
     const fromMs = Date.parse('2026-10-03T12:00:00Z');
     const toMs = Date.parse('2026-10-03T16:00:00Z') + 500;
     const transitions = findTransitions('Australia/Sydney', fromMs, toMs);
