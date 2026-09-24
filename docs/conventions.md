@@ -2164,10 +2164,14 @@ data distribution served here for the generator to draw from instead (same probe
 four routes the probe tries to discover the tzdist base URL come back empty, so none of the three
 conditions it checks (the service answering at all, a named zone returning one parseable
 VTIMEZONE, and start/end truncation being honoured) can even be exercised. (The JMAP/JSCalendar
-converters carry the same guard on one side, not the other: `imap/jmap_ical.c:8190` calls
-`icalcomponent_add_required_timezones` unconditionally on its write path — no `tzbyref` check
-anywhere nearby — while `imap/jmap_calendar.c`'s call site was not checked; neither matters here,
-since this server's own path is CalDAV, not JMAP.)
+converters carry no such guard at all: `imap/jmap_ical.c:8190` (`jmapical_toical`),
+`imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP create path at `:4832`
+and the update path at `:5728`), and `imap/jscalendar.c:5032` (`jscal_to_ical`, called from those
+same JMAP paths and from the JSCalendar conversion endpoint `imap/http_convert.c:177`) all call
+`icalcomponent_add_required_timezones` unconditionally, with no `tzbyref` check anywhere nearby;
+neither matters here, since this server's own path is CalDAV, not JMAP — and neither
+`imap/http_caldav.c` nor `imap/caldav_util.c` calls any of the three, so a CalDAV PUT reaches none
+of them.)
 `createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`
 regenerates it whenever `start`/`end` changes (stripping the stale one first, so a moved event's
 `TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain,

@@ -5211,14 +5211,17 @@ export class CalDAVCalendarClient {
 
     // RFC 5545 §3.6.5 requires a VTIMEZONE for every TZID a component uses. Generated from ICU
     // (see vtimezone.ts) rather than left for Cyrus to fill in: Cyrus's own attacher
-    // (`icalcomponent_add_required_timezones`) is called unconditionally only on its JMAP write
-    // path (`imap/jmap_ical.c:8190`). Its two CalDAV call sites are read-side, not write-side —
-    // the GET handler and the multiget REPORT handler — and both sit behind a `tzbyref`
-    // capability this deployment does not advertise (docs/conventions.md). `caldav_put` itself
-    // never calls the attacher at all, so a CalDAV PUT — this one — gets no VTIMEZONE from Cyrus
-    // regardless of that capability; this generator is the only thing that ever attaches one on
-    // our write path. One block per distinct usable literal TZID start/end actually use, each
-    // covering the combined span `collectZoneInstants` computes (#166).
+    // (`icalcomponent_add_required_timezones`) is called unconditionally on its JMAP and
+    // JSCalendar conversion paths (`imap/jmap_ical.c:8190`, `imap/jmap_calendar.c:4503`,
+    // `imap/jscalendar.c:5032`), but its only CalDAV call sites are two read-side ones — the GET
+    // handler and the multiget REPORT handler (`imap/http_caldav.c:2617`, `:5719`) — gated on
+    // `tzbyref`, a per-resource flag Cyrus sets only when the server runs RFC 7809 time-zones-by-
+    // reference (`ALLOW_CAL_NOTZ`), which this deployment does not run (docs/conventions.md). The
+    // CalDAV write path calls the attacher nowhere: `caldav_put` never reaches it, so a CalDAV
+    // PUT — this one — gets no VTIMEZONE from Cyrus regardless of that flag; this generator is the
+    // only thing that ever attaches one on our write path. One block per distinct usable literal
+    // TZID start/end actually use, each covering the combined span `collectZoneInstants` computes
+    // (#166).
     const createZoneTzids = referencedZoneTzids([startFrame, endFrame]);
     const createInstants = collectZoneInstants([
       { label: 'start', frame: startFrame },
