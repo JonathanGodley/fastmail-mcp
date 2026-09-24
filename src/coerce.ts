@@ -1030,7 +1030,8 @@ export function zoneOffsetMsAt(utcMsInput: number, zone: string | undefined): nu
   // identical wall-clock components and return the identical offset. Without this floor, any
   // caller that hands in a sub-second `utcMs` gets that same whole-second wall-clock reading back
   // minus the UNFLOORED input — leaking the sub-second remainder straight into the returned
-  // "offset" as a spurious few hundred milliseconds (pinned directly at coerce.test.ts:2061).
+  // "offset" as a spurious few hundred milliseconds (pinned directly by coerce.test.ts's "floors
+  // a sub-second instant to its own whole second" test).
   // Flooring internally means every caller gets a consistent offset regardless of the precision
   // it passes in, rather than each one having to floor first.
   const utcMs = Math.floor(utcMsInput / 1000) * 1000;
