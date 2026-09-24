@@ -73,17 +73,23 @@ interface Observance {
  * multiple of `DAY_MS`), one last comparison against `toMs` itself catches a transition in the
  * remaining partial day the loop never got to sample.
  *
- * `fromMs` is floored to a whole second first, and stays whole-second-aligned at every sample
- * after that (`DAY_MS` is itself a whole number of seconds), so every instant this passes to
- * `zoneOffsetMsAt` is a whole second. Defensive, not load-bearing today: `zoneOffsetMsAt` floors
- * internally regardless of what it is given, and `generateVTimezone`, the only caller, already
- * pre-floors both span bounds — this guards a caller that does not.
+ * `fromMs` and `toMs` are each floored to a whole second up front, and every sample in between
+ * stays on that grid too (`DAY_MS` is itself a whole number of seconds) — so every instant this
+ * passes to `zoneOffsetMsAt`, and every bound handed to `bisectTransition`, is a whole second.
+ * Both floors matter, not just for precision: a fractional `toMs` reaching `bisectTransition` can
+ * make its bisection loop never terminate (see that function's own comment). Defensive, not
+ * load-bearing on the one caller today: `generateVTimezone` already pre-floors both span bounds
+ * before calling in — this guards a caller that does not.
  */
-function findTransitions(zone: string, fromMs: number, toMs: number): Transition[] {
+// Exported for its own test coverage (the whole-second floor on `toMs` below): every real
+// caller still goes through `generateVTimezone`, which is where the exported bound-checking
+// behaviour actually lives.
+export function findTransitions(zone: string, fromMs: number, toMs: number): Transition[] {
   const transitions: Transition[] = [];
+  const to = Math.floor(toMs / SECOND_MS) * SECOND_MS;
   let prevMs = Math.floor(fromMs / SECOND_MS) * SECOND_MS;
   let prevOffsetMs = zoneOffsetMsAt(prevMs, zone);
-  for (let t = prevMs + DAY_MS; t <= toMs; t += DAY_MS) {
+  for (let t = prevMs + DAY_MS; t <= to; t += DAY_MS) {
     const offsetMs = zoneOffsetMsAt(t, zone);
     if (offsetMs !== prevOffsetMs) {
       transitions.push({ utcMs: bisectTransition(zone, prevMs, t, prevOffsetMs), fromOffsetMs: prevOffsetMs, toOffsetMs: offsetMs });
@@ -91,10 +97,10 @@ function findTransitions(zone: string, fromMs: number, toMs: number): Transition
     }
     prevMs = t;
   }
-  if (prevMs < toMs) {
-    const offsetMs = zoneOffsetMsAt(toMs, zone);
+  if (prevMs < to) {
+    const offsetMs = zoneOffsetMsAt(to, zone);
     if (offsetMs !== prevOffsetMs) {
-      transitions.push({ utcMs: bisectTransition(zone, prevMs, toMs, prevOffsetMs), fromOffsetMs: prevOffsetMs, toOffsetMs: offsetMs });
+      transitions.push({ utcMs: bisectTransition(zone, prevMs, to, prevOffsetMs), fromOffsetMs: prevOffsetMs, toOffsetMs: offsetMs });
     }
   }
   return transitions;
@@ -110,7 +116,11 @@ function findTransitions(zone: string, fromMs: number, toMs: number): Transition
  * see `findTransitions` — and every midpoint computed here is too), never probing a sub-second
  * instant: `zoneOffsetMsAt` resolves to whole seconds internally regardless of what it is given,
  * so a finer probe here buys nothing, and every real IANA transition lands on a whole minute
- * anyway.
+ * anyway. This is not just imprecision if `highMs` ever arrives fractional: with a gap strictly
+ * between 1 and 2 seconds, `Math.floor((highSec - lowSec) / 2)` is 0, `midSec` never moves past
+ * `lowSec`, the probe at `lowSec` still reads `lowOffsetMs` by definition, and the loop never
+ * terminates — a single-threaded stdio server hung on one call. `findTransitions` flooring both
+ * bounds before either reaches here is what keeps that unreachable.
  */
 function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
   let lowSec = lowMs / SECOND_MS;
