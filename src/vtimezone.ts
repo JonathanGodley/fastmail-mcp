@@ -115,25 +115,22 @@ export function findTransitions(zone: string, fromMs: number, toMs: number): Tra
  * see `findTransitions` — and every midpoint computed here is too), never probing a sub-second
  * instant: `zoneOffsetMsAt` resolves to whole seconds internally regardless of what it is given,
  * so a finer probe here buys nothing, and every real IANA transition lands on a whole minute
- * anyway. Precondition: both bounds arrive whole-second (`findTransitions` floors them before
- * calling in). A fractional bound breaks bisection itself — with a gap strictly between 1 and 2
- * seconds, `Math.floor((highSec - lowSec) / 2)` is 0 and `midSec` never moves past `lowSec` — so
- * the iteration cap below turns a violated precondition into a thrown error instead of a hang.
+ * anyway. Precondition: both bounds must be whole-second, checked at entry rather than trusted —
+ * a fractional bound otherwise either returns a silent sub-second result or, for a gap strictly
+ * between 1 and 2 seconds, stalls the loop outright, and neither failure is visible to a caller
+ * until it happens. Whole-second bounds guarantee `highSec - lowSec` strictly decreases each pass,
+ * so the loop itself needs no iteration bound once the precondition holds.
  */
 function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
+  if (lowMs % SECOND_MS !== 0 || highMs % SECOND_MS !== 0) {
+    throw new Error('Timezone transition bisection requires whole-second bounds.');
+  }
   let lowSec = lowMs / SECOND_MS;
   let highSec = highMs / SECOND_MS;
-  // A day-wide gap (the widest `findTransitions` ever hands in) needs at most 17 halvings; 64 is
-  // a hard backstop, not a tuned bound. Reaching it means the whole-second precondition above was
-  // violated — a server bug, since no caller-supplied value reaches this function directly — so
-  // it throws rather than loop forever.
-  for (let i = 0; i < 64 && highSec - lowSec > 1; i++) {
+  while (highSec - lowSec > 1) {
     const midSec = lowSec + Math.floor((highSec - lowSec) / 2);
     if (zoneOffsetMsAt(midSec * SECOND_MS, zone) === lowOffsetMs) lowSec = midSec;
     else highSec = midSec;
-  }
-  if (highSec - lowSec > 1) {
-    throw new Error('Timezone transition bisection failed to converge.');
   }
   return highSec * SECOND_MS;
 }
