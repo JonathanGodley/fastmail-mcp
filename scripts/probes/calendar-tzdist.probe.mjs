@@ -1,9 +1,9 @@
 // What this probe settles
 // -----------------------
-// This server's calendar create path writes `DTSTART;TZID=<zone>:<wall clock>` and embeds no
-// `VTIMEZONE` for that zone (#166). Fastmail's own client embeds one on every timed event it
-// authors — measured, in docs/fastmail-action-availability.md — so matching the client means
-// embedding one too. The only open question is where the block comes from.
+// Before #166, this server's calendar create path wrote `DTSTART;TZID=<zone>:<wall clock>` and
+// embedded no `VTIMEZONE` for that zone. Fastmail's own client embeds one on every timed event it
+// authors — measured, in docs/fastmail-action-availability.md — so matching the client meant
+// embedding one too. The only open question was where the block would come from.
 //
 // The cheap source is RFC 7808 timezone data distribution: ask the server for a zone by name
 // and get its `VTIMEZONE` back, optionally truncated to a span. The expensive alternative is
