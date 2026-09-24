@@ -114,7 +114,7 @@ export function findTransitions(zone: string, fromMs: number, toMs: number): Tra
  * Bisection stays on WHOLE-SECOND instants throughout (both inputs are already whole-second —
  * see `findTransitions` — and every midpoint computed here is too), never probing a sub-second
  * instant: `zoneOffsetMsAt` resolves to whole seconds internally regardless of what it is given,
- * so a finer probe here buys nothing, and every real IANA transition lands on a whole minute
+ * so a finer probe here buys nothing, and every real IANA transition lands on a whole second
  * anyway. Precondition: both bounds must be whole-second, checked at entry rather than trusted —
  * a fractional bound otherwise either returns a silent sub-second result or, for a gap strictly
  * between 1 and 2 seconds, stalls the loop outright, and neither failure is visible to a caller
