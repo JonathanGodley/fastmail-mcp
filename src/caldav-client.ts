@@ -2310,8 +2310,10 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * 5545 §3.6.5: `standardc`/`daylightc` hold `tzprop` only — no sub-component is legal inside
  * either one, so a wrong grandchild is exactly as forbidden as a wrong direct child); or a
  * BEGIN:/END: marker that only exists once its own fold is undone, which hides a component
- * boundary from this scan entirely (see the guard below) — are all refused as "malformed", the
- * fold case immediately and the other two only once the block they were seen inside is resolved.
+ * boundary from this scan entirely (see the guard below) — are all refused as too broken to edit
+ * safely. The fold case is refused immediately, with its own message naming what actually
+ * happened rather than "malformed"; the other two are recorded against the block currently being
+ * tracked and refused as "malformed" only once that block's fate is resolved.
  * Neither of the depth-tracked two throws the moment it is seen: each is recorded against the block
  * currently being tracked, and the actual disposition is decided only once that block's fate is
  * known. If its own matching END:VTIMEZONE is reached, "malformed" is reported (only) when
@@ -2332,18 +2334,19 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
   // across every logical line in the payload, because a hidden marker anywhere makes the
   // depth-tracking below untrustworthy regardless of where it sits relative to a VTIMEZONE.
   //
-  // Refusing outright — rather than unfolding and re-deriving physical spans — is deliberate: this
-  // has no legitimate false positive to weigh against. The test below is on the LOGICAL line (the
-  // first physical line plus whatever continuations follow it), so it also refuses a marker line
-  // that was ALREADY complete on its own but got folded anyway — "BEGIN:VEVENT" split across a
-  // fold, or a long custom component name folded at the 75-octet boundary RFC 5545 §3.1
-  // recommends — not only one hidden entirely inside a continuation. Both shapes are legal under
-  // the grammar; refusing them anyway is safe because no conforming producer folds a
-  // component-marker line at all — libical, which both Cyrus and this codebase's own generator
-  // follow, always writes BEGIN:/END: unfolded. A folded DESCRIPTION whose continuation text
-  // happens to CONTAIN "BEGIN:VEVENT" is unaffected: its logical line unfolds to
-  // `DESCRIPTION:...BEGIN:VEVENT`, which does not itself start with the marker, so the anchored
-  // /^(BEGIN|END):/i test below leaves it untouched.
+  // The decision: any logical line that unfolds to a BEGIN:/END: marker but arrived as more than
+  // one physical line is refused outright — including a legal fold of an already-complete marker
+  // line ("BEGIN:VEVENT" split across a fold, or a long custom component name folded at the
+  // 75-octet boundary RFC 5545 §3.1 recommends), which no producer seen here (libical, Cyrus,
+  // this codebase's own generator) ever emits. Refusing fails closed.
+  //
+  // Why refuse rather than unfold and re-derive physical spans: this function's {start, end} are
+  // physical indices the callers splice directly, and refusing needs no logical-to-physical
+  // mapping.
+  //
+  // What it doesn't catch: a folded property whose continuation text merely CONTAINS
+  // "BEGIN:VEVENT" doesn't start with the marker once unfolded (`DESCRIPTION:...BEGIN:VEVENT`
+  // fails the anchored /^(BEGIN|END):/i test below), so it stays untouched.
   for (let i = 0; i < lines.length; i++) {
     if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
     let j = i + 1;
