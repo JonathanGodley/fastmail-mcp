@@ -6585,7 +6585,7 @@ describe('VTIMEZONE embedding (#166)', () => {
         assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
       });
 
-      it('refuses a create whose year-long lookback would reach into year 1, writing nothing', async () => {
+      it('refuses a create starting in year 1, writing nothing', async () => {
         const { client, mockDAVClient } = createMockedClient();
         await assert.rejects(
           () => client.createCalendarEvent({
@@ -6632,7 +6632,7 @@ describe('VTIMEZONE embedding (#166)', () => {
         assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
       });
 
-      it('refuses an update whose new start\'s year-long lookback would reach into year 1, writing nothing', async () => {
+      it('refuses an update whose new start is in year 1, writing nothing', async () => {
         const stored = storedEvent('floor@fm', 'DTSTART;TZID=Europe/London:20260320T090000', 'DTEND;TZID=Europe/London:20260320T100000');
         const { client, mockDAVClient } = updateMockedClient(stored);
         await assert.rejects(
