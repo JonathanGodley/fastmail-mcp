@@ -1,8 +1,9 @@
 // What this probe settles
 // -----------------------
 // Before #166, this server's calendar create path wrote `DTSTART;TZID=<zone>:<wall clock>` and
-// embedded no `VTIMEZONE` for that zone. Fastmail's own client embeds one on every timed event it
-// authors — measured, in docs/fastmail-action-availability.md — so matching the client meant
+// embedded no `VTIMEZONE` for that zone. Every timed event Fastmail's own client authors ends up
+// stored with one too — added by Cyrus's JMAP-to-iCalendar converter, not sent by the client itself
+// (measured, in docs/fastmail-action-availability.md) — so matching that stored shape meant
 // embedding one too. The only open question was where the block would come from.
 //
 // The cheap source is RFC 7808 timezone data distribution: ask the server for a zone by name
