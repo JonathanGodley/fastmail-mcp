@@ -22,7 +22,7 @@
 //   3. Truncation is honoured. A zone bounded by `start`/`end` must come back actually
 //      truncated AND carrying the `TZUNTIL` the server adds for the `end` bound. A service
 //      that answers but IGNORES truncation is a materially different result from one that
-//      honours it — it cannot reproduce the client's own output shape — so it reports as a
+//      honours it — it cannot reproduce that stored shape — so it reports as a
 //      FAIL on this condition rather than being folded into condition 2's pass.
 //
 // Discovery. The base URL is asked for, never assumed. Four routes, all read off the Cyrus
@@ -92,10 +92,10 @@ const CYRUS_DEFAULT_PREFIX = '/tzdist';
 // values read from the account, so both are safe to print.
 const ZONES = ['Australia/Sydney', 'Asia/Hong_Kong'];
 
-// The truncation spans. Fixed constants, chosen so the result is directly comparable to the
-// client's own measured output: docs/fastmail-action-availability.md records a client-authored
-// series whose embedded VTIMEZONE carried `TZUNTIL:20260923T145959Z`, so asking for that exact
-// end instant makes a match visible byte for byte. The year span crosses both Sydney DST
+// The truncation spans. Fixed constants, chosen so the result is directly comparable to that
+// stored shape: docs/fastmail-action-availability.md records a client-authored event whose
+// stored VTIMEZONE carried `TZUNTIL:20260923T145959Z`, so asking for that exact end instant
+// makes a match visible byte for byte. The year span crosses both Sydney DST
 // transitions, so its observance count sits between the event span's and the untruncated
 // block's — which is what shows truncation tracking the span rather than being a fixed trim.
 const SPAN_EVENT = { start: '2026-08-22T00:00:00Z', end: '2026-09-23T14:59:59Z' };
@@ -391,7 +391,7 @@ try {
 
   // ------------------------------------------------------------------------------------
   // Condition 3: truncation is honoured. THE ONE THAT DECIDES WHETHER WE CAN MATCH THE
-  // CLIENT'S OUTPUT SHAPE. Cyrus's `get` action adds TZUNTIL itself when `end` is given and
+  // STORED SHAPE. Cyrus's `get` action adds TZUNTIL itself when `end` is given and
   // trims the observances to the span; a server that answers but ignores `start`/`end`
   // returns the full block, which is a different platform answer and must read as one.
   //
