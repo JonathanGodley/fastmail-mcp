@@ -219,8 +219,8 @@ describe('generateVTimezone', () => {
 
   it('does not refuse an 1850 span, whose lookback stays comfortably after the boundary', () => {
     // Pins that the guard above is a real boundary rather than something that rejects every early
-    // date. This is a comfortable case, not an edge one: it does not show every year-1-or-later
-    // start succeeds (the boundary sits partway through year 1, not at its start).
+    // date. This is a comfortable case, not an edge one: the actual boundary for a span start is 3
+    // January of year 2 (pinned exactly in the test below), far later than this 1850 fixture.
     const spanStart = utcMsFromComponents(1850, 1, 15, 0, 0, 0);
     assert.doesNotThrow(() => generateVTimezone('UTC', spanStart, spanStart + 1000));
   });
