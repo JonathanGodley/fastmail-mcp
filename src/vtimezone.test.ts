@@ -206,7 +206,7 @@ describe('generateVTimezone', () => {
     assert.equal(obs[0].to, '+0900');
   });
 
-  it('refuses a span whose lookback window would reach back before year 1', () => {
+  it('refuses a span starting in year 1, whose 366-day lookback reaches into year 0', () => {
     // `Date.UTC(1, 0, 15)` is NOT year 1 — JS maps a year in 0..99 to 1900+n, so that call is
     // 1901-01-15. `utcMsFromComponents` (shared with the production constant) defeats the same
     // mapping, giving a genuine year-1 instant whose 366-day lookback reaches into year 0.
@@ -217,12 +217,24 @@ describe('generateVTimezone', () => {
     );
   });
 
-  it('does not refuse a span whose lookback window stays within year 1 or later', () => {
-    // Pins that the year-1 guard above is a real boundary rather than something that rejects
-    // every early date: an 1850 span, whose 366-day lookback stays comfortably after year 1,
-    // must succeed.
+  it('does not refuse an 1850 span, whose lookback stays comfortably after the boundary', () => {
+    // Pins that the guard above is a real boundary rather than something that rejects every early
+    // date. This is a comfortable case, not an edge one: it does not show every year-1-or-later
+    // start succeeds (the boundary sits partway through year 1, not at its start).
     const spanStart = utcMsFromComponents(1850, 1, 15, 0, 0, 0);
     assert.doesNotThrow(() => generateVTimezone('UTC', spanStart, spanStart + 1000));
+  });
+
+  it('pins the exact UTC boundary the thrown message states: accepts 0002-01-03T00:00:00Z, refuses one second earlier', () => {
+    // MIN_LOOKBACK_START_MS and LOOKBACK_MS are arithmetic, not directly asserted elsewhere; this
+    // pins the boundary they produce against the exact instant the thrown message names.
+    const accepted = utc('0002-01-03T00:00:00Z');
+    assert.doesNotThrow(() => generateVTimezone('UTC', accepted, accepted + 1000));
+    const refused = utc('0002-01-02T23:59:59Z');
+    assert.throws(
+      () => generateVTimezone('UTC', refused, refused + 1000),
+      /Cannot generate a VTIMEZONE this far back: the event must start on or after 3 January of year 2 \(UTC\)\./,
+    );
   });
 
   it('refuses a span of 101 years (#166)', () => {
