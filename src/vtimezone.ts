@@ -143,8 +143,8 @@ function pad(n: number, width = 2): string {
 }
 
 /** A UTC offset as RFC 5545's `utc-offset` (§3.3.14): `+HHMM`, seconds appended only when the
- * offset itself carries them (real for some pre-modern zones, never for one this span will hit,
- * but the ABNF allows it so there is no reason to lose the precision if it ever occurs). */
+ * offset itself carries them (real for some pre-modern zones, and the ABNF allows it, so there is
+ * no reason to lose the precision when it occurs). */
 function formatOffset(offsetMs: number): string {
   const sign = offsetMs < 0 ? '-' : '+';
   const totalSeconds = Math.round(Math.abs(offsetMs) / 1000);
