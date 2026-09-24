@@ -508,7 +508,7 @@ here, not that one property happens to be missing.
 platform — bundled, or generated from timezone rules it carries itself. #166 cannot be closed by a
 fetch.
 
-**Superseding update, 18 September 2026.** #166 is closed by generating the block instead: Node's
+**Superseding update, 25 September 2026.** #166 is closed by generating the block instead: Node's
 own ICU timezone data already backs `zoneOffsetMsAt` (`src/coerce.ts`), and `src/vtimezone.ts` walks
 it to synthesise a `VTIMEZONE` per referenced zone — not byte-identical to Cyrus's own (no `RRULE`
 observances, no reproduction of its exact trimming), but resolving to the same offsets across the
