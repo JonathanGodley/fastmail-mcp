@@ -7112,10 +7112,13 @@ describe('VTIMEZONE embedding (#166)', () => {
       'END:VEVENT', 'END:VTIMEZONE', 'END:VCALENDAR',
     ].join('\r\n');
 
-    // The fold guard's own message names no component (#166 pass 6): the scan that throws it
-    // runs over the whole payload before any VTIMEZONE has been located, so it must stay true of
-    // a payload holding no VTIMEZONE at all, not just this VTIMEZONE-nested case.
+    // The fold guard's own message names no component: the scan that throws it runs over the
+    // whole payload before any VTIMEZONE has been located, so it must stay true of a payload
+    // holding no VTIMEZONE at all, not just this VTIMEZONE-nested case.
     const FOLD_GUARD_MESSAGE = /Stored calendar resource has a component boundary hidden behind a folded line\./;
+    // The depth-tracked "malformed" path's own message — what the control below asserts, so the
+    // fold is the only difference between it and its folded twin above.
+    const MALFORMED_VTIMEZONE_MESSAGE = /Stored calendar resource has a malformed VTIMEZONE block\./;
 
     it('refuses a folded BEGIN:VEVENT inside a VTIMEZONE, rather than deleting the whole event with an "orphaned" block', () => {
       assert.throws(() => removeOrphanedVTimezones(foldedPayload), FOLD_GUARD_MESSAGE);
@@ -7127,7 +7130,7 @@ describe('VTIMEZONE embedding (#166)', () => {
 
     it('control: the same shape with BEGIN:VEVENT not folded still refuses, isolating the fold as what defeated detection', () => {
       const unfolded = foldedPayload.replace('BEG\r\n IN:VEVENT', 'BEGIN:VEVENT');
-      assert.throws(() => removeOrphanedVTimezones(unfolded), InvalidInputError);
+      assert.throws(() => removeOrphanedVTimezones(unfolded), MALFORMED_VTIMEZONE_MESSAGE);
     });
 
     it('refuses a fold-hidden BEGIN:VALARM inside a VEVENT with no VTIMEZONE anywhere in the resource, naming no component the resource lacks', () => {
