@@ -2333,12 +2333,17 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
   // depth-tracking below untrustworthy regardless of where it sits relative to a VTIMEZONE.
   //
   // Refusing outright — rather than unfolding and re-deriving physical spans — is deliberate: this
-  // has no legitimate false positive to weigh against. For a logical line to unfold to BEGIN:/END:,
-  // its first physical line must carry no colon at all, which is not a legitimate content line
-  // under RFC 5545 §3.1's `NAME[;params]:VALUE` grammar — no conforming producer emits one. A
-  // folded DESCRIPTION whose continuation text happens to CONTAIN "BEGIN:VEVENT" is unaffected:
-  // its logical line unfolds to `DESCRIPTION:...BEGIN:VEVENT`, which does not itself start with
-  // the marker, so the anchored /^(BEGIN|END):/i test below leaves it untouched.
+  // has no legitimate false positive to weigh against. The test below is on the LOGICAL line (the
+  // first physical line plus whatever continuations follow it), so it also refuses a marker line
+  // that was ALREADY complete on its own but got folded anyway — "BEGIN:VEVENT" split across a
+  // fold, or a long custom component name folded at the 75-octet boundary RFC 5545 §3.1
+  // recommends — not only one hidden entirely inside a continuation. Both shapes are legal under
+  // the grammar; refusing them anyway is safe because no conforming producer folds a
+  // component-marker line at all — libical, which both Cyrus and this codebase's own generator
+  // follow, always writes BEGIN:/END: unfolded. A folded DESCRIPTION whose continuation text
+  // happens to CONTAIN "BEGIN:VEVENT" is unaffected: its logical line unfolds to
+  // `DESCRIPTION:...BEGIN:VEVENT`, which does not itself start with the marker, so the anchored
+  // /^(BEGIN|END):/i test below leaves it untouched.
   for (let i = 0; i < lines.length; i++) {
     if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
     let j = i + 1;
@@ -2346,7 +2351,14 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
     if (j === i + 1) continue; // this logical line was never folded
     const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
     if (/^(BEGIN|END):/i.test(logical)) {
-      throw new InvalidInputError('Stored calendar resource has a malformed VTIMEZONE block.');
+      // Named generically, not as a VTIMEZONE fault: this scan runs over the WHOLE payload before
+      // any VTIMEZONE has even been located (a hidden marker earlier in the document can shift
+      // the depth one is later seen at), so a resource can trip this with no VTIMEZONE in it at
+      // all — reporting "malformed VTIMEZONE block" there would name a component the resource
+      // need not contain.
+      throw new InvalidInputError(
+        'Stored calendar resource has a component boundary hidden behind a folded line.'
+      );
     }
   }
 

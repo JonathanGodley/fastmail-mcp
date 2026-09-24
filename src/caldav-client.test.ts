@@ -7112,17 +7112,35 @@ describe('VTIMEZONE embedding (#166)', () => {
       'END:VEVENT', 'END:VTIMEZONE', 'END:VCALENDAR',
     ].join('\r\n');
 
+    // The fold guard's own message names no component (#166 pass 6): the scan that throws it
+    // runs over the whole payload before any VTIMEZONE has been located, so it must stay true of
+    // a payload holding no VTIMEZONE at all, not just this VTIMEZONE-nested case.
+    const FOLD_GUARD_MESSAGE = /Stored calendar resource has a component boundary hidden behind a folded line\./;
+
     it('refuses a folded BEGIN:VEVENT inside a VTIMEZONE, rather than deleting the whole event with an "orphaned" block', () => {
-      assert.throws(() => removeOrphanedVTimezones(foldedPayload), InvalidInputError);
+      assert.throws(() => removeOrphanedVTimezones(foldedPayload), FOLD_GUARD_MESSAGE);
     });
 
     it('refuses the same folded payload through the production regenerateVTimezones -> removeOrphanedVTimezones order', () => {
-      assert.throws(() => removeOrphanedVTimezones(regenerateVTimezones(foldedPayload, '\r\n')), InvalidInputError);
+      assert.throws(() => removeOrphanedVTimezones(regenerateVTimezones(foldedPayload, '\r\n')), FOLD_GUARD_MESSAGE);
     });
 
     it('control: the same shape with BEGIN:VEVENT not folded still refuses, isolating the fold as what defeated detection', () => {
       const unfolded = foldedPayload.replace('BEG\r\n IN:VEVENT', 'BEGIN:VEVENT');
       assert.throws(() => removeOrphanedVTimezones(unfolded), InvalidInputError);
+    });
+
+    it('refuses a fold-hidden BEGIN:VALARM inside a VEVENT with no VTIMEZONE anywhere in the resource, naming no component the resource lacks', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//EN',
+        'BEGIN:VEVENT', 'UID:no-vtimezone@example.com', 'SUMMARY:no VTIMEZONE in this resource at all',
+        'DTSTART:20260601T090000Z', 'DTEND:20260601T100000Z',
+        'BEG',
+        ' IN:VALARM',
+        'ACTION:DISPLAY', 'DESCRIPTION:Reminder', 'TRIGGER:-PT15M',
+        'END:VALARM', 'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), FOLD_GUARD_MESSAGE);
     });
 
     it('does not refuse a folded DESCRIPTION whose continuation text merely contains BEGIN:VEVENT, since the concatenated logical line does not itself start with a marker', () => {
