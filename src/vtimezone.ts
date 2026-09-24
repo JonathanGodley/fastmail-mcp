@@ -75,11 +75,10 @@ interface Observance {
  *
  * `fromMs` and `toMs` are each floored to a whole second up front, and every sample in between
  * stays on that grid too (`DAY_MS` is itself a whole number of seconds) — so every instant this
- * passes to `zoneOffsetMsAt`, and every bound handed to `bisectTransition`, is a whole second.
- * Both floors matter, not just for precision: a fractional `toMs` reaching `bisectTransition` can
- * make its bisection loop never terminate (see that function's own comment). Defensive, not
- * load-bearing on the one caller today: `generateVTimezone` already pre-floors both span bounds
- * before calling in — this guards a caller that does not.
+ * passes to `zoneOffsetMsAt`, and every bound handed to `bisectTransition`, is a whole second,
+ * which is that function's own precondition (see its comment). Defensive, not load-bearing on the
+ * one caller today: `generateVTimezone` already pre-floors both span bounds before calling in —
+ * this guards a caller that does not.
  */
 // Exported for its own test coverage (the whole-second floor on `toMs` below): every real
 // caller still goes through `generateVTimezone`, which is where the exported bound-checking
@@ -116,19 +115,25 @@ export function findTransitions(zone: string, fromMs: number, toMs: number): Tra
  * see `findTransitions` — and every midpoint computed here is too), never probing a sub-second
  * instant: `zoneOffsetMsAt` resolves to whole seconds internally regardless of what it is given,
  * so a finer probe here buys nothing, and every real IANA transition lands on a whole minute
- * anyway. This is not just imprecision if `highMs` ever arrives fractional: with a gap strictly
- * between 1 and 2 seconds, `Math.floor((highSec - lowSec) / 2)` is 0, `midSec` never moves past
- * `lowSec`, the probe at `lowSec` still reads `lowOffsetMs` by definition, and the loop never
- * terminates — a single-threaded stdio server hung on one call. `findTransitions` flooring both
- * bounds before either reaches here is what keeps that unreachable.
+ * anyway. Precondition: both bounds arrive whole-second (`findTransitions` floors them before
+ * calling in). A fractional bound breaks bisection itself — with a gap strictly between 1 and 2
+ * seconds, `Math.floor((highSec - lowSec) / 2)` is 0 and `midSec` never moves past `lowSec` — so
+ * the iteration cap below turns a violated precondition into a thrown error instead of a hang.
  */
 function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
   let lowSec = lowMs / SECOND_MS;
   let highSec = highMs / SECOND_MS;
-  while (highSec - lowSec > 1) {
+  // A day-wide gap (the widest `findTransitions` ever hands in) needs at most 17 halvings; 64 is
+  // a hard backstop, not a tuned bound. Reaching it means the whole-second precondition above was
+  // violated — a server bug, since no caller-supplied value reaches this function directly — so
+  // it throws rather than loop forever.
+  for (let i = 0; i < 64 && highSec - lowSec > 1; i++) {
     const midSec = lowSec + Math.floor((highSec - lowSec) / 2);
     if (zoneOffsetMsAt(midSec * SECOND_MS, zone) === lowOffsetMs) lowSec = midSec;
     else highSec = midSec;
+  }
+  if (highSec - lowSec > 1) {
+    throw new Error('Timezone transition bisection failed to converge.');
   }
   return highSec * SECOND_MS;
 }

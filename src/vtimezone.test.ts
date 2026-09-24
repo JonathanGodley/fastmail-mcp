@@ -293,17 +293,7 @@ describe('generateVTimezone', () => {
 });
 
 describe('findTransitions', () => {
-  // The `{ timeout: 5000 }` below is a best-effort pin, not a guarantee: node:test's per-test
-  // timeout fires through the event loop, and the defect it guards against is a synchronous,
-  // non-yielding while loop, which blocks that same event loop. Verified directly — reverting the
-  // floor below and running this file under an OS-level `timeout 12` still had to be killed
-  // externally; node's own 5000ms timeout never got a chance to fire or report. So this test
-  // passes fast today and would HANG the whole run on a real regression, not fail cleanly. Kept
-  // as the regression pin anyway (with the timeout option, in case a future change makes the loop
-  // yield somewhere) rather than left with no coverage; a hard guarantee needs an external
-  // process/worker kill, which is a bigger piece of test infrastructure than this fix earns on
-  // its own.
-  it('does not hang on a fractional toMs across a real transition (#166)', { timeout: 5000 }, () => {
+  it('does not hang on a fractional toMs across a real transition (#166)', () => {
     // Sydney's 2026 spring-forward instant is 2026-10-03T16:00:00Z (+10:00 -> +11:00). `toMs`
     // half a second past it means bisectTransition's highSec starts fractional and the real
     // boundary sits only 0.5s before it: lowSec climbs toward 15:59:59, and once the gap narrows
