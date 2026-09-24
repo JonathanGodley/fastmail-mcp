@@ -218,7 +218,7 @@ function zoneAbbreviation(zone: string, utcMs: number): string {
  *
  * `TZUNTIL` (RFC 7808 §7.2, not RFC 5545 itself — a later RFC, not a vendor extension) is always
  * set to `spanEndUtcMs`, matching the bound Cyrus's own `icalcomponent_add_required_timezones`
- * puts on the block it attaches server-side — see `docs/conventions.md`'s VTIMEZONE section.
+ * puts on the block it attaches server-side (`imap/ical_support.c:3141`).
  */
 export function generateVTimezone(
   zone: string,
