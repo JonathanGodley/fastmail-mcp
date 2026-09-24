@@ -6552,6 +6552,98 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
   });
 
+  // generateVTimezone's own two refusals (span, year-1 lookback floor) are pinned at the unit
+  // level in vtimezone.test.ts. Nothing there proves either one actually reaches a caller: both
+  // create_calendar_event and update_calendar_event call generateVTimezone through their own
+  // separate code paths, and a refactor could silently swallow or bypass the throw on either one
+  // without any unit test noticing. These pin the refusal at the CLIENT call, and that nothing
+  // was written before it fired.
+  describe('create/update_calendar_event surface generateVTimezone\'s own refusals (#166)', () => {
+    describe('create_calendar_event', () => {
+      before(() => setDefaultTimezone('America/New_York'));
+      after(() => setDefaultTimezone(undefined));
+
+      function createMockedClient() {
+        const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+        const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+          createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
+        });
+        (client as any).client = mockDAVClient;
+        return { client, mockDAVClient };
+      }
+
+      it('refuses a create whose span exceeds MAX_VTIMEZONE_SPAN_DAYS, writing nothing', async () => {
+        const { client, mockDAVClient } = createMockedClient();
+        await assert.rejects(
+          () => client.createCalendarEvent({
+            calendarId: 'Personal', title: 'T',
+            start: '2000-01-01T00:00:00', end: '2101-01-02T00:00:00',
+            timeZone: 'Europe/London',
+          }),
+          InvalidInputError,
+        );
+        assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
+      });
+
+      it('refuses a create whose year-long lookback would reach into year 1, writing nothing', async () => {
+        const { client, mockDAVClient } = createMockedClient();
+        await assert.rejects(
+          () => client.createCalendarEvent({
+            calendarId: 'Personal', title: 'T',
+            start: '0001-06-01T09:00:00', end: '0001-06-01T10:00:00',
+            timeZone: 'Europe/London',
+          }),
+          InvalidInputError,
+        );
+        assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0);
+      });
+    });
+
+    describe('update_calendar_event', () => {
+      before(() => setDefaultTimezone('America/New_York'));
+      after(() => setDefaultTimezone(undefined));
+
+      function storedEvent(uid: string, dtstart: string, dtend: string): string {
+        return [
+          'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+          `UID:${uid}`, 'DTSTAMP:20260301T000000Z',
+          dtstart, dtend, 'SUMMARY:Stored',
+          'END:VEVENT', 'END:VCALENDAR',
+        ].join('\r\n');
+      }
+
+      function updateMockedClient(icalData: string) {
+        const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+        const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+          fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+          updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+        });
+        (client as any).client = mockDAVClient;
+        return { client, mockDAVClient };
+      }
+
+      it('refuses an update whose new span exceeds MAX_VTIMEZONE_SPAN_DAYS, writing nothing', async () => {
+        const stored = storedEvent('span@fm', 'DTSTART;TZID=Europe/London:20260320T090000', 'DTEND;TZID=Europe/London:20260320T100000');
+        const { client, mockDAVClient } = updateMockedClient(stored);
+        await assert.rejects(
+          () => client.updateCalendarEvent('span@fm', { start: '2000-01-01T00:00:00', end: '2101-01-02T00:00:00' }),
+          InvalidInputError,
+        );
+        assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+      });
+
+      it('refuses an update whose new start\'s year-long lookback would reach into year 1, writing nothing', async () => {
+        const stored = storedEvent('floor@fm', 'DTSTART;TZID=Europe/London:20260320T090000', 'DTEND;TZID=Europe/London:20260320T100000');
+        const { client, mockDAVClient } = updateMockedClient(stored);
+        await assert.rejects(
+          () => client.updateCalendarEvent('floor@fm', { start: '0001-06-01T09:00:00', end: '0001-06-01T10:00:00' }),
+          InvalidInputError,
+        );
+        assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+      });
+    });
+  });
+
   describe('regenerateVTimezones — span computation and block replacement (#166)', () => {
     it('computes the span from BOTH DTSTART and DTEND, not just one, when they straddle a DST transition', () => {
       // Sydney's own 2026 October transition (STANDARD +1000 -> DAYLIGHT +1100 at
