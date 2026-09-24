@@ -225,7 +225,7 @@ export function generateVTimezone(
   const lookbackStartMs = spanStartUtcMs - LOOKBACK_MS;
   if (lookbackStartMs < MIN_LOOKBACK_START_MS) {
     throw new InvalidInputError(
-      'Cannot generate a VTIMEZONE this far back — the year-long lookback it needs would reach into year 1 or earlier.'
+      'Cannot generate a VTIMEZONE this far back — the year-long lookback it needs would reach back to the first day of year 1 or earlier.'
     );
   }
   const spanDays = Math.ceil((spanEndUtcMs - spanStartUtcMs) / DAY_MS);
