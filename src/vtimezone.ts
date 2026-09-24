@@ -216,7 +216,7 @@ function zoneAbbreviation(zone: string, utcMs: number): string {
  * touches exactly two offsets the same way a DST cycle does but never reverts, so it stays
  * `STANDARD` throughout. A zone with only one offset in range is `STANDARD` outright.
  *
- * `TZUNTIL` (RFC 7808 §7.2, not RFC 5545 itself — a later RFC, not a vendor extension) is always
+ * `TZUNTIL` (RFC 7808 §7.1, not RFC 5545 itself — a later RFC, not a vendor extension) is always
  * set to `spanEndUtcMs`.
  */
 export function generateVTimezone(
