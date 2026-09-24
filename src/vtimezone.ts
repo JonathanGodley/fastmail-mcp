@@ -121,7 +121,10 @@ export function findTransitions(zone: string, fromMs: number, toMs: number): Tra
  * until it happens. Whole-second bounds guarantee `highSec - lowSec` strictly decreases each pass,
  * so the loop itself needs no iteration bound once the precondition holds.
  */
-function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
+// Exported for its own test coverage (the entry check above): every real caller still goes
+// through generateVTimezone -> findTransitions, which is where the whole-second bounds actually
+// come from.
+export function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
   if (lowMs % SECOND_MS !== 0 || highMs % SECOND_MS !== 0) {
     throw new Error('Timezone transition bisection requires whole-second bounds.');
   }

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateVTimezone, findTransitions } from './vtimezone.js';
+import { generateVTimezone, findTransitions, bisectTransition } from './vtimezone.js';
 import { InvalidInputError, utcMsFromComponents } from './coerce.js';
 
 function utc(iso: string): number {
@@ -317,5 +317,28 @@ describe('findTransitions', () => {
     assert.equal(transitions[0].utcMs, Date.parse('2026-10-03T16:00:00Z'));
     assert.equal(transitions[0].fromOffsetMs, 10 * 3600 * 1000);
     assert.equal(transitions[0].toOffsetMs, 11 * 3600 * 1000);
+  });
+});
+
+describe('bisectTransition', () => {
+  // findTransitions always floors before calling in, so nothing exercises this check through that
+  // path; a scratch copy with the check deleted stayed 25/25 green. Pinned directly here instead.
+  // Bounds sit an hour either side of Sydney's real 2026 spring-forward transition (not AT either
+  // bound, unlike the findTransitions test above) so the check fires before any bisection runs.
+  const wholeSecondMs = Date.parse('2026-10-03T16:00:00Z');
+  const lowOffsetMs = 10 * 3600 * 1000;
+
+  it('refuses a fractional low bound', () => {
+    assert.throws(
+      () => bisectTransition('Australia/Sydney', wholeSecondMs - 3600000 + 0.7, wholeSecondMs + 3600000, lowOffsetMs),
+      /Timezone transition bisection requires whole-second bounds\./,
+    );
+  });
+
+  it('refuses a fractional high bound', () => {
+    assert.throws(
+      () => bisectTransition('Australia/Sydney', wholeSecondMs - 3600000, wholeSecondMs + 3600000 + 0.7, lowOffsetMs),
+      /Timezone transition bisection requires whole-second bounds\./,
+    );
   });
 });
