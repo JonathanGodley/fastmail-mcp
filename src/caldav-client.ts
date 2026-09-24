@@ -12,8 +12,6 @@ import { foldICalLine } from './ical-fold.js';
 // the rest of the server displays, so it reads that value instead of re-deriving its own
 // from the environment.
 import { getDefaultTimezone } from './email-formatter.js';
-// generateVTimezone lives in its own module rather than here so it can import zoneOffsetMsAt
-// from coerce.ts without this file importing it back — see vtimezone.ts's own header comment.
 import { generateVTimezone } from './vtimezone.js';
 
 export interface CalDAVConfig {
