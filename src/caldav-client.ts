@@ -2312,14 +2312,12 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * BEGIN:/END: marker that only exists once its own fold is undone, which hides a component
  * boundary from this scan entirely (see the guard below) — are all refused as too broken to edit
  * safely. The fold case is refused immediately, with its own message naming what actually
- * happened rather than "malformed"; the other two are recorded against the block currently being
- * tracked and refused as "malformed" only once that block's fate is resolved.
- * Neither of the depth-tracked two throws the moment it is seen: each is recorded against the block
- * currently being tracked, and the actual disposition is decided only once that block's fate is
- * known. If its own matching END:VTIMEZONE is reached, "malformed" is reported (only) when
- * something was recorded; if the input ends first, it is always "unterminated" instead,
- * regardless of what else went wrong inside it — a resource that never closes its VTIMEZONE
- * cannot be edited safely either way, and this is the only way that fault is ever reached.
+ * happened rather than "malformed"; the other two are only recorded against the block currently
+ * being tracked, and the actual disposition is decided once that block's fate is known —
+ * "malformed" if its own matching END:VTIMEZONE is reached with something recorded against it,
+ * "unterminated" instead if the input ends first regardless of what else went wrong inside it (a
+ * resource that never closes its VTIMEZONE cannot be edited safely either way, and this is the
+ * only way that fault is ever reached).
  * BEGIN:/END: component names are compared case-insensitively for this one scan (RFC 5545 §3.1
  * does not require a matching case); structuralLine itself stays case-sensitive (#57, #111). A
  * bare `BEGIN:`/`END:` naming no component opens or closes nothing, so it is ignored rather than
