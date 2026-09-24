@@ -437,7 +437,7 @@ since the 22 August section records bytes only — gave `11:00 AM – 12:00 PM A
 `9:00 AM – 10:00 AM HKST`. So the absence had no visible effect in the Fastmail client, which
 resolves the zone name itself. **This did not measure interoperability**: whether a
 `VTIMEZONE`-less resource resolves the same way in some *other* CalDAV client was never tested. As
-of 18 September 2026 the point is moot for this server's own writes — `create_calendar_event` and
+of 25 September 2026 the point is moot for this server's own writes — `create_calendar_event` and
 `update_calendar_event` now generate and embed a `VTIMEZONE` for every zone they reference (#166,
 `src/vtimezone.ts`; see "The platform" below for where the data comes from).
 
