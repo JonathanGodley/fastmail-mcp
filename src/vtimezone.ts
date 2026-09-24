@@ -74,12 +74,10 @@ interface Observance {
  * remaining partial day the loop never got to sample.
  *
  * `fromMs` is floored to a whole second first, and stays whole-second-aligned at every sample
- * after that (`DAY_MS` is itself a whole number of seconds). `bisectTransition` itself does not
- * need this — `zoneOffsetMsAt` floors whatever instant it is given, so a fractional sample would
- * resolve identically — but the transition instants this function returns become
- * `generateVTimezone`'s observance onsets, and that caller's own floor (see its comment) needs
- * every instant on the same whole-second grid its `spanDays` arithmetic and `DTSTART`/`TZUNTIL`
- * rendering already assume.
+ * after that (`DAY_MS` is itself a whole number of seconds), so every instant this passes to
+ * `zoneOffsetMsAt` is a whole second. Defensive, not load-bearing today: `zoneOffsetMsAt` floors
+ * internally regardless of what it is given, and `generateVTimezone`, the only caller, already
+ * pre-floors both span bounds — this guards a caller that does not.
  */
 function findTransitions(zone: string, fromMs: number, toMs: number): Transition[] {
   const transitions: Transition[] = [];
