@@ -2153,9 +2153,19 @@ be discoverable only by reading the event back.
 such `TZID` (RFC 5545 §3.6.5; #166, `src/vtimezone.ts`), generated from Node's own ICU timezone
 data rather than fetched from the platform: `caldav_store_resource` (the function behind every
 `caldav_put` path in `imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so nothing on
-the write path would catch a bare, undefined `TZID=` reference, and Cyrus's own re-attach step,
-`icalcomponent_add_required_timezones` (`imap/ical_support.c`), never runs for our writes either
-way — its two CalDAV call sites (`imap/http_caldav.c:2617`, `:5719`) sit inside
+the write path would catch a bare, undefined `TZID=` reference. A `text/calendar` PUT — the only
+body type this server sends — parses through `ical_string_as_icalcomponent`
+(`imap/ical_support.c:832`), which calls Cyrus's own re-attach step,
+`icalcomponent_add_required_timezones` (`imap/ical_support.c:3086`), nowhere; measured directly
+too, not just read from source — a resource this server wrote came back with no VTIMEZONE when
+fetched over CalDAV (23 August 2026, #166). That is not true of CalDAV as a whole: an
+`application/event+json` body (one of the four types `imap/http_caldav.c`'s own MIME table
+registers alongside `text/calendar`, `application/calendar+xml` and `application/calendar+json` —
+only the JSON-event one reaches the attacher, checked all four) is converted through
+`jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`) into `jmapical_toical` (`:8273`), which
+runs the attacher unconditionally (`:8190`) — this server never sends that content type, so it
+doesn't apply here, but "CalDAV never attaches" would be false of Cyrus generally. The attacher's
+two CalDAV call sites on the READ side (`imap/http_caldav.c:2617`, `:5719`) sit inside
 `if (cdata->comp_flags.tzbyref)`, a per-resource flag set not BY `strip_vtimezones` but
 alongside it, in the same `if (namespace_calendar.allow & ALLOW_CAL_NOTZ)` block
 (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
@@ -2166,12 +2176,11 @@ conditions it checks (the service answering at all, a named zone returning one p
 VTIMEZONE, and start/end truncation being honoured) can even be exercised. (The JMAP/JSCalendar
 converters carry no such guard at all: `imap/jmap_ical.c:8190` (`jmapical_toical`),
 `imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP create path at `:4832`
-and the update path at `:5728`), and `imap/jscalendar.c:5032` (`jscal_to_ical`, called from those
-same JMAP paths and from the JSCalendar conversion endpoint `imap/http_convert.c:177`) all call
+and the update path at `:5728`), and `imap/jscalendar.c:5032` (`jscal_to_ical`, whose callers
+include the JMAP create/update paths, the JSCalendar conversion endpoint
+`imap/http_convert.c:177`, and `alert_to_ical` at `imap/jmap_calendar.c:1251`) all call
 `icalcomponent_add_required_timezones` unconditionally, with no `tzbyref` check anywhere nearby;
-neither matters here, since this server's own path is CalDAV, not JMAP — and neither
-`imap/http_caldav.c` nor `imap/caldav_util.c` calls any of the three, so a CalDAV PUT reaches none
-of them.)
+none of them matters for this server's own write path, which sends `text/calendar`, never JSON.)
 `createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`
 regenerates it whenever `start`/`end` changes (stripping the stale one first, so a moved event's
 `TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain,

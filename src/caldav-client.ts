@@ -5208,18 +5208,23 @@ export class CalDAVCalendarClient {
     validateDateConsistency(startFrame, endFrame);
 
     // RFC 5545 §3.6.5 requires a VTIMEZONE for every TZID a component uses. Generated from ICU
-    // (see vtimezone.ts) rather than left for Cyrus to fill in: Cyrus's own attacher
-    // (`icalcomponent_add_required_timezones`) is called unconditionally on its JMAP and
-    // JSCalendar conversion paths (`imap/jmap_ical.c:8190`, `imap/jmap_calendar.c:4503`,
-    // `imap/jscalendar.c:5032`), but its only CalDAV call sites are two read-side ones — the GET
-    // handler and the multiget REPORT handler (`imap/http_caldav.c:2617`, `:5719`) — gated on
-    // `tzbyref`, a per-resource flag Cyrus sets only when the server runs RFC 7809 time-zones-by-
-    // reference (`ALLOW_CAL_NOTZ`), which this deployment does not run (docs/conventions.md). The
-    // CalDAV write path calls the attacher nowhere: `caldav_put` never reaches it, so a CalDAV
-    // PUT — this one — gets no VTIMEZONE from Cyrus regardless of that flag; this generator is the
-    // only thing that ever attaches one on our write path. One block per distinct usable literal
-    // TZID start/end actually use, each covering the combined span `collectZoneInstants` computes
-    // (#166).
+    // (see vtimezone.ts) rather than left for Cyrus to fill in: a `text/calendar` PUT — the only
+    // body type this server sends — parses through `ical_string_as_icalcomponent`
+    // (`imap/ical_support.c:832`), which calls Cyrus's own attacher
+    // (`icalcomponent_add_required_timezones`) nowhere; measured directly too, not just read from
+    // source — a resource this server wrote came back with no VTIMEZONE over CalDAV (23 August
+    // 2026, #166). That is not true of CalDAV generally: an `application/event+json` body (one of
+    // four types http_caldav.c's own MIME table registers) is converted through
+    // `jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`) into `jmapical_toical` (`:8273`),
+    // which runs the attacher unconditionally (`:8190`) — this server never sends that content
+    // type, so it doesn't apply here, but "CalDAV never attaches" would be false of Cyrus as a
+    // whole. The attacher's two direct CalDAV call sites are both read-side — the GET handler and
+    // the multiget REPORT handler (`imap/http_caldav.c:2617`, `:5719`) — gated on `tzbyref`, a
+    // per-resource flag Cyrus sets only when the server runs RFC 7809 time-zones-by-reference
+    // (`ALLOW_CAL_NOTZ`), which this deployment does not run (docs/conventions.md). This generator
+    // is the only thing that attaches a VTIMEZONE on our actual write path. One block per distinct
+    // usable literal TZID start/end actually use, each covering the combined span
+    // `collectZoneInstants` computes (#166).
     const createZoneTzids = referencedZoneTzids([startFrame, endFrame]);
     const createInstants = collectZoneInstants([
       { label: 'start', frame: startFrame },
