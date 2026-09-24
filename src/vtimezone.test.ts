@@ -325,7 +325,7 @@ describe('bisectTransition', () => {
   // path. Pinned directly here instead. Bounds sit an hour either side of Sydney's real 2026
   // spring-forward transition rather than tight against it (unlike the findTransitions test above):
   // with the check removed, bounds tight against a transition bisect forever once the gap narrows
-  // to a fractional (1, 2) seconds, while these wider bounds return a wrong result without hanging
+  // to a fractional (1, 2) seconds, while these wider bounds return without hanging
   // — keep them wide if these tests are ever changed, or a red run here hangs instead of failing.
   const wholeSecondMs = Date.parse('2026-10-03T16:00:00Z');
   const lowOffsetMs = 10 * 3600 * 1000;
