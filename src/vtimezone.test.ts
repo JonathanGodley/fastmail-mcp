@@ -305,7 +305,7 @@ describe('generateVTimezone', () => {
 });
 
 describe('findTransitions', () => {
-  it('does not hang on a fractional toMs across a real transition (#166)', () => {
+  it('returns the right transition for a fractional toMs, because findTransitions floors it before bisectTransition\'s precondition check (#166)', () => {
     // Sydney's 2026 spring-forward instant is 2026-10-03T16:00:00Z (+10:00 -> +11:00); toMs here
     // is half a second past it. This pins that findTransitions' whole-second floor on toMs keeps
     // bisectTransition's own whole-second precondition satisfied end to end, rather than letting a
