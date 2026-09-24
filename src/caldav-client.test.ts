@@ -6969,9 +6969,9 @@ describe('VTIMEZONE embedding (#166)', () => {
     it('resolves a DURATION span for a pre-1000 zoned DTSTART instead of throwing on an unpadded year string', () => {
       // The day-shifted year is read back off a `Date` with `getUTCFullYear()` and dropped
       // straight into a template string. For a year under 1000 that yields a 1-3 digit year
-      // (e.g. "826"), and the downstream instant resolver requires a strict 4-digit year —
-      // so an unpadded short year fails to parse and this throws, rather than computing a span,
-      // for every zoned DTSTART before 1000 with any DURATION at all.
+      // (e.g. "826"), and the downstream instant resolver requires a strict 4-digit year — so
+      // without padding, an unpadded short year would fail to parse and throw, rather than
+      // computing a span, for every zoned DTSTART before 1000 with any DURATION at all.
       const data = [
         'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
         'UID:pre-1000-duration@fm', 'DTSTAMP:20260301T000000Z',
