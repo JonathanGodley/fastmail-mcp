@@ -74,11 +74,8 @@ describe('generateVTimezone', () => {
   });
 
   it('detects a transition even when the span itself is under a day — an overnight event straddling the October transition', () => {
-    // A realistic calendar event's own span is almost always well under 24 hours, unlike the
-    // month-wide spans the other transition tests use. findTransitions samples once every
-    // DAY_MS starting at fromMs + DAY_MS, so a span shorter than that had no sample point
-    // inside it at all — the loop body never ran, and a transition strictly between fromMs and
-    // toMs went undetected regardless of how close either end sat to it.
+    // A sub-day span, unlike the month-wide spans the other transition tests use: the day loop
+    // never samples inside it, so this pins the tail check that catches the transition anyway.
     const block = generateVTimezone(
       'Australia/Sydney',
       utc('2026-10-03T23:00:00+10:00'),
@@ -160,7 +157,7 @@ describe('generateVTimezone', () => {
   });
 
   it('folds a long TZID line at 75 octets, per RFC 5545 §3.1 (shared foldICalLine, #166)', () => {
-    // No real IANA zone name is remotely this long; the fold itself is now `ical-fold.ts`'s own
+    // No real IANA zone name is remotely this long; the fold itself is `ical-fold.ts`'s own
     // unit-tested responsibility (shared with caldav-client.ts), so this only needs to prove the
     // generator actually wires its output through it, with a continuation line to show for it.
     const zone = 'Fake/' + 'x'.repeat(200);
@@ -174,8 +171,8 @@ describe('generateVTimezone', () => {
 
   it('labels a lone observance DAYLIGHT when it is the higher of the two offsets a prior transition set up, even with no transition IN the span', () => {
     // January is peak daylight saving in Sydney (+1100), reached by the October transition
-    // outside this span. Classifying by `to`-offsets alone saw one distinct value here and
-    // called the zone fixed-offset, mislabelling this DAYLIGHT observance STANDARD.
+    // outside this span. Classifying by `to`-offsets alone sees one distinct value here and
+    // calls the zone fixed-offset, mislabelling this DAYLIGHT observance STANDARD.
     const block = generateVTimezone('Australia/Sydney', utc('2027-01-05T00:00:00+11:00'), utc('2027-01-06T00:00:00+11:00'));
     const obs = observances(block);
     assert.equal(obs.length, 1, block);

@@ -656,7 +656,7 @@ export function extractTzidParam(line: string): string | undefined {
  * destroyable through a mis-read. A MIXED-case payload is not fail-closed the same way — a
  * case-sensitive scan can recognize an OUTER boundary while missing an inner one, merging real
  * content into it rather than seeing nothing. `extractVTimezoneBlocks` is the one place that
- * now guards against exactly that shape (a nested `begin:vtimezone`, or any other non-
+ * guards against exactly that shape (a nested `begin:vtimezone`, or any other non-
  * STANDARD/DAYLIGHT component, inside a VTIMEZONE block), comparing that one component name
  * case-insensitively; the rest of this gap is unaddressed and tracked under the RFC conformance
  * audit (#57, #111). `hasICalProperty` is the exception because it is the one read that gates a
@@ -1064,9 +1064,7 @@ export function removeOrphanedVTimezones(icalData: string): string {
   if (tzBlocks.length === 0) return icalData;
 
   // Content outside VTIMEZONE blocks, for reference scanning — derived from the SAME blocks
-  // extractVTimezoneBlocks just found, not a second, looser BEGIN:VTIMEZONE/END:VTIMEZONE scan of
-  // its own that could disagree with it about where a block's boundaries actually are. One scan,
-  // one answer.
+  // extractVTimezoneBlocks just found.
   const excludedLines = new Set<number>();
   for (const block of tzBlocks) {
     for (let i = block.start; i <= block.end; i++) excludedLines.add(i);
@@ -1178,8 +1176,7 @@ interface ParsedICalDuration {
  * Parse a DURATION value into its components, or undefined if malformed. The one parse
  * `parseICalDuration` (the user-visible implicit-DTEND computation) and
  * `resolveDurationSpanEndMs` (the VTIMEZONE span computation) both build on, so the two agree
- * on what counts as a valid DURATION rather than each carrying its own copy of the pattern and
- * its guards that could silently drift apart.
+ * on what counts as a valid DURATION.
  */
 function parseICalDurationComponents(duration: string): ParsedICalDuration | undefined {
   const m = duration.match(ICAL_DURATION_RE);
@@ -2300,9 +2297,8 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  *
  * A VTIMEZONE is a direct child of the VCALENDAR, and its boundaries are its own component's:
  * found by tracking nesting depth from every structural BEGIN:/END: line, not by scanning forward
- * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. A stack of open
- * component names (rather than a bare depth count) makes this exact even where nesting could
- * otherwise confuse it. Three ways a stored resource is too broken to edit safely — a
+ * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. Three ways a
+ * stored resource is too broken to edit safely — a
  * BEGIN:VTIMEZONE opening somewhere other than directly under the VCALENDAR; anything at ANY
  * depth inside a tracked VTIMEZONE other than STANDARD/DAYLIGHT as its own direct children (RFC
  * 5545 §3.6.5: `standardc`/`daylightc` hold `tzprop` only — no sub-component is legal inside
@@ -2481,10 +2477,6 @@ function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid:
  * every other patch has landed, so it reads the FINAL start/end rather than a value about to be
  * overwritten again below it — and before `removeOrphanedVTimezones`, which then drops any block
  * (this function's included) that the patched event no longer references at all.
- *
- * `isRecurringSeriesResource` refuses every RRULE/RDATE-bearing update before this point ever
- * runs, so the invariant check just below cannot fire through the public API today. A
- * series-aware span (the series' LAST occurrence, not the master) is designed under #146.
  */
 export function regenerateVTimezones(icalData: string, lineEnding: string): string {
   const vevent = extractVEvent(icalData);
@@ -2493,7 +2485,8 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   // Also a plain Error, matching updateCalendarEvent's own "no VEVENT block found": if this
   // fires at all, the upstream isRecurringSeriesResource refusal has already failed to stop a
   // recurring VEVENT from reaching here, which is a server bug, not a caller input fault — no
-  // argument this caller could re-form reaches this check.
+  // argument this caller could re-form reaches this check. A series-aware span (the series' LAST
+  // occurrence, not the master) is designed under #146.
   if (hasICalProperty(vevent, 'RRULE') || hasICalProperty(vevent, 'RDATE')) {
     throw new Error(
       'Cannot compute a VTIMEZONE span for a recurring VEVENT (RRULE/RDATE present) — a single ' +
@@ -2541,11 +2534,10 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   const spanMaxMs = Math.max(...instants);
 
   // Strip every referenced zone's stored block(s) FIRST, then insert one freshly generated block
-  // per literal TZID spelling — never interleaved strip-then-insert per zone. Interleaving left
-  // a dangling TZID when two referenced zones were alias-equivalent but differently spelled
-  // (`US/Pacific` and `America/Los_Angeles`): `stripVTimezoneBlockFor` matches by zone IDENTITY
-  // (`zoneNamesEqual`), so stripping the SECOND alias-equal spelling also removed the block the
-  // first iteration had just inserted for the first spelling (#166).
+  // per literal TZID spelling — never interleaved strip-then-insert per zone: interleaving would
+  // strip the block just inserted for an alias-equal spelling, since `stripVTimezoneBlockFor`
+  // matches by zone IDENTITY (`zoneNamesEqual`), and `US/Pacific` / `America/Los_Angeles` are
+  // alias-equivalent but differently spelled (#166).
   let result = icalData;
   for (const tzid of zoneTzids) {
     result = stripVTimezoneBlockFor(result, tzid);

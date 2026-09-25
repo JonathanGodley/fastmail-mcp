@@ -2057,12 +2057,9 @@ describe('startOfLocalDayUtcIso', () => {
 
 describe('zoneOffsetMsAt', () => {
   it('floors a sub-second instant to its own whole second, at a Sydney transition boundary', () => {
+    // See zoneOffsetMsAt's own floor comment (src/coerce.ts) for the corruption this pins against.
     // 2026-10-03T16:00:00Z is Sydney's spring-forward instant (02:00 -> 03:00 local, +10:00 to
-    // +11:00). Reading a sub-second `utcMs` without flooring first reconstructs the SAME
-    // whole-second wall-clock reading (Intl has no sub-second component to read), then subtracts
-    // the UNFLOORED input from it — leaking the sub-second remainder straight into the "offset"
-    // as a spurious few hundred milliseconds, exactly the corruption zoneOffsetMsAt's own comment
-    // describes for a caller that skips this floor.
+    // +11:00), so a wrong offset here would be visible rather than masked by a flat zone.
     const wholeSecondMs = Date.parse('2026-10-03T15:59:59Z');
     const subSecondMs = wholeSecondMs + 500;
     assert.equal(zoneOffsetMsAt(subSecondMs, 'Australia/Sydney'), zoneOffsetMsAt(wholeSecondMs, 'Australia/Sydney'));

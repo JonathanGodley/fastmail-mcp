@@ -35,11 +35,9 @@ const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 // else bounds it: the caller controls it, up to validateAndFormatICalDate's own year-9999
 // ceiling. Measured on this code: a century (100 366-day years, this file's own leap-safe unit)
 // costs about 190ms and 201 observances per zone; the reachable ceiling, a DTEND in year 9999,
-// costs about 15 seconds, ~16000 observances and a 1.64 MB payload — for a PUT the server then
-// rejects on size regardless, so the caller pays that whole cost for a guaranteed failure on a
-// single-threaded stdio process, which an LLM client's natural response to is a retry of the
-// same cost. The span is bounded here, rather than the observance count or the output size,
-// because it is the only one of the three known before the cost of finding out is paid.
+// costs about 15 seconds, ~16000 observances and a 1.64 MB payload. The span is bounded here,
+// rather than the observance count or the output size, because it is the only one of the three
+// known before the cost of finding out is paid.
 export const MAX_VTIMEZONE_SPAN_DAYS = 36600;
 
 interface Transition {
@@ -63,26 +61,16 @@ interface Observance {
  * between two day-apart samples can only have one transition behind it. Coarse only in WHERE it
  * looks — each change found is then refined to the exact SECOND by `bisectTransition`.
  *
- * A real calendar event's own span is almost always well under a day, unlike the day-spaced
- * sampling grid: `toMs - fromMs < DAY_MS` left the loop below with no sample point inside the
- * span at all, so a transition strictly between the two endpoints went undetected regardless of
- * how close either sat to it — an overnight event straddling a clock change generated a
- * single-observance VTIMEZONE with the wrong (or right-by-luck) offset for whichever end the
- * lookback happened to match. The tail check closes exactly that gap: once the day-stepping
- * loop stops short of `toMs` (it always does, unless `toMs - fromMs` happens to be an exact
- * multiple of `DAY_MS`), one last comparison against `toMs` itself catches a transition in the
- * remaining partial day the loop never got to sample.
+ * A real calendar event's own span is often under a day, unlike the day-spaced sampling grid: the
+ * day-stepping loop below never samples inside a sub-day span, so the tail check's one last
+ * comparison against `toMs` is what catches a transition in it.
  *
  * `fromMs` and `toMs` are each floored to a whole second up front, and every sample in between
  * stays on that grid too (`DAY_MS` is itself a whole number of seconds) — so every instant this
  * passes to `zoneOffsetMsAt`, and every bound handed to `bisectTransition`, is a whole second,
- * which is that function's own precondition (see its comment). Defensive, not load-bearing on the
- * one caller today: `generateVTimezone` already pre-floors both span bounds before calling in —
- * this guards a caller that does not.
+ * which is that function's own precondition (see its comment).
  */
-// Exported for its own test coverage (the whole-second floor on `toMs` below): every real
-// caller still goes through `generateVTimezone`, which is where the exported bound-checking
-// behaviour actually lives.
+// Exported for its own test coverage; every real caller goes through `generateVTimezone`.
 export function findTransitions(zone: string, fromMs: number, toMs: number): Transition[] {
   const transitions: Transition[] = [];
   const to = Math.floor(toMs / SECOND_MS) * SECOND_MS;
@@ -121,9 +109,7 @@ export function findTransitions(zone: string, fromMs: number, toMs: number): Tra
  * until it happens. Whole-second bounds guarantee `highSec - lowSec` strictly decreases each pass,
  * so the loop itself needs no iteration bound once the precondition holds.
  */
-// Exported for its own test coverage (the entry check above): every real caller still goes
-// through generateVTimezone -> findTransitions, which is where the whole-second bounds actually
-// come from.
+// Exported for its own test coverage; every real caller goes through generateVTimezone -> findTransitions.
 export function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
   if (lowMs % SECOND_MS !== 0 || highMs % SECOND_MS !== 0) {
     throw new Error('Timezone transition bisection requires whole-second bounds.');
@@ -216,8 +202,7 @@ function zoneAbbreviation(zone: string, utcMs: number): string {
  * touches exactly two offsets the same way a DST cycle does but never reverts, so it stays
  * `STANDARD` throughout. A zone with only one offset in range is `STANDARD` outright.
  *
- * `TZUNTIL` (RFC 7808 §7.1, not RFC 5545 itself — a later RFC, not a vendor extension) is always
- * set to `spanEndUtcMs`.
+ * `TZUNTIL` (RFC 7808 §7.1) is always set to `spanEndUtcMs`.
  */
 export function generateVTimezone(
   zone: string,

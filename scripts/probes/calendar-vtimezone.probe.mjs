@@ -1,10 +1,10 @@
 // What this probe settles
 // -----------------------
-// #166: create_calendar_event and update_calendar_event now generate a VTIMEZONE component
+// #166: create_calendar_event and update_calendar_event generate a VTIMEZONE component
 // (RFC 5545 §3.6.5) for every zone a written DTSTART/DTEND references, since Fastmail's own
 // server never supplies or repairs one on this server's CalDAV write path (measured in
 // docs/conventions.md's "VTIMEZONE residual" and docs/fastmail-action-availability.md). The
-// generator itself (src/vtimezone.ts) is exhaustively unit-tested against Node's own ICU data;
+// generator itself (src/vtimezone.ts) is unit-tested against Node's own ICU data;
 // what a unit test cannot prove is that the WIRED-UP tool actually puts that generated block on
 // the wire, in a resource this account's real CalDAV server accepts and stores unchanged. That
 // is this probe.

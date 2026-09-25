@@ -5316,8 +5316,6 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     // ordering here (nothing to order on), but regenerateVTimezones computes ONE combined span
     // shared by every referenced zone (#166) — silently dropping this endpoint would corrupt the
     // shared span used for the OTHER, genuinely resolvable zone too, so this refuses instead.
-    // Unlike the vendor TZID stand-down above, there was never an instant here to lose in the
-    // first place.
     const garbageEnd = stored(
       'garbage@fm',
       'DTSTART;TZID=America/New_York:20260320T060000',
@@ -6400,9 +6398,7 @@ describe('timeZone parameter (#157)', () => {
   });
 });
 
-// #166: this server writes DTSTART;TZID=<zone> with no accompanying VTIMEZONE component, which
-// RFC 5545 §3.6.5 requires for every TZID used. These two are seen red against the pre-#166
-// code (no VTIMEZONE emitted anywhere) before the create/update wiring lands.
+// RFC 5545 §3.6.5 requires a VTIMEZONE for every TZID used.
 describe('VTIMEZONE embedding (#166)', () => {
   describe('create_calendar_event', () => {
     before(() => setDefaultTimezone('America/New_York'));
@@ -6785,9 +6781,9 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
 
     it('refuses a VEVENT nested inside a VTIMEZONE, rather than treating the whole thing as one orphaned block and deleting the event', () => {
-      // Nothing here re-opens VTIMEZONE, so the old nested-BEGIN-only check accepted this: the
-      // scan reads the VEVENT's own END:VTIMEZONE as closing Evil/Zone's block, TZID parses as
-      // Evil/Zone, finds it unreferenced, and deletes the entire event along with it.
+      // Nothing here re-opens VTIMEZONE: the scan reads the VEVENT's own END:VTIMEZONE as closing
+      // Evil/Zone's block, TZID parses as Evil/Zone, finds it unreferenced, and deletes the
+      // entire event along with it.
       const data = [
         'BEGIN:VCALENDAR', 'VERSION:2.0',
         'BEGIN:VTIMEZONE', 'TZID:Evil/Zone',
@@ -6799,7 +6795,7 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => removeOrphanedVTimezones(data), InvalidInputError);
     });
 
-    it('refuses a mixed-case begin:vtimezone nested inside a VTIMEZONE block, which the exact-case nested-BEGIN check alone cannot see', () => {
+    it('refuses a mixed-case begin:vtimezone nested inside a VTIMEZONE block', () => {
       // Lower-cased `begin:vtimezone` for the real Australia/Sydney block: structuralLine's
       // exact-case match reads it as ordinary block content, not as a second BEGIN, so the outer
       // Evil/Zone block's TZID is what the scan reports and the genuinely-referenced Sydney
@@ -6883,7 +6879,7 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => regenerateVTimezones(data, '\r\n'), /unterminated/);
     });
 
-    it('refuses a VEVENT nested inside a STANDARD, one level below the only depth a foreign BEGIN: was checked at (#166)', () => {
+    it('refuses a VEVENT nested inside a STANDARD (#166)', () => {
       // A BEGIN:VEVENT sitting inside a STANDARD has 'STANDARD', not 'VTIMEZONE', on top of the
       // stack — a check that only looks at a VTIMEZONE's DIRECT children never sees it. Unrefused,
       // the whole VEVENT ends up inside the recorded block's start..end range, so
@@ -6987,11 +6983,9 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
 
     it('refuses a DTEND far enough out that generating its VTIMEZONE would be unbounded work (#166)', () => {
-      // A DTEND in year 9999 is the reachable ceiling (validateAndFormatICalDate's own limit):
-      // unbounded, this costs 15 seconds and ~16000 observances for a PUT the server rejects on
-      // size regardless, so the caller pays the whole cost for a guaranteed failure. The span
-      // bound in generateVTimezone has to be reachable through this wired-up path, not just
-      // directly against the generator.
+      // A DTEND in year 9999 is the reachable ceiling (validateAndFormatICalDate's own limit).
+      // The span bound in generateVTimezone has to be reachable through this wired-up path, not
+      // just directly against the generator.
       const data = [
         'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
         'UID:huge-span@fm', 'DTSTAMP:20260301T000000Z',
@@ -7003,10 +6997,10 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
 
     it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166)', () => {
-      // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span (the old
-      // per-zone behaviour) would leave the departure zone's block stopping at takeoff instead
-      // of covering the moment the event moves into the arrival zone — both blocks must share
-      // ONE combined [min,max] range instead.
+      // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span would
+      // leave the departure zone's block stopping at takeoff instead of covering the moment the
+      // event moves into the arrival zone — both blocks must share ONE combined [min,max] range
+      // instead.
       const dtstart = 'DTSTART;TZID=America/New_York:20260320T090000';
       const dtend = 'DTEND;TZID=Europe/London:20260320T150000';
       const data = [

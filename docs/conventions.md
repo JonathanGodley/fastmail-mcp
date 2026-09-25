@@ -2159,9 +2159,7 @@ body type this server sends — parses through `ical_string_as_icalcomponent`
 `icalcomponent_add_required_timezones` (`imap/ical_support.c:3086`), nowhere; measured directly
 too, not just read from source — a resource this server wrote came back with no VTIMEZONE when
 fetched over CalDAV (23 August 2026, #166). That is not true of CalDAV as a whole: an
-`application/event+json` body (one of the four types `imap/http_caldav.c`'s own MIME table
-registers alongside `text/calendar`, `application/calendar+xml` and `application/calendar+json` —
-only the JSON-event one reaches the attacher, checked all four) is converted through
+`application/event+json` body is converted through
 `jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`) into `jmapical_toical` (`:8273`), which
 runs the attacher unconditionally (`:8190`) — this server never sends that content type, so it
 doesn't apply here, but "CalDAV never attaches" would be false of Cyrus generally. The attacher's
@@ -2170,10 +2168,7 @@ two CalDAV call sites on the READ side (`imap/http_caldav.c:2617`, `:5719`) sit 
 alongside it, in the same `if (namespace_calendar.allow & ALLOW_CAL_NOTZ)` block
 (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
 (measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
-data distribution served here for the generator to draw from instead (same probe, same date): all
-four routes the probe tries to discover the tzdist base URL come back empty, so none of the three
-conditions it checks (the service answering at all, a named zone returning one parseable
-VTIMEZONE, and start/end truncation being honoured) can even be exercised. (The JMAP/JSCalendar
+data distribution served here for the generator to draw from instead (same probe, same date). (The JMAP/JSCalendar
 converters carry no such guard at all: `imap/jmap_ical.c:8190` (`jmapical_toical`),
 `imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP create path at `:4832`
 and the update path at `:5728`), and `imap/jscalendar.c:5032` (`jscal_to_ical`, whose callers
@@ -2183,8 +2178,8 @@ include the JMAP create/update paths, the JSCalendar conversion endpoint
 none of them matters for this server's own write path, which sends `text/calendar`, never JSON.)
 `createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`
 regenerates it whenever `start`/`end` changes (stripping the stale one first, so a moved event's
-`TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain,
-none of them new: (1) an IANA name ICU resolves but the SERVER's own tzdata does not recognise
+`TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain:
+(1) an IANA name ICU resolves but the SERVER's own tzdata does not recognise
 would round-trip as an unresolvable reference with nothing here able to generate a definition for
 it either — the same argument, alongside the ones in `validateCallerTimezone` itself, for keeping
 that gate narrow rather than widening it to accept anything ICU-shaped; (2) a `TZID` ICU cannot
