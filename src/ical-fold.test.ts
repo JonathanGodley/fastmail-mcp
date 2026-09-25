@@ -44,6 +44,57 @@ describe('foldICalLine', () => {
         `Line exceeds 75 octets: ${Buffer.byteLength(line, 'utf8')} bytes`);
     }
   });
+
+  it('does not fold a line of exactly 75 octets, but folds one of 76', () => {
+    const line75 = 'X'.repeat(75);
+    assert.equal(foldICalLine(line75), line75);
+    const line76 = 'X'.repeat(76);
+    assert.ok(foldICalLine(line76).includes('\r\n'));
+  });
+
+  it('never leaves a lone surrogate when the 75-octet cut falls inside a surrogate pair', () => {
+    function unfold(folded: string): string {
+      const lines = folded.split('\r\n');
+      let out = lines[0];
+      for (let i = 1; i < lines.length; i++) {
+        out += lines[i].startsWith(' ') ? lines[i].slice(1) : lines[i];
+      }
+      return out;
+    }
+    function hasLoneSurrogate(s: string): boolean {
+      for (let i = 0; i < s.length; i++) {
+        const code = s.charCodeAt(i);
+        if (code >= 0xD800 && code <= 0xDBFF) {
+          const next = s.charCodeAt(i + 1);
+          if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+          i++;
+        } else if (code >= 0xDC00 && code <= 0xDFFF) {
+          return true;
+        }
+      }
+      return false;
+    }
+    const cases = [
+      'X'.repeat(8) + '📍'.repeat(20),
+      'X'.repeat(10) + '\u{10FFFF}'.repeat(15),
+      'X'.repeat(10) + '🐀'.repeat(20),
+      'X'.repeat(72) + '！'.repeat(5),
+      // 'X'.repeat(8) above happens to land the 75-octet cut on a whole-character boundary for
+      // this repeated 4-byte character, so it alone would not fail if the surrogate-pair guard
+      // were removed. A prefix of 3 does land the cut mid-pair, which is what the guard exists for.
+      'X'.repeat(3) + '📍'.repeat(20),
+    ];
+    for (const body of cases) {
+      const input = 'LOCATION:' + body;
+      const folded = foldICalLine(input);
+      const lines = folded.split('\r\n');
+      for (const line of lines) {
+        assert.ok(!hasLoneSurrogate(line), `lone surrogate in ${JSON.stringify(line)}`);
+        assert.equal(Buffer.from(line, 'utf8').toString('utf8'), line, `piece does not round-trip: ${JSON.stringify(line)}`);
+      }
+      assert.equal(unfold(folded), input);
+    }
+  });
 });
 
 describe('foldICalLine with custom line ending', () => {
