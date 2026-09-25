@@ -1015,7 +1015,7 @@ that reads `error.message` sees no change.
 
 ## Bounding a quadratic serializer
 
-`foldICalLine` (`src/caldav-client.ts`) folds an iCalendar content line to 75 octets per
+`foldICalLine` (`src/ical-fold.ts`) folds an iCalendar content line to 75 octets per
 RFC 5545 §3.1 by repeatedly re-slicing the remainder of the line, allocating a fresh copy
 of the tail each time. Its cost therefore grows with the square of the field length:
 roughly 135ms to fold a 200KB value, and out of memory somewhere near 800KB. Every
@@ -2148,29 +2148,56 @@ touched. This closes the same gap a caller hits without it: a designator-less cr
 landing in the configured zone, or an update silently inheriting a stored zone, would otherwise
 be discoverable only by reading the event back.
 
-**The VTIMEZONE residual.** This server writes `DTSTART;TZID=<name>` / `DTEND;TZID=<name>` with
-no accompanying `VTIMEZONE` component — `createCalendarEvent`'s iCal assembly never emits one,
-and never has. `caldav_store_resource` (the function behind every `caldav_put` path in
-`imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so a bare `TZID=` reference with
-nothing defining it is accepted at write time. **It is not repaired on the way out.** Cyrus does
-have a re-attach step, `icalcomponent_add_required_timezones` (`imap/ical_support.c`), called from
-the CalDAV `GET` and `multiget` handlers in `imap/http_caldav.c` — but both call sites sit inside
-`if (cdata->comp_flags.tzbyref)` (`:2600`, `:5713`), and `GET` additionally requires a
-`CalDAV-Timezones: T` request header. `tzbyref` is a per-resource flag set only by
-`strip_vtimezones` (`imap/caldav_util.c:1082`), which runs only under `ALLOW_CAL_NOTZ`: a
-deployment serving time zones by reference strips a client-supplied `VTIMEZONE` at write, marks
-the resource, and re-attaches on read, on the premise that the component is reconstructible from
-the `TZID` name alone. This deployment does not serve them (measured 17 Sep 2026,
-`scripts/probes/calendar-tzdist.probe.mjs`), and this server's resources carry nothing to strip, so
-the flag is never set on them and the re-attach never runs. A client fetching one of these events
-back over CalDAV receives the bare `TZID` exactly as written, which is what #166's fetch-back
-measured. (The JMAP/JSCalendar converters in `imap/jmap_calendar.c` and `imap/jmap_ical.c` also
-call the re-attach; whether those calls carry the same guard was not checked, and this server's
-own read path goes through CalDAV.) The residual this leaves: an IANA name ICU
-resolves but the SERVER's own tzdata does not recognise would round-trip as an unresolvable
-reference with nothing here to catch it before the write — another argument, alongside the ones
-in `validateCallerTimezone` itself, for keeping that gate narrow rather than widening it to
-accept anything ICU-shaped.
+**The VTIMEZONE residual.** `createCalendarEvent` and `updateCalendarEvent` write
+`DTSTART;TZID=<name>` / `DTEND;TZID=<name>` together with a `VTIMEZONE` component defining every
+such `TZID` (RFC 5545 §3.6.5; #166, `src/vtimezone.ts`), generated from Node's own ICU timezone
+data rather than fetched from the platform: `caldav_store_resource` (the function behind every
+`caldav_put` path in `imap/http_caldav.c`) has no VTIMEZONE-presence precondition, so nothing on
+the write path would catch a bare, undefined `TZID=` reference. A `text/calendar` PUT — the only
+body type this server sends — parses through `ical_string_as_icalcomponent`
+(`imap/ical_support.c:832`), which calls Cyrus's own re-attach step,
+`icalcomponent_add_required_timezones` (`imap/ical_support.c:3086`), nowhere; measured directly
+too, not just read from source — a resource this server wrote came back with no VTIMEZONE when
+fetched over CalDAV (23 August 2026, #166). That is not true of CalDAV as a whole: an
+`application/event+json` body (the only one of `http_caldav.c`'s four registered calendar body
+types that does) is converted through `jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`)
+into `jmapical_toical` (`:8273`), which runs the attacher unconditionally (`:8190`) — this server
+never sends that content type, so it doesn't apply here, but "CalDAV never attaches" would be
+false of Cyrus generally. On THIS deployment that route is closed outright: a CalDAV PUT whose
+body is `application/event+json` is refused with HTTP 403 and the `CALDAV:supported-calendar-data`
+precondition, from the Content-Type check in `meth_put` (`imap/http_dav.c:7225-7232`), which
+rejects any type not among the collection's registered MIME types before any parsing is reached
+— so the build either lacks `WITH_JMAP` or does not register that type for the calendar
+collection (measured 25 Sep 2026, `scripts/probes/calendar-event-json-put.probe.mjs`). The
+attacher's two CalDAV call sites on the READ side
+(`imap/http_caldav.c:2617`, `:5719`) sit inside `if (cdata->comp_flags.tzbyref)`, a per-resource
+flag set not BY `strip_vtimezones` but alongside it, in the same `if (namespace_calendar.allow &
+ALLOW_CAL_NOTZ)` block (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
+(measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
+data distribution served here for the generator to draw from instead (same probe, same date).
+(The JMAP/JSCalendar converters carry no such guard at all: `imap/jmap_ical.c:8190`
+(`jmapical_toical`), `imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP
+create path at `:4832` and the update path at `:5728`), and `imap/jscalendar.c:5032`
+(`jscal_to_ical`, whose callers include the JMAP create/update paths, the JSCalendar conversion
+endpoint `imap/http_convert.c:177`, and `alert_to_ical` at `imap/jmap_calendar.c:1251`) all call
+`icalcomponent_add_required_timezones` unconditionally, with no `tzbyref` check anywhere nearby;
+none of them matters for this server's own write path, which sends `text/calendar`, never JSON.)
+`createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`
+regenerates it whenever `start`/`end` changes (stripping the stale one first, so a moved event's
+`TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain:
+(1) an IANA name ICU resolves but the SERVER's own tzdata does not recognise
+would round-trip as an unresolvable reference with nothing here able to generate a definition for
+it either — the same argument, alongside the ones in `validateCallerTimezone` itself, for keeping
+that gate narrow rather than widening it to accept anything ICU-shaped; (2) a `TZID` ICU cannot
+resolve at all (a vendor id from an external invite) is passed through untouched, on a stored
+event or a freshly patched one alike — there being no ICU data to generate a replacement from, its
+existing block (if any) is left exactly as found rather than stripped; (3) `regenerateVTimezones`
+refuses outright on any VEVENT carrying `RRULE` or `RDATE` — a single occurrence's own
+DTSTART/DTEND is the wrong span for a series, which has no one instant range a `TZUNTIL` could
+honestly cover. This is a defended invariant rather than a live path: `update_calendar_event`
+already refuses every repeating event outright (`recurringSeriesRefusal`), so the check can never
+fire through the public API today. A series-aware span (the series' LAST occurrence, not the
+master) is designed under #146.
 
 ### A calendar window's DAY is a local day
 

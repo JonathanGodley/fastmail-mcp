@@ -986,11 +986,24 @@ export function describeTimezone(zone: string | undefined): string {
  * fallback is not reachable in production today. It stays because this is a low-level helper
  * with no way to enforce that every future caller pre-validates its `zone` argument the same
  * way, and because it is covered directly by its own unit tests.
+ *
+ * Exported for `src/vtimezone.ts` (#166), which samples a zone's offset at many instants — a
+ * day-by-day scan across a year plus a span, then a bisection per transition found — to locate
+ * its DST transitions. The formatter is cached per zone (below) for exactly that caller: one
+ * `generateVTimezone` call can make hundreds of these calls, and constructing an
+ * `Intl.DateTimeFormat` is the expensive part of each one.
  */
-function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
-  let parts;
+// Keyed on `zone` itself, not `zone ?? ''`: coalescing `undefined` (the host zone) and `''` (a
+// genuinely empty zone string) onto one key would let whichever is cached first silently answer
+// for both, including a failed `''` lookup's cached `null` standing in for the host zone.
+const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat | null>();
+
+function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
+  const cached = zoneOffsetFormatterCache.get(zone);
+  if (cached !== undefined) return cached;
+  let formatter: Intl.DateTimeFormat | null;
   try {
-    parts = new Intl.DateTimeFormat('en-US', {
+    formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
       hour12: false,
       // ERA IS REQUESTED BECAUSE THE YEAR IS READ BACK, and without it `Intl` prints the
@@ -1003,11 +1016,31 @@ function zoneOffsetMsAt(utcMs: number, zone: string | undefined): number {
       era: 'short',
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(new Date(utcMs));
+    });
   } catch {
+    formatter = null;
+  }
+  zoneOffsetFormatterCache.set(zone, formatter);
+  return formatter;
+}
+
+export function zoneOffsetMsAt(utcMsInput: number, zone: string | undefined): number {
+  // Floored to a whole second: `formatter.formatToParts` reads whole seconds off `utcMs` (there
+  // is no sub-second component below), so a sub-second `utcMs` and its own floor must read
+  // identical wall-clock components and return the identical offset. Without this floor, any
+  // caller that hands in a sub-second `utcMs` gets that same whole-second wall-clock reading back
+  // minus the UNFLOORED input — leaking the sub-second remainder straight into the returned
+  // "offset" as a spurious few hundred milliseconds (pinned directly by coerce.test.ts's "floors
+  // a sub-second instant to its own whole second, at a Sydney transition boundary" test).
+  // Flooring internally means every caller gets a consistent offset regardless of the precision
+  // it passes in, rather than each one having to floor first.
+  const utcMs = Math.floor(utcMsInput / 1000) * 1000;
+  const formatter = zoneOffsetFormatterFor(zone);
+  if (!formatter) {
     if (zone === undefined) return 0;
     return zoneOffsetMsAt(utcMs, undefined);
   }
+  const parts = formatter.formatToParts(new Date(utcMs));
   const get = (type: string) => Number(parts.find(p => p.type === type)?.value);
   // ISO 8601 / proleptic Gregorian has a year 0; the BC/AD scale does not. 1 BC IS year 0,
   // 2 BC is year -1, so the mapping is `1 - n`.
@@ -1036,8 +1069,12 @@ const GREGORIAN_CYCLE_MS = 146097 * 24 * 60 * 60 * 1000;
  * value correctly returns the year 26. Shifting by one whole Gregorian cycle steps over the
  * mapping and back without disturbing the arithmetic, so a leap day still lands on the day
  * the proleptic Gregorian calendar puts it.
+ *
+ * Exported for `src/vtimezone.ts` (#166), whose year-1 lookback boundary needs the same
+ * two-digit-year mapping defeated the same way rather than a second copy of the cycle-shift
+ * trick.
  */
-function utcMsFromComponents(y: number, mo: number, d: number, h: number, mi: number, s: number): number {
+export function utcMsFromComponents(y: number, mo: number, d: number, h: number, mi: number, s: number): number {
   if (y >= 0 && y <= 99) {
     return Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d, h, mi, s) - GREGORIAN_CYCLE_MS;
   }

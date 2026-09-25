@@ -5,12 +5,14 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // InternalError ("server bug"), which is wrong for caller-fixable input and
 // would tell the caller a bare retry might work. See docs/conventions.md.
 import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { foldICalLine } from './ical-fold.js';
 // The deployment's configured timezone, read from the ONE place it is stored — the value
 // `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
 // INTERPRET a local date rather than display one, but it must interpret it as the same zone
 // the rest of the server displays, so it reads that value instead of re-deriving its own
 // from the environment.
 import { getDefaultTimezone } from './email-formatter.js';
+import { generateVTimezone } from './vtimezone.js';
 
 export interface CalDAVConfig {
   username: string;
@@ -647,15 +649,20 @@ export function extractTzidParam(line: string): string | undefined {
  *
  * CASE-SENSITIVE on the property name, unlike `hasICalProperty`, and left that way
  * deliberately. RFC 5545 §3.1 says names are case-insensitive, so a lower-cased `uid:` or
- * `dtstart:` here reads as absent — but every consequence of that is fail-CLOSED, because the
- * structural scan above it is case-sensitive too: `extractVEventBlocks` matches the literal
- * `BEGIN:VEVENT`, so a payload whose keywords are lower-cased yields no blocks at all,
- * `findCalendarObjectByUID` skips the object before it ever reads a value, and the event is
- * simply invisible to every tool rather than editable or destroyable through a mis-read.
- * `hasICalProperty` is the exception because it is the one read that gates a destroy while the
- * surrounding payload IS well-formed — a normal resource with one lower-cased `rrule:` line —
- * so there, missing the property fails open. Making every read case-insensitive is a wider
- * change than that gate needs, and belongs with the RFC conformance audit (#57, #111).
+ * `dtstart:` here reads as absent. For a WHOLLY lower-cased payload that is fail-CLOSED: the
+ * structural scan above it is case-sensitive too, so `extractVEventBlocks` matching only the
+ * literal `BEGIN:VEVENT` yields no blocks at all, `findCalendarObjectByUID` skips the object
+ * before it ever reads a value, and the event is simply invisible rather than editable or
+ * destroyable through a mis-read. A MIXED-case payload is not fail-closed the same way — a
+ * case-sensitive scan can recognize an OUTER boundary while missing an inner one, merging real
+ * content into it rather than seeing nothing. `extractVTimezoneBlocks` is the one place that
+ * guards against exactly that shape (a nested `begin:vtimezone`, or any other non-
+ * STANDARD/DAYLIGHT component, inside a VTIMEZONE block), comparing that one component name
+ * case-insensitively; the rest of this gap is unaddressed and tracked under the RFC conformance
+ * audit (#57, #111). `hasICalProperty` is the exception because it is the one read that gates a
+ * destroy while the surrounding payload IS well-formed — a normal resource with one lower-cased
+ * `rrule:` line — so there, missing the property fails open. Making every read case-insensitive
+ * is a wider change than either gate needs.
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   // Whole content lines, split on RFC 5545 line breaks only — never a `/m` regex over the
@@ -847,30 +854,6 @@ export function toICalUTC(isoString: string): string {
   // split the refusal into what reads as several sentences from the server.
   if (isNaN(d.getTime())) throw new InvalidInputError(`Invalid date: "${echoCallerText(isoString)}"`);
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-}
-
-/**
- * Fold an iCalendar content line at 75 octets per RFC 5545 §3.1.
- * @param lineEnding Line ending to use for fold breaks (default '\r\n')
- */
-export function foldICalLine(line: string, lineEnding: string = '\r\n'): string {
-  const parts: string[] = [];
-  while (Buffer.byteLength(line, 'utf8') > 75) {
-    // Find the largest character count that fits in 75 bytes
-    let cut = 75;
-    while (cut > 0 && Buffer.byteLength(line.slice(0, cut), 'utf8') > 75) {
-      cut--;
-    }
-    // Don't split a surrogate pair (characters outside BMP like emoji)
-    if (cut > 0 && cut < line.length) {
-      const code = line.charCodeAt(cut);
-      if (code >= 0xDC00 && code <= 0xDFFF) cut--;
-    }
-    parts.push(line.slice(0, cut));
-    line = ' ' + line.slice(cut);
-  }
-  parts.push(line);
-  return parts.join(lineEnding);
 }
 
 /**
@@ -1077,39 +1060,16 @@ export function removeOrphanedVTimezones(icalData: string): string {
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
 
-  // Find all VTIMEZONE blocks and their TZIDs
-  const tzBlocks: Array<{ tzid: string; start: number; end: number }> = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (structuralLine(lines[i]) === 'BEGIN:VTIMEZONE') {
-      const blockStart = i;
-      let blockEnd = -1;
-      for (let j = i + 1; j < lines.length; j++) {
-        if (structuralLine(lines[j]) === 'END:VTIMEZONE') {
-          blockEnd = j;
-          break;
-        }
-      }
-      if (blockEnd === -1) { i = lines.length; break; }
-      // Use parseICalValue for proper unfolding support
-      const tzBlock = lines.slice(blockStart, blockEnd + 1).join('\n');
-      // Trimmed here because this feeds an exact-equality comparison against the parsed TZID
-      // parameter of every non-VTIMEZONE line below.
-      const tzid = (parseICalValue(tzBlock, 'TZID') || '').trim();
-      tzBlocks.push({ tzid, start: blockStart, end: blockEnd });
-      i = blockEnd;
-    }
-  }
-
+  const tzBlocks = extractVTimezoneBlocks(lines);
   if (tzBlocks.length === 0) return icalData;
 
-  // Build content outside VTIMEZONE blocks for reference scanning
-  const nonTzLines: string[] = [];
-  let inTz = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (structuralLine(lines[i]) === 'BEGIN:VTIMEZONE') { inTz = true; continue; }
-    if (structuralLine(lines[i]) === 'END:VTIMEZONE') { inTz = false; continue; }
-    if (!inTz) nonTzLines.push(lines[i]);
+  // Content outside VTIMEZONE blocks, for reference scanning — derived from the SAME blocks
+  // extractVTimezoneBlocks just found.
+  const excludedLines = new Set<number>();
+  for (const block of tzBlocks) {
+    for (let i = block.start; i <= block.end; i++) excludedLines.add(i);
   }
+  const nonTzLines = lines.filter((_, i) => !excludedLines.has(i));
   // Unfold before scanning so a reference split across a folded line isn't missed, but stay in
   // LINES: a TZID parameter is a property of one line, and the parser below reads one at a time.
   const unfoldedNonTzLines = nonTzLines.join('\n').replace(/\n[ \t]/g, '').split('\n');
@@ -1200,13 +1160,26 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
   return lines.join(lineEnding);
 }
 
+/** RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]. The one pattern every DURATION parse in this file matches against. */
+const ICAL_DURATION_RE = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/;
+
+interface ParsedICalDuration {
+  sign: 1 | -1;
+  weeks: number;
+  days: number;
+  hours: number;
+  minutes: number;
+  seconds: number;
+}
+
 /**
- * Parse an iCalendar DURATION value and compute end datetime.
- * RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]
- * Returns ISO 8601 end datetime, or undefined for malformed input.
+ * Parse a DURATION value into its components, or undefined if malformed. The one parse
+ * `parseICalDuration` (the user-visible implicit-DTEND computation) and
+ * `resolveDurationSpanEndMs` (the VTIMEZONE span computation) both build on, so the two agree
+ * on what counts as a valid DURATION.
  */
-export function parseICalDuration(duration: string, start: string): string | undefined {
-  const m = duration.match(/^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+function parseICalDurationComponents(duration: string): ParsedICalDuration | undefined {
+  const m = duration.match(ICAL_DURATION_RE);
   if (!m) return undefined;
 
   const [, sign, weeks, days, hours, minutes, seconds] = m;
@@ -1216,17 +1189,35 @@ export function parseICalDuration(duration: string, start: string): string | und
   // If T is present in input, at least one time component must exist (reject "P1DT")
   if (duration.includes('T') && !hours && !minutes && !seconds) return undefined;
 
-  const ms =
-    (parseInt(weeks || '0', 10) * 7 * 86400000) +
-    (parseInt(days || '0', 10) * 86400000) +
-    (parseInt(hours || '0', 10) * 3600000) +
-    (parseInt(minutes || '0', 10) * 60000) +
-    (parseInt(seconds || '0', 10) * 1000);
+  return {
+    sign: sign === '-' ? -1 : 1,
+    weeks: parseInt(weeks || '0', 10),
+    days: parseInt(days || '0', 10),
+    hours: parseInt(hours || '0', 10),
+    minutes: parseInt(minutes || '0', 10),
+    seconds: parseInt(seconds || '0', 10),
+  };
+}
+
+/**
+ * Parse an iCalendar DURATION value and compute end datetime.
+ * RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]
+ * Returns ISO 8601 end datetime, or undefined for malformed input.
+ * A plain millisecond add, deliberately outside the nominal-day/exact-time split
+ * `resolveDurationSpanEndMs` uses for the VTIMEZONE span: this function's caller wants a
+ * user-visible end sharing `start`'s own spelling, not a DST-aware instant.
+ */
+export function parseICalDuration(duration: string, start: string): string | undefined {
+  const parsed = parseICalDurationComponents(duration);
+  if (!parsed) return undefined;
+  const { sign, weeks, days, hours, minutes, seconds } = parsed;
+
+  const ms = (weeks * 7 * 86400000) + (days * 86400000) + (hours * 3600000) + (minutes * 60000) + (seconds * 1000);
 
   const startDate = new Date(start);
   if (isNaN(startDate.getTime())) return undefined;
 
-  const endMs = sign === '-' ? startDate.getTime() - ms : startDate.getTime() + ms;
+  const endMs = startDate.getTime() + sign * ms;
   const endDate = new Date(endMs);
 
   // Return in same format as input start
@@ -1245,7 +1236,7 @@ export function parseICalDuration(duration: string, start: string): string | und
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, s] = timePart.split(':').map(Number);
     const utcStart = Date.UTC(y, mo - 1, d, h, mi, s);
-    const utcEnd = sign === '-' ? utcStart - ms : utcStart + ms;
+    const utcEnd = utcStart + sign * ms;
     const e = new Date(utcEnd);
     const pad = (n: number) => String(n).padStart(2, '0');
     return `${e.getUTCFullYear()}-${pad(e.getUTCMonth() + 1)}-${pad(e.getUTCDate())}T${pad(e.getUTCHours())}:${pad(e.getUTCMinutes())}:${pad(e.getUTCSeconds())}`;
@@ -2256,6 +2247,308 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
     `DTEND must be later than DTSTART per RFC 5545 §3.8.2.2 — start "${echoCallerText(start.display)}" ` +
     `is not before end "${echoCallerText(end.display)}". Pass an end later than the start.`
   );
+}
+
+/**
+ * The literal TZID spelling of every usable zoned frame among `frames` — as WRITTEN, not
+ * canonicalised, so each generated block's own `TZID:` line matches the parameter a reader will
+ * look it up by. Two alias-equivalent but differently spelled TZIDs (`US/Pacific` and
+ * `America/Los_Angeles`) each get their own entry: a VEVENT referencing both needs one block per
+ * spelling actually on the wire, not one per zone identity (#166). A frame
+ * that is `date`/`floating`/`utc`, or whose TZID `isUsableTimezone` rejects (a vendor id like
+ * `AUS Eastern Standard Time`), contributes nothing — see `validateDateConsistency`'s own
+ * stand-down on the same check for why an unresolvable name is left alone rather than refused.
+ */
+function referencedZoneTzids(frames: DatePropertyFrame[]): Set<string> {
+  const tzids = new Set<string>();
+  for (const frame of frames) {
+    if (frame.frame === 'zoned' && frame.tzid && isUsableTimezone(frame.tzid)) tzids.add(frame.tzid);
+  }
+  return tzids;
+}
+
+/**
+ * The UTC instant each labelled, usable zoned frame resolves to — feeding ONE combined span
+ * across every zone a VEVENT references (#166), rather than a separate
+ * span per zone. A cross-zone event (DTSTART in one zone, DTEND in another — a flight) needs
+ * BOTH zones' VTIMEZONE blocks to cover the SAME [min,max] range: the departure zone's block
+ * must still cover the moment the event moves into the arrival zone, not stop at its own single
+ * instant.
+ *
+ * `label` names the source property in the thrown message: a frame whose value cannot be
+ * resolved to an instant throws rather than being silently skipped (#166)
+ * — a span silently missing one of its two endpoints is a wrong span, not a smaller correct one.
+ */
+function collectZoneInstants(labeled: Array<{ label: string; frame: DatePropertyFrame }>): number[] {
+  const instants: number[] = [];
+  for (const { label, frame } of labeled) {
+    if (frame.frame !== 'zoned' || !frame.tzid || !isUsableTimezone(frame.tzid)) continue;
+    const ms = resolveCalendarInstantMs(formatICalDate(frame.value), frame.tzid);
+    if (Number.isNaN(ms)) {
+      throw new InvalidInputError(`Cannot resolve ${label} to an instant for VTIMEZONE generation.`);
+    }
+    instants.push(ms);
+  }
+  return instants;
+}
+
+/**
+ * Every VTIMEZONE block in `lines`, with its TZID and its line-index span (inclusive of both
+ * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`). The one scan every caller that needs VTIMEZONE
+ * boundaries uses — stripVTimezoneBlockFor, removeOrphanedVTimezones — so a resource this
+ * malformed is refused identically everywhere rather than only on some paths.
+ *
+ * A VTIMEZONE is a direct child of the VCALENDAR, and its boundaries are its own component's:
+ * found by tracking nesting depth from every structural BEGIN:/END: line, not by scanning forward
+ * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. Three ways a
+ * stored resource is too broken to edit safely — a BEGIN:VTIMEZONE opening somewhere other than
+ * directly under the VCALENDAR; anything at ANY depth inside a tracked VTIMEZONE other than
+ * STANDARD/DAYLIGHT as its own direct children (RFC
+ * 5545 §3.6.5: `standardc`/`daylightc` hold `tzprop` only — no sub-component is legal inside
+ * either one, so a wrong grandchild is exactly as forbidden as a wrong direct child); or a
+ * BEGIN:/END: marker that only exists once its own fold is undone, which hides a component
+ * boundary from this scan entirely (see the guard below) — are all refused as too broken to edit
+ * safely. The fold case is refused immediately, with its own message naming what actually
+ * happened rather than "malformed"; the other two are only recorded against the block currently
+ * being tracked, and the actual disposition is decided once that block's fate is known —
+ * "malformed" if its own matching END:VTIMEZONE is reached with something recorded against it,
+ * "unterminated" instead if the input ends first regardless of what else went wrong inside it (a
+ * resource that never closes its VTIMEZONE cannot be edited safely either way, and this is the
+ * only way that fault is ever reached).
+ * BEGIN:/END: component names are compared case-insensitively for this one scan (RFC 5545 §3.1
+ * does not require a matching case); structuralLine itself stays case-sensitive (#57, #111). A
+ * bare `BEGIN:`/`END:` naming no component opens or closes nothing, so it is ignored rather than
+ * refused.
+ */
+function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
+  // RFC 5545 §3.1: unfolding precedes component recognition. The stack-tracking scan below reads
+  // PHYSICAL lines (it has to — its {start, end} are physical indices the callers splice), so a
+  // BEGIN:/END: split across a fold is invisible to it: neither physical half matches
+  // /^(BEGIN|END):(.+)$/i, no frame is pushed, and the component it should have opened or closed
+  // is silently absorbed into whatever block happens to be open around it. Checked up front,
+  // across every logical line in the payload, because a hidden marker anywhere makes the
+  // depth-tracking below untrustworthy regardless of where it sits relative to a VTIMEZONE.
+  //
+  // The decision: any logical line that unfolds to a BEGIN:/END: marker but arrived as more than
+  // one physical line is refused outright — including a legal fold of an already-complete marker
+  // line ("BEGIN:VEVENT" split across a fold, or a long custom component name folded at the
+  // 75-octet boundary RFC 5545 §3.1 recommends), which no producer seen here (libical, Cyrus,
+  // this codebase's own generator) ever emits. Refusing fails closed.
+  //
+  // Why refuse rather than unfold and re-derive physical spans: this function's {start, end} are
+  // physical indices the callers splice directly, and refusing needs no logical-to-physical
+  // mapping.
+  //
+  // What it doesn't catch: a folded property whose continuation text merely CONTAINS
+  // "BEGIN:VEVENT" doesn't start with the marker once unfolded (`DESCRIPTION:...BEGIN:VEVENT`
+  // fails the anchored /^(BEGIN|END):/i test below), so it stays untouched.
+  for (let i = 0; i < lines.length; i++) {
+    if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
+    let j = i + 1;
+    while (j < lines.length && isFoldedContinuation(lines[j])) j++;
+    if (j === i + 1) continue; // this logical line was never folded
+    const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
+    if (/^(BEGIN|END):/i.test(logical)) {
+      // Named generically, not as a VTIMEZONE fault: this scan runs over the WHOLE payload before
+      // any VTIMEZONE has even been located (a hidden marker earlier in the document can shift
+      // the depth one is later seen at), so a resource can trip this with no VTIMEZONE in it at
+      // all — reporting "malformed VTIMEZONE block" there would name a component the resource
+      // need not contain.
+      throw new InvalidInputError(
+        'Stored calendar resource has a component boundary hidden behind a folded line.'
+      );
+    }
+  }
+
+  const blocks: Array<{ tzid: string; start: number; end: number }> = [];
+  const stack: string[] = [];
+  // The one VTIMEZONE currently being tracked: the line it opened on, the stack depth it opened
+  // at (so its own closing END: is recognisable regardless of what else nested inside it), and
+  // whether anything seen so far inside it violates the criteria above. A second BEGIN:VTIMEZONE
+  // while one is already open is itself such a violation (see below), never a second candidate.
+  let candidateStart = -1;
+  let candidateOpenDepth = -1;
+  let malformed = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const structural = structuralLine(lines[i]);
+    if (structural === null) continue;
+    const match = /^(BEGIN|END):(.+)$/i.exec(structural);
+    if (!match) continue;
+    const name = match[2].toUpperCase();
+
+    if (match[1].toUpperCase() === 'BEGIN') {
+      const openDepth = stack.length;
+      if (candidateStart === -1 && name === 'VTIMEZONE') {
+        candidateStart = i;
+        candidateOpenDepth = openDepth;
+        malformed = openDepth !== 1;
+      } else if (candidateStart !== -1) {
+        const isDirectChild = openDepth === candidateOpenDepth + 1;
+        if (!isDirectChild || !['STANDARD', 'DAYLIGHT'].includes(name)) {
+          malformed = true;
+        }
+      }
+      stack.push(name);
+    } else {
+      // An END: whose name does not match what is actually open leaves the stack untouched: it
+      // does not belong to the frame on top, so it cannot be the close a tracked candidate is
+      // waiting for either.
+      if (stack[stack.length - 1] === name) stack.pop();
+      if (candidateStart !== -1 && stack.length === candidateOpenDepth) {
+        if (malformed) {
+          throw new InvalidInputError('Stored calendar resource has a malformed VTIMEZONE block.');
+        }
+        const tzid = (parseICalValue(lines.slice(candidateStart, i + 1).join('\n'), 'TZID') || '').trim();
+        blocks.push({ tzid, start: candidateStart, end: i });
+        candidateStart = -1;
+      }
+    }
+  }
+  // A stored resource this broken cannot be edited safely at all, so it is refused outright.
+  if (candidateStart !== -1) {
+    throw new InvalidInputError('Stored calendar resource has an unterminated VTIMEZONE block.');
+  }
+  return blocks;
+}
+
+/**
+ * Remove any existing VTIMEZONE block(s) for `tzid`, so a stale one is never left beside the
+ * freshly generated replacement `regenerateVTimezones` is about to insert — two blocks
+ * disagreeing about the same TZID would leave a reader to pick between them.
+ */
+function stripVTimezoneBlockFor(icalData: string, tzid: string): string {
+  const lineEnding = detectLineEnding(icalData);
+  const lines = icalData.split(/\r?\n/);
+  const toRemove = extractVTimezoneBlocks(lines).filter(b => zoneNamesEqual(b.tzid, tzid));
+  for (let i = toRemove.length - 1; i >= 0; i--) {
+    lines.splice(toRemove[i].start, toRemove[i].end - toRemove[i].start + 1);
+  }
+  return lines.join(lineEnding);
+}
+
+/**
+ * Insert a generated VTIMEZONE `block` right before the first VEVENT — the same position
+ * `createCalendarEvent` places one, between `PRODID` (and any earlier VTIMEZONE) and the event
+ * itself.
+ */
+function insertVTimezoneBlock(icalData: string, block: string, lineEnding: string): string {
+  const lines = icalData.split(/\r?\n/);
+  const veventIdx = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  lines.splice(veventIdx === -1 ? lines.length : veventIdx, 0, ...block.split(/\r?\n/));
+  return lines.join(lineEnding);
+}
+
+/**
+ * The end instant of a DURATION applied to a zoned `startIso` wall clock, for the VTIMEZONE span
+ * only (RFC 5545 §3.3.6): the week/day components are nominal — "the same wall-clock time N days
+ * later" — but the hour/minute/second components are exact elapsed time. Sydney
+ * `20261003T230000` + `PT6H` is local 05:00 nominally, but six REAL elapsed hours crossing that
+ * night's spring-forward is local 06:00 — the hour DST skips is exactly the hour a naive
+ * wall-clock add of the whole duration would lose. Resolving the nominal (week/day-shifted only)
+ * wall clock to an instant FIRST, then adding the time components as exact milliseconds to that
+ * instant, keeps the two kinds of arithmetic from being conflated.
+ */
+function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid: string): number | undefined {
+  const parsed = parseICalDurationComponents(durationValue);
+  if (!parsed) return undefined;
+  const { sign, weeks, days, hours, minutes, seconds } = parsed;
+
+  const nominalDays = sign * ((weeks * 7) + days);
+
+  const [datePart, timePart] = startIso.split('T');
+  const [y, mo, d] = datePart.split('-').map(Number);
+  // Same cycle-shift `nextDateOnly` uses, generalized from a fixed +1 day to `nominalDays`:
+  // `Date.UTC` maps a two-digit year to 19xx, so construction itself has to happen a whole
+  // Gregorian cycle away and be shifted back on read, the same as there.
+  const shifted = new Date(Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d));
+  shifted.setUTCDate(shifted.getUTCDate() + nominalDays);
+  const year = shifted.getUTCFullYear() - GREGORIAN_CYCLE_YEARS;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const nominalIso = `${String(year).padStart(4, '0')}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${timePart}`;
+
+  const nominalMs = resolveCalendarInstantMs(nominalIso, tzid);
+  if (Number.isNaN(nominalMs)) return NaN;
+
+  const exactMs = sign * ((hours * 3600000) + (minutes * 60000) + (seconds * 1000));
+  return nominalMs + exactMs;
+}
+
+/**
+ * Recompute the VTIMEZONE block(s) the master VEVENT's current DTSTART/DTEND need, after
+ * `updateCalendarEvent` has patched them (#166). Called only when `timeChanged`, and only after
+ * every other patch has landed, so it reads the FINAL start/end rather than a value about to be
+ * overwritten again below it — and before `removeOrphanedVTimezones`, which then drops any block
+ * (this function's included) that the patched event no longer references at all.
+ */
+export function regenerateVTimezones(icalData: string, lineEnding: string): string {
+  const vevent = extractVEvent(icalData);
+  if (!vevent) return icalData;
+
+  // Also a plain Error, matching updateCalendarEvent's own "no VEVENT block found": if this
+  // fires at all, the upstream isRecurringSeriesResource refusal has already failed to stop a
+  // recurring VEVENT from reaching here, which is a server bug, not a caller input fault — no
+  // argument this caller could re-form reaches this check. A series-aware span (the series' LAST
+  // occurrence, not the master) is designed under #146.
+  if (hasICalProperty(vevent, 'RRULE') || hasICalProperty(vevent, 'RDATE')) {
+    throw new Error(
+      'Cannot compute a VTIMEZONE span for a recurring VEVENT (RRULE/RDATE present) — a single ' +
+      'occurrence\'s own DTSTART/DTEND is the wrong span for a series.'
+    );
+  }
+
+  const startLine = parseAllICalProperties(vevent, 'DTSTART')[0];
+  const endLine = parseAllICalProperties(vevent, 'DTEND')[0];
+  // Only DTSTART, DTEND, and DURATION (RFC 5545 §3.6.1's alternative to DTEND) bound the
+  // VEVENT's own occurrence — nothing else in the component defines an instant range a
+  // VTIMEZONE needs to cover.
+  const startFrame = startLine ? describeDateProperty(startLine) : undefined;
+  const endFrame = endLine ? describeDateProperty(endLine) : undefined;
+  const frames = [startFrame, endFrame].filter((f): f is DatePropertyFrame => f !== undefined);
+
+  const zoneTzids = referencedZoneTzids(frames);
+  if (zoneTzids.size === 0) return icalData;
+
+  const labeled: Array<{ label: string; frame: DatePropertyFrame }> = [];
+  if (startFrame) labeled.push({ label: 'DTSTART', frame: startFrame });
+  if (endFrame) labeled.push({ label: 'DTEND', frame: endFrame });
+  const instants = collectZoneInstants(labeled);
+
+  // DTEND absent, DURATION present: derive the implicit end from DTSTART + DURATION. The
+  // computed end shares DTSTART's own zone (DURATION carries no TZID of its own), so it extends
+  // this SAME combined span rather than introducing a second zone (#166).
+  if (!endLine && startFrame && startFrame.frame === 'zoned' && startFrame.tzid && isUsableTimezone(startFrame.tzid)) {
+    const durationLine = parseAllICalProperties(vevent, 'DURATION')[0];
+    if (durationLine) {
+      const colonIdx = findValueBoundary(durationLine);
+      const durationValue = colonIdx === -1 ? '' : durationLine.slice(colonIdx + 1).trim();
+      const startIso = formatICalDate(startFrame.value);
+      const endMs = startIso ? resolveDurationSpanEndMs(durationValue, startIso, startFrame.tzid) : undefined;
+      if (endMs !== undefined) {
+        if (Number.isNaN(endMs)) {
+          throw new InvalidInputError('Cannot resolve DURATION to an instant for VTIMEZONE generation.');
+        }
+        instants.push(endMs);
+      }
+    }
+  }
+
+  const spanMinMs = Math.min(...instants);
+  const spanMaxMs = Math.max(...instants);
+
+  // Strip every referenced zone's stored block(s) FIRST, then insert one freshly generated block
+  // per literal TZID spelling — never interleaved strip-then-insert per zone: interleaving would
+  // strip the block just inserted for an alias-equal spelling, since `stripVTimezoneBlockFor`
+  // matches by zone IDENTITY (`zoneNamesEqual`), and `US/Pacific` / `America/Los_Angeles` are
+  // alias-equivalent but differently spelled (#166).
+  let result = icalData;
+  for (const tzid of zoneTzids) {
+    result = stripVTimezoneBlockFor(result, tzid);
+  }
+  for (const tzid of zoneTzids) {
+    result = insertVTimezoneBlock(result, generateVTimezone(tzid, spanMinMs, spanMaxMs, lineEnding), lineEnding);
+  }
+  return result;
 }
 
 // Returns undefined unless the RESULT is a plain `YYYY-MM-DD`, and both halves of that are
@@ -4902,10 +5195,25 @@ export class CalDAVCalendarClient {
     const endFrame = describeDateProperty(endLine, event.end, endFormatted.tzidSource);
     validateDateConsistency(startFrame, endFrame);
 
+    // RFC 5545 §3.6.5 requires a VTIMEZONE for every TZID a component uses. A `text/calendar`
+    // PUT — the only body type this server sends — gets none from Cyrus, so this generates one
+    // instead (see vtimezone.ts). For what a CalDAV PUT does and does not reach on the platform
+    // side, and why, see docs/conventions.md's "The VTIMEZONE residual" (#166).
+    const createZoneTzids = referencedZoneTzids([startFrame, endFrame]);
+    const createInstants = collectZoneInstants([
+      { label: 'start', frame: startFrame },
+      { label: 'end', frame: endFrame },
+    ]);
+    const vtimezoneBlocks = createInstants.length === 0 ? [] : Array.from(
+      createZoneTzids,
+      tzid => generateVTimezone(tzid, Math.min(...createInstants), Math.max(...createInstants), '\r\n'),
+    );
+
     const icalLines = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
       'PRODID:-//fastmail-mcp//CalDAV//EN',
+      ...vtimezoneBlocks.flatMap(block => block.split('\r\n')),
       'BEGIN:VEVENT',
       `UID:${uid}`,
       `DTSTAMP:${now}`,
@@ -5289,8 +5597,11 @@ export class CalDAVCalendarClient {
     data = replaceICalProperty(data, 'DTSTAMP', `DTSTAMP:${now}`);
     data = replaceICalProperty(data, 'LAST-MODIFIED', `LAST-MODIFIED:${now}`);
 
-    // --- Orphaned VTIMEZONE cleanup (LAST — after all modifications) ---
+    // --- VTIMEZONE regeneration + orphan cleanup (LAST — after all modifications) ---
+    // regenerateVTimezones runs first: a re-zoned or re-timed event needs a freshly computed
+    // block (new span, new TZUNTIL) before the orphan sweep decides what is still referenced.
     if (timeChanged) {
+      data = regenerateVTimezones(data, lineEnding);
       data = removeOrphanedVTimezones(data);
     }
 

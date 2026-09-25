@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, zoneOffsetMsAt, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -2052,6 +2052,47 @@ describe('startOfLocalDayUtcIso', () => {
     // from starting on the wrong date.
     const middayThere = Date.parse('2026-03-08T16:00:00Z');
     assert.equal(startOfLocalDayUtcIso(middayThere, 'America/Havana'), '2026-03-08T05:00:00Z');
+  });
+});
+
+describe('zoneOffsetMsAt', () => {
+  it('floors a sub-second instant to its own whole second, at a Sydney transition boundary', () => {
+    // See zoneOffsetMsAt's own floor comment (src/coerce.ts) for the corruption this pins against
+    // — a flat zone would fail on that leak too. 2026-10-03T16:00:00Z is Sydney's spring-forward
+    // instant (02:00 -> 03:00 local, +10:00 to +11:00), chosen because a floor implemented as
+    // ROUND instead would read 15:59:59.5 as 16:00:00, the already-switched +11:00 offset — an
+    // error a flat zone's constant offset could never expose.
+    const wholeSecondMs = Date.parse('2026-10-03T15:59:59Z');
+    const subSecondMs = wholeSecondMs + 500;
+    assert.equal(zoneOffsetMsAt(subSecondMs, 'Australia/Sydney'), zoneOffsetMsAt(wholeSecondMs, 'Australia/Sydney'));
+  });
+
+  it('does not let a "" zone call cache a null formatter into the SAME slot undefined uses', async () => {
+    // Comparing the RETURNED OFFSET cannot prove this on CI: ubuntu-latest runs at TZ=UTC, where
+    // both "" (which falls back to the host zone on failure) and undefined resolve to 0 whether
+    // or not the cache collision is fixed — the old bug and the fix are indistinguishable by
+    // value there. Testing the KEYING instead: a fresh module instance (a cache-busted import
+    // gets its own empty `zoneOffsetFormatterCache`, since that Map is module-private state) lets
+    // "" cache a null formatter first, then intercepting the real `Intl.DateTimeFormat`
+    // constructor proves `undefined` still gets its OWN construction attempt afterward — a
+    // coalesced key would instead reuse "" 's cached null and never construct anything for it.
+    const fresh: typeof import('./coerce.js') =
+      await import(`./coerce.js?zone-cache-keying-test=${Date.now()}-${Math.random()}`);
+    const OriginalDateTimeFormat = Intl.DateTimeFormat;
+    let undefinedZoneConstructions = 0;
+    function SpyDateTimeFormat(this: unknown, locale?: string | string[], options?: Intl.DateTimeFormatOptions) {
+      if (options && 'timeZone' in options && options.timeZone === undefined) undefinedZoneConstructions++;
+      return new OriginalDateTimeFormat(locale, options);
+    }
+    Intl.DateTimeFormat = SpyDateTimeFormat as unknown as typeof Intl.DateTimeFormat;
+    try {
+      const ms = Math.floor(Date.now() / 1000) * 1000;
+      fresh.zoneOffsetMsAt(ms, '');
+      fresh.zoneOffsetMsAt(ms, undefined);
+    } finally {
+      Intl.DateTimeFormat = OriginalDateTimeFormat;
+    }
+    assert.equal(undefinedZoneConstructions, 1, 'undefined must get its own construction attempt, not reuse "" \'s cached null');
   });
 });
 

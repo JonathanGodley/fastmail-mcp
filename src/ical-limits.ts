@@ -4,7 +4,7 @@ import { InvalidInputError } from './coerce.js';
 // VEVENT by `create_calendar_event` / `update_calendar_event`.
 //
 // WHY THIS EXISTS: every one of those values is emitted through `foldICalLine`
-// (src/caldav-client.ts), which folds a content line to 75 octets per RFC 5545 §3.1 by
+// (src/ical-fold.ts), which folds a content line to 75 octets per RFC 5545 §3.1 by
 // repeatedly re-slicing the REMAINDER of the line — so its cost grows with the square of
 // the field length, and each fold allocates a fresh copy of the tail. Measured on this
 // code: ~135ms to fold a 200KB value, and the process runs out of memory somewhere near
