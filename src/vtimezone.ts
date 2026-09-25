@@ -83,6 +83,9 @@ interface Observance {
  * stays on that grid too (`DAY_MS` is itself a whole number of seconds) — so every instant this
  * passes to `zoneOffsetMsAt`, and every bound handed to `bisectTransition`, is a whole second,
  * which is that function's own precondition (see its comment).
+ *
+ * Requires `fromMs <= toMs`, unchecked: an inverted span silently returns no transitions, and
+ * cannot occur because `generateVTimezone`'s two callers pass `Math.min`/`Math.max` of their instants.
  */
 // Exported for its own test coverage; every real caller goes through `generateVTimezone`.
 export function findTransitions(zone: string, fromMs: number, toMs: number): Transition[] {
