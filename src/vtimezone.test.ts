@@ -252,6 +252,21 @@ describe('generateVTimezone', () => {
     assert.doesNotThrow(() => generateVTimezone('Australia/Sydney', spanStart, spanEnd));
   });
 
+  it('pins the exact year-10000 boundary the thrown message states: accepts 9999-12-31T23:59:59Z, refuses 10000-01-01T00:00:00Z', () => {
+    // MAX_VTIMEZONE_SPAN_DAYS bounds the span's LENGTH only; nothing else bounded the span's END
+    // instant, so a short span whose end still lands at or after year 10000 would otherwise reach
+    // toUtcStamp and print a 5-digit year, which RFC 5545's fixed-4-digit-year DATE-TIME form
+    // cannot represent (#166).
+    const spanStart = utcMsFromComponents(9999, 12, 30, 0, 0, 0);
+    const accepted = utcMsFromComponents(9999, 12, 31, 23, 59, 59);
+    assert.doesNotThrow(() => generateVTimezone('UTC', spanStart, accepted));
+    const refused = utcMsFromComponents(10000, 1, 1, 0, 0, 0);
+    assert.throws(
+      () => generateVTimezone('UTC', spanStart, refused),
+      /Cannot generate a VTIMEZONE this far ahead: the event must end before year 10000 \(UTC\)\./,
+    );
+  });
+
   it('gives Sydney\'s STANDARD and DAYLIGHT observances distinct TZNAMEs, each a plausible shape (#166)', () => {
     const block = generateVTimezone(
       'Australia/Sydney',

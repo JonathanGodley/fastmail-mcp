@@ -6996,6 +6996,20 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
     });
 
+    it('refuses a DURATION whose end lands in year 10000, reachable through this path with a span short enough to clear the century bound (#166)', () => {
+      // DTSTART is 99991231T090000 Sydney, DURATION:PT48H: the span is two days, far under
+      // MAX_VTIMEZONE_SPAN_DAYS, so only a bound on the span's END instant (not its length) can
+      // catch this. Confirms the year-10000 ceiling is reachable through regenerateVTimezones,
+      // not just directly against generateVTimezone.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:huge-end@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:99991231T090000', 'DURATION:PT48H', 'SUMMARY:Too far ahead',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+    });
+
     it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166)', () => {
       // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span would
       // leave the departure zone's block stopping at takeoff instead of covering the moment the

@@ -41,6 +41,13 @@ const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 // three known before the cost of finding out is paid.
 export const MAX_VTIMEZONE_SPAN_DAYS = 36600;
 
+// The latest instant a span may end at (exclusive), symmetric with the year-2 floor above: RFC
+// 5545's DATE-TIME form is a fixed 4-digit year, and TZUNTIL's own stamp would print a 5-digit one
+// the moment spanEndUtcMs reaches year 10000, which no downstream parser can read back as a valid
+// year. Refused outright rather than clamped: a clamped TZUNTIL would misreport the span this
+// actually generated for.
+const MAX_SPAN_END_MS = utcMsFromComponents(10000, 1, 1, 0, 0, 0);
+
 interface Transition {
   utcMs: number;
   fromOffsetMs: number;
@@ -227,6 +234,11 @@ export function generateVTimezone(
   if (spanDays > MAX_VTIMEZONE_SPAN_DAYS) {
     throw new InvalidInputError(
       `Event spans ${spanDays} days; VTIMEZONE generation is limited to ${MAX_VTIMEZONE_SPAN_DAYS} days. Shorten the event.`
+    );
+  }
+  if (spanEndUtcMs >= MAX_SPAN_END_MS) {
+    throw new InvalidInputError(
+      'Cannot generate a VTIMEZONE this far ahead: the event must end before year 10000 (UTC).'
     );
   }
   const priorTransitions = findTransitions(zone, lookbackStartMs, spanStartUtcMs);
