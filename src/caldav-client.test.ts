@@ -2747,6 +2747,35 @@ describe('removeOrphanedVTimezones', () => {
     assert.ok(result.includes('VTIMEZONE'));
     assert.ok(result.includes('Europe/Rome'));
   });
+
+  it('leaves data unchanged when a bare BEGIN:VTIMEZONE line carries a trailing U+2028 line separator and never gets a closing END:VTIMEZONE', () => {
+    // `.` does not match a U+2028 line separator, and the marker regex requires a match all the
+    // way to end-of-line ($), so 'BEGIN:VTIMEZONE\u2028X' is never read as a marker at all: no
+    // VTIMEZONE is recognised anywhere in this resource, so there is nothing to sweep. Without
+    // that end anchor, the regex would still match up to the separator, open an unclosed
+    // VTIMEZONE candidate, and the resource would be refused instead of returned unchanged.
+    const data = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0',
+      'BEGIN:VTIMEZONE\u2028X',
+      'BEGIN:VEVENT', 'UID:sep@fm', 'DTSTART:20260101T000000Z', 'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    assert.equal(removeOrphanedVTimezones(data), data);
+  });
+
+  it('leaves data unchanged when a bare BEGIN:VTIMEZONE line carries a lone CR and never gets a closing END:VTIMEZONE', () => {
+    // Same anchor gap as the U+2028 case above, forced instead by a bare CR (no following LF)
+    // that survives inside one physical line. The end anchor is what stops
+    // 'BEGIN:VTIMEZONE\rX' from being read as a marker; without it the resource would be
+    // refused as an unterminated VTIMEZONE block instead of returned unchanged.
+    const data = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0',
+      'BEGIN:VTIMEZONE\rX',
+      'BEGIN:VEVENT', 'UID:cr2@fm', 'DTSTART:20260101T000000Z', 'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    assert.equal(removeOrphanedVTimezones(data), data);
+  });
 });
 
 describe('removeExceptionVEvents', () => {
