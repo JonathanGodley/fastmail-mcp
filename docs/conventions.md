@@ -2168,7 +2168,9 @@ rejects any type not among the collection's registered MIME types before any par
 — so the build either lacks `WITH_JMAP` or does not register that type for the calendar
 collection (measured 25 Sep 2026, `scripts/probes/calendar-event-json-put.probe.mjs`). The
 attacher's two CalDAV call sites on the READ side
-(`imap/http_caldav.c:2617`, `:5719`) sit inside `if (cdata->comp_flags.tzbyref)`, a per-resource
+(`imap/http_caldav.c:2617`, `:5719`), and the hand-rolled re-attach in `export_calendar`
+(`imap/http_caldav.c:1841`, which adds each referenced TZID's built-in definition through
+`add_timezone`), all sit behind a `cdata->comp_flags.tzbyref` check, a per-resource
 flag set not BY `strip_vtimezones` but alongside it, in the same `if (namespace_calendar.allow &
 ALLOW_CAL_NOTZ)` block (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
 (measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
