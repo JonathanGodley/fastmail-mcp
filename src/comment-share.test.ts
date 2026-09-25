@@ -5,7 +5,9 @@
  * git actually reports. The repo's own working tree is never touched.
  */
 
-import { test, before, after } from 'node:test';
+import {
+  test, before, beforeEach, after,
+} from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
@@ -50,13 +52,25 @@ before(() => {
   copyFileSync(join(REPO, 'scripts', 'comment-share.mjs'), join(work, 'scripts', 'comment-share.mjs'));
   git(['init', '-b', 'main']);
   writeFileSync(join(work, 'a.ts'), block(20, 20));
-  git(['add', 'a.ts']);
+  // Track the script fixture too, so beforeEach's clean (untracked files only)
+  // never removes the very thing report() spawns.
+  git(['add', 'a.ts', 'scripts/comment-share.mjs']);
   git(['commit', '-m', 'base']);
 });
 
 after(() => {
   // Windows holds handles on a just-used repo briefly; the retry option covers it.
   rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+});
+
+// Clears staged and untracked leftovers before every case, so a case that
+// throws mid-test (or the one before it) can't corrupt one that runs after it.
+// This is a no-op on real commits - reset --hard only discards what HEAD
+// doesn't already have - so a case that deliberately commits (below) still
+// hands its commit on to the next one.
+beforeEach(() => {
+  git(['reset', '--hard', 'HEAD']);
+  git(['clean', '-fdx']);
 });
 
 test('--staged reports a change far above the file\'s own density, exit 0', () => {
@@ -69,6 +83,11 @@ test('--staged reports a change far above the file\'s own density, exit 0', () =
 });
 
 test('a commit is measured against its first parent', () => {
+  // beforeEach wipes uncommitted state, so this makes its own staged change
+  // to commit rather than relying on the previous case's; the resulting
+  // commit is real HEAD history, so it does carry forward to later cases.
+  appendFileSync(join(work, 'a.ts'), block(25, 5));
+  git(['add', 'a.ts']);
   git(['commit', '-m', 'over the bar']);
   const sha = git(['rev-parse', 'HEAD']);
   const r = report([sha]);
@@ -85,11 +104,12 @@ test('prints nothing when the change is under the bar', () => {
 });
 
 test('--all prints the under-the-bar figures too', () => {
+  appendFileSync(join(work, 'a.ts'), block(10, 10));
+  git(['add', 'a.ts']);
   const r = report(['--staged', '--all']);
   assert.equal(r.status, 0);
   assert.ok(r.out.includes('comment-share (under the bar): a.ts: +10 comment lines against +10 code (1.0 per code line; the file runs'), r.out);
   assert.ok(!r.out.includes('/tidy-comments'), 'no nudge when nothing is over the bar');
-  git(['reset', '--hard', 'HEAD']);
 });
 
 test('a new file with more comment than code fires at 1.0', () => {
@@ -97,8 +117,6 @@ test('a new file with more comment than code fires at 1.0', () => {
   git(['add', 'b.ts']);
   const r = report(['--staged']);
   assert.ok(r.out.includes('comment-share: b.ts: +25 comment lines against +10 code (2.5 per code line; new file, no baseline).'), r.out);
-  git(['reset', '--hard', 'HEAD']);
-  rmSync(join(work, 'b.ts'), { force: true });
 });
 
 test('markdown is not measured', () => {
@@ -106,8 +124,6 @@ test('markdown is not measured', () => {
   git(['add', 'notes.md']);
   const r = report(['--staged']);
   assert.equal(r.out, '');
-  git(['reset', '--hard', 'HEAD']);
-  rmSync(join(work, 'notes.md'), { force: true });
 });
 
 test('no arguments prints usage and still exits 0', () => {
