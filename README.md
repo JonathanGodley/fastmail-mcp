@@ -126,9 +126,9 @@ This fork adds a **response simplification system** that reduces token usage whe
    # Accepts an IANA name (e.g. America/New_York). Defaults to the server host's
    # timezone; set it if the server runs in a different timezone than you. This is
    # an available option, not a recommendation — leave it unset and everything
-   # still works, just in the host's zone. An unrecognised name is not an error -
-   # it falls back to the host's timezone, with no warning if that turns out to be
-   # the wrong one for you; check what actually got resolved if it matters.
+   # still works, just in the host's zone. If set, it must be a full IANA name (a
+   # region-qualifying slash, or exactly UTC); an abbreviation, alias or
+   # unrecognised name stops the server from starting rather than being replaced.
    export FASTMAIL_TIMEZONE="America/New_York"
    ```
 
