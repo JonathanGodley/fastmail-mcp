@@ -1203,9 +1203,9 @@ function parseICalDurationComponents(duration: string): ParsedICalDuration | und
  * Parse an iCalendar DURATION value and compute end datetime.
  * RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]
  * Returns ISO 8601 end datetime, or undefined for malformed input.
- * A plain millisecond add, deliberately outside the nominal-day/exact-time split
- * `resolveDurationSpanEndMs` uses for the VTIMEZONE span: this function's caller wants a
- * user-visible end sharing `start`'s own spelling, not a DST-aware instant.
+ * A plain millisecond add, which is wrong across a DST transition in the event's zone (#196).
+ * `resolveDurationSpanEndMs` already does the RFC 5545 §3.3.6 nominal-day/exact-time split
+ * for the VTIMEZONE span.
  */
 export function parseICalDuration(duration: string, start: string): string | undefined {
   const parsed = parseICalDurationComponents(duration);
