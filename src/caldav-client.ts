@@ -2449,11 +2449,6 @@ function insertVTimezoneBlock(icalData: string, block: string, lineEnding: strin
  * wall-clock add of the whole duration would lose. Resolving the nominal (week/day-shifted only)
  * wall clock to an instant FIRST, then adding the time components as exact milliseconds to that
  * instant, keeps the two kinds of arithmetic from being conflated.
- *
- * `parseICalDuration` itself computes a different thing from the same parse: its other caller
- * (the implicit-DTEND path) wants a user-visible end sharing `start`'s own spelling, a plain
- * ms-add outside this split. The two share `parseICalDurationComponents` so a DURATION judged
- * valid for one purpose is judged valid for the other the same way.
  */
 function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid: string): number | undefined {
   const parsed = parseICalDurationComponents(durationValue);

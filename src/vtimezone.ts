@@ -225,15 +225,10 @@ export function generateVTimezone(
   spanEndUtcMsInput: number,
   lineEnding: string = '\r\n',
 ): string {
-  // Floored to a whole second so every instant this function samples is one. `zoneOffsetMsAt`
-  // floors internally too (see its own comment), so a sub-second instant no longer reads a
-  // corrupted offset the way it once could — but `spanDays` below, and the initial observance's
-  // lookback boundary, are plain arithmetic on `spanStartUtcMs`/`spanEndUtcMs` themselves, not
-  // routed through `zoneOffsetMsAt`. This floor keeps that arithmetic, and the `DTSTART`/
-  // `TZUNTIL` this generates, on the exact same whole-second grid `findTransitions` samples —
-  // rather than computing a span from a fractional instant while every observance in it resolves
-  // against that instant's floor. RFC 5545 has no sub-second datetime form, so every real
-  // caller's span is already whole-second; this only guards a caller that isn't.
+  // Floored to a whole second: `zoneOffsetMsAt` floors internally too, but `spanDays` below and
+  // the initial observance's lookback boundary are plain arithmetic on `spanStartUtcMs`/
+  // `spanEndUtcMs` directly, bypassing that floor — so this keeps `DTSTART`/`TZUNTIL` and the
+  // lookback boundary on the same whole-second grid `findTransitions` samples.
   const spanStartUtcMs = Math.floor(spanStartUtcMsInput / SECOND_MS) * SECOND_MS;
   const spanEndUtcMs = Math.floor(spanEndUtcMsInput / SECOND_MS) * SECOND_MS;
   const lookbackStartMs = spanStartUtcMs - LOOKBACK_MS;
@@ -273,10 +268,6 @@ export function generateVTimezone(
   const distinctOffsets = Array.from(new Set(observances.flatMap(o => [o.fromOffsetMs, o.toOffsetMs])));
   const lowerOffsetMs = distinctOffsets.length > 1 ? Math.min(...distinctOffsets) : null;
   const higherOffsetMs = distinctOffsets.length > 1 ? Math.max(...distinctOffsets) : null;
-  // A permanent step (Asia/Pyongyang's 2018 change to +09:00, Europe/Moscow's 2011 change to
-  // +04:00) touches exactly the same kind of offset pair a real DST cycle does, but never
-  // reverts — so the higher offset only counts as DAYLIGHT once some transition in the lookback
-  // or the span itself is actually seen falling back to the lower one.
   // Two known limits, both labelling-only — every offset's own value stays exact either way: a
   // zone's first-ever DST season reads as STANDARD, because the reversion it will eventually make
   // has not happened yet inside this lookback/span window; and with three or more distinct
