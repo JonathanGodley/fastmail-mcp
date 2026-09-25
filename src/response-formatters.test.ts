@@ -312,19 +312,19 @@ describe('buildUnpathableMailboxNote', () => {
 describe('simplifyIdentity', () => {
   const raw = {
     id: 'id-1',
-    name: 'Jonathan',
+    name: 'Alexandra',
     email: 'jon@example.com',
     replyTo: [{ email: 'reply@example.com' }],
     mayDelete: true,
     bcc: [{ email: 'bcc@example.com' }],
-    textSignature: 'Regards, Jon',
-    htmlSignature: '<p>Regards, Jon</p>',
+    textSignature: 'Regards, Alex',
+    htmlSignature: '<p>Regards, Alex</p>',
   };
 
   it('returns core fields by default', () => {
     const result = simplifyIdentity(raw);
     assert.equal(result.id, 'id-1');
-    assert.equal(result.name, 'Jonathan');
+    assert.equal(result.name, 'Alexandra');
     assert.equal(result.email, 'jon@example.com');
     assert.deepEqual(result.replyTo, [{ email: 'reply@example.com' }]);
     assert.equal(result.mayDelete, true);
@@ -332,8 +332,8 @@ describe('simplifyIdentity', () => {
 
   it('returns the configured signatures by default (#33)', () => {
     const result = simplifyIdentity(raw);
-    assert.equal(result.textSignature, 'Regards, Jon');
-    assert.equal(result.htmlSignature, '<p>Regards, Jon</p>');
+    assert.equal(result.textSignature, 'Regards, Alex');
+    assert.equal(result.htmlSignature, '<p>Regards, Alex</p>');
   });
 
   it('omits verbose fields by default', () => {
@@ -359,8 +359,8 @@ describe('simplifyIdentity', () => {
   it('includes verbose fields when verbose=true', () => {
     const result = simplifyIdentity(raw, { verbose: true });
     assert.deepEqual(result.bcc, [{ email: 'bcc@example.com' }]);
-    assert.equal(result.textSignature, 'Regards, Jon');
-    assert.equal(result.htmlSignature, '<p>Regards, Jon</p>');
+    assert.equal(result.textSignature, 'Regards, Alex');
+    assert.equal(result.htmlSignature, '<p>Regards, Alex</p>');
   });
 
   it('still reports a blank signature under verbose=true (verbose means everything sent)', () => {
@@ -981,12 +981,12 @@ describe('simplifyMailbox missing verbose fields', () => {
 describe('simplifyIdentity missing verbose fields', () => {
   const raw = {
     id: 'id-1',
-    name: 'Jonathan',
+    name: 'Alexandra',
     email: 'jon@example.com',
     verificationState: 'autoverified',
     showInCompose: true,
     saveSentToMailboxId: 'mb-sent',
-    displayName: 'Jon G',
+    displayName: 'Alex E',
     isAutoConfigured: true,
     enableExternalSMTP: false,
     server: 'smtp.fastmail.com',
@@ -1017,7 +1017,7 @@ describe('simplifyIdentity missing verbose fields', () => {
 
   it('includes displayName in verbose mode', () => {
     const result = simplifyIdentity(raw, { verbose: true });
-    assert.equal(result.displayName, 'Jon G');
+    assert.equal(result.displayName, 'Alex E');
   });
 
   it('includes isAutoConfigured in verbose mode', () => {

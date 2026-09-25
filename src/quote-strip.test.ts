@@ -143,7 +143,7 @@ describe('stripQuotedText — Outlook header block', () => {
       '________________________________',
       'From: Alice Example <alice@example.com>',
       'Sent: Monday, 15 June 2026 13:29',
-      'To: Jon Godley',
+      'To: Alex Example',
       'Subject: Re: Thursday',
       '',
       'Are we still on for Thursday?',

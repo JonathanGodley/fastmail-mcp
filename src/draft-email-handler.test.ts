@@ -19,7 +19,7 @@ function makeOriginal(over: any = {}) {
     messageId: ['orig-msg@example.com'],
     references: ['root@example.com'],
     subject: 'Project update',
-    from: [{ name: 'Jon Godley', email: 'jon@example.com' }],
+    from: [{ name: 'Alex Example', email: 'jon@example.com' }],
     to: [{ email: 'me@example.com' }],
     sentAt: '2026-06-15T03:29:02Z',
     textBody: [{ partId: 't', type: 'text/plain' }],
@@ -550,7 +550,7 @@ describe('draft_email — nothing is added that the caller did not place', () =>
     const { client, calls } = spyClient();
     const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'hi\n{{quote}}' }, client);
     assert.equal(r.subject, 'Re: Project update');
-    assert.deepEqual(calls.draft.to, ['Jon Godley <jon@example.com>']);
+    assert.deepEqual(calls.draft.to, ['Alex Example <jon@example.com>']);
     assert.deepEqual(calls.draft.inReplyTo, ['orig-msg@example.com']);
     assert.deepEqual(calls.draft.references, ['root@example.com', 'orig-msg@example.com']);
     assert.equal(calls.draft.sourceEmailId, 'o1');
@@ -1529,7 +1529,7 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
   it("defaults the recipient to the original sender, keeping the display name", async () => {
     const named = plainClient();
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, named.client);
-    assert.deepEqual(named.calls.draft.to, ['Jon Godley <jon@example.com>']);
+    assert.deepEqual(named.calls.draft.to, ['Alex Example <jon@example.com>']);
 
     const bare = plainClient(makeOriginal({ from: [{ email: 'noname@example.com' }] }));
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, bare.client);
@@ -1546,7 +1546,7 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
       cc: [{ email: 'raj@example.com' }, { name: 'Sue Ng', email: 'sue@example.com' }],
     }));
     const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
-    assert.deepEqual(calls.draft.to, ['Jon Godley <jon@example.com>']);
+    assert.deepEqual(calls.draft.to, ['Alex Example <jon@example.com>']);
     assert.deepEqual(calls.draft.cc, [
       'Dana Fox <dana@example.com>', 'raj@example.com', 'Sue Ng <sue@example.com>',
     ]);
@@ -1567,7 +1567,7 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     // A Reply-To naming no address is no Reply-To: From still decides.
     const empty = plainClient(makeOriginal({ replyTo: [{ name: 'Nobody' }] }));
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, empty.client);
-    assert.deepEqual(empty.calls.draft.to, ['Jon Godley <jon@example.com>']);
+    assert.deepEqual(empty.calls.draft.to, ['Alex Example <jon@example.com>']);
   });
 
   it('excludes every address a wildcard identity covers from the carried cc', async () => {
@@ -1584,7 +1584,7 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
 
   it('dedupes the carried cc by address, case-insensitively, keeping the first spelling', async () => {
     const { client, calls } = plainClient(makeOriginal({
-      from: [{ name: 'Jon Godley', email: 'JON@example.com' }],
+      from: [{ name: 'Alex Example', email: 'JON@example.com' }],
       to: [{ name: 'Dana Fox', email: 'dana@example.com' }, { email: 'jon@EXAMPLE.com' }],
       cc: [{ name: 'D. Fox', email: 'DANA@Example.com' }],
     }));
@@ -1623,7 +1623,7 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
       { mode: 'reply', originalEmailId: 'o1', textBody: 'x', cc: ['bob@x.example'] },
       ccOnly.client,
     );
-    assert.deepEqual(ccOnly.calls.draft.to, ['Jon Godley <jon@example.com>']);
+    assert.deepEqual(ccOnly.calls.draft.to, ['Alex Example <jon@example.com>']);
     assert.deepEqual(ccOnly.calls.draft.cc, ['bob@x.example']);
   });
 

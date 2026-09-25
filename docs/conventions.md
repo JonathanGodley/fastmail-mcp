@@ -1109,9 +1109,9 @@ to re-decide every time the shape gains a field, and it guesses at what the call
 where an allowlist is told. Callers here are overwhelmingly models that know exactly which
 fields they are about to read, so being told costs a few tokens and removes the guess.
 It exists because response size was otherwise a property of the mailbox rather than of the
-call — a 66-message sweep measured 84KB (~47% RFC threading plumbing, ~23% preview,
-18% the fields the caller wanted) and an editor-inflated draft body pushed `get_email`
-past the same wall (#79, #69). `limit` is not a substitute: per-message size varies by
+call: in a listing, the RFC threading plumbing and the preview outweighed the fields the
+caller wanted, and an editor-inflated draft body pushed `get_email` past the same wall
+(#79, #69). `limit` is not a substitute: per-message size varies by
 more than an order of magnitude, so no limit value is both safe and useful.
 
 Four properties define the convention, and a fifth tool adding `fields` should keep all of
@@ -1204,11 +1204,11 @@ error description is caught.
 The reason is that indentation is bytes the caller pays for and nothing parses. Every payload
 here is machine-read — an MCP client parses it, or a model reads it as data — and neither
 needs the whitespace. It also scales with the number of JSON *tokens* rather than with the
-content, so it costs most on exactly the payloads that are already the largest. Measured live
-against one real account in August 2026, as a point-in-time reading rather than a rate:
-**17.3%** of a 25-message `list_emails` page, **24.9%** of the same page under `raw: true`, **28.5%** of a `list_mailboxes` result (many small flat objects, so the
-most delimiters per byte of content), and 6.5% of a single `get_email` (dominated by one long
-body string, which carries no delimiters to indent). That is pure whitespace in every case:
+content, so it costs most on exactly the payloads that are already the largest. Measured live in
+August 2026, indentation was a double-digit share of a `list_emails` page, more under
+`raw: true`, and most of a `list_mailboxes` result (many small flat objects, so the most
+delimiters per byte of content), and only a small share of a single `get_email` (dominated by
+one long body string, which carries no delimiters to indent). That is pure whitespace in every case:
 the change removes no field and alters no value (#40).
 
 **A payload inside a prose frame is still a payload.** A list result is a summary line, a
@@ -1692,8 +1692,8 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
   the fetched original in this header. That id is what lets `send_draft` mark exactly the
   copy the caller composed from — matching Fastmail's own client, which marks the
   instance replied to and leaves other copies of the same Message-ID untouched
-  (observed live, 2026-08-14: replying to the Archive copy of a self-addressed message
-  set `$answered` on that copy only, never the Sent twin). The recorded id is surfaced
+  (observed live against Fastmail on 2026-08-14: a reply set `$answered` on the copy
+  replied to only, never on another stored copy of the same message). The recorded id is surfaced
   by `get_email` (and `get_thread` with `includeBodies`) as `sourceEmailId`, so which
   copy will be marked is inspectable before the send.
 - **The exact id is validated before use; the Message-ID lookup is the fallback, not a

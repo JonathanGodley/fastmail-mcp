@@ -3540,7 +3540,7 @@ describe('updateDraft replyTo', () => {
 
 // ---------- wildcard identity ----------
 
-const WILDCARD_IDENTITY = { id: 'id-wild', name: 'Jonathan Godley', email: '*@example.com', mayDelete: true };
+const WILDCARD_IDENTITY = { id: 'id-wild', name: 'Alex Example', email: '*@example.com', mayDelete: true };
 
 // A wildcard identity's `email` is a pattern, not an address, so it must never become the
 // value of a `from` header (#160). The refusal is on the WRITE: it fires only on the arm that
@@ -3651,7 +3651,7 @@ describe('createDraft wildcard identity', () => {
     await client.createDraft({ subject: 'Hi', from: 'work@example.com' });
 
     const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Alex Example', email: 'work@example.com' }]);
   });
 
   // The refusal is on the ADDRESS half and nothing else. A display name that happens to look
@@ -3759,7 +3759,7 @@ describe('updateDraft wildcard identity', () => {
     await client.updateDraft('draft-1', { from: 'new@example.com' });
 
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'new@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Alex Example', email: 'new@example.com' }]);
   });
 
   it('preserves concrete from when updating without changing from', async () => {
@@ -3774,7 +3774,7 @@ describe('updateDraft wildcard identity', () => {
     await client.updateDraft('draft-1', { subject: 'Changed subject only' });
 
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Alex Example', email: 'work@example.com' }]);
   });
 
   // The passed value, the same hole createDraft had: the arm below fires only when the edit
@@ -3863,7 +3863,7 @@ describe('updateDraft wildcard identity', () => {
     await client.updateDraft('draft-1', { from: 'work@example.com' });
 
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
-    assert.deepEqual(emailObj.from, [{ name: 'Jonathan Godley', email: 'work@example.com' }]);
+    assert.deepEqual(emailObj.from, [{ name: 'Alex Example', email: 'work@example.com' }]);
   });
 
   // The sharpest case the refusal must NOT touch: the stored address matches no verified
