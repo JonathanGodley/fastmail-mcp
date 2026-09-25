@@ -170,8 +170,20 @@ describe('generateVTimezone', () => {
     // No real IANA zone name is remotely this long; the fold itself is `ical-fold.ts`'s own
     // unit-tested responsibility (shared with caldav-client.ts), so this only needs to prove the
     // generator actually wires its output through it, with a continuation line to show for it.
+    // `zoneOffsetMsAt` throws on a name ICU cannot resolve, so the fake name is aliased to UTC
+    // for the length of the call.
     const zone = 'Fake/' + 'x'.repeat(200);
-    const block = generateVTimezone(zone, utc('2026-06-01T00:00:00Z'), utc('2026-06-01T01:00:00Z'));
+    const OriginalDateTimeFormat = Intl.DateTimeFormat;
+    function AliasingDateTimeFormat(locale?: string | string[], options?: Intl.DateTimeFormatOptions) {
+      return new OriginalDateTimeFormat(locale, options?.timeZone === zone ? { ...options, timeZone: 'UTC' } : options);
+    }
+    Intl.DateTimeFormat = AliasingDateTimeFormat as unknown as typeof Intl.DateTimeFormat;
+    let block: string;
+    try {
+      block = generateVTimezone(zone, utc('2026-06-01T00:00:00Z'), utc('2026-06-01T01:00:00Z'));
+    } finally {
+      Intl.DateTimeFormat = OriginalDateTimeFormat;
+    }
     const lines = block.split('\r\n');
     for (const line of lines) {
       assert.ok(Buffer.byteLength(line, 'utf8') <= 75, line);

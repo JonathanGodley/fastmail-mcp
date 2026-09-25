@@ -1794,9 +1794,8 @@ Three properties of the implementation are load-bearing and easy to undo by acci
   **The one remaining stand-down is a name ICU cannot resolve**, and it is an inability, not a
   choice: real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone, so
   there is no instant to order on and refusing would reject a record the account already holds.
-  The resolvability test is `isUsableTimezone`, never `zoneOffsetMsAt` — that one falls back to
-  the HOST zone for a name it cannot resolve, so it answers for a different zone rather than
-  saying it could not answer.
+  The resolvability test is `isUsableTimezone`, run before anything is resolved:
+  `zoneOffsetMsAt` throws on a name it cannot resolve.
   **The shape reaches this check on an UPDATE only.** `create_calendar_event` takes no
   per-value zone — a designator-less pair is written in the configured zone — so both of a
   created event's ends are always in one zone, and the cross-zone branch is reachable only when
@@ -1856,10 +1855,9 @@ old best-effort one. The configured zone remains the fallback, for two cases onl
 genuinely floating `start` (there is no zone to sort it in, so the caller's own clock is the
 least-wrong guess) and a `timeZone` this server was HANDED but cannot resolve (a Windows zone
 name such as `AUS Eastern Standard Time`, passed through verbatim rather than rejected — see
-below). That guard is not cosmetic: `zoneOffsetMsAt` silently falls back to the HOST zone for
-an unresolvable name, so sorting by an unresolvable `timeZone` directly would place that one
-event in the *host's* zone rather than the account's configured one — a regression on the
-zone-blind behaviour this replaces, which is exactly why `isUsableTimezone` gates it.
+below). That guard is not cosmetic: `zoneOffsetMsAt` throws on an unresolvable name, so
+sorting by an unresolvable `timeZone` directly would fail the whole listing over one event,
+which is exactly why `isUsableTimezone` gates it.
 
 **Non-IANA names pass through verbatim, on purpose.** A calendar written by a non-Fastmail
 client can carry a Windows zone name in its `TZID` rather than an IANA one. This server does
@@ -1897,9 +1895,9 @@ instant it names, a date-only value is the configured zone's local day, a `DTSTA
 span is the full multi-day local span (a date-only `DTEND` is already exclusive in iCalendar —
 see `docs/fastmail-action-availability.md` — so no day is added), and a wall clock resolves in
 its own TZID where ICU can resolve that name and in the configured zone otherwise. The zone
-fallback rule is `sortEventsByStart`'s, for the same reason: `zoneOffsetMsAt` silently falls
-back to the HOST zone for an unresolvable name, so an unusable `timeZone` must land on the
-account's configured zone rather than the deployment's. `zone` is a required parameter of
+fallback rule is `sortEventsByStart`'s, for the same reason: `zoneOffsetMsAt` throws on an
+unresolvable name, so an unusable `timeZone` must land on the account's configured zone
+before anything is resolved. `zone` is a required parameter of
 `eventIntersectsWindow` precisely so no call site can fall through to the host by omission.
 
 The CalDAV server remains the authority on time-range matching (RFC 4791 §9.9,
@@ -2263,19 +2261,16 @@ Mechanics worth knowing before touching it:
   Gregorian cycle (400 years, exactly 146097 days) to step over the mapping without disturbing
   the leap arithmetic. Unreachable in practice; it is the same silent-different-window class as
   the rest of this section, which is why it is fixed rather than noted.
-- **An unusable IANA name falls back to the host zone** rather than throwing, matching
-  `toLocalIso` on the same kind of bad zone string. `describeTimezone` names BOTH in that case -
-  the host zone that resolved and the value that did not - because naming only the unresolved
-  one would put the disclosure and the behaviour in disagreement on the one call where a caller
-  is trying to work out why their days look wrong. `FASTMAIL_TIMEZONE` itself can no longer
-  reach this branch in production: `resolveConfiguredTimezone`
+- **An unusable IANA name is an invariant violation, not a fallback.** `zoneOffsetMsAt` throws
+  a plain `Error` on a name ICU cannot resolve (without echoing it) rather than answering with
+  the host zone's offset, which would turn a caller bug into a silently wrong day. No production
+  path reaches it: `resolveConfiguredTimezone`
   ([#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157), see "Writing a zone"
-  above) validates it at server startup - including the near-unreachable case where the HOST
-  zone itself fails the rule - so `getDefaultTimezone()`, the only value every current caller of
-  `describeTimezone` passes, is already guaranteed usable by the time a request runs this code.
-  The fallback stays in `describeTimezone` itself rather than being deleted: it is a general
-  utility with its own tests, not something entitled to assume every future caller pre-validates
-  its argument the way today's callers happen to.
+  above) validates `FASTMAIL_TIMEZONE` at server startup - including the near-unreachable case
+  where the HOST zone itself fails the rule - so `getDefaultTimezone()` is either `undefined`
+  (the host zone) or usable, and every event TZID is gated by `isUsableTimezone` before it is
+  resolved. `describeTimezone`, a general utility, flags an unusable value as unresolvable
+  rather than naming a zone the dates were read in.
 - **Test with an INJECTED zone.** The coercions take the zone as an argument for exactly this
   reason. A test that leaves it to the machine passes under both the UTC-day and the local-day
   reading whenever the host sits in the zone asserted — which is how the wrong-day window sat

@@ -946,19 +946,10 @@ export function resolveConfiguredTimezone(
  * the tool description (said once, where a model reads it) rather than repeated inside every
  * error.
  *
- * The exception is a zone name ICU cannot resolve. `zoneOffsetMsAt` deliberately falls back
- * to the HOST zone there rather than throwing, so naming the configured value alone would
- * print a zone the dates were not read in — the disclosure and the behaviour disagreeing, on
- * the one call where the caller is trying to work out why their days look wrong. So both are
- * named: what actually resolved, and the configured value that did not.
- *
- * Since `resolveConfiguredTimezone` (#157) validates `FASTMAIL_TIMEZONE` at startup and
- * refuses to start on a value that would land here, every production caller of this function
- * now always passes an already-usable zone, so this branch is not reachable through a
- * misconfigured `FASTMAIL_TIMEZONE` any more. It stays: `describeTimezone` is a general
- * utility, not something that gets to assume its argument was pre-validated by any one
- * caller, and covering the branch directly is cheaper than proving every future call site
- * always will be.
+ * The exception is a zone name ICU cannot resolve. No date can be read in one (`zoneOffsetMsAt`
+ * throws), so it is flagged as unresolvable rather than printed as though dates were read in
+ * it. No production caller passes one, since `resolveConfiguredTimezone` (#157) validates
+ * `FASTMAIL_TIMEZONE` at startup, but this is a general utility and does not assume that.
  */
 export function describeTimezone(zone: string | undefined): string {
   if (!zone) return hostTimezone();
@@ -966,8 +957,7 @@ export function describeTimezone(zone: string | undefined): string {
   // Through the shared echo, so a cut zone name shows that it was cut. Slicing silently at
   // 40 characters printed a name the caller could neither recognise nor correct.
   const echoed = echoCallerText(zone, ZONE_ECHO_LIMIT);
-  return `${resolveUsableTimezone(zone)} (the configured time zone "${echoed}" is not a time zone this server can resolve, ` +
-    "so this server's own zone was used)";
+  return `"${echoed}" (the configured time zone, which is not a time zone this server can resolve)`;
 }
 
 /**
@@ -978,14 +968,12 @@ export function describeTimezone(zone: string | undefined): string {
  * offset. No timezone database ships with this server, so ICU (through `Intl`) is the only
  * thing here that knows when a zone changes offset.
  *
- * An unusable IANA name falls back to the host zone rather than throwing, matching
- * `toLocalIso`'s posture on the same kind of bad zone string. Every current caller passes
- * `getDefaultTimezone()` down through `coerceCalendarWindowStart`/`End`, and since #157
- * `resolveConfiguredTimezone` validates that value at server startup — refusing to start
- * rather than let an unusable configured (or host) zone reach request time at all — so this
- * fallback is not reachable in production today. It stays because this is a low-level helper
- * with no way to enforce that every future caller pre-validates its `zone` argument the same
- * way, and because it is covered directly by its own unit tests.
+ * `undefined` means the host zone. A name ICU cannot resolve THROWS: callers pass either the
+ * configured zone (validated at startup by `resolveConfiguredTimezone`, #157) or a TZID that
+ * `isUsableTimezone` has already accepted, so reaching it is a caller bug, and answering with
+ * the host zone's offset would turn that bug into a silently wrong time. Gate an untrusted name
+ * with `isUsableTimezone` first. An invalid instant (NaN, or beyond ±8.64e15 ms) throws a
+ * RangeError from `formatToParts` rather than returning a guessed offset.
  *
  * Exported for `src/vtimezone.ts` (#166), which samples a zone's offset at many instants — a
  * day-by-day scan across a year plus a span, then a bisection per transition found — to locate
@@ -994,8 +982,8 @@ export function describeTimezone(zone: string | undefined): string {
  * `Intl.DateTimeFormat` is the expensive part of each one.
  */
 // Keyed on `zone` itself, not `zone ?? ''`: coalescing `undefined` (the host zone) and `''` (a
-// genuinely empty zone string) onto one key would let whichever is cached first silently answer
-// for both, including a failed `''` lookup's cached `null` standing in for the host zone.
+// genuinely empty zone string) onto one key would let whichever is cached first answer for both,
+// so a failed `''` lookup's cached `null` would make every later host-zone call throw.
 const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat | null>();
 
 function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
@@ -1037,8 +1025,7 @@ export function zoneOffsetMsAt(utcMsInput: number, zone: string | undefined): nu
   const utcMs = Math.floor(utcMsInput / 1000) * 1000;
   const formatter = zoneOffsetFormatterFor(zone);
   if (!formatter) {
-    if (zone === undefined) return 0;
-    return zoneOffsetMsAt(utcMs, undefined);
+    throw new Error('zoneOffsetMsAt was given a time zone name ICU cannot resolve; check it with isUsableTimezone first.');
   }
   const parts = formatter.formatToParts(new Date(utcMs));
   const get = (type: string) => Number(parts.find(p => p.type === type)?.value);

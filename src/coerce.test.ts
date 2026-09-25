@@ -1479,13 +1479,12 @@ describe('calendar window bounds resolve a date in the configured zone (#138)', 
     }
   });
 
-  it('falls back to the host zone rather than throwing on an unusable zone name', () => {
-    // A mistyped FASTMAIL_TIMEZONE is a deployment mistake, not a caller mistake; it must
-    // not turn every calendar read into an error. Same posture as toLocalIso.
-    assert.equal(
-      coerceCalendarWindowStart('2026-08-12', 'startDate', 'Not/AZone'),
-      coerceCalendarWindowStart('2026-08-12', 'startDate', undefined),
-    );
+  it('refuses to read a date in an unusable zone name rather than reading it in the host zone', () => {
+    // Production never passes one (FASTMAIL_TIMEZONE is validated at startup, #157); a caller
+    // that does is a bug, and a host-zone answer would hide it as a wrong day.
+    assert.throws(() => coerceCalendarWindowStart('2026-08-12', 'startDate', 'Not/AZone'), /time zone/);
+    // An instant carrying its own designator never consults the zone, so it still resolves.
+    assert.equal(coerceCalendarWindowStart('2026-08-12T09:00:00Z', 'startDate', 'Not/AZone'), '2026-08-12T09:00:00Z');
   });
 
   it('rejects the same bad values the UTC coercion does, naming the zone in the hint', () => {
@@ -2067,32 +2066,34 @@ describe('zoneOffsetMsAt', () => {
     assert.equal(zoneOffsetMsAt(subSecondMs, 'Australia/Sydney'), zoneOffsetMsAt(wholeSecondMs, 'Australia/Sydney'));
   });
 
+  it('throws on a zone name ICU cannot resolve, rather than answering with the host zone\'s offset', () => {
+    const ms = Date.parse('2026-10-03T15:59:59Z');
+    for (const zone of ['Not/AZone', 'AUS Eastern Standard Time', '']) {
+      assert.throws(
+        () => zoneOffsetMsAt(ms, zone),
+        (err: Error) => {
+          // A plain Error: this is a caller bug, not something a tool caller can fix.
+          assert.equal(err.constructor, Error);
+          assert.match(err.message, /time zone/);
+          if (zone) assert.ok(!err.message.includes(zone), 'the unresolvable value must not be echoed');
+          return true;
+        },
+        `expected a throw for ${JSON.stringify(zone)}`,
+      );
+    }
+    assert.equal(typeof zoneOffsetMsAt(ms, undefined), 'number');
+  });
+
   it('does not let a "" zone call cache a null formatter into the SAME slot undefined uses', async () => {
-    // Comparing the RETURNED OFFSET cannot prove this on CI: ubuntu-latest runs at TZ=UTC, where
-    // both "" (which falls back to the host zone on failure) and undefined resolve to 0 whether
-    // or not the cache collision is fixed — the old bug and the fix are indistinguishable by
-    // value there. Testing the KEYING instead: a fresh module instance (a cache-busted import
-    // gets its own empty `zoneOffsetFormatterCache`, since that Map is module-private state) lets
-    // "" cache a null formatter first, then intercepting the real `Intl.DateTimeFormat`
-    // constructor proves `undefined` still gets its OWN construction attempt afterward — a
-    // coalesced key would instead reuse "" 's cached null and never construct anything for it.
+    // A fresh module instance (a cache-busted import gets its own empty
+    // `zoneOffsetFormatterCache`, which is module-private state) lets "" cache its null
+    // formatter FIRST. A coalesced key would then hand undefined that same null, and the host-zone
+    // call would throw too.
     const fresh: typeof import('./coerce.js') =
       await import(`./coerce.js?zone-cache-keying-test=${Date.now()}-${Math.random()}`);
-    const OriginalDateTimeFormat = Intl.DateTimeFormat;
-    let undefinedZoneConstructions = 0;
-    function SpyDateTimeFormat(this: unknown, locale?: string | string[], options?: Intl.DateTimeFormatOptions) {
-      if (options && 'timeZone' in options && options.timeZone === undefined) undefinedZoneConstructions++;
-      return new OriginalDateTimeFormat(locale, options);
-    }
-    Intl.DateTimeFormat = SpyDateTimeFormat as unknown as typeof Intl.DateTimeFormat;
-    try {
-      const ms = Math.floor(Date.now() / 1000) * 1000;
-      fresh.zoneOffsetMsAt(ms, '');
-      fresh.zoneOffsetMsAt(ms, undefined);
-    } finally {
-      Intl.DateTimeFormat = OriginalDateTimeFormat;
-    }
-    assert.equal(undefinedZoneConstructions, 1, 'undefined must get its own construction attempt, not reuse "" \'s cached null');
+    const ms = Math.floor(Date.now() / 1000) * 1000;
+    assert.throws(() => fresh.zoneOffsetMsAt(ms, ''), /time zone/);
+    assert.equal(typeof fresh.zoneOffsetMsAt(ms, undefined), 'number');
   });
 });
 
@@ -2126,14 +2127,13 @@ describe('resolveCalendarInstantMs', () => {
 });
 
 describe('describeTimezone names the zone that actually resolved', () => {
-  it('names the host zone AND the configured value when the configured one is unusable', () => {
-    // zoneOffsetMsAt falls back to the host zone on a name ICU cannot resolve, so naming the
-    // configured value alone printed a zone the dates were not read in — on the one call
-    // where the caller is trying to work out why their days look wrong.
+  it('flags an unusable configured value as unresolvable, without claiming another zone was used', () => {
+    // No date is read in an unresolvable zone (zoneOffsetMsAt throws), so the label must not
+    // name the host zone as the one in force.
     const label = describeTimezone('Not/AZone');
-    assert.match(label, new RegExp(Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/[/]/g, '\\/')));
     assert.match(label, /Not\/AZone/);
     assert.match(label, /not a time zone this server can resolve/);
+    assert.doesNotMatch(label, /own zone was used/);
   });
 
   it('says nothing extra about a zone that resolves', () => {

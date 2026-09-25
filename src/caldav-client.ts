@@ -2215,9 +2215,8 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
   // WHAT REMAINS IS A STAND-DOWN ON AN UNRESOLVABLE NAME, and that is an inability, not a
   // choice. Real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone
   // ICU can place, so there is no instant to order on and refusing would reject a record the
-  // account already holds. `isUsableTimezone` is the test, and `zoneOffsetMsAt` is deliberately
-  // NOT: it falls back to the HOST zone for a name it cannot resolve, so it answers for a
-  // different zone rather than saying it could not answer.
+  // account already holds. `isUsableTimezone` is the test, and it must run first:
+  // `zoneOffsetMsAt` throws on a name it cannot resolve.
   let ordered: boolean;
   if (start.frame === 'zoned' && start.tzid && end.tzid && !zoneNamesEqual(start.tzid, end.tzid)) {
     if (!isUsableTimezone(start.tzid) || !isUsableTimezone(end.tzid)) return;
@@ -2624,9 +2623,8 @@ const DATE_ONLY_EVENT_VALUE = /^\d{4}-\d{2}-\d{2}$/;
  *   A RESOLVABLE TZID — the correct reading rather than a best-effort one. Its own zone.
  *   AN UNRESOLVABLE NAME — a Windows zone name such as "AUS Eastern Standard Time" passed
  *     through verbatim rather than rejected. Configured, and the `isUsableTimezone` check is
- *     what makes that happen: `zoneOffsetMsAt` silently falls back to the HOST zone for a name
- *     it cannot resolve, which would place that one event in the deployment's zone instead of
- *     the account's.
+ *     what makes that happen: `zoneOffsetMsAt` throws on a name it cannot resolve, so without
+ *     it one such event would fail the whole read.
  *
  * THE NAME IS NORMALISED BEFORE IT IS TESTED, and that is load-bearing rather than tidying.
  * `attachStartZone` deliberately emits the STORED spelling, so a TZID written in the RFC 5545
@@ -2771,9 +2769,8 @@ export function eventIntersectsWindow(
  * §3.3.5 — no zone exists to sort it in, so the caller's own clock is the least-wrong guess)
  * and for a `timeZone` this server was handed but ICU cannot resolve (a Windows zone name
  * such as "AUS Eastern Standard Time" passed through verbatim rather than rejected). That
- * fallback matters beyond correctness: `zoneOffsetMsAt` silently falls back to the HOST zone
- * for an unresolvable name, so sorting by an unresolvable `timeZone` directly would place that
- * one event in the host zone instead of the account's configured one.
+ * fallback matters beyond correctness: `zoneOffsetMsAt` throws on an unresolvable name, so
+ * sorting by an unresolvable `timeZone` directly would fail the whole listing over one event.
  *
  * That choice is `zoneForValue`, CALLED rather than restated. The sort and the window filter
  * have to agree about which zone an event is in — a read that filtered an event in one zone
@@ -4644,20 +4641,17 @@ export class CalDAVCalendarClient {
     const zone = getDefaultTimezone();
     // The resolved (ICU-usable) form of `zone`, for the `timeZone`/`endTimeZone` fields
     // (#139) — those compare a stored TZID against the zone actually in force. Since #157,
-    // `getDefaultTimezone()` is already guaranteed usable (an unusable configured or host
-    // zone now stops the server at startup instead), so this call is a defensive no-op in
-    // production rather than doing real work — kept because `resolveUsableTimezone` is the
-    // one shared seam every other zone-resolving call site here already goes through, and
-    // this stays consistent with them rather than being a special case that assumes its
-    // input differently from the rest. `zone` above stays the raw configured value for
-    // `coerceCalendarWindowStart`/`End`, which do not resolve it either — they hand it
-    // through to the same `zoneOffsetMsAt`, whose own catch tolerates an unresolvable zone.
-    // `sortEventsByStart` is handed `configuredZone`, the same value the window filter gets.
-    // The raw value would order the same events the same way — canonicalising a usable zone
-    // changes its spelling and not its offset, and for an unresolvable one `zoneOffsetMsAt`
-    // falls back to the host zone `resolveUsableTimezone` falls back to — but passing one
-    // resolved value removes the dependency on those two fallbacks coinciding rather than
-    // documenting it.
+    // `getDefaultTimezone()` is already guaranteed usable (an unusable configured zone stops
+    // the server at startup, and an unusable host zone is replaced by UTC), so this call is a
+    // defensive no-op in production rather than doing real work — kept because
+    // `resolveUsableTimezone` is the one shared seam every other zone-resolving call site here
+    // already goes through, and this stays consistent with them rather than being a special
+    // case that assumes its input differently from the rest. `zone` above stays the raw
+    // configured value (`undefined` meaning the host zone) for `coerceCalendarWindowStart`/`End`
+    // and `startOfLocalDayUtcIso`, which hand it to `zoneOffsetMsAt` unresolved; that is safe
+    // only because of the startup guarantee, since `zoneOffsetMsAt` throws on an unresolvable
+    // name. `sortEventsByStart` is handed `configuredZone`, the same value the window filter
+    // gets, so the sort and the filter read one resolved zone.
     const configuredZone = resolveUsableTimezone(zone);
     const rawStart = coerceCalendarWindowStart(startDate, 'startDate', zone);
     const rawEnd = coerceCalendarWindowEnd(endDate, 'endDate', zone);

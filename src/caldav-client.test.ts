@@ -8341,10 +8341,9 @@ describe('eventIntersectsWindow', () => {
 
   it('places an unresolvable zone name in the CONFIGURED zone, never the host\'s', () => {
     // A Windows zone id is passed through verbatim rather than rejected, and `zoneOffsetMsAt`
-    // silently resolves a name it cannot parse against the HOST zone — so dropping the
-    // usability guard would place this one event in whichever zone the deployment runs in.
-    // Asserted from two different configured zones so that neither answer can be the host's
-    // by coincidence: whichever machine runs this, at most one of them is the host.
+    // throws on a name it cannot resolve — so dropping the usability guard would fail the
+    // read. Asserted from two different configured zones so that neither answer can be the
+    // host's by coincidence: whichever machine runs this, at most one of them is the host.
     const event = {
       start: '2027-03-05T09:30:00',
       end: '2027-03-05T10:30:00',
@@ -10207,10 +10206,9 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
   });
 
   it('falls back to the configured zone for an event whose own timeZone cannot be resolved', () => {
-    // zoneOffsetMsAt silently resolves an unusable name against the HOST zone, not the
-    // configured one — sorting a Windows TZID straight through it would place the event in
-    // whichever zone the test happens to run on. The isUsableTimezone guard is what keeps
-    // this event pinned to the configured (Sydney) fallback instead.
+    // zoneOffsetMsAt throws on an unusable name, so sorting a Windows TZID straight through it
+    // would fail the listing. The isUsableTimezone guard is what keeps this event pinned to the
+    // configured (Sydney) fallback instead.
     const events = [
       { id: 'windows', title: 'Third-party', start: '2026-03-25T08:00:00', timeZone: 'AUS Eastern Standard Time' },
       { id: 'sydney', title: 'AU', start: '2026-03-25T08:00:00' },
