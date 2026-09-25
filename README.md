@@ -127,8 +127,9 @@ This fork adds a **response simplification system** that reduces token usage whe
    # timezone; set it if the server runs in a different timezone than you. This is
    # an available option, not a recommendation — leave it unset and everything
    # still works, just in the host's zone. If set, it must be a full IANA name (a
-   # region-qualifying slash, or exactly UTC); an abbreviation, alias or
-   # unrecognised name stops the server from starting rather than being replaced.
+   # region-qualifying slash, or UTC in any case); a bare abbreviation or alias
+   # (no slash) or an unrecognised name stops the server from starting rather
+   # than being replaced.
    export FASTMAIL_TIMEZONE="America/New_York"
    ```
 
@@ -241,7 +242,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
    | Attachment Download Directory | `FASTMAIL_DOWNLOAD_DIR` | Where `download_attachment` writes. Blank uses `~/Downloads/fastmail-mcp/`. |
    | Attachment Send Directory | `FASTMAIL_ATTACH_DIR` | Blank leaves **sending** attachments off entirely. Set it only if you want it. |
    | Allow Attaching Content Already In The Account | `FASTMAIL_ALLOW_BLOB_ATTACH` | A checkbox, **unchecked** by default. Ticking it lets outgoing mail attach a `blobId` or one part of an existing message. Separate gate from the send directory — see [Sending attachments](#sending-attachments). |
-   | Email Date Timezone | `FASTMAIL_TIMEZONE` | Blank uses the host's zone. Also governs calendar window dates and `create_calendar_event`'s default zone — an available option, not a requirement. If set, it must be a full IANA zone name (a region-qualifying slash, or exactly `UTC`) - the same rule `timeZone` enforces on a write, see [Writing calendar times](#writing-calendar-times). An abbreviation, alias or unresolvable value stops the server from starting rather than being silently substituted for. |
+   | Email Date Timezone | `FASTMAIL_TIMEZONE` | Blank uses the host's zone. Also governs calendar window dates and `create_calendar_event`'s default zone — an available option, not a requirement. If set, it must be a full IANA zone name (a region-qualifying slash, or `UTC` in any case) - the same rule `timeZone` enforces on a write, see [Writing calendar times](#writing-calendar-times). A bare abbreviation or alias (no slash) or an unresolvable value stops the server from starting rather than being silently substituted for. |
    | CalDAV Username / CalDAV App Password | `FASTMAIL_CALDAV_USERNAME` / `FASTMAIL_CALDAV_PASSWORD` | Both needed for the calendar tools; without them those tools report themselves unavailable and the rest are unaffected. |
    | Calendar Organizer Display Name | `FASTMAIL_CALDAV_DISPLAY_NAME` | Blank falls back to the CalDAV username. |
 
