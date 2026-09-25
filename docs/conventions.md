@@ -2163,7 +2163,13 @@ fetched over CalDAV (23 August 2026, #166). That is not true of CalDAV as a whol
 types that does) is converted through `jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`)
 into `jmapical_toical` (`:8273`), which runs the attacher unconditionally (`:8190`) — this server
 never sends that content type, so it doesn't apply here, but "CalDAV never attaches" would be
-false of Cyrus generally. The attacher's two CalDAV call sites on the READ side
+false of Cyrus generally. On THIS deployment that route is closed outright: a CalDAV PUT whose
+body is `application/event+json` is refused with HTTP 403 and the `CALDAV:supported-calendar-data`
+precondition, from the Content-Type check in `meth_put` (`imap/http_dav.c:7225-7232`), which
+rejects any type not among the collection's registered MIME types before any parsing is reached
+— so the build either lacks `WITH_JMAP` or does not register that type for the calendar
+collection (measured 25 Sep 2026, `scripts/probes/calendar-event-json-put.probe.mjs`). The
+attacher's two CalDAV call sites on the READ side
 (`imap/http_caldav.c:2617`, `:5719`) sit inside `if (cdata->comp_flags.tzbyref)`, a per-resource
 flag set not BY `strip_vtimezones` but alongside it, in the same `if (namespace_calendar.allow &
 ALLOW_CAL_NOTZ)` block (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
