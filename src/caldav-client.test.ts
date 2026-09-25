@@ -2434,6 +2434,38 @@ describe('parseICalDuration', () => {
     assert.equal(result, '2026-04-01T12:00:00');
     assert.ok(!result!.includes('Z'), 'floating start should produce floating end');
   });
+
+  it('rejects trailing garbage after a value that would otherwise parse (P1DX)', () => {
+    assert.equal(parseICalDuration('P1DX', '2026-01-01T00:00:00'), undefined);
+  });
+
+  it('rejects leading garbage before an otherwise-valid value (XP1D)', () => {
+    assert.equal(parseICalDuration('XP1D', '2026-01-01T00:00:00'), undefined);
+  });
+
+  it('parses a double-digit day count (P10D)', () => {
+    assert.equal(parseICalDuration('P10D', '2026-01-01T00:00:00'), '2026-01-11T00:00:00');
+  });
+
+  it('parses a double-digit week count (P10W)', () => {
+    assert.equal(parseICalDuration('P10W', '2026-01-01T00:00:00'), '2026-03-12T00:00:00');
+  });
+
+  it('parses a double-digit hour count (PT10H)', () => {
+    assert.equal(parseICalDuration('PT10H', '2026-01-01T00:00:00'), '2026-01-01T10:00:00');
+  });
+
+  it('parses a double-digit second count (PT10S)', () => {
+    assert.equal(parseICalDuration('PT10S', '2026-01-01T00:00:00'), '2026-01-01T00:00:10');
+  });
+
+  it('honours a leading negative sign, subtracting rather than adding the duration', () => {
+    assert.equal(parseICalDuration('-PT1H', '2026-01-01T00:00:00'), '2025-12-31T23:00:00');
+  });
+
+  it('parses a single-digit second count (PT30S)', () => {
+    assert.equal(parseICalDuration('PT30S', '2026-01-01T00:00:00'), '2026-01-01T00:00:30');
+  });
 });
 
 describe('parseCalendarObject with participants', () => {
@@ -4547,6 +4579,27 @@ describe('removeOrphanedVTimezones counts only real TZID parameters', () => {
     assert.ok(removeOrphanedVTimezones(data).includes('BEGIN:VTIMEZONE'));
   });
 
+  // A block's OWN lines can carry a ;TZID= parameter too (an X- property inside a STANDARD/
+  // DAYLIGHT sub-component, say) — that must never count as a reference to the block itself, or
+  // every VTIMEZONE would look self-referencing and none would ever be swept as orphaned.
+  it('does not let a VTIMEZONE\'s own internal ;TZID= parameter count as a reference to itself', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:Europe/Paris',
+      'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0100',
+      'X-SELF;TZID=Europe/Paris:1',
+      'END:STANDARD',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    assert.ok(!removeOrphanedVTimezones(data).includes('BEGIN:VTIMEZONE'), 'a block\'s own line must not keep it alive');
+  });
+
   // The exactness the substring test did not have in the other direction either: `Europe/Pari`
   // is a prefix of the block's TZID, and `;TZID=Europe/Paris` contains `;TZID=Europe/Pari`, so
   // a block for the SHORTER name was kept by a reference that names the longer one.
@@ -4563,6 +4616,21 @@ describe('removeOrphanedVTimezones counts only real TZID parameters', () => {
       'END:VCALENDAR',
     ].join('\n');
     assert.ok(!removeOrphanedVTimezones(data).includes('BEGIN:VTIMEZONE'));
+  });
+
+  it('keeps a block whose stored TZID value carries a trailing space, matched against a reference naming the trimmed zone', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VTIMEZONE',
+      'TZID:Europe/Paris ',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART;TZID=Europe/Paris:20260320T093000',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    assert.ok(removeOrphanedVTimezones(data).includes('BEGIN:VTIMEZONE'));
   });
 });
 
@@ -5309,6 +5377,24 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
     });
   }
+
+  it('does not widen the resolvable zone\'s own span to cover a vendor TZID standing down beside it (#166)', async () => {
+    // The second row of the vendor-TZID table above: AUS Eastern Standard Time cannot resolve,
+    // so only Europe/Rome gets a written VTIMEZONE. Standing down on the unresolvable side must
+    // not also widen the resolvable side's span — it should still cover just this one occurrence.
+    const vendorBeside = stored(
+      'vendor-span@fm',
+      'DTSTART;TZID=AUS Eastern Standard Time:20260320T060000',
+      'DTEND;TZID=Europe/Rome:20260320T080000',
+    );
+    const { client, mockDAVClient } = mockClient(vendorBeside);
+    await client.updateCalendarEvent('vendor-span@fm', { start: '2026-03-20T07:00:00' });
+    const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    const blocks = [...written.matchAll(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/g)].map(m => m[0]);
+    assert.equal(blocks.length, 1, written);
+    assert.ok(blocks[0].includes('TZID:Europe/Rome'), written);
+    assert.equal((blocks[0].match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 1, written);
+  });
 
   it('refuses a cross-zone update when the stored side of the pair holds a value naming no instant', async () => {
     // Both zones resolve; the stored END's value does not parse as a date at all, which a
@@ -6457,6 +6543,9 @@ describe('VTIMEZONE embedding (#166)', () => {
       });
       const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
       assert.ok(!ical.includes('BEGIN:VTIMEZONE'), ical);
+      const lines = ical.split('\r\n');
+      const prodidLine = lines.findIndex(l => l.startsWith('PRODID:'));
+      assert.ok(prodidLine !== -1 && lines[prodidLine + 1] === 'BEGIN:VEVENT', ical);
     });
 
     it('joins the embedded block with real CRLF line endings, not a flattened run-on', async () => {
@@ -6757,7 +6846,11 @@ describe('VTIMEZONE embedding (#166)', () => {
         'SUMMARY:Bypass attempt',
         'END:VEVENT', 'END:VCALENDAR',
       ].join('\r\n');
-      assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /unterminated/);
+        return true;
+      });
     });
 
     it('refuses removeOrphanedVTimezones input whose first VTIMEZONE is unterminated, rather than deleting the block a later reference still needs', () => {
@@ -6896,6 +6989,32 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => removeOrphanedVTimezones(regenerateVTimezones(data, '\r\n')), InvalidInputError);
     });
 
+    it('refuses a STANDARD nested inside a STANDARD (#166)', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Nested/Standard',
+        'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0000',
+        'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0000', 'END:STANDARD',
+        'END:STANDARD',
+        'END:VTIMEZONE', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), /malformed/);
+    });
+
+    it('refuses a VEVENT nested directly inside a VTIMEZONE, with the VTIMEZONE at physical line index 1 and no VERSION line', () => {
+      // No VERSION:2.0 line at all: the depth-tracking scan has to find the VTIMEZONE's boundary
+      // from BEGIN:/END: lines alone, not from any assumption about which line starts the body.
+      const data = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VTIMEZONE', 'TZID:Europe/Paris',
+        'BEGIN:VEVENT', 'UID:inner@fm', 'DTSTART:20260101T000000Z', 'END:VEVENT',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:real@fm', 'DTSTART;TZID=Europe/Paris:20260101T090000', 'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(data), /malformed VTIMEZONE block/);
+    });
+
     it('refuses the same shape with the VEVENT nested inside a DAYLIGHT instead of a STANDARD (#166)', () => {
       const data = [
         'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//EN',
@@ -6941,6 +7060,115 @@ describe('VTIMEZONE embedding (#166)', () => {
       const endMs = resolveCalendarInstantMs('2026-10-04T06:00:00', 'Australia/Sydney');
       const expectedTzuntil = new Date(endMs).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
       assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
+    });
+
+    it('resolves a DURATION carrying hours, minutes AND seconds together, not just the largest unit', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:hms-duration@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20261003T230000', 'DURATION:PT1H30M15S', 'SUMMARY:HMS',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.ok(block.includes('TZUNTIL:20261003T143015Z'), block);
+    });
+
+    it('resolves a DURATION given in weeks (RFC 5545 §3.3.6)', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:week-duration@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20260930T090000', 'DURATION:P1W', 'SUMMARY:Week',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.equal((block.match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 2, block);
+      assert.ok(block.includes('TZUNTIL:20261006T220000Z'), block);
+    });
+
+    it('tolerates a trailing space on a stored DURATION value', () => {
+      // Same DTSTART/DURATION pair as the transition-crossing DURATION test above; only the
+      // trailing space on the value itself is new.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:duration-trailing-space@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20261003T230000', 'DURATION:PT6H ', 'SUMMARY:Duration',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      const endMs = resolveCalendarInstantMs('2026-10-04T06:00:00', 'Australia/Sydney');
+      const expectedTzuntil = new Date(endMs).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+      assert.ok(block.includes(`TZUNTIL:${expectedTzuntil}`), `${block}\nexpected ${expectedTzuntil}`);
+    });
+
+    it('computes the span from DTSTART alone when DURATION does not parse, rather than throwing', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:garbage-duration@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20261004T000000', 'DURATION:garbage', 'SUMMARY:Garbage',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.ok(block.includes('TZUNTIL:20261003T140000Z'), block);
+    });
+
+    it('takes the span end from DTEND when a VEVENT stores both DTEND and DURATION', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:dtend-and-duration@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20261001T000000',
+        'DTEND;TZID=Australia/Sydney:20261003T013000',
+        'DURATION:P10D',
+        'SUMMARY:Both',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.equal((block.match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 1, block);
+      assert.ok(block.includes('TZUNTIL:20261002T153000Z'), block);
+    });
+
+    it('computes a single-instant span from DTSTART alone, with no DTEND and no DURATION at all', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:dtstart-only@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:20261003T010000', 'SUMMARY:Only start',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.equal((block.match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 1, block);
+      assert.ok(block.includes('TZUNTIL:20261002T150000Z'), block);
+    });
+
+    it('does not throw a TypeError for a zoned DTEND with no DTSTART at all', () => {
+      // Whatever the current computation does with a missing DTSTART, it must not crash outright:
+      // this pins the actual behaviour (a span computed from DTEND alone) rather than a guess.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:no-dtstart@fm', 'DTSTAMP:20260301T000000Z',
+        'DTEND;TZID=Australia/Sydney:20260320T100000',
+        'SUMMARY:No start',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.doesNotThrow(() => regenerateVTimezones(data, '\r\n'));
+      const result = regenerateVTimezones(data, '\r\n');
+      const block = (result.match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/) ?? [''])[0];
+      assert.ok(block.includes('TZUNTIL:20260319T230000Z'), block);
+    });
+
+    it('refuses a stored DTSTART that does not resolve to an instant', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:bad-dtstart@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Europe/Rome:whenever', 'DTEND;TZID=Europe/Rome:20260320T100000',
+        'SUMMARY:Bad start',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), /Cannot resolve DTSTART to an instant/);
     });
 
     it('does not remap a short-year zoned DTSTART into the wrong century when a DURATION day-shift is applied', () => {
@@ -7010,6 +7238,20 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
     });
 
+    it('refuses a year-9999 DTSTART whose DURATION cannot resolve to an instant, for a reason unrelated to either span bound (#166)', () => {
+      // Same DTSTART as the PT48H case above, but with the nominal-day-shift DURATION form
+      // (P2D rather than PT48H): resolveDurationSpanEndMs's own arithmetic for a day-count
+      // DURATION fails to resolve here, independently of both MAX_VTIMEZONE_SPAN_DAYS and the
+      // year-10000 ceiling.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:huge-p2d@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Australia/Sydney:99991231T090000', 'DURATION:P2D', 'SUMMARY:P2D',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), /Cannot resolve DURATION to an instant/);
+    });
+
     it('gives BOTH zones of a cross-zone event the SAME combined span, TZUNTIL at the real end (#166)', () => {
       // A flight: DTSTART in one zone, DTEND in another. Each zone's own narrower span would
       // leave the departure zone's block stopping at takeoff instead of covering the moment the
@@ -7032,6 +7274,23 @@ describe('VTIMEZONE embedding (#166)', () => {
       const londonBlock = blocks.find(b => b.includes('TZID:Europe/London'));
       assert.ok(nyBlock && nyBlock.includes(`TZUNTIL:${expectedTzuntil}`), result);
       assert.ok(londonBlock && londonBlock.includes(`TZUNTIL:${expectedTzuntil}`), result);
+    });
+
+    it('takes the one zoned block\'s span from its own instant alone, when the other end is plain UTC (#166)', () => {
+      // A UTC-designated end names no TZID and needs no VTIMEZONE of its own; it must not widen
+      // the ONE zoned block's span either, the way a second real zone would in the flight test
+      // above. A UTC DTEND two years out pins that this is not simply "widest referenced zone".
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:mixed-zone-utc@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=Europe/Rome:20260320T080000', 'DTEND:20280320T100000Z', 'SUMMARY:Mixed',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const result = regenerateVTimezones(data, '\r\n');
+      const blocks = [...result.matchAll(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/g)].map(m => m[0]);
+      assert.equal(blocks.length, 1, result);
+      assert.equal((blocks[0].match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 1, result);
+      assert.ok(blocks[0].includes('TZUNTIL:20260320T070000Z'), result);
     });
 
     it('gives an alias pair (differently spelled but zone-identical TZIDs) each their own literal block, none dangling (#166)', () => {
@@ -7071,6 +7330,10 @@ describe('VTIMEZONE embedding (#166)', () => {
       const result = regenerateVTimezones(data, '\n');
       assert.ok(!result.includes('\r'), result);
       assert.ok(result.includes('BEGIN:VTIMEZONE\nTZID:Australia/Sydney'), result);
+      const vtzIdx = result.indexOf('BEGIN:VTIMEZONE');
+      const veventIdx = result.indexOf('BEGIN:VEVENT');
+      const endCalIdx = result.indexOf('END:VCALENDAR');
+      assert.ok(vtzIdx !== -1 && vtzIdx < veventIdx && veventIdx < endCalIdx, result);
     });
 
     it('matches a stale VTIMEZONE block by its TZID even when TZID is not the first line inside it (#166)', () => {
@@ -7132,6 +7395,21 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.throws(() => removeOrphanedVTimezones(foldedPayload), FOLD_GUARD_MESSAGE);
     });
 
+    it('refuses a BEGIN:VEVENT folded across THREE physical lines, not just two', () => {
+      const threePieceFold = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//x//EN',
+        'BEGIN:VTIMEZONE', 'TZID:Orphan3/Zone',
+        'BEGIN:STANDARD', 'DTSTART:19701101T020000', 'TZOFFSETFROM:-0400', 'TZOFFSETTO:-0500', 'END:STANDARD',
+        'BE',
+        ' G',
+        ' IN:VEVENT',
+        'UID:victim3@example.com', 'SUMMARY:the only event',
+        'DTSTART;TZID=Europe/London:20260601T090000', 'DTEND;TZID=Europe/London:20260601T100000',
+        'END:VEVENT', 'END:VTIMEZONE', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.throws(() => removeOrphanedVTimezones(threePieceFold), FOLD_GUARD_MESSAGE);
+    });
+
     it('refuses the same folded payload through the production regenerateVTimezones -> removeOrphanedVTimezones order', () => {
       assert.throws(() => removeOrphanedVTimezones(regenerateVTimezones(foldedPayload, '\r\n')), FOLD_GUARD_MESSAGE);
     });
@@ -7168,6 +7446,33 @@ describe('VTIMEZONE embedding (#166)', () => {
       assert.ok(out.includes('BEGIN:VTIMEZONE'), 'referenced VTIMEZONE must survive a folded DESCRIPTION containing BEGIN:VEVENT as text');
     });
 
+    it('does not refuse an unfolded property line that merely mentions BEGIN:VTIMEZONE as text, since the marker regex anchors to the start of the line', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:Note/Zone',
+        'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0000', 'END:STANDARD',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:note@fm', 'X-NOTE:see BEGIN:VTIMEZONE', 'DTSTART;TZID=Note/Zone:20260101T000000',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const out = removeOrphanedVTimezones(data);
+      assert.ok(out.includes('BEGIN:VTIMEZONE'), 'a property value mentioning the marker as text must not be read as a structural line');
+    });
+
+    it('leaves a resource unchanged when a would-be BEGIN:VTIMEZONE line carries a lone CR before trailing content', () => {
+      // 'BEGIN:VTIMEZONE\rX' never matches the structural marker on either an LF or a CRLF split
+      // of this resource, so no VTIMEZONE is recognised here at all — there is nothing to sweep.
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE\rX', 'TZID:CR/Zone',
+        'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0000', 'TZOFFSETTO:+0000', 'END:STANDARD',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:cr@fm', 'DTSTART;TZID=CR/Zone:20260101T000000',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.equal(removeOrphanedVTimezones(data), data);
+    });
+
     it('does not refuse a legitimately folded ordinary property inside a VTIMEZONE, such as a folded TZNAME', () => {
       const data = [
         'BEGIN:VCALENDAR',
@@ -7198,7 +7503,10 @@ describe('VTIMEZONE embedding (#166)', () => {
       ].join('\r\n');
       assert.throws(() => regenerateVTimezones(withRrule, '\r\n'), (err: Error) => {
         assert.notEqual(err.name, 'InvalidInputError');
-        assert.match(err.message, /recurring VEVENT/);
+        assert.equal(
+          err.message,
+          "Cannot compute a VTIMEZONE span for a recurring VEVENT (RRULE/RDATE present) — a single occurrence's own DTSTART/DTEND is the wrong span for a series.",
+        );
         return true;
       });
 
