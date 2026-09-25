@@ -118,6 +118,16 @@ describe('generateVTimezone', () => {
     assert.equal(observances(block).length, 1, block);
   });
 
+  it('finds no transitions and emits no bogus observance for a span entirely after Sydney\'s October change (#166)', () => {
+    // Both ends of this span are already past the spring-forward: findTransitions itself must
+    // report none, not just generateVTimezone folding a spurious one away downstream.
+    const from = utc('2026-10-03T17:00:00Z');
+    const to = utc('2026-10-05T17:00:00Z');
+    assert.equal(findTransitions('Australia/Sydney', from, to).length, 0);
+    const block = generateVTimezone('Australia/Sydney', from, to);
+    assert.equal(observances(block).length, 1, block);
+  });
+
   it('formats a half-hour offset as +0530 for Asia/Kolkata, a fixed-offset zone', () => {
     const block = generateVTimezone('Asia/Kolkata', utc('2026-06-01T00:00:00+05:30'), utc('2026-06-02T00:00:00+05:30'));
     const obs = observances(block);
@@ -178,6 +188,16 @@ describe('generateVTimezone', () => {
     assert.equal(obs.length, 1, block);
     assert.equal(obs[0].kind, 'DAYLIGHT');
     assert.equal(obs[0].to, '+1100');
+  });
+
+  it('labels every Pacific/Apia observance STANDARD across its 2011 date-line move, the three-or-more-offsets labelling limit (#166)', () => {
+    // See generateVTimezone's own "two known limits" comment for why: this zone crosses three
+    // distinct offsets in this window, so the lowest-offset-reversion check the labelling relies
+    // on never fires here.
+    const block = generateVTimezone('Pacific/Apia', utc('2011-03-01T00:00:00Z'), utc('2012-06-01T00:00:00Z'));
+    const obs = observances(block);
+    assert.ok(obs.length > 0, block);
+    assert.ok(obs.every(o => o.kind === 'STANDARD'), block);
   });
 
   it('keeps Europe/Moscow STANDARD across its 2011 permanent step from +0300 to +0400', () => {
@@ -250,6 +270,16 @@ describe('generateVTimezone', () => {
     const spanStart = utcMsFromComponents(2000, 1, 1, 0, 0, 0);
     const spanEnd = utcMsFromComponents(2099, 1, 1, 0, 0, 0);
     assert.doesNotThrow(() => generateVTimezone('Australia/Sydney', spanStart, spanEnd));
+  });
+
+  it('pins the exact MAX_VTIMEZONE_SPAN_DAYS boundary the thrown message states: 36600 days is accepted, 36601 is refused', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const spanStart = utcMsFromComponents(2000, 1, 1, 0, 0, 0);
+    assert.doesNotThrow(() => generateVTimezone('UTC', spanStart, spanStart + 36600 * DAY_MS));
+    assert.throws(
+      () => generateVTimezone('UTC', spanStart, spanStart + 36600 * DAY_MS + 1000),
+      /Event spans 36601 days; VTIMEZONE generation is limited to 36600 days\. Shorten the event\./,
+    );
   });
 
   it('pins the exact year-10000 boundary the thrown message states: accepts 9999-12-31T23:59:59Z, refuses 10000-01-01T00:00:00Z', () => {
