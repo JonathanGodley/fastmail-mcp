@@ -79,8 +79,8 @@ describe('foldICalLine', () => {
       'X'.repeat(10) + '\u{10FFFF}'.repeat(15),
       'X'.repeat(10) + '🐀'.repeat(20),
       'X'.repeat(72) + '！'.repeat(5),
-      // Only this prefix of 3 lands the 75-octet cut inside a surrogate pair; the four cases
-      // above are boundary cases that don't.
+      // Only this prefix of 3 lands the 75-octet cut inside a surrogate pair; none of the four
+      // cases above does.
       'X'.repeat(3) + '📍'.repeat(20),
     ];
     for (const body of cases) {
