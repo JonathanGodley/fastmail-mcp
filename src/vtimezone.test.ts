@@ -191,9 +191,12 @@ describe('generateVTimezone', () => {
   });
 
   it('labels every Pacific/Apia observance STANDARD across its 2011 date-line move, the three-or-more-offsets labelling limit (#166)', () => {
-    // See generateVTimezone's own "two known limits" comment for why: this zone crosses three
-    // distinct offsets in this window, so the lowest-offset-reversion check the labelling relies
-    // on never fires here.
+    // See generateVTimezone's own "two known limits" comment for why: this zone crosses FOUR
+    // distinct offsets in this window (-1100, -1000, +1400, +1300), so the lowest-offset-reversion
+    // check the labelling relies on never fires here. -1000 and +1400 were both real DST periods,
+    // so labelling them STANDARD is wrong in the real world — this test pins that wrong label
+    // deliberately, as a known limit, and should flip to expect DAYLIGHT on those two observances
+    // if that limit is ever lifted.
     const block = generateVTimezone('Pacific/Apia', utc('2011-03-01T00:00:00Z'), utc('2012-06-01T00:00:00Z'));
     const obs = observances(block);
     assert.ok(obs.length > 0, block);

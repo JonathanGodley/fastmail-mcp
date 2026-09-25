@@ -2175,12 +2175,11 @@ flag set not BY `strip_vtimezones` but alongside it, in the same `if (namespace_
 ALLOW_CAL_NOTZ)` block (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
 (measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
 data distribution served here for the generator to draw from instead (same probe, same date).
-(The JMAP/JSCalendar
-converters carry no such guard at all: `imap/jmap_ical.c:8190` (`jmapical_toical`),
-`imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP create path at `:4832`
-and the update path at `:5728`), and `imap/jscalendar.c:5032` (`jscal_to_ical`, whose callers
-include the JMAP create/update paths, the JSCalendar conversion endpoint
-`imap/http_convert.c:177`, and `alert_to_ical` at `imap/jmap_calendar.c:1251`) all call
+(The JMAP/JSCalendar converters carry no such guard at all: `imap/jmap_ical.c:8190`
+(`jmapical_toical`), `imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP
+create path at `:4832` and the update path at `:5728`), and `imap/jscalendar.c:5032`
+(`jscal_to_ical`, whose callers include the JMAP create/update paths, the JSCalendar conversion
+endpoint `imap/http_convert.c:177`, and `alert_to_ical` at `imap/jmap_calendar.c:1251`) all call
 `icalcomponent_add_required_timezones` unconditionally, with no `tzbyref` check anywhere nearby;
 none of them matters for this server's own write path, which sends `text/calendar`, never JSON.)
 `createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`

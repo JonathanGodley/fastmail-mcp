@@ -41,11 +41,16 @@ const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 // three known before the cost of finding out is paid.
 export const MAX_VTIMEZONE_SPAN_DAYS = 36600;
 
-// The latest instant a span may end at (exclusive), symmetric with the year-2 floor above: RFC
-// 5545's DATE-TIME form is a fixed 4-digit year, and TZUNTIL's own stamp would print a 5-digit one
-// the moment spanEndUtcMs reaches year 10000, which no downstream parser can read back as a valid
-// year. Refused outright rather than clamped: a clamped TZUNTIL would misreport the span this
-// actually generated for.
+// The latest instant a span may end at (exclusive): RFC 5545's DATE-TIME form is a fixed 4-digit
+// year, and TZUNTIL's own stamp would print a 5-digit one the moment spanEndUtcMs reaches year
+// 10000, which no downstream parser can read back as a valid year. Refused outright rather than
+// clamped: a clamped TZUNTIL would misreport the span this actually generated for. This ceiling
+// only guards TZUNTIL, which is stamped in UTC; an observance's own DTSTART is the transition
+// onset written in the OLD offset, so a zone ahead of UTC could in principle still print a
+// 5-digit DTSTART year from a transition in the last ~14 hours of 9999 UTC even though TZUNTIL
+// stayed under this bound. That depends on tzdata actually carrying such a transition: none of
+// the 418 IANA zones ICU ships today has one in the final 48 hours of year 9999, so this is a
+// live gap only if a future tzdata release adds one — worth rechecking if it ever does.
 const MAX_SPAN_END_MS = utcMsFromComponents(10000, 1, 1, 0, 0, 0);
 
 interface Transition {

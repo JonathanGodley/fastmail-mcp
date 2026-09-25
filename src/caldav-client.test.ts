@@ -5379,13 +5379,16 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   }
 
   it('does not widen the resolvable zone\'s own span to cover a vendor TZID standing down beside it (#166)', async () => {
-    // The second row of the vendor-TZID table above: AUS Eastern Standard Time cannot resolve,
-    // so only Europe/Rome gets a written VTIMEZONE. Standing down on the unresolvable side must
-    // not also widen the resolvable side's span — it should still cover just this one occurrence.
+    // Europe/Rome sits on the earlier endpoint (DTSTART) and the vendor TZID on the later one
+    // (DTEND), five wall-clock days after it. Five days clears any real-world UTC offset (a
+    // zone runs from -12:00 to +14:00): if collectZoneInstants ever stopped filtering on
+    // isUsableTimezone, the vendor's wall clock would resolve through resolveCalendarInstantMs
+    // anyway, landing within +-14 hours of its own reading, which is still comfortably later
+    // than DTSTART's Rome instant. Either way, TZUNTIL would move off the pinned value below.
     const vendorBeside = stored(
       'vendor-span@fm',
-      'DTSTART;TZID=AUS Eastern Standard Time:20260320T060000',
-      'DTEND;TZID=Europe/Rome:20260320T080000',
+      'DTSTART;TZID=Europe/Rome:20260320T060000',
+      'DTEND;TZID=AUS Eastern Standard Time:20260325T080000',
     );
     const { client, mockDAVClient } = mockClient(vendorBeside);
     await client.updateCalendarEvent('vendor-span@fm', { start: '2026-03-20T07:00:00' });
@@ -5394,6 +5397,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     assert.equal(blocks.length, 1, written);
     assert.ok(blocks[0].includes('TZID:Europe/Rome'), written);
     assert.equal((blocks[0].match(/BEGIN:(?:STANDARD|DAYLIGHT)/g) || []).length, 1, written);
+    assert.ok(blocks[0].includes('TZUNTIL:20260320T060000Z'), written);
   });
 
   it('refuses a cross-zone update when the stored side of the pair holds a value naming no instant', async () => {
@@ -7235,7 +7239,11 @@ describe('VTIMEZONE embedding (#166)', () => {
         'DTSTART;TZID=Australia/Sydney:99991231T090000', 'DURATION:PT48H', 'SUMMARY:Too far ahead',
         'END:VEVENT', 'END:VCALENDAR',
       ].join('\r\n');
-      assert.throws(() => regenerateVTimezones(data, '\r\n'), InvalidInputError);
+      assert.throws(() => regenerateVTimezones(data, '\r\n'), (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /this far ahead/);
+        return true;
+      });
     });
 
     it('refuses a year-9999 DTSTART whose DURATION cannot resolve to an instant, for a reason unrelated to either span bound (#166)', () => {

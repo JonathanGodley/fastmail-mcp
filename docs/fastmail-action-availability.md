@@ -465,14 +465,15 @@ These are left explicit rather than blank.
 
 ## The platform: whether the server will hand this one a `VTIMEZONE`
 
-The subsection above leaves interoperability open (#166) — this server used to write a bare `TZID` where a Fastmail-authored
-event ends up carrying a `VTIMEZONE` (added by Cyrus's JMAP→iCalendar converter, not by the client
-itself), and the decision was to match that stored shape. That left a question the client cannot
-answer, because it is about the server rather than the client: where the block would come from. RFC
-7808 timezone data distribution would supply one by zone name, and Cyrus implements that service, so
-asking for it would be the cheap answer. **Cyrus implementing it is not evidence Fastmail exposes
-it.** The service is gated on a per-deployment config switch, and no amount of source reading says
-which way that switch is set on an account, which is why this was measured.
+The subsection above leaves interoperability open (#166) — this server used to write a bare
+`TZID` where a Fastmail-authored event ends up carrying a `VTIMEZONE` (added by Cyrus's
+JMAP→iCalendar converter, not by the client itself), and the decision was to match that stored
+shape. That left a question the client cannot answer, because it is about the server rather than
+the client: where the block would come from. RFC 7808 timezone data distribution would supply one
+by zone name, and Cyrus implements that service, so asking for it would be the cheap answer.
+**Cyrus implementing it is not evidence Fastmail exposes it.** The service is gated on a
+per-deployment config switch, and no amount of source reading says which way that switch is set
+on an account, which is why this was measured.
 
 **Measured on 17 September 2026** by `scripts/probes/calendar-tzdist.probe.mjs` — raw CalDAV and
 HTTP over bare `fetch`, one account, read-only, creating nothing. This is a fifth method in this
