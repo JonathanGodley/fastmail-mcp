@@ -35,9 +35,10 @@ const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 // else bounds it: the caller controls it, up to validateAndFormatICalDate's own year-9999
 // ceiling. Measured on this code: a century (100 366-day years, this file's own leap-safe unit)
 // costs about 190ms and 201 observances per zone; the reachable ceiling, a DTEND in year 9999,
-// costs about 15 seconds, ~16000 observances and a 1.64 MB payload. The span is bounded here,
-// rather than the observance count or the output size, because it is the only one of the three
-// known before the cost of finding out is paid.
+// costs about 15 seconds, ~16000 observances and a 1.64 MB payload — unacceptable on a
+// single-threaded stdio server, for a PUT the server rejects on size anyway. The span is bounded
+// here, rather than the observance count or the output size, because it is the only one of the
+// three known before the cost of finding out is paid.
 export const MAX_VTIMEZONE_SPAN_DAYS = 36600;
 
 interface Transition {

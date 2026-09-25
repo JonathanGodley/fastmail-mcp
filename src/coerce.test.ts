@@ -2057,9 +2057,11 @@ describe('startOfLocalDayUtcIso', () => {
 
 describe('zoneOffsetMsAt', () => {
   it('floors a sub-second instant to its own whole second, at a Sydney transition boundary', () => {
-    // See zoneOffsetMsAt's own floor comment (src/coerce.ts) for the corruption this pins against.
-    // 2026-10-03T16:00:00Z is Sydney's spring-forward instant (02:00 -> 03:00 local, +10:00 to
-    // +11:00), so a wrong offset here would be visible rather than masked by a flat zone.
+    // See zoneOffsetMsAt's own floor comment (src/coerce.ts) for the corruption this pins against
+    // — a flat zone would fail on that leak too. 2026-10-03T16:00:00Z is Sydney's spring-forward
+    // instant (02:00 -> 03:00 local, +10:00 to +11:00), chosen because a floor implemented as
+    // ROUND instead would read 15:59:59.5 as 16:00:00, the already-switched +11:00 offset — an
+    // error a flat zone's constant offset could never expose.
     const wholeSecondMs = Date.parse('2026-10-03T15:59:59Z');
     const subSecondMs = wholeSecondMs + 500;
     assert.equal(zoneOffsetMsAt(subSecondMs, 'Australia/Sydney'), zoneOffsetMsAt(wholeSecondMs, 'Australia/Sydney'));

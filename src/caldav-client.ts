@@ -1203,6 +1203,9 @@ function parseICalDurationComponents(duration: string): ParsedICalDuration | und
  * Parse an iCalendar DURATION value and compute end datetime.
  * RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]
  * Returns ISO 8601 end datetime, or undefined for malformed input.
+ * A plain millisecond add, deliberately outside the nominal-day/exact-time split
+ * `resolveDurationSpanEndMs` uses for the VTIMEZONE span: this function's caller wants a
+ * user-visible end sharing `start`'s own spelling, not a DST-aware instant.
  */
 export function parseICalDuration(duration: string, start: string): string | undefined {
   const parsed = parseICalDurationComponents(duration);
@@ -2298,9 +2301,9 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * A VTIMEZONE is a direct child of the VCALENDAR, and its boundaries are its own component's:
  * found by tracking nesting depth from every structural BEGIN:/END: line, not by scanning forward
  * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. Three ways a
- * stored resource is too broken to edit safely — a
- * BEGIN:VTIMEZONE opening somewhere other than directly under the VCALENDAR; anything at ANY
- * depth inside a tracked VTIMEZONE other than STANDARD/DAYLIGHT as its own direct children (RFC
+ * stored resource is too broken to edit safely — a BEGIN:VTIMEZONE opening somewhere other than
+ * directly under the VCALENDAR; anything at ANY depth inside a tracked VTIMEZONE other than
+ * STANDARD/DAYLIGHT as its own direct children (RFC
  * 5545 §3.6.5: `standardc`/`daylightc` hold `tzprop` only — no sub-component is legal inside
  * either one, so a wrong grandchild is exactly as forbidden as a wrong direct child); or a
  * BEGIN:/END: marker that only exists once its own fold is undone, which hides a component

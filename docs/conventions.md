@@ -2159,16 +2159,17 @@ body type this server sends — parses through `ical_string_as_icalcomponent`
 `icalcomponent_add_required_timezones` (`imap/ical_support.c:3086`), nowhere; measured directly
 too, not just read from source — a resource this server wrote came back with no VTIMEZONE when
 fetched over CalDAV (23 August 2026, #166). That is not true of CalDAV as a whole: an
-`application/event+json` body is converted through
-`jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`) into `jmapical_toical` (`:8273`), which
-runs the attacher unconditionally (`:8190`) — this server never sends that content type, so it
-doesn't apply here, but "CalDAV never attaches" would be false of Cyrus generally. The attacher's
-two CalDAV call sites on the READ side (`imap/http_caldav.c:2617`, `:5719`) sit inside
-`if (cdata->comp_flags.tzbyref)`, a per-resource flag set not BY `strip_vtimezones` but
-alongside it, in the same `if (namespace_calendar.allow & ALLOW_CAL_NOTZ)` block
-(`imap/caldav_util.c:1081-1082`), which this deployment does not enable
+`application/event+json` body (the only one of `http_caldav.c`'s four registered calendar body
+types that does) is converted through `jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`)
+into `jmapical_toical` (`:8273`), which runs the attacher unconditionally (`:8190`) — this server
+never sends that content type, so it doesn't apply here, but "CalDAV never attaches" would be
+false of Cyrus generally. The attacher's two CalDAV call sites on the READ side
+(`imap/http_caldav.c:2617`, `:5719`) sit inside `if (cdata->comp_flags.tzbyref)`, a per-resource
+flag set not BY `strip_vtimezones` but alongside it, in the same `if (namespace_calendar.allow &
+ALLOW_CAL_NOTZ)` block (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
 (measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
-data distribution served here for the generator to draw from instead (same probe, same date). (The JMAP/JSCalendar
+data distribution served here for the generator to draw from instead (same probe, same date).
+(The JMAP/JSCalendar
 converters carry no such guard at all: `imap/jmap_ical.c:8190` (`jmapical_toical`),
 `imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP create path at `:4832`
 and the update path at `:5728`), and `imap/jscalendar.c:5032` (`jscal_to_ical`, whose callers

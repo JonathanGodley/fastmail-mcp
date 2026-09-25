@@ -465,7 +465,7 @@ These are left explicit rather than blank.
 
 ## The platform: whether the server will hand this one a `VTIMEZONE`
 
-The subsection above ends on #166 — this server used to write a bare `TZID` where a Fastmail-authored
+The subsection above leaves interoperability open (#166) — this server used to write a bare `TZID` where a Fastmail-authored
 event ends up carrying a `VTIMEZONE` (added by Cyrus's JMAP→iCalendar converter, not by the client
 itself), and the decision was to match that stored shape. That left a question the client cannot
 answer, because it is about the server rather than the client: where the block would come from. RFC

@@ -6781,9 +6781,9 @@ describe('VTIMEZONE embedding (#166)', () => {
     });
 
     it('refuses a VEVENT nested inside a VTIMEZONE, rather than treating the whole thing as one orphaned block and deleting the event', () => {
-      // Nothing here re-opens VTIMEZONE: the scan reads the VEVENT's own END:VTIMEZONE as closing
-      // Evil/Zone's block, TZID parses as Evil/Zone, finds it unreferenced, and deletes the
-      // entire event along with it.
+      // Nothing here re-opens VTIMEZONE, so a nested-BEGIN check alone misses it. Unrefused, the
+      // scan reads the VEVENT's own END:VTIMEZONE as closing Evil/Zone's block, TZID parses as
+      // Evil/Zone, finds it unreferenced, and deletes the entire event along with it.
       const data = [
         'BEGIN:VCALENDAR', 'VERSION:2.0',
         'BEGIN:VTIMEZONE', 'TZID:Evil/Zone',
