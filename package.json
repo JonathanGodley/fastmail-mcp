@@ -7,6 +7,10 @@
   "bin": {
     "fastmail-mcp": "dist/index.js"
   },
+  "files": [
+    "dist/",
+    "!dist/**/*.map"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
