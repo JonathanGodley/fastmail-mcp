@@ -1,5 +1,155 @@
 # Contributing
 
+## Development rules
+
+### Documentation ships with the change
+
+Any change to a tool's behaviour, parameters or response format, and any added
+or removed feature, updates two places in the same change, not as a follow-up:
+
+1. the tool's `description` and `inputSchema` in `src/index.ts`, which is what
+   MCP clients see;
+2. `README.md`: the tool reference section and any format or feature section the
+   change touches.
+
+### Response format
+
+Every tool that returns email data uses the simplified format from
+`src/email-formatter.ts`:
+
+- `simplifyEmail()` for full emails and list items;
+- empty, null and false fields are omitted to save tokens;
+- unknown JMAP fields go to `_extra`;
+- every such tool accepts `raw: true` to bypass simplification.
+
+### JMAP properties
+
+All email list and search methods in `src/jmap-client.ts` request the same set
+of `Email/get` properties. `getEmails()` and `searchEmails()` both run through
+the shared `runFilteredQuery` helper, which sets `EMAIL_PROPERTIES_COMPACT`
+once, so they stay in sync by construction. `getThread()` (full mode) and
+`getEmailById()` request extra body properties and must stay a superset of the
+list set, so that `raw: true` returns a complete JMAP response. If you add a
+property to one, add it to all.
+
+When you append a method call to an existing batch (for example a trailing
+`Mailbox/get` to resolve mailbox names), read its result with
+`readListResultIfPresent` rather than a hard index. `getMethodResult` and
+`getListResult` throw on a missing index, so a hard index would fail every test
+that stubs only the original responses, and would fail in production against a
+server that drops the trailing method.
+
+A tolerant read must still never silently drop a promised field. A read tool
+promises `mailboxes` and `roles`; when a mailbox id cannot be resolved to a
+name, the id is reported in `unresolvedMailboxIds` rather than omitted (#53).
+In general, when a resolution or enrichment cannot complete, either surface the
+degradation explicitly or raise an error on a genuine failure. Do not weaken a
+production behaviour to satisfy an under-stubbed test; fix the test.
+
+The positional index reads are safe only because `Email/get`, `Mailbox/get`
+and `Thread/get` each appear once per batch. JMAP (RFC 8620 section 3.4) returns
+errors as `error` entries in place, so before using index reads on a batch where
+a method could appear more than once or be reordered, match responses by call
+id instead.
+
+### A destroy must not remove what the server cannot recreate
+
+A tool that irreversibly destroys a record refuses any record whose kind this
+server's create tools cannot produce. The recovery echo a destroy returns
+(`deletedCard`, for example) is only useful if a create tool can consume it.
+That is why `delete_contact` rejects a contact group: `create_contact` has no
+`kind` or `members` parameter. `update_contact` refuses groups for the same
+reason, through the same shared message.
+
+The test is the record kind, not its fields. Most real records carry fields the
+create tool cannot set, such as a contact card's titles or photos; those are a
+documented limit (see the echo bound in `docs/conventions.md`), not a reason to
+refuse. When you add a delete path, check it against the create surface first,
+and either refuse the kind that cannot be made or say plainly why the destroy is
+still safe. For example, `delete_email` moves to Trash, so no content is lost,
+but it writes `mailboxIds` as a whole value, so the message's other labels are
+dropped (#123).
+
+### Bumping the version
+
+The version string is hand-edited in three places:
+
+- `package.json`
+- `manifest.json`
+- the `Server` constructor in `src/index.ts`
+
+Then run `npm install --package-lock-only` to carry it into
+`package-lock.json`, which holds it twice. Never hand-edit the lockfile. The
+`version sync` test asserts all four agree.
+
+### Building and testing
+
+The server runs from `dist/index.js`, not `src/`, so run `npm run build` after a
+change. A running MCP client keeps serving the build it started with; reconnect
+it, or exercise the change through the tests or `scripts/mcp-harness.mjs`.
+
+Before committing, run:
+
+```bash
+npx tsc --noEmit
+npm run typecheck:tests
+npm test
+```
+
+`npm test` builds first (via `pretest`), because `built-server.test.ts` spawns
+`dist/index.js` and checks in a `before` hook that the build exists and is newer
+than `src/`. When that hook throws, the runner reports the suite as cancelled
+rather than failed, so a run without a build can look green.
+
+Handler logic must be unit-testable. The `CallTool` switch in `src/index.ts`
+has no test harness, so a handler that does more than destructure and delegate
+belongs in a function that takes an injected client, tested with a mock. The
+model is `composeDraftEmail(args, client, attachDir)` in
+`src/draft-email-handler.ts`: it takes a `DraftEmailClient` interface, which
+`JmapClient` satisfies structurally, so its branches are covered by `npm test`
+with no credentials or network.
+
+A live run against a real account is a one-off check of externally observable
+behaviour (for example a byte-identical attachment round-trip), never the only
+test of logic that could be unit-tested. `scripts/mcp-harness.mjs` is the
+reusable client for that: it spawns `dist/index.js` with `FASTMAIL_API_TOKEN` in
+its environment and matches JSON-RPC responses by id.
+
+### CI runs on Linux
+
+`.github/workflows/test.yml` runs the build, a test-file count check,
+`typecheck:tests` and `npm test` on ubuntu-latest across Node 20, 22 and 24, for
+every push to `main` and every pull request. `npx-smoke.yml` packs the tarball
+and boots the installed binary on the same matrix, and `secret-scan.yml` runs
+the secret scanner.
+
+A local pass on Windows or macOS is therefore not the finish line. Any fixture
+whose arithmetic depends on path length, the path separator or line endings
+must derive its values at run time (for example from the real `tmpdir()`)
+rather than assume them; a Windows temp path is far longer than `/tmp`.
+
+### Where design rationale lives
+
+Why one tool behaves as it does is recorded in that tool's GitHub issue. Facts
+that span several tools, or that describe the JMAP/Fastmail platform, live in
+`docs/`:
+
+- `docs/email-bodies.md`: the body-format model (HTML as the source of truth,
+  text/plain as a derived fallback), `edit_draft` coupling, the identity
+  signature, MIME-matched body extraction, and destroy-and-recreate.
+- `docs/security-model.md`: path confinement for downloads and attachments.
+- `docs/fastmail-action-availability.md`: what the Fastmail client offers on
+  each screen and what each action actually does, measured rather than
+  inferred.
+- `docs/conventions.md`: the sending-identity model, lenient input coercion,
+  mailbox-query scoping, result serialisation, untrusted values in messages,
+  calendar window bounds, free/busy handling, the quote sanitiser, and
+  dependency and build notes.
+- `docs/upstream-sync.md`: how this fork merges from upstream.
+
+Read the relevant file before re-deriving a decision, and add a new cross-tool
+decision there rather than in a local note.
+
 ## Secret & PII protection
 
 This repo has layered guards to keep credentials and personal information out of
