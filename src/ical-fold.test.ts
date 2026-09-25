@@ -79,10 +79,8 @@ describe('foldICalLine', () => {
       'X'.repeat(10) + '\u{10FFFF}'.repeat(15),
       'X'.repeat(10) + '🐀'.repeat(20),
       'X'.repeat(72) + '！'.repeat(5),
-      // None of the four cases above lands the 75-octet cut mid-pair — each repeated character's
-      // byte width happens to divide evenly into the prefix, so none of them alone would fail if
-      // the surrogate-pair guard were removed. Only this prefix of 3 lands the cut mid-pair, which
-      // is what the guard exists for.
+      // Only this prefix of 3 lands the 75-octet cut inside a surrogate pair; the four cases
+      // above are boundary cases that don't.
       'X'.repeat(3) + '📍'.repeat(20),
     ];
     for (const body of cases) {

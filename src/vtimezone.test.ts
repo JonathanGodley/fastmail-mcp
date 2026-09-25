@@ -195,8 +195,8 @@ describe('generateVTimezone', () => {
     // distinct offsets in this window (-1100, -1000, +1400, +1300), so the lowest-offset-reversion
     // check the labelling relies on never fires here. -1000 and +1400 were both real DST periods,
     // so labelling them STANDARD is wrong in the real world — this test pins that wrong label
-    // deliberately, as a known limit, and should flip to expect DAYLIGHT on those two observances
-    // if that limit is ever lifted.
+    // deliberately, as a known limit, and should flip to expect DAYLIGHT on the observances whose
+    // TZOFFSETTO is -1000 or +1400 (three of them) if that limit is ever lifted.
     const block = generateVTimezone('Pacific/Apia', utc('2011-03-01T00:00:00Z'), utc('2012-06-01T00:00:00Z'));
     const obs = observances(block);
     assert.ok(obs.length > 0, block);

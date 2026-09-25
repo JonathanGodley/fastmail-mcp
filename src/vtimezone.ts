@@ -49,8 +49,9 @@ export const MAX_VTIMEZONE_SPAN_DAYS = 36600;
 // onset written in the OLD offset, so a zone ahead of UTC could in principle still print a
 // 5-digit DTSTART year from a transition in the last ~14 hours of 9999 UTC even though TZUNTIL
 // stayed under this bound. That depends on tzdata actually carrying such a transition: none of
-// the 418 IANA zones ICU ships today has one in the final 48 hours of year 9999, so this is a
-// live gap only if a future tzdata release adds one — worth rechecking if it ever does.
+// the 418 zones in Node 25.2.1's ICU 77.1 / tz 2025b has one in the final 48 hours of year 9999,
+// so this is a live gap only if a future tzdata release adds one — worth rechecking if it ever
+// does, on whatever Node/ICU/tz build is current then.
 const MAX_SPAN_END_MS = utcMsFromComponents(10000, 1, 1, 0, 0, 0);
 
 interface Transition {
