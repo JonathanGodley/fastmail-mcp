@@ -1,36 +1,20 @@
 import { InvalidInputError } from './coerce.js';
 
 // The per-entry algebra shared by the contact READ shape (src/response-formatters.ts) and
-// the update_contact MERGE (src/contacts-calendar.ts). It lives in its own module so the
-// formatter never has to import the JMAP client to agree with it on what a label is: both
-// sides read one definition, so the shape a caller sees and the shape a write preserves
-// cannot drift apart.
-//
-// Everything here is pure — no account, no network — so the rules below are exercised
-// directly by unit tests rather than only through a live card.
+// the update_contact MERGE (src/contacts-calendar.ts), in its own module so the formatter
+// need not import the JMAP client to agree with it on what a label is.
 
-/** The property that identifies an entry within its map: emails by address, phones by number. */
 export type EntryKeyField = 'address' | 'number';
 
 /**
- * The label of one emails/phones entry, or undefined when it has none.
+ * The label of one emails/phones entry, or undefined when it has none. Measured on real cards:
  *
- * Read off real cards in a live address book, because the shape is not what the map
- * suggests:
+ *  - The entry map's KEY is an opaque server-assigned id, never a label.
+ *  - `contexts` is a SET (`{"private": true}`); recent Fastmail UI cards carry it and no `label`.
+ *  - `label` is a scalar on older imported cards, observed always `""`, so an EMPTY label
+ *    means "no label".
  *
- *  - The entry map's KEY is an opaque server-assigned id, never a label. Older cards carry
- *    40-character sha1-shaped keys; cards written by the current Fastmail UI carry short
- *    6-character ones. Neither is readable, so the key is never used as a label.
- *  - `contexts` is a SET of context names — `{"private": true}` — and every card written by
- *    a recent Fastmail UI carries it and carries no `label` key at all.
- *  - `label` is a scalar string, present on older imported cards, and on every one of those
- *    observed its value was `""`. So an EMPTY label means "no label", not "a label that
- *    happens to be blank"; treating it as a label would emit `{address, label: ""}` objects
- *    for a whole imported address book.
- *
- * Both properties are live in the same account, so both are read here: the scalar wins when
- * it says something, and `contexts` is the fallback. A `contexts` set with more than one key
- * names no single label, so it resolves to none rather than picking one arbitrarily.
+ * The scalar wins when it says something; a `contexts` set with several keys names no label.
  */
 export function resolveEntryLabel(entry: any): string | undefined {
   if (!entry || typeof entry !== 'object') return undefined;
@@ -44,16 +28,9 @@ export function resolveEntryLabel(entry: any): string | undefined {
 }
 
 /**
- * The default read shape of an emails/phones map: a HYBRID list.
- *
- * An entry with no label emits as a BARE STRING (the address / the number) — which is what
- * the overwhelming majority of real entries are, and wrapping every one of them in a
- * single-key object costs tokens to say nothing. An entry that does have a label emits as
- * `{address, label}` / `{number, label}`, because dropping the label would make "home" and
- * "work" indistinguishable in the output.
- *
- * Entries with no address/number at all are skipped: there is no value to emit, and the
- * full entry is still reachable through `verbose` and `raw`.
+ * The default read shape of an emails/phones map: a HYBRID list. An unlabelled entry emits
+ * as a BARE STRING, the common case, to save tokens; a labelled one as `{address, label}`.
+ * An entry with no value is skipped, still reachable through `verbose` and `raw`.
  */
 export function simplifyEntryMap(
   map: any,
@@ -70,14 +47,12 @@ export function simplifyEntryMap(
   return out.length ? out : undefined;
 }
 
-/** A coerced emails/phones entry as it arrives from a tool call. */
 export interface ContactEntryInput {
   address?: string;
   number?: string;
   label?: string;
 }
 
-/** A coerced structured name as it arrives from a tool call. */
 export interface ContactNameInput {
   given?: string;
   surname?: string;
@@ -85,18 +60,10 @@ export interface ContactNameInput {
 }
 
 /**
- * Merge a supplied name into the stored one rather than replacing it wholesale.
- *
- * Real cards carry `{ full?, components?: [{kind, value}] }`, and several carry `components`
- * with NO `full` — so a whole-value replace driven by a bare name string would delete the
- * only structured given/surname the card had. Instead:
- *
- *  - a supplied `full` sets `full` and leaves the components alone;
- *  - a supplied `given`/`surname` updates the component of that kind in place, or appends
- *    one when the card had none, leaving components of every other kind (middle names,
- *    titles, suffixes) untouched;
- *  - every other property of the stored name object (`@type`, `sortAs`, `isOrdered`, …) is
- *    carried through unchanged.
+ * Merge a supplied name into the stored one rather than replacing it wholesale: several real
+ * cards carry `components` with NO `full`, so a whole-value replace would delete the only
+ * structured given/surname they had. Components of other kinds and every other property of
+ * the name object are carried through.
  */
 export function mergeContactName(existing: any, incoming: ContactNameInput): Record<string, any> {
   const base: Record<string, any> =
@@ -123,18 +90,9 @@ export function mergeContactName(existing: any, incoming: ContactNameInput): Rec
 }
 
 /**
- * Merge a supplied `notes` string into the stored notes map.
- *
- * A card's notes are an Id-map of note objects, but the tool surface is a single string. When
- * the card holds exactly one note the merge keeps its map key and any other properties it
- * carries and overwrites only the text, for the same reason the entry merge preserves
- * `contexts`/`pref`. When the card holds none, a single fresh note is written.
- *
- * When the card holds SEVERAL, the write is REJECTED. There is no way to express "replace the
- * second of three" through a scalar parameter, so writing one note would delete the others —
- * silent loss of a field the caller was never shown, which is the exact failure the rest of
- * this module exists to prevent. Same posture as the entry-edit ambiguity guard: refuse and
- * name the deliberate route, rather than resolve it on a heuristic.
+ * Merge a supplied `notes` string into the stored Id-map of notes. One stored note keeps its
+ * key and other properties. SEVERAL are REJECTED: a scalar cannot say "replace the second of
+ * three", so writing one would silently delete the others.
  */
 export function mergeContactNotes(existing: any, note: string): Record<string, any> {
   if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
@@ -157,7 +115,6 @@ export function mergeContactNotes(existing: any, note: string): Record<string, a
   return { n0: { note } };
 }
 
-/** Build an entry map from scratch, with no reference to what the card already held. */
 export function buildEntryMap(items: Array<Record<string, any>>, prefix: string): Record<string, any> {
   const map: Record<string, any> = {};
   items.forEach((item, i) => {
@@ -167,27 +124,19 @@ export function buildEntryMap(items: Array<Record<string, any>>, prefix: string)
 }
 
 export interface EntryMergeOutcome {
-  /** The Id-map to write, existing map keys preserved wherever an entry matched. */
   map: Record<string, any>;
-  /** Existing entries no supplied entry matched, with the map keys they were stored under. */
   dropped: Array<{ key: string; entry: any }>;
   /** The key values of supplied entries that matched nothing on the card. */
   added: string[];
 }
 
 /**
- * Merge a supplied emails/phones array into the stored map.
+ * Merge a supplied emails/phones array into the stored map. The array defines WHICH entries
+ * exist; a matching entry keeps its map key and every field the read shape never surfaced
+ * (`contexts`, `pref`, `@type`, anything future).
  *
- * The supplied array defines WHICH entries exist; the stored map defines what each surviving
- * entry still carries. An entry whose address/number matches one already on the card keeps
- * every field the read shape never surfaced — `contexts`, the near-ubiquitous `pref`,
- * `@type`, and anything a future Fastmail release adds — and only the supplied properties
- * are written over it. Its map key is kept too, so a client holding an entry id still
- * resolves it.
- *
- * Matching is EXACT on the key value. A case-differing address does not match, and therefore
- * surfaces as a drop-plus-add, which the ambiguity guard below rejects rather than resolving
- * on a guess.
+ * Matching is EXACT, so a case-differing address is a drop-plus-add, which the ambiguity
+ * guard rejects rather than resolving on a guess.
  */
 export function mergeEntryMap(
   existingMap: any,
@@ -221,26 +170,17 @@ export function mergeEntryMap(
       const merged: Record<string, any> =
         stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...stored } : {};
       merged[keyField] = value;
-      // A label is only written when it CHANGES what the entry says. A caller that read the
-      // card and sent it straight back is resending the label this server showed it, and on
-      // the common shape that label came from `contexts` — the entry has no scalar `label`
-      // key at all. Writing one anyway would mutate the card on a round-trip that asked for
-      // no change, adding a property the entry never had. So an incoming label equal to the
-      // one the read shape resolved is treated as "unchanged" and nothing is written.
-      //
-      // A label that genuinely differs still writes the scalar `label`, which then wins over
-      // `contexts` on the next read — leaving the two properties disagreeing on a card whose
-      // other clients read `contexts`. That residual is deliberate and NOT resolved here;
-      // whether a relabel should write `contexts` instead is an open behaviour question, and
-      // the tool description states what actually happens rather than promising more.
+      // Written only when it CHANGES what the read shape showed: a round-tripped label usually
+      // came from `contexts`, and writing a scalar `label` would mutate an unchanged card.
+      // A real relabel writes the scalar, which then disagrees with `contexts` for other
+      // clients; a deliberate residual, stated in the tool description.
       if (item.label !== undefined && item.label !== resolveEntryLabel(stored)) {
         merged.label = item.label;
       }
       map[matchKey] = merged;
     } else {
       added.push(value);
-      // A fresh literal built from the validated keys, never a passthrough of the caller's
-      // object — the same discipline the coercion layer follows, for the same reason.
+      // A fresh literal, never a passthrough of the caller's object.
       const fresh: Record<string, any> = { [keyField]: value };
       if (item.label !== undefined) fresh.label = item.label;
       map[nextKey()] = fresh;
@@ -251,33 +191,17 @@ export function mergeEntryMap(
   return { map, dropped, added };
 }
 
-// How many dropped entries are spelled out in the ambiguity rejection. Enough to retry
-// losslessly on any realistic card, short enough that a pathological one does not become the
-// error message.
 const MAX_ECHOED_DROPPED_ENTRIES = 5;
 
 /**
- * The card-level `kind` a card declares (JSContact, RFC 9553 section 2.1.4), or undefined
- * when it declares nothing usable.
+ * The card-level `kind` (RFC 9553 section 2.1.4), read ONLY here so the read surface and the
+ * write refusals agree on what a group is (#113). What Cyrus does with it:
  *
- * This is the ONE place the property is read, so the read surface and the write refusals
- * below cannot end up disagreeing about what a group is (#113). What Cyrus — the server
- * Fastmail runs, and therefore the authority over the RFC — actually does with it:
- *
- *  - `kind` is ALWAYS present on a card it returns. `jscard_from_vcard` seeds the object with
- *    `kind: "individual"` before it looks at a single vCard property and nothing removes it
- *    afterwards (`imap/jscontact.c:1982`), so a plain person card whose vCard carries no KIND
- *    line still comes back as `"individual"`. That default is materialised deliberately: a
- *    `filter: {kind: "individual"}` query has to match those cards. So "the property is
- *    absent" is NOT the signal for an ordinary card — the value being the default is.
- *  - The value is LOWERCASED on the way out. `buf_lcase` mutates the buffer in place and the
- *    emitted string is read back from it (`imap/jscontact.c:1169`), so a vCard `KIND:Group`
- *    reaches us as `"group"`, never `"Group"`. That is why the group test below can compare
- *    exactly — and it matches what Cyrus itself compares on write, a case-sensitive
- *    `strcmpsafe("group", ...)` (`imap/jmap_contact.c:4282`).
- *  - Any other value passes through verbatim. Cyrus keeps no whitelist for the card-level
- *    property, so besides `group` a card can hold `org`, `location`, `device`,
- *    `application` or an unregistered extension value. Callers must not read this as a
+ *  - ALWAYS present: `jscard_from_vcard` seeds `kind: "individual"` (`imap/jscontact.c:1982`),
+ *    so the default value, not absence, marks an ordinary card.
+ *  - LOWERCASED on the way out (`imap/jscontact.c:1169`), which is why the group test compares
+ *    exactly, as Cyrus does on write (`imap/jmap_contact.c:4282`).
+ *  - Any other value passes through verbatim (`org`, `location`, extensions), so this is not a
  *    two-way group-or-not flag.
  */
 export function contactCardKind(card: any): string | undefined {
@@ -285,16 +209,11 @@ export function contactCardKind(card: any): string | undefined {
   return typeof kind === 'string' && kind !== '' ? kind : undefined;
 }
 
-/** The kind every card is assumed to be when it says nothing else (RFC 9553 section 2.1.4). */
 const DEFAULT_CONTACT_KIND = 'individual';
 
 /**
- * The kind worth showing a caller: the declared kind, unless it is the default.
- *
- * Emitting `"individual"` on every card would cost tokens to say what the absence of the
- * field already says, which is the omit-empty rule the rest of the read shape follows. What
- * is left is the useful half — a card this server's write tools may refuse, or simply is not
- * a person — surfaced BEFORE the caller spends a write finding out (#113).
+ * The declared kind, unless it is the default: so a card the write tools may refuse is
+ * visible BEFORE the caller spends a write finding out (#113).
  */
 export function nonDefaultContactKind(card: any): string | undefined {
   const kind = contactCardKind(card);
@@ -302,59 +221,33 @@ export function nonDefaultContactKind(card: any): string | undefined {
 }
 
 /**
- * Whether a card is a contact GROUP rather than a person card.
- *
- * A group card carries a `members` map of the uids it contains and none of the person fields.
- * This server's contact WRITE surface has no `kind` parameter and no `members` parameter, so
- * it can neither create a group nor describe one — which is why both write tools that can
- * meet one refuse it, from a single rule stated in one place rather than two lookalike checks.
- * (The READ tools do surface `kind`, so a caller can see a group coming; that is what
- * nonDefaultContactKind is for.)
- *
- * Reads the property through `contactCardKind` so the refusal and the `kind` the read tools
- * show are answering from the same value.
+ * The contact write surface has no `kind` or `members` parameter, so it can neither create
+ * nor describe a group; both write tools refuse one through this single rule.
  */
 export function isContactGroupCard(card: any): boolean {
   return contactCardKind(card) === 'group';
 }
 
-/**
- * The shared refusal both group-aware write tools raise, so they read as one rule.
- *
- * `because` carries the part that genuinely differs — an update has no parameters that
- * describe a group, a delete cannot put back what it destroys — and `recovery` names where
- * the caller can do it instead. Everything a caller needs to recognise the rule (this is a
- * group; this tool will not touch it) is fixed here.
- */
+/** The shared refusal both group-aware write tools raise, so they read as one rule. */
 export function contactGroupRefusal(opts: { id: string; tool: string; because: string; recovery: string }): string {
   return `Contact ${opts.id} is a contact GROUP, not a person card, so ${opts.tool} refuses it: ` +
     `${opts.because} ${opts.recovery}`;
 }
 
 /**
- * Whether this field's merge is the one shape that cannot be resolved: entries dropped AND
- * entries added in the same call.
- *
- * Split out from the rejection below so a caller can ask the question without catching an
- * exception — `update_contact` needs it to scope its override to the field that was
- * actually ambiguous instead of applying it to every array in the call.
+ * Entries dropped AND added in one call. Split out from the rejection so `update_contact` can
+ * scope its override to the ambiguous field without catching an exception.
  */
 export function isAmbiguousEntryEdit(outcome: EntryMergeOutcome): boolean {
   return outcome.dropped.length > 0 && outcome.added.length > 0;
 }
 
 /**
- * Reject an edit that both drops a known entry and adds an unknown one in the same call.
+ * Reject an edit that both drops a known entry and adds an unknown one: it reads as a
+ * correction or as a removal plus an unrelated addition, and silent replace is the lossy one.
  *
- * That combination has two readings that produce different cards — "correct the address on
- * this entry, keeping its contexts and pref" and "delete this entry and add an unrelated
- * one" — and the tool cannot tell which was meant. Resolving it silently as a replace is the
- * lossy reading, so it is refused instead.
- *
- * The refusal echoes the dropped entries in FULL, hidden fields included, because the point
- * is to make the lossless retry cheaper than reaching for the override: with `pref` and
- * `contexts` in hand, the caller can resend the entry it meant to keep. A rejection that only
- * named the entries would leave `allowEntryReplace` as the path of least resistance.
+ * The dropped entries are echoed in FULL, hidden fields included, so the lossless retry is
+ * cheaper than reaching for `allowEntryReplace`.
  */
 export function assertUnambiguousEntryEdit(field: string, outcome: EntryMergeOutcome): void {
   if (!isAmbiguousEntryEdit(outcome)) return;
