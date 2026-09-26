@@ -112,32 +112,32 @@ describe('buildQuoteBlocks — the attribution line', () => {
     buildQuoteBlocks({ original: makeOriginal(opts), htmlShips: false, timezone: TZ }).textBlock!;
 
   it('renders the exact captured Fastmail attribution (local time, ASCII-spaced)', () => {
-    const block = textBlockFor({ text: 'orig', name: 'Jonathan Godley', sentAt: '2026-06-15T03:29:02Z' });
-    assert.match(block, /^On Mon, Jun 15, 2026, at 1:29 PM, Jonathan Godley wrote:\n/);
+    const block = textBlockFor({ text: 'orig', name: 'Alex Example', sentAt: '2026-06-15T03:29:02Z' });
+    assert.match(block, /^On Mon, Jun 15, 2026, at 1:29 PM, Alex Example wrote:\n/);
   });
 
   it('uses sentAt over receivedAt', () => {
     const block = textBlockFor({
-      text: 'orig', name: 'Jon', sentAt: '2026-06-15T03:29:02Z', receivedAt: '2026-06-15T09:00:00Z',
+      text: 'orig', name: 'Alex', sentAt: '2026-06-15T03:29:02Z', receivedAt: '2026-06-15T09:00:00Z',
     });
-    assert.match(block, /at 1:29 PM, Jon wrote:/); // 1:29 PM = sentAt, not the 7 PM receivedAt
+    assert.match(block, /at 1:29 PM, Alex wrote:/); // 1:29 PM = sentAt, not the 7 PM receivedAt
   });
 
   it('falls back to receivedAt when sentAt is absent', () => {
-    const block = textBlockFor({ text: 'orig', name: 'Jon', receivedAt: '2026-06-15T03:29:02Z' });
-    assert.match(block, /^On Mon, Jun 15, 2026, at 1:29 PM, Jon wrote:\n/);
+    const block = textBlockFor({ text: 'orig', name: 'Alex', receivedAt: '2026-06-15T03:29:02Z' });
+    assert.match(block, /^On Mon, Jun 15, 2026, at 1:29 PM, Alex wrote:\n/);
   });
 
   it('omits the date entirely (never "Invalid Date") when no timestamp is present', () => {
-    const block = textBlockFor({ text: 'orig', name: 'Jon' }); // no sentAt/receivedAt
-    assert.match(block, /^Jon wrote:\n/);          // exactly "Jon wrote:", no "On "
+    const block = textBlockFor({ text: 'orig', name: 'Alex' }); // no sentAt/receivedAt
+    assert.match(block, /^Alex wrote:\n/);          // exactly "Alex wrote:", no "On "
     assert.doesNotMatch(block, /Invalid Date/);
     assert.doesNotMatch(block, /On .*wrote:/);
   });
 
   it('collapses a newline in the sender display name', () => {
-    const block = textBlockFor({ text: 'orig', name: 'Jon\nGodley', sentAt: '2026-06-15T03:29:02Z' });
-    assert.match(block, /^On .*, Jon Godley wrote:\n/);
+    const block = textBlockFor({ text: 'orig', name: 'Alex\nExample', sentAt: '2026-06-15T03:29:02Z' });
+    assert.match(block, /^On .*, Alex Example wrote:\n/);
   });
 
   it('falls back to the email when there is no display name', () => {
@@ -157,13 +157,13 @@ describe('buildQuoteBlocks — the attribution line', () => {
 
 describe('buildQuoteBlocks — the text form of the quote', () => {
   it('prefixes every quoted line (incl. blank lines) with "> "', () => {
-    const original = makeOriginal({ text: 'line one\n\nline three', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const original = makeOriginal({ text: 'line one\n\nline three', name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
     const { textBlock } = buildQuoteBlocks({ original, htmlShips: false, timezone: TZ });
     assert.match(textBlock!, /^On .*wrote:\n> line one\n> \n> line three$/);
   });
 
   it('quotes an html-only original via htmlToText when the message ships no html', () => {
-    const original = makeOriginal({ html: '<p>Hello <b>world</b></p>', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const original = makeOriginal({ html: '<p>Hello <b>world</b></p>', name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
     const { textBlock } = buildQuoteBlocks({ original, htmlShips: false, timezone: TZ });
     assert.match(textBlock!, /> Hello world/);
   });
@@ -171,21 +171,21 @@ describe('buildQuoteBlocks — the text form of the quote', () => {
 
 describe('buildQuoteBlocks — the html form of the quote', () => {
   it('wraps the quote in a cite blockquote with the portable quote-bar style and escapes the attribution', () => {
-    const original = makeOriginal({ html: '<p>original <b>body</b></p>', name: 'Jon & Co', sentAt: '2026-06-15T03:29:02Z' });
+    const original = makeOriginal({ html: '<p>original <b>body</b></p>', name: 'Alex & Co', sentAt: '2026-06-15T03:29:02Z' });
     const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
     assert.match(htmlBlock!, /<blockquote type="cite" style="margin:0 0 0 \.8ex;border-left:1px solid #ccc;padding-left:1ex">/);
-    assert.match(htmlBlock!, /Jon &amp; Co wrote:/);           // attribution html-escaped
+    assert.match(htmlBlock!, /Alex &amp; Co wrote:/);           // attribution html-escaped
     assert.match(htmlBlock!, /<p>original <b>body<\/b><\/p>/); // formatting preserved
   });
 
   it('quotes a text-only original via an escaped html block', () => {
-    const original = makeOriginal({ text: 'plain <b>not bold</b>\nsecond', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const original = makeOriginal({ text: 'plain <b>not bold</b>\nsecond', name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
     const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
     assert.match(htmlBlock!, /plain &lt;b&gt;not bold&lt;\/b&gt;<br>second/); // escaped + <br>
   });
 
   it('quotes each format from its matching original part', () => {
-    const original = makeOriginal({ text: 'orig text', html: '<p>orig html</p>', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const original = makeOriginal({ text: 'orig text', html: '<p>orig html</p>', name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
     const blocks = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
     assert.match(blocks.textBlock!, /> orig text/);
     assert.match(blocks.htmlBlock!, /<p>orig html<\/p>/);
@@ -196,7 +196,7 @@ describe('buildQuoteBlocks — what it will and will not read', () => {
   it('quotes an original body part that has no type (matching extractBody leniency)', () => {
     // A single-format original whose part is untyped; the reader must still read it.
     const original = {
-      from: [{ name: 'Jon' }], sentAt: '2026-06-15T03:29:02Z',
+      from: [{ name: 'Alex' }], sentAt: '2026-06-15T03:29:02Z',
       textBody: [{ partId: 't' }], htmlBody: [{ partId: 't' }],
       bodyValues: { t: { value: 'untyped body' } },
     };
@@ -206,7 +206,7 @@ describe('buildQuoteBlocks — what it will and will not read', () => {
 
   it('yields no html block for a cid-image-only original (content-based, not string trim)', () => {
     // No orphan "On … wrote:" over an empty blockquote: the attribution goes with the quote.
-    const original = makeOriginal({ html: '<div><img src="cid:logo@x"></div>', name: 'Jon', sentAt: '2026-06-15T03:29:02Z' });
+    const original = makeOriginal({ html: '<div><img src="cid:logo@x"></div>', name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
     const blocks = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
     assert.equal(blocks.htmlBlock, undefined);
     assert.equal(blocks.textBlock, undefined);

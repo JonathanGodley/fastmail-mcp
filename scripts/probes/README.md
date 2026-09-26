@@ -7,23 +7,32 @@ account, via `scripts/mcp-harness.mjs`.
 
 These are **not** durable regression coverage - the unit suite is. A probe run
 proves the real external path once, on demand (typically before a release or
-after touching an area a probe covers). See CLAUDE.md "Testing".
+after touching an area a probe covers). See CONTRIBUTING.md "Building and testing".
+
+**Probes run against a live account.** They create and remove real fixtures in
+it, and some send real mail to the account's own address. Read a probe's row
+below before running it.
 
 ## Running
 
 1. `npm run build` (the server runs from `dist/`, not `src/`).
-2. Run through the token launcher, which injects `FASTMAIL_API_TOKEN` from the
-   local MCP client config into the child environment without printing it:
+2. Set `FASTMAIL_API_TOKEN` in the environment. The calendar probes also need
+   `FASTMAIL_CALDAV_USERNAME` and `FASTMAIL_CALDAV_PASSWORD` (an app password),
+   and some read `FASTMAIL_TIMEZONE`; a calendar probe run without them reports
+   the missing credential itself rather than failing obscurely.
+3. Run the probe with `node`:
 
    ```
-   python scripts/probes/run-probe.py inline-read.smoke.mjs
+   node scripts/probes/inline-read.smoke.mjs
    ```
 
-   The launcher also injects the CalDAV username/password when the config
-   carries them, because the calendar probes authenticate with a separate app
-   password rather than the JMAP token. Those are optional: a config without
-   them still runs every JMAP probe, and a calendar probe reports the missing
-   credential itself rather than failing obscurely.
+If your credentials live in Claude Code's MCP server config rather than your
+shell, `run-probe.py` is a convenience launcher that reads them from that config
+into the child environment without printing them:
+
+```
+python scripts/probes/run-probe.py inline-read.smoke.mjs
+```
 
 Each probe prints one PASS/FAIL line per check and exits non-zero on any
 failure.
@@ -98,7 +107,6 @@ and clear them by hand if you care.
 | `calendar-event-json-put.probe.mjs` | Whether a second route gets the platform to supply the `VTIMEZONE` (#166). A `text/calendar` PUT gets none, but Cyrus also registers `application/event+json`, a JSCalendar event (RFC 8984), as a CalDAV PUT body type under `#ifdef WITH_JMAP` (`imap/http_caldav.c:285-290`), and that body's conversion path ends in `icalcomponent_add_required_timezones` (`imap/jmap_ical.c:8190`), which adds one `VTIMEZONE` per referenced zone, truncated to the event's span and carrying a `TZUNTIL`. Whether Fastmail's build registers the type cannot be read off the source. PUTs one minimal JSCalendar event (`@type`, `uid`, `start`, `timeZone`, `duration`, `title`: `uid` and `start` are the two `jmap_ical.c` requires), timed in `Australia/Sydney` from local 01:30 on 2026-10-04 for `PT2H` so its span crosses that morning's spring-forward. Four conditions, reported separately: the PUT is accepted; a raw `text/calendar` GET of the stored resource holds exactly one `VTIMEZONE` with the event's `TZID`; that block carries a `TZUNTIL`; `DTSTART` keeps its zone and wall time and the end (a `DURATION`, since Cyrus writes no `DTEND` when both ends share one zone) names the intended instant. A refused PUT prints only its status and the `DAV:error` precondition name, which separates "type not registered" (`supported-calendar-data`) from "type accepted, body rejected" (`valid-calendar-data`). Raw CalDAV over bare `fetch`, not the built server and not tsdav. The fixture goes into a collection it creates by MKCALENDAR and **there is no fallback**: if MKCALENDAR fails the probe stops. Deletes the collection in a `finally` and PROPFINDs to confirm it is gone. No participants, so nothing is mailed. Output is PASS/FAIL, status codes, zone names and the stored `VTIMEZONE` (timezone data); no URL, UID, title or account address is printed. **Result on this account, 25 Sep 2026: the PUT is refused `403` with `CALDAV:supported-calendar-data`; conditions 2-4 are not reached.** On the PUT path that precondition has one emitter (`imap/http_dav.c:7231`, no mime-table entry matched the Content-Type), so this deployment does not accept `application/event+json` on CalDAV PUT, and the platform will not supply a `VTIMEZONE` by this route either. Cleanup reported `DELETE 204`, `PROPFIND 404` |
 | `label-emptiness.probe.mjs` | The emptiness-guard premise behind #132: a membership patch that would leave a message filed nowhere is REJECTED for a message that has never moved, but ACCEPTED — expunging the message — for one carrying a tombstone from an earlier move. Raw JMAP, not the built server, so it measures the platform rather than the guard `remove_labels` now applies on top of it. Creates and destroys its own mailboxes |
 | `calendar-vtimezone.probe.mjs` | End-to-end proof that #166's generated `VTIMEZONE` actually lands on the wire: creates ONE timed event in `Australia/Sydney` through the BUILT server (`create_calendar_event`, via the MCP harness), fetches the stored resource back RAW over CalDAV, and checks the bytes — exactly one `VTIMEZONE` block carrying `TZID:Australia/Sydney`, a `TZUNTIL` equal to the event's own `DTEND` in UTC, and exactly two observances — one `STANDARD`, one `DAYLIGHT` — whose `TZOFFSETTO`s match Intl's independently-computed offset at `DTSTART` and at `DTEND` respectively. The fixture sits directly on Sydney's October 2026 spring-forward transition, so the event's own short span crosses it and the block has to carry both observances — the generator's transition-finding and DAYLIGHT/STANDARD classification are what `src/vtimezone.test.ts` proves in depth; this probe is about the wire, not the arithmetic. The fixture goes into a temporary collection minted by MKCALENDAR (never a real one), deleted whole in a `finally`. No participants, so nothing is mailed. Output is PASS/FAIL and counts/offsets only — no collection URL, UID, event title or other account-derived value is printed |
-| `vtimezone-scan.fuzz.mts` | An invariant sweep, not a live probe: **needs no credentials, touches no network and does not use the built server.** It imports `removeOrphanedVTimezones` and `regenerateVTimezones` from `src/caldav-client.ts` and runs them in-process, so run it with `npx tsx scripts/probes/vtimezone-scan.fuzz.mts [iterations]` (default 200000) rather than through `run-probe.py`. Settles that the VTIMEZONE block scan behind #166 never deletes an event's own lines: it builds well-formed calendars, applies 0-2 random mutations (case flips, dropped or inserted `BEGIN`/`END` lines, moved lines, trailing spaces, RFC 5545 §3.1 folds at a random column) and asserts that no payload either function accepts loses its `UID:` or `SUMMARY:` line, neither of which is legal inside a `VTIMEZONE`. A refusal is fine; any other throw fails. Seeded, so a given count always generates the same payloads. Prints accepted/refused/unexpected counts and the first three failing inputs, and exits non-zero on any violation or unexpected throw. **Result, 25 Sep 2026, 200000 iterations: 337200 accepted, 62800 refused, 0 unexpected throws, 0 violations** |
 
 `jmaplib.mjs` is a minimal raw-JMAP helper (session, Email/set, blob upload,
 tiny PNG generator) used to build fixtures outside the server under test.

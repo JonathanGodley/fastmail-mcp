@@ -631,7 +631,7 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
 | Anywhere else, no Inbox | **Nothing.** It has already left the Inbox - the client calls this "already archived" - and that is a successful outcome |
 | Trash, Spam, Drafts, Scheduled, Sent or Snoozed, no Inbox | **Refused**, saying why, and naming an alternative in this server where one exists (a scheduled send and a snooze have none, and the refusal says so) |
 
-Corroboration for the first row: of the 15,843 messages in Archive on the account this was measured against, **zero** are also in another mailbox. Fastmail never creates the Archive-plus-label state that a replace-then-add implementation produces.
+Corroboration for the first row: on the account this was measured against, **no** message in Archive is also in another mailbox. Fastmail never creates the Archive-plus-label state that a replace-then-add implementation produces.
 
 The Inbox is checked **first**, so a message that is somehow in the Inbox *and* in Trash is archived (keeping Trash, gaining nothing) rather than refused - that is what the client does when shown the same state.
 

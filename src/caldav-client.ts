@@ -3848,7 +3848,7 @@ function calendarNotFoundError(
   // A nameless calendar is listed by its URL rather than dropped. Filtering it out left the
   // caller a message that silently under-reported what they could name — and the URL is not a
   // consolation prize here, it is a `calendarId` that works, which is exactly what this
-  // message exists to hand back. Never silently drop a promised field; see CLAUDE.md.
+  // message exists to hand back. Never silently drop a promised field; see CONTRIBUTING.md.
   //
   // Which is why the two carry DIFFERENT echo limits rather than sharing one. A URL that is
   // offered as a working handle and then truncated is worse than one omitted: the caller
@@ -3952,7 +3952,7 @@ function ambiguousCalendarNameError(
   // count — "names N calendars in this account" — and a collection that failed to list was never
   // searched, so it may hold an N+1th calendar of that name. Left off, the count reads as
   // complete when it is a statement about the collections that answered. Never silently drop a
-  // promised field; see CLAUDE.md.
+  // promised field; see CONTRIBUTING.md.
   return new InvalidInputError(
     `The calendarId "${echoCallerText(calendarId, CALENDAR_URL_ECHO_LIMIT)}" names ${matches.length} calendars ` +
     'in this account, and this server will not guess which one you mean. ' +
@@ -4249,7 +4249,7 @@ function assertDavOk(resp: unknown, action: string): void {
 // sentence index.ts's handlers append; they live here rather than in index.ts (where the
 // handler that calls them lives) because index.ts's CallTool switch has no test harness and
 // the module itself runs `server.connect()` as a load-time side effect, which makes it unsafe
-// to `import` from a unit test — CLAUDE.md's "Handler logic must be unit-testable" pattern
+// to `import` from a unit test — CONTRIBUTING.md's "Handler logic must be unit-testable" pattern
 // (composeDraftEmail/draft-email-handler.ts) is to extract into a safely-importable module
 // instead. This
 // one is co-located with the types it formats rather than a third file, since it has no

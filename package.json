@@ -7,6 +7,10 @@
   "bin": {
     "fastmail-mcp": "dist/index.js"
   },
+  "files": [
+    "dist/",
+    "!dist/**/*.map"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
@@ -15,7 +19,6 @@
     "pretest": "npm run build",
     "test": "tsx --test src/*.test.ts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
-    "mutate": "node scripts/mutate-commit.mjs",
     "scan:secrets": "node scripts/scan-secrets.mjs --all"
   },
   "engines": {
