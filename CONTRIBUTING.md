@@ -127,6 +127,12 @@ Each mutant takes about 0.25 s, so a commit usually finishes in under a minute;
 a cold `--all` run (about 15,700 mutants) takes roughly 1 to 1.5 hours on an
 8-core desktop. `src/index.ts` is never mutated.
 
+`.github/workflows/mutation.yml` runs the full set weekly, and on manual
+dispatch, as four `--all --shard <i>/4` jobs that each carry their incremental
+file forward from the last successful run. Read the results in the run's
+summary (counts, score and each surviving mutant) or in its report artifacts.
+Survivors never fail the workflow; only an error running Stryker does.
+
 ### CI runs on Linux
 
 `.github/workflows/test.yml` runs the build, a test-file count check,
