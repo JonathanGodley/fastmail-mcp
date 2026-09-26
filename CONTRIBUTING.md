@@ -115,6 +115,18 @@ test of logic that could be unit-tested. `scripts/mcp-harness.mjs` is the
 reusable client for that: it spawns `dist/index.js` with `FASTMAIL_API_TOKEN` in
 its environment and matches JSON-RPC responses by id.
 
+### Mutation testing
+
+Mutation testing changes a source line (a flipped condition, an emptied string)
+and checks that some test fails. `npm run mutation -- <commit>` mutates only the
+`src/` lines that commit changed; the commit must be `HEAD` and the tree clean.
+`npm run mutation -- --all` mutates all of `src/`, reusing earlier results
+through Stryker's incremental file in `reports/`. A surviving mutant is a line
+no test notices changing: add or tighten a test rather than deleting the line.
+Each mutant takes about 0.25 s, so a commit usually finishes in under a minute;
+a cold `--all` run (about 15,700 mutants) takes roughly 1 to 1.5 hours on an
+8-core desktop. `src/index.ts` is never mutated.
+
 ### CI runs on Linux
 
 `.github/workflows/test.yml` runs the build, a test-file count check,
