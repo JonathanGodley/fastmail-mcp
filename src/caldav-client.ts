@@ -1,16 +1,11 @@
 import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, urlEquals } from 'tsdav';
-// requireNonEmpty/validateClearFields come from coerce.ts rather than being
-// defined here, so their rejections throw the tagged InvalidInputError and the
-// CallTool boundary maps them to InvalidParams. A plain Error would surface as
-// InternalError ("server bug"), which is wrong for caller-fixable input and
-// would tell the caller a bare retry might work. See docs/conventions.md.
+// Caller-fixable input must throw coerce.ts's tagged InvalidInputError, which the CallTool
+// boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
+// docs/conventions.md.
 import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 import { foldICalLine } from './ical-fold.js';
-// The deployment's configured timezone, read from the ONE place it is stored — the value
-// `setDefaultTimezone` holds and every email `date` renders in. A calendar window has to
-// INTERPRET a local date rather than display one, but it must interpret it as the same zone
-// the rest of the server displays, so it reads that value instead of re-deriving its own
-// from the environment.
+// A calendar window interprets local dates in the same zone the rest of the server displays,
+// so it reads that stored value rather than re-deriving one from the environment.
 import { getDefaultTimezone } from './email-formatter.js';
 import { generateVTimezone } from './vtimezone.js';
 
@@ -22,11 +17,8 @@ export interface CalDAVConfig {
   // environment (the server does that through its shared multi-name lookup, so a DXT
   // user_config spelling reaches it); left unset it falls back to the username.
   displayName?: string;
-  // The clock "today" is read from, for the window a caller that named no bounds gets.
-  // Injectable so that behaviour is unit-testable at all: a default window computed from the
-  // real clock can only be asserted against a value the test recomputes the same way, which
-  // tests nothing. Defaults to `Date.now`, and is read ONCE per call so the two ends of one
-  // window cannot straddle a midnight.
+  // The clock "today" is read from for a default window; injectable so that window is
+  // unit-testable. Read ONCE per call so the two ends of one window cannot straddle a midnight.
   now?: () => number;
 }
 
@@ -49,17 +41,10 @@ export interface Participant {
 
 export interface CalendarEvent {
   id: string;
-  // The resource's CalDAV URL — AND A SECOND, EQUALLY SERIES-WIDE DELETE HANDLE, because
-  // `findCalendarObjectByUID` accepts it interchangeably with `id`. `delete_calendar_event`
-  // given a row's `url` destroys the whole series exactly as its `id` does.
-  //
-  // KEPT rather than dropped from the row, and the choice is worth stating because "stop
-  // emitting it" is the obvious alternative and breaking changes are cheap here. Two reasons
-  // it stays: a UID is unique per collection, not per account, so where two calendars hold
-  // the same UID the url is the only thing that tells the two records apart; and for a
-  // resource carrying no VEVENT at all the url IS the id (see parseCalendarObjects' minimal
-  // fallback), so removing the field would not remove the second handle, only hide it. It is
-  // documented on the tool surface instead, in the same sentence that settles what `id` names.
+  // The resource's CalDAV URL, and a second series-wide delete handle: `findCalendarObjectByUID`
+  // accepts it interchangeably with `id`. Kept on the row anyway: a UID is unique per
+  // collection, not per account, so the url is what tells two same-UID records apart, and for a
+  // resource with no VEVENT the url IS the id (parseCalendarObjects' minimal fallback).
   url: string;
   title: string;
   description?: string;
@@ -69,129 +54,61 @@ export interface CalendarEvent {
   organizer?: Participant;
   participants?: Participant[];
   // ---- recurrence (#64) ----
-  // Whether this entry belongs to a repeating series at all. Set for a series master AND
-  // for a single expanded occurrence, so a caller can tell "this repeats" without having
-  // to reason about which of the two fields below is present.
+  // Set for a series master AND for an expanded occurrence.
   isRecurring?: boolean;
-  // The occurrence this entry IS, from RECURRENCE-ID. Its presence is the unambiguous
-  // signal that `start`/`end` are the in-window occurrence rather than the series' original
-  // DTSTART — which is exactly what #64 asked for, because a recurring event reported at
-  // its first occurrence years earlier is indistinguishable from a one-off on that date.
+  // From RECURRENCE-ID: its presence says `start`/`end` are the in-window occurrence rather
+  // than the series' original DTSTART.
   recurrenceId?: string;
-  // The raw RRULE value ("FREQ=WEEKLY;BYDAY=MO"). Usually the mark of a series MASTER, which
-  // shows its ORIGINAL DTSTART, as against an occurrence, which carries a `recurrenceId` and
-  // shows the real date — reading the two together is how a caller knows which it is holding.
-  //
-  // The two are NOT mutually exclusive, though, and an earlier version of this comment said
-  // they were. RFC 5545 §3.8.5.3 lets an override block carry its own recurrence rule, so a
-  // block can have both; where it does, `recurrenceId` names the instance this entry IS and
-  // `recurrenceRule` is that block's own rule rather than the series'. The tool description
-  // states it the same way.
+  // The raw RRULE value. Not exclusive with `recurrenceId`: RFC 5545 §3.8.5.3 lets an override
+  // block carry its own rule, and then this is that block's rule, not the series'.
   recurrenceRule?: string;
-  // The raw RDATE values of a block that lists its occurrences individually instead of (or as
-  // well as) stating a rule — "20260612T090000Z,20260619T090000Z", every RDATE line in the
-  // block joined into one comma-separated list, which is well-formed because an RDATE value is
-  // already such a list.
+  // Every RDATE line's values joined into one comma-separated list. It proves `start` is not
+  // the only date this entry has, which the window guard in `getCalendarEvents` needs (#162).
   //
-  // It exists for the same reason `recurrenceRule` does: it is proof that `start` is NOT the
-  // only date this entry has. The window filter is not entitled to judge such a block on its
-  // DTSTART alone, and a series that recurs only by RDATE carries no rule at all — so without
-  // this field the guard in `getCalendarEvents` could not see it and dropped the row (#162).
+  // Values only, deliberately: TZID, VALUE=DATE and VALUE=PERIOD are dropped, so these
+  // designator-less values do NOT follow the `timeZone` rule and are only evidence that other
+  // dates exist. No tool acts on an individual RDATE, so parameters would claim a precision the
+  // field cannot back up.
   //
-  // THE VALUES ARE CARRIED AND THE PARAMETERS ARE NOT — TZID, VALUE=DATE and VALUE=PERIOD are
-  // all dropped, and that is a real limit rather than a detail. `RDATE;TZID=America/New_York:
-  // 20270302T090000` arrives here as a bare `20270302T090000`, which under the rule that
-  // governs `start` would read as FLOATING, and two RDATE lines in different zones join into
-  // one list with nothing left to tell them apart. So the designator-less values in this field
-  // do NOT follow the `timeZone` rule; they are only evidence that other dates exist. Both tool
-  // descriptions say so.
-  //
-  // The shape stays values-only deliberately. A caller cannot act on an individual RDATE
-  // through this server at all — there are no per-occurrence tools, and update/delete refuse
-  // the whole series — so the field's entire job is to prove `start` is not the only date this
-  // entry has. Carrying parameters would invite a precision it cannot back up. Read a real
-  // occurrence date out of `list_calendar_events` with a window, which the server expands.
-  //
-  // Expected to be absent on the ordinary listing path: Cyrus strips RDATE from an expanded
-  // block, the way it strips RRULE. Both halves are MEASURED — calendar-expand.probe.mjs
-  // settles RRULE, and calendar-rdate-expand.probe.mjs settles RDATE, observing an RDATE-only
-  // series come back from `<C:expand>` as one VEVENT per occurrence with no RDATE line on any
-  // of them, in either serialisation. It shows up for certain on `get_calendar_event`, which
-  // returns the unexpanded master, and on any block the server declined to expand.
+  // Normally absent on the listing path: Cyrus strips RDATE (and RRULE) from an expanded block
+  // (scripts/probes/calendar-expand.probe.mjs, calendar-rdate-expand.probe.mjs).
   recurrenceDates?: string;
   // ---- time zone (#139) ----
-  // The IANA name DTSTART was written in, when it is anything other than the zone this
-  // server would otherwise assume. NEVER an offset: an offset is only valid at the one
-  // instant it was computed for, and `start` above stays a bare local wall clock precisely
-  // so DST is worked out by the READER's own zone database rather than baked in here.
+  // The IANA name DTSTART was written in, when it differs from the zone this server would
+  // assume. NEVER an offset: `start` stays a bare wall clock so DST is worked out by the
+  // reader's own zone database.
   //
-  // OMITTED — not set to the configured zone's own name — for the overwhelming majority of
-  // rows, which are already in that zone; a caller reads "absent" as "the zone I asked
-  // about". `null` means something different and narrower: `start` carries a genuinely
-  // FLOATING value (RFC 5545 §3.3.5 — no TZID and no `Z`, a different instant for every
-  // reader), and there is no zone name to give it. A `Z`-designated instant is also
-  // omitted, because it already names its own instant; so is an all-day (date-only) value,
-  // which has no zone at all by definition — emitting `null` for either would assert
-  // "floating", which is a different, wrong fact.
+  // Omitted for rows already in the configured zone. `null` means `start` is genuinely
+  // FLOATING (RFC 5545 §3.3.5). A `Z` instant and an all-day value are omitted too, not
+  // `null`, since `null` would assert "floating".
   timeZone?: string | null;
-  // The IANA name `end` was written in, but ONLY when it differs from `start`'s — RFC 5545
-  // §3.8.5.3 and the write path (`validateDateConsistency`, fork issue #140) both allow a
-  // start and an end in two different named zones, which is legal for the ordinary reason a
-  // flight has one: it departs in one zone and lands in another. Omitted whenever end's zone
-  // matches start's (the common case), whenever `end` is absent, and whenever `end` was
-  // computed from a DURATION rather than a stored DTEND (it inherits start's zone by
-  // construction, so there is nothing to disagree about). `null` means end is floating while
-  // start is not, or the reverse.
+  // The IANA name `end` was written in, ONLY when it differs from `start`'s (legal per RFC 5545
+  // §3.8.5.3 and #140). Omitted when `end` is absent or computed from a DURATION, which inherits
+  // start's zone. `null` means one end is floating and the other is not.
   endTimeZone?: string | null;
-  // Whether this event blocks the account's free/busy: `busy` or `free` (#194). The caller's
-  // vocabulary; the stored property is `TRANSP` (`OPAQUE`/`TRANSPARENT`) — see
-  // TRANSPARENCY_VALUES and readTransparency, which derives `busy` for an absent property and
-  // reports a token matching neither iCal value verbatim.
-  //
-  // `string`, not the closed `Transparency` union the write surface uses: this server writes
-  // only the two tokens the RFC defines but reads whatever is in the account.
-  //
-  // Always present from `get_calendar_event`; from `list_calendar_events` only when it is not
-  // busy, so an ordinary event costs nothing (`includeDefaultTransparency` picks).
+  // `busy` or `free` (#194), derived from TRANSP by readTransparency. `string`, not the closed
+  // `Transparency` union, because the account can hold tokens this server never writes.
+  // Always present from `get_calendar_event`; listed rows carry it only when not busy.
   transparency?: string;
 }
 
-// What `getCalendarEvents` returns: the page, plus how many events matched before `limit`
-// trimmed it. The count is stated rather than left implicit because `limit` is a hard cap
-// with no paging — a caller that reads a capped page as the whole answer concludes the
-// calendar is empty past that point (#100). Expansion makes this sharper, not softer: a
-// fortnightly event across a three-month window is now seven entries where it was one, so
-// the cap is reached far more often than it used to be.
+// `total` is how many matched before `limit` trimmed the page: `limit` is a hard cap with no
+// paging, and a capped page read as the whole answer looks like an empty calendar (#100).
 export interface CalendarEventQueryResult {
   events: CalendarEvent[];
   total: number;
-  // Set only when the window actually queried was NOT the window the caller described. A
-  // caller handed a narrower window than it asked for must be told, or "nothing after that
-  // date" reads as an empty calendar. Absent means the window was honoured exactly.
-  //
-  // STRUCTURE, NOT PROSE — deliberately, and it used to be prose. The email listings already
-  // established the shape for a disclosure of this kind: the client returns structured
-  // metadata (`QueryResult.exclusion`), a formatter beside `buildExclusionNote` owns the
-  // wording and the blank-line separator, and the handler concatenates. Building the finished
-  // sentence down here instead put the wording somewhere no formatter test can reach it and
-  // gave the separator convention a second home.
+  // Set only when the window queried was narrower than the one the caller described. Structure,
+  // not prose: the formatter owns the wording, as `QueryResult.exclusion` does for email.
   windowClamp?: CalendarWindowClamp;
   brokenCollections?: string[];
 }
 
 /**
- * THE COLLECTIONS IN THE CALENDAR HOME'S OWN LISTING THAT FAILED TO LIST (#136).
+ * The entries in the calendar home's own listing that failed to list (#136). Absent, never
+ * empty, when every entry answered; `buildBrokenCollectionNote` owns the wording.
  *
- * Carried as STRUCTURE beside every calendar result, exactly as `windowClamp` above is: the
- * client returns the paths, `buildBrokenCollectionNote` in response-formatters.ts owns the
- * wording and the blank-line separator, and the handler concatenates. Absent (never an empty
- * array on a result) means every entry in the home listing answered.
- *
- * WHAT THE VALUES ARE, and what they deliberately are not: a broken entry keeps its href and
- * nothing else — the failure destroys the display name and the resourcetype alike — so this is
- * a list of PATHS and there is no name to give, and no way to say whether the collection was a
- * calendar at all. Every message built from it is worded for that, and none of them claims a
- * calendar was lost.
+ * A broken entry keeps only its href, so these are PATHS: there is no name, and no way to say
+ * whether it was a calendar at all. No message built from it may claim a calendar was lost.
  */
 export type BrokenCollections = string[];
 
@@ -209,27 +126,17 @@ export interface CalendarListResult {
 export interface CalendarEventResult {
   event: CalendarEvent;
   /**
-   * The OTHER records this id named, when it named more than one (#101). Absent — never an
-   * empty array — when the id named exactly one, so silence reads as "this id is unambiguous".
+   * The OTHER records this id named, when it named more than one (#101). Absent, never empty,
+   * when the id is unambiguous. `event` is the first copy in `CalendarObjectLookup`'s order.
    *
-   * `event` is the FIRST copy in the lookup's stated order (see `CalendarObjectLookup`) and
-   * carries its own `url`, so between the two a caller holds a handle for every copy.
-   *
-   * It hangs off the RESULT rather than off `CalendarEvent`, because `CalendarEvent` is the
-   * shared row type `list_calendar_events` also serialises and the list path resolves no id at
-   * all: a field there would be permanently absent on every row and would mean nothing by its
-   * absence. This is a property of the LOOKUP, and only a lookup has one.
+   * On the result, not on `CalendarEvent`: that is the shared row type the list path also
+   * serialises, and the list path resolves no id.
    */
   otherCopies?: CalendarEventCopy[];
   /**
-   * Did the caller reach this record by its own ADDRESS — a resource url that resolved to it —
-   * rather than by a UID that several records answer to?
-   *
-   * Only ever meaningful alongside `otherCopies`, and it changes what those copies MEAN. An
-   * ambiguous UID leaves `update_calendar_event`/`delete_calendar_event` refusing the id, so the
-   * note tells the caller to pick a copy by url. An addressed id has already picked one: the
-   * writes will act on THIS record, and telling the caller they will be refused would send them
-   * looking for a url they had already passed. See `CalendarObjectLookup` for the rule itself.
+   * Whether the id was a resource url rather than a shared UID. Meaningful only beside
+   * `otherCopies`: an addressed id's writes act on THIS record instead of being refused, so the
+   * note must not tell the caller to pick a url. See `CalendarObjectLookup`.
    */
   addressedByUrl?: boolean;
   brokenCollections?: BrokenCollections;
@@ -260,18 +167,10 @@ export interface CalendarWindowClamp {
 }
 
 /**
- * Extract the VEVENT block from iCalendar data.
- * This avoids matching properties from VTIMEZONE or other components.
- */
-/**
- * Resolve the ORGANIZER display name from the configured value, falling back when
- * it is unset, blank, or an unresolved DXT config placeholder like
- * "${user_config.fastmail_caldav_display_name}" — without that check the literal
- * placeholder would be embedded into generated iCal.
- *
- * The server resolves the value from the environment before constructing the client,
- * and its lookup rejects placeholders too. This stays the client's own guard so a
- * directly-constructed client (tests, embedders) cannot emit a placeholder CN either.
+ * Falls back when the configured name is unset, blank, or an unresolved DXT placeholder like
+ * "${user_config.fastmail_caldav_display_name}", which would otherwise land in generated iCal.
+ * The server's own lookup rejects placeholders too; this guard covers a directly-constructed
+ * client.
  */
 export function resolveDisplayName(raw: string | undefined, fallback: string): string {
   const trimmed = raw?.trim();
@@ -282,40 +181,15 @@ export function resolveDisplayName(raw: string | undefined, fallback: string): s
 /**
  * ICALENDAR STRUCTURE IS DECIDED ON WHOLE CONTENT LINES, NEVER WITH A `/m`-ANCHORED REGEX.
  *
- * This is the single most load-bearing rule in this parser, and the reason the helpers below
- * exist at all rather than each site testing `/^BEGIN:VEVENT/m` for itself.
+ * RFC 5545 §3.1 knows one line break, CRLF (a bare LF is tolerated because real servers emit
+ * it). JavaScript's `/m` anchors also match after U+2028, U+2029 and a bare CR, all of which
+ * are legal unescaped inside a TEXT value, so a `/m` regex lets anyone who writes a SUMMARY or
+ * DESCRIPTION forge structure: split a VEVENT so its dates vanish, fabricate a second event,
+ * or make a resource report ANOTHER resource's UID, which `findCalendarObjectByUID` would then
+ * hand to an irreversible delete. Do not "simplify" any of this back to a `/m` regex.
  *
- * RFC 5545 §3.1 knows exactly one line break: CRLF (and this server tolerates a bare LF,
- * because real servers emit it). JavaScript's `^`/`$` under `/m` additionally anchor after
- * U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR and a BARE CR. None of those three is a
- * line break to iCalendar, and none of them has to be escaped inside a TEXT value — so all
- * three survive verbatim into a SUMMARY or DESCRIPTION written by whoever authored the event.
- *
- * With `/m` anchors that turns any TEXT value into a structure-editing primitive, and the
- * damage is not limited to fabricating a row:
- *
- *   - `DESCRIPTION:hi<U+2028>END:VEVENT<U+2028>BEGIN:VEVENT<U+2028>…` cuts ONE component in two. The
- *     real DTSTART/DTEND land in the discarded tail, so the event comes back with no dates at
- *     all — and `eventIntersectsWindow` keeps a dateless event, so it displays inside a window
- *     it was never shown to be in.
- *   - On the expanded path the same payload yields two events, one wholly attacker-authored
- *     with an attacker-chosen start, and `blockCountProvesSeries` then marks the REAL event
- *     recurring because "two blocks prove a series".
- *   - Worst: a property read takes the FIRST match in the block, so a SUMMARY of
- *     `Lunch<U+2028>UID:board-meeting@victim.example<U+2028>DTSTART:…` makes the attacker's own
- *     resource report ANOTHER resource's UID. `delete_calendar_event`/`update_calendar_event`
- *     resolve an id through `findCalendarObjectByUID`, which returns the first object in the
- *     account whose UID matches — so an agent told "the id names the series, act on it"
- *     irreversibly destroys a record the caller never named, and mails its attendees a
- *     cancellation.
- *
- * Splitting on RFC line breaks and matching WHOLE lines makes U+2028, U+2029 and a bare CR
- * inert characters inside a value, which is what the RFC says they are. Do not "simplify" any
- * of this back to a `/m` regex.
- *
- * Unfolding stays per RFC and stays LATER than the component split (see `parseICalValue`): a
- * continuation line is one beginning with a space or a tab, so a marker at the head of a
- * continuation is text, not structure.
+ * Unfolding happens LATER than the component split (see `parseICalValue`), so a marker at the
+ * head of a continuation line is text, not structure.
  */
 interface ICalContentLine {
   /** The line's text, with no trailing line break. */
@@ -354,40 +228,24 @@ function icalContentLines(data: string): ICalContentLine[] {
 }
 
 /**
- * Whether a line is a FOLDED CONTINUATION of the line above it (RFC 5545 §3.1).
- *
- * Every structural scan skips these, so a `BEGIN:VEVENT` or a `UID:` at the head of a
- * continuation is read as the text it is. This is the fold-injection half of the same rule
- * the line model above closes for U+2028: libical folds at a fixed octet count, so padding a
- * description to put a chosen fold in a chosen place is deterministic to construct.
+ * Whether a line is a FOLDED CONTINUATION of the line above it (RFC 5545 §3.1). Structural
+ * scans skip these: libical folds at a fixed octet count, so a fold placing `UID:` at the head
+ * of a continuation is deterministic to construct.
  */
 function isFoldedContinuation(line: string): boolean {
   return line.startsWith(' ') || line.startsWith('\t');
 }
 
 /**
- * Whether an iCalendar block contains the named property as a whole content line.
+ * Whether an iCalendar block contains the named property as a whole logical line. It fronts
+ * the recurrence refusal on update/delete and the ORGANIZER/ATTENDEE patch routing.
  *
- * The one place a "does this component have an RRULE / an RDATE / a RECURRENCE-ID / an
- * ATTENDEE?" question is answered. Every such test used to be its own `/^KEY[;:]/m` literal,
- * which is exactly the shape described above — and the recurrence gate now decides whether
- * `update_calendar_event` / `delete_calendar_event` refuse the call outright, while the
- * ORGANIZER/ATTENDEE gates steer an in-place patch, so a forged one mis-routes a write.
+ * CASE-INSENSITIVE (RFC 5545 §3.1): libical upper-cases names, but a third party can PUT
+ * `rrule:`, and missing a real rule lets a delete destroy a series it should refuse.
  *
- * CASE-INSENSITIVE, because RFC 5545 §3.1 says property names are. libical re-serialises them
- * in upper case, so `rrule:FREQ=WEEKLY` does not arrive from Fastmail's own client — but it is
- * legal iCalendar, a third party can PUT it, and this test now fronts an irreversible write:
- * missing a real rule lets `delete_calendar_event` destroy a series it was meant to refuse.
- *
- * UNFOLDS FIRST (RFC 5545 §3.1), rather than skipping continuation lines as the structural
- * scans do. The two disagree only on a property NAME split across a fold — `RRU\r\n LE:…` —
- * which skipping reads as no property at all, i.e. fail-OPEN in front of that same destroy.
- * Unfolding closes it without re-opening the injection hole the skip existed for, because a
- * continuation is APPENDED to the line above and so can never begin a logical line: a
- * `DESCRIPTION:x\r\n UID:evil` still yields one line starting `DESCRIPTION:`, not a `UID:`.
- *
- * Exported for its own test, and still worth having one: a caller-level test of the recurrence
- * gate pins the refusal's own reads rather than this presence test, and the two can disagree.
+ * UNFOLDS FIRST rather than skipping continuations as the structural scans do: skipping reads
+ * a name split across a fold (`RRU\r\n LE:`) as absent, which fails open. A continuation is
+ * appended to the line above, so it still cannot begin a logical line.
  */
 export function hasICalProperty(block: string, key: string): boolean {
   const test = new RegExp(`^${key}[;:]`, 'i');
@@ -395,10 +253,8 @@ export function hasICalProperty(block: string, key: string): boolean {
 }
 
 /**
- * A block's LOGICAL lines: every folded continuation (RFC 5545 §3.1 — a line beginning with a
- * space or tab) joined onto the line above with its single leading whitespace character
- * removed. Text only, with no offsets, so it cannot be used to slice a component back out —
- * `icalContentLines` + `structuralLine` stay the model for anything that edits the payload.
+ * A block's LOGICAL lines, continuations unfolded. Text only, with no offsets: anything that
+ * edits the payload uses `icalContentLines` + `structuralLine` instead.
  */
 function unfoldedICalLines(block: string): string[] {
   const out: string[] = [];
@@ -411,10 +267,8 @@ function unfoldedICalLines(block: string): string[] {
 
 /**
  * A line's text for STRUCTURAL comparison, or null if the line is a folded continuation.
- *
- * Trailing whitespace (and a stray CR from a `\r\r\n` payload) is trimmed because it is not
- * meaningful and real servers emit it; LEADING whitespace deliberately is not, because leading
- * whitespace is precisely what makes a line a continuation rather than a marker.
+ * Trailing whitespace (and a stray CR from `\r\r\n`) is trimmed; leading whitespace is not,
+ * because it is what makes a line a continuation.
  */
 function structuralLine(text: string): string | null {
   if (isFoldedContinuation(text)) return null;
@@ -444,50 +298,18 @@ export function extractVEvent(data: string): string | null {
 }
 
 /**
- * Whether a STORED calendar resource holds a repeating series. Read off the RESOURCE, never
- * off a listing row: `list_calendar_events` expands a series into per-occurrence rows whose
- * RRULE the server has stripped, so a row is not evidence either way — the payload behind the
- * id is. This is what `update_calendar_event` and `delete_calendar_event` refuse on.
+ * Whether a STORED calendar resource holds a repeating series; what update/delete refuse on.
+ * Read off the resource, never a listing row, whose RRULE expansion has stripped.
  *
- * Four markers, ANY of which is enough, because this gates a refusal in front of an
- * irreversible write and so fails CLOSED — the cost of calling a one-off event a series is one
- * edit the caller does in the web client, the cost of the reverse is a destroyed series:
+ * Fails CLOSED, since it fronts an irreversible write. Any of four markers is enough: an
+ * RRULE; an RDATE (RFC 5545 §3.8.5.2, a series with no rule at all, #162); more than one
+ * VEVENT block (one resource is one UID, so a second block is an override); or any
+ * RECURRENCE-ID (a series whose master was removed). The last two match the read path's
+ * `blockCountProvesSeries`, so the two halves agree on what a series is.
  *
- *  - a VEVENT carrying an RRULE — the ordinary series master;
- *  - a VEVENT carrying an RDATE — a series that LISTS its occurrences rather than stating a
- *    rule (RFC 5545 §3.8.5.2). It carries no rule at all, so an RRULE-only test read a
- *    single-block master of one as a one-off and let `delete_calendar_event` destroy the whole
- *    series and mail every attendee a cancellation (#162). `create_calendar_event` has no RDATE
- *    parameter either, so the same "cannot recreate it, must not destroy it" rule applies;
- *  - more than one VEVENT block in the resource — one CalDAV resource is one UID, so a second
- *    block can only be an overridden occurrence of a recurrence;
- *  - any block carrying a RECURRENCE-ID — that block IS an overridden occurrence, and a
- *    resource made entirely of them is a series whose master has been removed.
- *
- * The last two are the same test the read path uses to set `isRecurring`
- * (`blockCountProvesSeries`), deliberately, so the two halves of the server cannot disagree
- * about what a series is — and the RDATE marker is here for that same reason: the read path
- * sets `isRecurring` and emits `recurrenceDates` on exactly such a block, and the tool
- * descriptions promise that update and delete act on every occurrence of it. Note what is NOT
- * required: the RRULE and the overrides do not have to agree, and a malformed resource
- * carrying an override with no rule still refuses.
- *
- * The marker scan is VEVENT-WIDE and NOT position-aware: it asks whether the block's content
- * lines contain the property anywhere, so a line nested inside a subcomponent of the VEVENT
- * (a VALARM, say) counts as present — `hasRecurrenceId` included, being the same call. None of
- * RRULE, RDATE or RECURRENCE-ID is a DEFINED VALARM property (RFC 5545 §3.6.6 admits any
- * `iana-prop`, so such a line still parses), so a payload placing one there is malformed, and
- * the resulting refusal is the fail-closed direction this whole test already prefers. The
- * identical reach applied to RRULE long before RDATE joined it; do not narrow any of them into
- * a position-aware read without settling what the write path should then do with a malformed
- * resource.
- *
- * Line-model reads (hasICalProperty / extractVEventBlocks), never a `/m`-anchored regex over
- * the raw payload. Calendar content is attacker-authored here (anyone who can send an
- * invitation writes a DESCRIPTION), and U+2028, U+2029 and a bare CR all satisfy JavaScript's
- * `/m` anchors while being legal, unescaped characters inside an iCalendar TEXT value — so a
- * regex would let a forged text field turn a one-off event into a refusal, or, read the other
- * way, be defeated by folding a real rule across a continuation line. See docs/conventions.md.
+ * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. That payload
+ * is malformed and refusing it is the fail-closed direction; do not make the read
+ * position-aware without deciding what the write path does with such a resource.
  */
 export function isRecurringSeriesResource(icalData: string | null | undefined): boolean {
   const blocks = extractVEventBlocks(icalData || '');
@@ -498,32 +320,8 @@ export function isRecurringSeriesResource(icalData: string | null | undefined): 
 }
 
 /**
- * The one refusal `update_calendar_event` and `delete_calendar_event` raise on a repeating
- * event, so the two read as a single rule rather than two similar ones.
- *
- * WHY THIS REFUSES INSTEAD OF ASKING FOR CONFIRMATION. `create_calendar_event` has no RRULE
- * parameter — this server cannot make a repeating event at all — so under the project rule
- * that a destroy must not remove what this server cannot recreate, it must not destroy or
- * rewrite one either. Concretely: a delete removes the whole resource, every occurrence past
- * and future, and the server then mails a cancellation to every attendee; an update patches
- * the master and moves every occurrence, and where the series carries RECURRENCE-ID overrides
- * RFC 5545 does not settle whether those follow the master or stay put, so there is no correct
- * answer to implement. Recurrence expansion (#64) made this reachable in a way it was not
- * before — a series used to appear once at its original start date, and now returns a
- * plausible per-occurrence row carrying the series id, so "delete Thursday's meeting" finds
- * something to call.
- *
- * Restoring per-occurrence and whole-series editing (and the RRULE parameter on create that
- * would make the two surfaces match) is tracked as issue #146; #109 holds the deeper design
- * discussion. Until that lands there is deliberately NO override parameter, and the message
- * says so outright, because an LLM caller that is merely told "no" will otherwise spend turns
- * hunting for the flag that makes it work.
- */
-/**
- * The event's SUMMARY for an error message, falling back to the id the caller passed when the
- * resource has none. Unescaped so the caller reads the title they see in the calendar, and
- * read off the MASTER block (the first one) so an override's re-titled occurrence cannot name
- * the series something the caller would not recognise.
+ * The event's SUMMARY for an error message, unescaped, falling back to the caller's id. Read off
+ * the MASTER block so an override's re-titled occurrence cannot rename the series.
  */
 function calendarObjectTitle(icalData: string | null | undefined, eventId: string): string {
   const blocks = extractVEventBlocks(icalData || '');
@@ -534,6 +332,13 @@ function calendarObjectTitle(icalData: string | null | undefined, eventId: strin
   return summary ? unescapeICalText(summary) : eventId;
 }
 
+/**
+ * The one refusal update and delete raise on a repeating event. It refuses outright because
+ * `create_calendar_event` cannot make a repeating event, so this server must not destroy or
+ * rewrite one (CLAUDE.md, "a destroy must not remove what this server cannot recreate").
+ * Per-occurrence editing is #146, design in #109. There is deliberately NO override parameter,
+ * and the message says so, or an LLM caller spends turns hunting for one.
+ */
 export function recurringSeriesRefusal(
   action: 'update' | 'delete',
   title: string,
@@ -541,11 +346,8 @@ export function recurringSeriesRefusal(
   const consequence = action === 'delete'
     ? 'Deleting it would remove every occurrence, past and future, and the server would mail a cancellation to every attendee.'
     : 'Changing it would move every occurrence, and where single occurrences have already been edited on their own there is no agreed answer for what should happen to them.';
-  // The title is read off the stored resource and unescaped on the way here, so an iCal `\n`
-  // in its SUMMARY arrives as a real newline: whoever wrote the event — an invitation sender
-  // included — chooses what this sentence opens with. It goes through the shared echo, inside
-  // the double quotes that echo's neutralisation protects (docs/conventions.md, untrusted
-  // values in prose), like every other value this file quotes back.
+  // The unescaped title is attacker-choosable text (docs/conventions.md, untrusted values in
+  // prose), so it goes through the shared echo inside its double quotes.
   return new InvalidInputError(
     `"${echoCallerText(title)}" is a repeating event, and this server will not ${action} it. `
     + `${consequence} `
@@ -558,10 +360,8 @@ export function recurringSeriesRefusal(
 }
 
 /**
- * Find the index of the first colon that separates iCal property parameters
- * from the property value. Colons inside quoted parameter values (e.g.
- * DELEGATED-FROM="mailto:boss@example.com") are skipped.
- * Also correctly handles properties like DESCRIPTION;ALTREP="http://...":text
+ * The first colon outside quotes: the parameter/value boundary. A quoted parameter value can
+ * hold colons (DELEGATED-FROM="mailto:boss@example.com").
  */
 export function findValueBoundary(line: string): number {
   let inQuote = false;
@@ -577,42 +377,17 @@ export function findValueBoundary(line: string): number {
 }
 
 /**
- * Extract the TZID parameter's value, AS STORED (quotes included if quoted), from an
- * iCalendar property. Quote-aware over the parameter list — the same technique
- * `findValueBoundary` uses for the value boundary itself — so a `;TZID=` embedded inside
- * another parameter's quoted value (e.g. `;X-FOO=";TZID=trap"`) is never mistaken for the
- * real parameter. That was possible with the naive `;TZID=("[^"]*"|[^;:]+)` regex this
- * replaces, which had no quote state and matched the first literal `;TZID=` it saw, trap or
- * real, and could emit an unbalanced quote when it matched inside one.
+ * The TZID parameter's value AS STORED (quotes included), searched quote-aware and only
+ * before the value boundary, so a `;TZID=` inside another parameter's quoted value or inside
+ * the value itself never matches.
  *
- * RATIFIED scope: only the segment BEFORE the value boundary is searched. A `;TZID=` inside
- * the property VALUE never matched legitimately either — a value is not a parameter list —
- * so this stops matching a pattern that never should have matched, rather than widening what
- * counts as a match.
+ * Takes a whole property line or the segment before its colon, property name included; a
+ * string with no unquoted colon is read as all parameters. Do not pass a bare
+ * `TZID=Europe/Paris` (no property name): segment 0 would then match.
  *
- * Accepts either a raw property line (parameters AND value, e.g. from
- * `parseAllICalProperties`) or the segment before the value boundary, property name
- * included (e.g. `describeDateProperty`'s `params`, built as `line.slice(0, colonIdx)`, so
- * its segment 0 is the property name, not a parameter — harmless, since it never starts with
- * `TZID=`): `findValueBoundary` returns -1 on a string with no unquoted colon, which is read
- * here as "the whole string is that segment" — so one function serves both callers with no
- * shape flag. Not "parameter-only": relying on that stronger reading is what would make a
- * bare `TZID=Europe/Paris` (no property name, no leading `;`) match here where the regex
- * this replaces returned undefined — inert today because no caller passes that shape, so
- * don't invite it.
- *
- * Returns `undefined`, never `''`, both when no TZID parameter is present and when a
- * `TZID=` is found with an empty value (`;TZID=;X=1`): the regex this replaces required at
- * least one value character, so a caller's own no-TZID fallback branch still fires on that
- * malformed line exactly as it did before.
- *
- * If TZID repeats — malformed, since RFC 5545 §3.2 says a parameter must not repeat — the
- * FIRST occurrence wins, matching what the left-to-right regex search it replaces returned.
- *
- * Matches `TZID` case-sensitively, same as the regex it replaces. RFC 5545 §3.1 allows a
- * lower-cased parameter name; reading this case-insensitively is conformance work that
- * belongs with the audit already tracked as #57/#111, not a silent widening bundled into a
- * hardening fix.
+ * Returns `undefined`, never `''`, for an empty `TZID=`, so callers' no-TZID fallback fires.
+ * A repeated TZID (malformed per RFC 5545 §3.2): the first wins. Case-sensitive on `TZID`;
+ * RFC 5545 §3.1 conformance is #57/#111.
  */
 export function extractTzidParam(line: string): string | undefined {
   const boundary = findValueBoundary(line);
@@ -642,33 +417,15 @@ export function extractTzidParam(line: string): string | undefined {
 }
 
 /**
- * Parse an iCalendar property value from within a VEVENT block.
- * Handles simple (KEY:value), parameterized (KEY;TZID=...:value),
- * and VALUE=DATE (KEY;VALUE=DATE:20260319) forms.
- * Also handles line folding (continuation lines starting with space/tab).
+ * The first matching property's value in a VEVENT block, unfolded. Whole content lines only
+ * (see the line-model comment above): this read decides which record a destroy resolves to.
  *
- * CASE-SENSITIVE on the property name, unlike `hasICalProperty`, and left that way
- * deliberately. RFC 5545 §3.1 says names are case-insensitive, so a lower-cased `uid:` or
- * `dtstart:` here reads as absent. For a WHOLLY lower-cased payload that is fail-CLOSED: the
- * structural scan above it is case-sensitive too, so `extractVEventBlocks` matching only the
- * literal `BEGIN:VEVENT` yields no blocks at all, `findCalendarObjectByUID` skips the object
- * before it ever reads a value, and the event is simply invisible rather than editable or
- * destroyable through a mis-read. A MIXED-case payload is not fail-closed the same way — a
- * case-sensitive scan can recognize an OUTER boundary while missing an inner one, merging real
- * content into it rather than seeing nothing. `extractVTimezoneBlocks` is the one place that
- * guards against exactly that shape (a nested `begin:vtimezone`, or any other non-
- * STANDARD/DAYLIGHT component, inside a VTIMEZONE block), comparing that one component name
- * case-insensitively; the rest of this gap is unaddressed and tracked under the RFC conformance
- * audit (#57, #111). `hasICalProperty` is the exception because it is the one read that gates a
- * destroy while the surrounding payload IS well-formed — a normal resource with one lower-cased
- * `rrule:` line — so there, missing the property fails open. Making every read case-insensitive
- * is a wider change than either gate needs.
+ * CASE-SENSITIVE on the property name, deliberately, unlike `hasICalProperty`. A wholly
+ * lower-cased payload yields no blocks at all and is invisible, which is fail-closed. A
+ * mixed-case payload is not, and only `extractVTimezoneBlocks` guards its one such shape; the
+ * rest is the RFC conformance audit (#57, #111).
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
-  // Whole content lines, split on RFC 5545 line breaks only — never a `/m` regex over the
-  // blob. This is the read that a forged UID/DTSTART inside a SUMMARY used to hijack, and it
-  // is the one whose answer decides which stored record a destroy resolves to. See the
-  // line-model comment above.
   const lines = icalContentLines(vevent).map(l => l.text);
   const test = new RegExp(`^${key}[;:]`);
 
@@ -677,27 +434,19 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
     const line = lines[i].replace(/\r$/, '');
     if (!test.test(line)) continue;
 
-    // Unfold: every following continuation line contributes its text minus the one leading
-    // space or tab that marked it as a continuation.
     let fullLine = line;
     for (let j = i + 1; j < lines.length; j++) {
       if (!isFoldedContinuation(lines[j])) break;
       fullLine += lines[j].substring(1);
     }
-    // A lone trailing `\r` (no following `\n`) is not a line break to `icalContentLines`, so
-    // it survives inside a line's own text — including a continuation line's, appended after
-    // the per-line strip above already ran on the first line only. Strip it here too, now
-    // that folding is done, so a `\r` on the LAST physical line of a folded value does not
-    // leak into the returned value.
+    // A lone `\r` survives `icalContentLines`, and the strip above ran on the first physical
+    // line only, so strip one from the last continuation too.
     fullLine = fullLine.replace(/\r$/, '');
 
-    // Use quote-aware colon detection for the parameter/value boundary
     const colonIdx = findValueBoundary(fullLine);
     if (colonIdx === -1) return undefined;
-    // Not trimmed: RFC 5545 whitespace inside a property VALUE is significant (a padded
-    // SUMMARY is a padded SUMMARY). A caller that feeds this into an anchored parser, or that
-    // needs it for an exact-match comparison (e.g. a UID equality check), trims at its own
-    // call site instead — see each such call site's own one-line comment.
+    // Not trimmed: whitespace inside a value is significant. Callers needing an exact match
+    // (a UID equality check) trim at their own call site.
     return fullLine.substring(colonIdx + 1);
   }
 
@@ -705,11 +454,10 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
 }
 
 /**
- * Return all occurrences of a property key as full unfolded raw lines.
- * Needed because ATTENDEE/EXDATE etc. can appear multiple times.
+ * Every occurrence of a property as a full unfolded raw line (ATTENDEE, EXDATE and others
+ * repeat). Same line model as parseICalValue.
  */
 export function parseAllICalProperties(vevent: string, key: string): string[] {
-  // Same line model as parseICalValue — RFC line breaks only, folded continuations skipped.
   const lines = icalContentLines(vevent).map(l => l.text);
   const regex = new RegExp(`^${key}[;:]`);
   const results: string[] = [];
@@ -719,7 +467,6 @@ export function parseAllICalProperties(vevent: string, key: string): string[] {
     const line = lines[i].replace(/\r$/, '');
     if (!regex.test(line)) continue;
 
-    // Unfold continuation lines
     let fullLine = line;
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j];
@@ -738,18 +485,14 @@ export function parseAllICalProperties(vevent: string, key: string): string[] {
 
 /**
  * Parse a raw ATTENDEE or ORGANIZER line into a Participant.
- * Uses quote-aware scanning for parameter/value boundary detection.
  */
 export function parseAttendee(rawLine: string): Participant {
-  // Find the parameter/value boundary (first colon outside quotes)
   const boundaryIdx = findValueBoundary(rawLine);
   const paramPart = boundaryIdx >= 0 ? rawLine.substring(0, boundaryIdx) : rawLine;
   const valuePart = boundaryIdx >= 0 ? rawLine.substring(boundaryIdx + 1) : '';
 
-  // Extract email from cal-address value
   const email = valuePart.replace(/^mailto:/i, '');
 
-  // Split parameters on semicolons, respecting quotes
   const params: string[] = [];
   let current = '';
   let inQuote = false;
@@ -771,7 +514,6 @@ export function parseAttendee(rawLine: string): Participant {
   }
   if (current) params.push(current);
 
-  // Extract known parameters
   const result: Participant = { email };
 
   for (const param of params) {
@@ -779,7 +521,6 @@ export function parseAttendee(rawLine: string): Participant {
     if (eqIdx === -1) continue;
     const pName = param.substring(0, eqIdx).toUpperCase();
     let pValue = param.substring(eqIdx + 1);
-    // Strip surrounding quotes
     if (pValue.startsWith('"') && pValue.endsWith('"')) {
       pValue = pValue.slice(1, -1);
     }
@@ -837,28 +578,19 @@ export function formatICalDate(raw: string | undefined): string | undefined {
  * e.g. "2026-04-07T18:45:00+10:00" → "20260407T084500Z"
  */
 export function toICalUTC(isoString: string): string {
-  // Guard: date-only input must be handled by caller, not passed here. This one stays a
-  // plain Error on purpose — it reports a broken internal contract between this function
-  // and the code calling it, not anything the tool caller supplied or can correct.
+  // A plain Error on purpose: a broken internal contract, not caller-fixable input.
   if (/^\d{4}-\d{2}-\d{2}$/.test(isoString)) {
     throw new Error('date-only input must be handled by caller, not passed to toICalUTC');
   }
-  // Floating time (no offset, no Z) — preserve as local iCal datetime
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(isoString)) {
     return isoString.replace(/[-:]/g, '');
   }
   const d = new Date(isoString);
-  // The value this takes is a caller-supplied start/end, so an unparseable one is
-  // caller-fixable input — and it is quoted back through the shared echo rather than pasted,
-  // because nothing upstream of this seam has screened it for the line separators that would
-  // split the refusal into what reads as several sentences from the server.
+  // Caller-supplied and unscreened upstream, so it goes through the shared echo.
   if (isNaN(d.getTime())) throw new InvalidInputError(`Invalid date: "${echoCallerText(isoString)}"`);
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 }
 
-/**
- * Detect line ending style from iCal data.
- */
 export function detectLineEnding(data: string): string {
   return data.includes('\r\n') ? '\r\n' : '\n';
 }
@@ -875,9 +607,8 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
 
-  // structuralLine, not `.trim()`: a trimmed compare treats the head of a FOLDED
-  // continuation (` BEGIN:VEVENT`) as a component marker, which is the write-path twin of
-  // the read-path forgery the line model above closes.
+  // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
+  // (` BEGIN:VEVENT`) as a component marker.
   const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('replaceICalProperty: BEGIN:VEVENT not found');
 
@@ -904,8 +635,6 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
 
   for (let i = veventStart + 1; i < veventEnd; i++) {
     const trimmed = structuralLine(lines[i]);
-    // A folded continuation is text, never a marker: it belongs to the property above it,
-    // and the property scan below has already consumed (or will skip) that property whole.
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) { nestDepth++; continue; }
     if (trimmed.startsWith('END:')) { nestDepth--; continue; }
@@ -913,7 +642,6 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
 
     if (propRegex.test(lines[i])) {
       foundIdx = i;
-      // Find end of this property (including continuation lines)
       foundEndIdx = i + 1;
       while (foundEndIdx < veventEnd && (lines[foundEndIdx].startsWith(' ') || lines[foundEndIdx].startsWith('\t'))) {
         foundEndIdx++;
@@ -923,7 +651,6 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
   }
 
   if (foundIdx >= 0) {
-    // Replace or remove existing property
     const newLines = newLine !== null ? newLine.split(/\r?\n/) : [];
     lines.splice(foundIdx, foundEndIdx - foundIdx, ...newLines);
   } else if (newLine !== null) {
@@ -931,11 +658,8 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
     // RFC 5545 ABNF is `eventprop *alarmc`, so properties must precede alarms.
     let insertAt = veventEnd;
     for (let i = veventStart + 1; i < veventEnd; i++) {
-      // structuralLine, like every other scan in this function. A trimmed compare read the head
-      // of a FOLDED continuation (` BEGIN:phase two of the agenda`) as a sub-component and
-      // spliced the new property INTO the middle of the property above it — the tail of that
-      // property was cut loose and swallowed by the inserted line, damaging two records in one
-      // write with nothing reported.
+      // structuralLine: a trimmed compare would read a folded ` BEGIN:...` as a sub-component
+      // and splice the new property into the middle of the one above.
       if (structuralLine(lines[i])?.startsWith('BEGIN:')) { insertAt = i; break; }
     }
     const newLines = newLine.split(/\r?\n/);
@@ -955,9 +679,8 @@ export function removeAllICalProperties(icalData: string, key: string): string {
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
 
-  // structuralLine, not `.trim()`: a trimmed compare treats the head of a FOLDED
-  // continuation (` BEGIN:VEVENT`) as a component marker, which is the write-path twin of
-  // the read-path forgery the line model above closes.
+  // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
+  // (` BEGIN:VEVENT`) as a component marker.
   const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('removeAllICalProperties: BEGIN:VEVENT not found');
 
@@ -978,14 +701,11 @@ export function removeAllICalProperties(icalData: string, key: string): string {
   if (veventEnd === -1) throw new Error('removeAllICalProperties: END:VEVENT not found');
 
   const propRegex = new RegExp(`^${key}[;:]`);
-  // Collect indices to remove (in reverse order to avoid index shifting)
   const toRemove: Array<[number, number]> = [];
   let nestDepth = 0;
 
   for (let i = veventStart + 1; i < veventEnd; i++) {
     const trimmed = structuralLine(lines[i]);
-    // A folded continuation is text, never a marker: it belongs to the property above it,
-    // and the property scan below has already consumed (or will skip) that property whole.
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) { nestDepth++; continue; }
     if (trimmed.startsWith('END:')) { nestDepth--; continue; }
@@ -1019,9 +739,8 @@ export function insertBeforeEndVEvent(icalData: string, newLine: string): string
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
 
-  // structuralLine, not `.trim()`: a trimmed compare treats the head of a FOLDED
-  // continuation (` BEGIN:VEVENT`) as a component marker, which is the write-path twin of
-  // the read-path forgery the line model above closes.
+  // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
+  // (` BEGIN:VEVENT`) as a component marker.
   const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('insertBeforeEndVEvent: BEGIN:VEVENT not found');
 
@@ -1045,7 +764,6 @@ export function insertBeforeEndVEvent(icalData: string, newLine: string): string
   }
   if (veventEnd === -1) throw new Error('insertBeforeEndVEvent: END:VEVENT not found');
 
-  // Insert before first sub-component (VALARM etc.) or before END:VEVENT
   const insertIdx = firstSubComponent !== -1 ? firstSubComponent : veventEnd;
   const newLines = newLine.split(/\r?\n/);
   lines.splice(insertIdx, 0, ...newLines);
@@ -1063,8 +781,6 @@ export function removeOrphanedVTimezones(icalData: string): string {
   const tzBlocks = extractVTimezoneBlocks(lines);
   if (tzBlocks.length === 0) return icalData;
 
-  // Content outside VTIMEZONE blocks, for reference scanning — derived from the SAME blocks
-  // extractVTimezoneBlocks just found.
   const excludedLines = new Set<number>();
   for (const block of tzBlocks) {
     for (let i = block.start; i <= block.end; i++) excludedLines.add(i);
@@ -1074,23 +790,17 @@ export function removeOrphanedVTimezones(icalData: string): string {
   // LINES: a TZID parameter is a property of one line, and the parser below reads one at a time.
   const unfoldedNonTzLines = nonTzLines.join('\n').replace(/\n[ \t]/g, '').split('\n');
 
-  // WHAT COUNTS AS A REFERENCE IS DECIDED BY THE SAME PARSER THAT READS A TZID EVERYWHERE ELSE
-  // (#187). A substring search for `;TZID=<name>` miscounts in both directions, and calendar
-  // content is attacker-authored, so both are reachable: it counts a `;TZID=` sitting inside
-  // another parameter's QUOTED value or inside a property VALUE (a DESCRIPTION will do), and —
-  // being a prefix match — it lets a reference to `Europe/Paris` keep a block whose TZID is
-  // `Europe/Pari`. A block referenced ONLY in one of those ways is now dropped, which is
-  // correct: it was never referenced.
+  // A reference is decided by the same parser that reads a TZID everywhere else (#187). A
+  // substring search would count a `;TZID=` inside a quoted parameter or a DESCRIPTION, and
+  // match `Europe/Pari` as a prefix of `Europe/Paris`.
   const referenced = new Set<string>();
   for (const line of unfoldedNonTzLines) {
     const tzid = extractTzidParam(line);
     if (tzid !== undefined) referenced.add(tzid.replace(/^"|"$/g, ''));
   }
 
-  // Check each VTIMEZONE for references
   const orphaned = tzBlocks.filter(tz => tz.tzid !== '' && !referenced.has(tz.tzid));
 
-  // Remove orphaned blocks in reverse order
   for (let i = orphaned.length - 1; i >= 0; i--) {
     lines.splice(orphaned[i].start, orphaned[i].end - orphaned[i].start + 1);
   }
@@ -1102,11 +812,8 @@ export function removeOrphanedVTimezones(icalData: string): string {
  * Remove exception VEVENT blocks whose RECURRENCE-ID matches one of the orphaned dates.
  * Operates on the full iCal string. Never touches the master VEVENT (no RECURRENCE-ID).
  *
- * NO PRODUCTION CALLER at present, and kept deliberately rather than deleted:
- * `update_calendar_event` refuses a repeating event outright now (see recurringSeriesRefusal),
- * which made the orphan-pruning branch that used this unreachable. This is the primitive that
- * a series-aware update needs back — see #146, which names it — and it is pure and covered by
- * its own tests, so keeping it costs nothing and re-deriving it would.
+ * NO PRODUCTION CALLER, kept deliberately: it is the primitive a series-aware update needs
+ * back (#146), and it is pure and tested.
  */
 export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: Date[]): string {
   if (orphanedRecurrenceIds.length === 0) return icalData;
@@ -1114,15 +821,12 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
 
-  // Find all VEVENT blocks
   const veventBlocks: Array<{ start: number; end: number; recurrenceId?: string }> = [];
   for (let i = 0; i < lines.length; i++) {
     if (structuralLine(lines[i]) === 'BEGIN:VEVENT') {
       const blockStart = i;
       for (let j = i + 1; j < lines.length; j++) {
         if (structuralLine(lines[j]) === 'END:VEVENT') {
-          // Extract RECURRENCE-ID using parseICalValue for consistency
-          // with the orphan detection code path (handles unfolding)
           const veventText = lines.slice(blockStart, j + 1).join('\n');
           // Trimmed here because this feeds formatICalDate, which anchors its pattern.
           const recId = parseICalValue(veventText, 'RECURRENCE-ID')?.trim();
@@ -1134,25 +838,20 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
     }
   }
 
-  // Only remove exception VEVENTs (those with RECURRENCE-ID) that are orphaned.
-  // Compare on ISO date strings (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS) to avoid
-  // timezone interpretation issues (floating vs UTC) with millisecond comparison.
+  // Compared as ISO strings in a fixed UTC frame, so floating and UTC values are not
+  // reinterpreted in the process's local zone.
   const orphanedDateStrings = orphanedRecurrenceIds.map(d => {
-    // Normalize to ISO date string for comparison
     return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
   });
   const toRemove = veventBlocks.filter(block => {
     if (!block.recurrenceId) return false; // master VEVENT — never remove
     const recIdFormatted = formatICalDate(block.recurrenceId);
     if (!recIdFormatted) return false;
-    // Compare in a fixed UTC frame — naive datetimes must not be interpreted
-    // in the process's local timezone (must match orphan-detection's frame).
     const recDate = parseICalDateAsUTC(recIdFormatted);
     const recDateStr = recDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
     return orphanedDateStrings.includes(recDateStr);
   });
 
-  // Remove in reverse order
   for (let i = toRemove.length - 1; i >= 0; i--) {
     lines.splice(toRemove[i].start, toRemove[i].end - toRemove[i].start + 1);
   }
@@ -1173,10 +872,8 @@ interface ParsedICalDuration {
 }
 
 /**
- * Parse a DURATION value into its components, or undefined if malformed. The one parse
- * `parseICalDuration` (the user-visible implicit-DTEND computation) and
- * `resolveDurationSpanEndMs` (the VTIMEZONE span computation) both build on, so the two agree
- * on what counts as a valid DURATION.
+ * Parse a DURATION value into its components, or undefined if malformed. Shared by
+ * `parseICalDuration` and `resolveDurationSpanEndMs` so the two agree on validity.
  */
 function parseICalDurationComponents(duration: string): ParsedICalDuration | undefined {
   const m = duration.match(ICAL_DURATION_RE);
@@ -1200,12 +897,9 @@ function parseICalDurationComponents(duration: string): ParsedICalDuration | und
 }
 
 /**
- * Parse an iCalendar DURATION value and compute end datetime.
- * RFC 5545 §3.3.6: [+/-]P[nW | nDTnHnMnS]
- * Returns ISO 8601 end datetime, or undefined for malformed input.
- * A plain millisecond add, which is wrong across a DST transition in the event's zone (#196).
- * `resolveDurationSpanEndMs` already does the RFC 5545 §3.3.6 nominal-day/exact-time split
- * for the VTIMEZONE span.
+ * The end a DURATION implies from `start`, in start's format, or undefined if malformed.
+ * A plain millisecond add, which is wrong across a DST transition in the event's zone (#196);
+ * `resolveDurationSpanEndMs` does the RFC 5545 §3.3.6 nominal-day/exact-time split.
  */
 export function parseICalDuration(duration: string, start: string): string | undefined {
   const parsed = parseICalDurationComponents(duration);
@@ -1220,18 +914,13 @@ export function parseICalDuration(duration: string, start: string): string | und
   const endMs = startDate.getTime() + sign * ms;
   const endDate = new Date(endMs);
 
-  // Return in same format as input start
   if (/^\d{4}-\d{2}-\d{2}$/.test(start)) {
-    // Date-only: return date-only
     return endDate.toISOString().slice(0, 10);
   }
 
-  // Floating time (no Z, no offset): return floating to match start format.
-  // new Date() interprets floating as local, so we add the duration in ms
-  // and format back as floating by doing manual arithmetic instead of toISOString().
+  // `new Date()` reads a floating time as process-local, so do the arithmetic in UTC by hand.
   const isFloating = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(start);
   if (isFloating) {
-    // Parse start components directly to avoid local-time interpretation
     const [datePart, timePart] = start.split('T');
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, s] = timePart.split(':').map(Number);
@@ -1253,57 +942,27 @@ function extractAllVEvents(data: string): string[] {
 /**
  * Parse EVERY event a single CalDAV resource represents.
  *
- * One resource is not one event, and which events it holds depends on how it was asked
- * for — so the shape of the payload has to be decided before anything is read out of it:
+ *   EXPANDED (a time-range query sent with `expand`): one VEVENT per in-window occurrence,
+ *     several in ONE blob (scripts/probes/calendar-expand.probe.mjs); every block is an event.
+ *   UNEXPANDED: the series MASTER plus optional overrides; only the master is emitted.
+ *   NO VEVENT: a minimal event.
  *
- *   EXPANDED (a time-range query sent with `expand`): the server applies the recurrence
- *     itself and returns one VEVENT per in-window occurrence, RRULE stripped. Several
- *     occurrences arrive inside ONE calendar-data blob — measured against Fastmail at 3, 6
- *     and 7 VEVENTs in a single blob (scripts/probes/calendar-expand.probe.mjs) — so
- *     reading only the first would silently drop six events out of seven. Every block
- *     becomes its own CalendarEvent.
+ * WHICH SHAPE IT IS, IS TOLD, NEVER INFERRED FROM CONTENT. Cyrus's expansion (`expand_cb`,
+ * imap/http_caldav.c) emits the series' first instance with no RRULE and no RECURRENCE-ID, so
+ * a "no master means expanded" sniff takes that instance for a master and drops every sibling.
  *
- *   UNEXPANDED (no time range, or a plain query): the resource holds the series MASTER,
- *     which carries the RRULE, optionally followed by exception blocks that override
- *     individual instances. Only the master is emitted, which is the long-standing
- *     one-event-per-resource behaviour.
- *
- *   NO VEVENT: the minimal-event fallback, unchanged.
- *
- * WHICH SHAPE IT IS, IS TOLD — NEVER INFERRED FROM CONTENT. `expanded` is set by the caller
- * that decided to send `expand`, because the payload cannot be read backwards to recover
- * that decision. The tempting discriminator — "no block lacks a RECURRENCE-ID, therefore
- * the server expanded this" — is FALSE against the server Fastmail runs. Cyrus's expansion
- * (`expand_cb`, imap/http_caldav.c) sets a RECURRENCE-ID only on instances AFTER the
- * series' first: the first instance is emitted with its RRULE stripped and NO
- * RECURRENCE-ID. So any window containing a series' original DTSTART returns
- * [first-instance, occurrence, occurrence, …], the content sniff picks the first block as
- * a "master", and every sibling is discarded with nothing said — a yearly series over a
- * five-year window reported ONE event, and a 2020-2021 window lost 27 of 102 occurrences.
- *
- * The master is selected by looking for the block WITHOUT a RECURRENCE-ID rather than by
- * taking the first block. RFC 5545 does not fix component order, so a resource authored by
- * another client can serialise an override ahead of its master — and the previous
- * first-match read reported that override as though it were the event. `normalizeMasterVEventFirst`
- * encodes the same rule for the write path by reordering the payload; this decides it on
- * the block list instead, because the read path has no reason to re-serialise anything.
- * The two are deliberately left as separate implementations: unifying them means making the
- * write path consume a parsed model it does not have, which is the read/write divergence
- * tracked in #102 rather than something to settle inside a parser.
+ * The master is the block WITHOUT a RECURRENCE-ID, not the first block: RFC 5545 does not fix
+ * component order. `normalizeMasterVEventFirst` applies the same rule on the write path; the
+ * two stay separate implementations until the read/write divergence in #102 is settled.
  */
 export function parseCalendarObjects(
   obj: DAVCalendarObject,
   options?: { includeParticipants?: boolean; expanded?: boolean; configuredZone?: string; blocks?: string[]; includeDefaultTransparency?: boolean },
 ): CalendarEvent[] {
-  // `blocks` is an optimisation with a correctness point behind it. The listing path has to
-  // COUNT this resource's blocks before deciding whether to parse it at all (see
-  // CALENDAR_MAX_OCCURRENCES_PER_SERIES), and extracting them twice would mean two walks of a
-  // payload that is large in exactly the case the count is guarding against — and, worse, two
-  // places that could disagree about what a VEVENT block is. Passing the list through keeps
-  // one structural extraction per resource.
+  // `blocks` lets the listing path, which counts blocks first (CALENDAR_MAX_OCCURRENCES_PER_SERIES),
+  // pass its extraction through: one walk of a large payload, one definition of a block.
   const blocks = options?.blocks ?? extractAllVEvents(obj.data || '');
   if (blocks.length === 0) {
-    // No VEVENT found — return minimal event
     return [{
       id: obj.url || '',
       url: obj.url || '',
@@ -1312,15 +971,9 @@ export function parseCalendarObjects(
   }
 
   if (options?.expanded) {
-    // Every block is an in-window occurrence the server generated. Nothing is selected and
-    // nothing is dropped: the server already decided what falls in the window.
     const events = blocks.map(b => parseVEvent(obj, b, options));
     if (blockCountProvesSeries(blocks)) {
-      // A resource that yielded MORE THAN ONE in-window instance is a repeating series by
-      // construction, so its first instance is recurring too even though the server stripped
-      // the RRULE and left it without a RECURRENCE-ID. Without this the row that survives at
-      // the head of an expanded series reports as a one-off, which is the same lie the
-      // dropped-siblings bug told, one row smaller.
+      // Marks the first instance too, which Cyrus leaves with no RRULE and no RECURRENCE-ID.
       for (const event of events) event.isRecurring = true;
     }
     return events;
@@ -1328,8 +981,7 @@ export function parseCalendarObjects(
 
   const master = blocks.find(b => !hasRecurrenceId(b));
 
-  // No master at all means every block is a detached override; emitting each of them is
-  // right, since each names a distinct instance.
+  // No master: every block is a detached override naming a distinct instance.
   if (!master) return blocks.map(b => parseVEvent(obj, b, options));
 
   return [parseVEvent(obj, master, options)];
@@ -1340,26 +992,16 @@ function hasRecurrenceId(block: string): boolean {
 }
 
 /**
- * Whether an EXPANDED blob's block list proves the resource is a repeating series.
- *
- * Two blocks or more can only come from a recurrence, and a RECURRENCE-ID on any block says
- * the same thing. What is NOT decidable here is the converse: a single block carrying
- * neither marker is a one-off event AND the sole in-window instance of a series that starts
- * inside the window, because Cyrus emits both identically (see above). That residue is settled
- * afterwards by `settleAmbiguousRecurrence`, not guessed at and not left to the caller, so this
- * predicate answers only what the blob PROVES: a `false` from it means "ask", not "one-off".
+ * Whether an EXPANDED blob's block list proves the resource is a repeating series. A `false`
+ * means "ask", not "one-off": a lone unmarked block may be a series' only in-window instance,
+ * which `settleAmbiguousRecurrence` resolves.
  */
 function blockCountProvesSeries(blocks: string[]): boolean {
   return blocks.length > 1 || blocks.some(hasRecurrenceId);
 }
 
 /**
- * Parse ONE event out of a resource.
- *
- * Retained as the single-event entry point that most of this file and its callers use.
- * It returns the first event `parseCalendarObjects` produces, which for an unexpanded
- * resource is the series master — the right answer for `get_calendar_event`, which fetches
- * without a time range and so has no occurrence to report.
+ * Parse ONE event out of a resource: for an unexpanded resource, the series master.
  */
 export function parseCalendarObject(obj: DAVCalendarObject, options?: { includeParticipants?: boolean; configuredZone?: string; includeDefaultTransparency?: boolean }): CalendarEvent {
   return parseCalendarObjects(obj, options)[0];
@@ -1376,17 +1018,12 @@ function parseVEvent(
   const rawStart = parseICalValue(vevent, 'DTSTART')?.trim();
   let rawEnd = parseICalValue(vevent, 'DTEND')?.trim();
   const location = parseICalValue(vevent, 'LOCATION');
-  // Trimmed here because this is the id findCalendarObjectByUID later matches by exact
-  // equality — the same exact-match category as the TZID substring check.
+  // Trimmed because findCalendarObjectByUID matches it by exact equality.
   const uid = parseICalValue(vevent, 'UID')?.trim() || obj.url || '';
 
-  // The zone this account is configured for, resolved to a name ICU can actually use. Passed
-  // in rather than read from module state (see resolveUsableTimezone's own comment in
-  // coerce.ts on why), so a test that pins a zone exercises the omit-when-same branch
-  // deterministically rather than passing only when it happens to match the host.
+  // Injectable so a test can pin the zone rather than depend on the host's.
   const configuredZone = options?.configuredZone ?? resolveUsableTimezone(undefined);
 
-  // DURATION parsing: compute end from start + duration if DTEND absent
   if (!rawEnd && rawStart) {
     // Trimmed here because this feeds parseICalDuration, which anchors its pattern.
     const rawDuration = parseICalValue(vevent, 'DURATION')?.trim();
@@ -1395,7 +1032,6 @@ function parseVEvent(
       if (startIso) {
         const computedEnd = parseICalDuration(rawDuration, startIso);
         if (computedEnd) {
-          // computedEnd is already ISO format, return it directly
           const event: CalendarEvent = {
             id: uid,
             url: obj.url || '',
@@ -1405,16 +1041,7 @@ function parseVEvent(
             end: computedEnd,
             location: location ? unescapeICalText(location) : undefined,
           };
-          // Start's own zone only — deliberately not the shared attachZoneFields, which would
-          // also classify whatever raw DTEND line the source text happens to still contain.
-          // An empty `DTEND;TZID=Europe/Paris:` value takes this branch too (parseICalValue
-          // reads it as falsy) but still carries a TZID parameter, so describeDateProperty
-          // would read it as `zoned` even though that value was never used to compute `end`.
-          // A DURATION-computed end shares start's frame by construction — parseICalDuration
-          // returns the new instant in the same spelling it read `start` in (see its own
-          // "Return in same format as input start" comment) — so endTimeZone has nothing
-          // independent to report here, and is left unset. See attachZoneFields' own doc
-          // comment for the full reasoning.
+          // Start's zone only, never attachZoneFields: see its doc comment.
           attachStartZone(event, vevent, configuredZone);
           attachTransparency(event, vevent, options?.includeDefaultTransparency);
           addRecurrenceToEvent(event, vevent);
@@ -1448,15 +1075,9 @@ function parseVEvent(
 }
 
 /**
- * Put `transparency` on an event, or decide not to (#194).
- *
- * BOTH RETURN PATHS OF `parseVEvent` CALL THIS — the DURATION-computed branch as well as the
- * stored-DTEND one. They build separate event literals, and the Fastmail client writes both
- * end-shapes from one account (docs/fastmail-action-availability.md), so a field attached in
- * one branch belongs in the other.
- *
- * `includeDefault` off (the listing path) rides the field only when the value is not the RFC
- * default; on (the single-event fetch) always states it. See `CalendarEvent.transparency`.
+ * Put `transparency` on an event, or decide not to (#194). BOTH return paths of `parseVEvent`
+ * must call this: they build separate literals, and the Fastmail client writes both end
+ * shapes (docs/fastmail-action-availability.md).
  */
 function attachTransparency(event: CalendarEvent, vevent: string, includeDefault?: boolean): void {
   const transparency = readTransparency(vevent);
@@ -1465,10 +1086,8 @@ function attachTransparency(event: CalendarEvent, vevent: string, includeDefault
   }
 }
 
-// Where a DTSTART/DTEND property's zone comes from, for the `timeZone`/`endTimeZone`
-// response fields (#139). Four outcomes rather than `describeDateProperty`'s three,
-// because `describeDateProperty` needs a raw line to classify and a missing property
-// never produces one — `absent` is that fourth case.
+// A DTSTART/DTEND property's zone, for `timeZone`/`endTimeZone` (#139). `absent` is a missing
+// property, which `describeDateProperty` has no line to classify.
 type ZoneDescriptor =
   | { kind: 'tzid'; name: string }
   | { kind: 'floating' }
@@ -1476,17 +1095,9 @@ type ZoneDescriptor =
   | { kind: 'absent' };
 
 /**
- * Classify a DTSTART/DTEND property's zone from its raw line(s).
- *
- * Built on `describeDateProperty` rather than re-deriving the TZID extraction, so the read
- * path and the write path's DTSTART/DTEND consistency check (`describeDateProperty`,
- * `validateDateConsistency`) agree about what a `zoned` value even is — including sharing
- * `extractTzidParam`'s quote-aware parameter-list read and unquoting, the same helper
- * `formatDateTimeProperty` uses to preserve a TZID on a floating rewrite.
- *
- * `describeDateProperty`'s `date` (all-day) and `utc` (Z-suffixed) frames collapse to one
- * `none` outcome here: both are already self-describing and neither carries a zone name, so
- * from this field's point of view they are the same fact — "nothing to say".
+ * Classify a DTSTART/DTEND property's zone from its raw line(s). Built on
+ * `describeDateProperty` so the read path and the write path's consistency check agree on what
+ * `zoned` is. Its `date` and `utc` frames both become `none`: neither carries a zone name.
  */
 function classifyZoneFromLines(rawLines: string[]): ZoneDescriptor {
   if (rawLines.length === 0) return { kind: 'absent' };
@@ -1496,38 +1107,19 @@ function classifyZoneFromLines(rawLines: string[]): ZoneDescriptor {
   return { kind: 'none' };
 }
 
-// RFC 5545 §3.2.19 lets a TZID carry a leading '/', naming a zone registered by its creator
-// rather than the plain IANA form — the simple case is '/Zone/Name', the same IANA-style name
-// with one slash in front, and other clients emit it. libical strips exactly this one
-// character before comparing, so stripping it here matches the platform rather than inventing
-// a rule. This is comparison-only: `attachZoneFields` emits the stored spelling verbatim, slash
-// and all, so the field always reflects what the calendar actually stored.
-//
-// A vendor-prefixed TZID ('/vendor.example/20050126_1/Australia/Sydney') still compares
-// unequal after stripping one slash — that is the safe direction, an extra emitted field
-// rather than a false claim that two differently-registered names are the same zone.
-//
-// After the strip, each side is canonicalised through `canonicalZoneName` (coerce.ts) when ICU
-// can resolve it — the same seam `validateCallerTimezone` and `resolveUsableTimezone` route
-// through to decide what actually lands on the wire (#157). Without this, a link/alias spelling
-// compared unequal to the canonical name it resolves to: a caller echoing back a stored 'NZ'
-// TZID as timeZone 'NZ' read as a DIFFERENT zone from the 'Pacific/Auckland' this server itself
-// writes for it, producing a false "stranded two-zone event" rejection on an ordinary
-// read-modify-write round trip (#139). A name ICU cannot resolve at all (a Windows zone id, a
-// vendor-prefixed TZID) falls back to the trimmed/stripped string unchanged — still today's
-// conservative string comparison, and still a real rejection when the two sides genuinely
-// differ.
+// Comparison-only; the stored spelling is what gets emitted. Strips the one leading '/' RFC 5545
+// §3.2.19 allows, as libical does; a vendor-prefixed TZID still compares unequal, the safe
+// direction. Then canonicalises through `canonicalZoneName` (#157), so an alias such as 'NZ'
+// equals the 'Pacific/Auckland' this server writes and a round trip is not falsely rejected
+// as a two-zone event (#139). A name ICU cannot resolve is compared as the stripped string.
 function normalizeZoneForComparison(name: string): string {
   const trimmed = name.trim();
   const stripped = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
   return canonicalZoneName(stripped);
 }
 
-// Zone names compare trimmed, slash-normalized and ICU-alias-canonicalised (see above), then
-// case-insensitively ("Australia/Sydney" == "australia/sydney" == "/Australia/Sydney" ==
-// "NZ" == "Pacific/Auckland") and no other way: emitting an extra field when two spellings of
-// the same zone differ only in these ways is the safe direction, claiming two genuinely
-// different zones are the same is not.
+// Normalised as above, then case-insensitive, and no looser: an extra emitted field is the
+// safe direction, calling two different zones the same is not.
 function zoneNamesEqual(a: string, b: string): boolean {
   return normalizeZoneForComparison(a).toLowerCase() === normalizeZoneForComparison(b).toLowerCase();
 }
@@ -1542,15 +1134,12 @@ function attachStartZone(event: CalendarEvent, vevent: string, configuredZone: s
   const startDesc = classifyZoneFromLines(parseAllICalProperties(vevent, 'DTSTART'));
 
   if (startDesc.kind === 'tzid') {
-    // Trimmed because a padded TZID that DIFFERS from the configured zone must still emit a
-    // name isUsableTimezone (and everything downstream, e.g. sortEventsByStart) can resolve —
-    // isUsableTimezone("Australia/Sydney ") is false. NOT slash-normalized: the stored
-    // spelling, leading '/' and all, is what actually named the zone.
+    // Trimmed so downstream isUsableTimezone can resolve it; not slash-normalized, since the
+    // stored spelling is what named the zone.
     if (!zoneNamesEqual(startDesc.name, configuredZone)) event.timeZone = startDesc.name.trim();
   } else if (startDesc.kind === 'floating') {
     event.timeZone = null;
   }
-  // 'none' (Z-instant or all-day) and 'absent' both omit — see the field comment.
   return startDesc;
 }
 
@@ -1563,30 +1152,19 @@ function attachEndZone(event: CalendarEvent, startDesc: ZoneDescriptor, vevent: 
     : startDesc;
   if (zoneDescriptorsEqual(endDesc, compareDesc)) return;
 
-  // Trimmed for the same reason as `timeZone` above; stored spelling otherwise preserved.
+  // Trimmed as for `timeZone` above.
   event.endTimeZone = endDesc.kind === 'tzid' ? endDesc.name.trim() : null;
 }
 
 /**
  * Set `timeZone`, and where applicable `endTimeZone`, on a parsed event from the VEVENT's raw
- * DTSTART/DTEND lines (#139). This is the one rule for the emit matrix documented on
- * `CalendarEvent` and in docs/conventions.md — read the descriptor comments there before
- * changing the branches above, they are not independent choices.
+ * DTSTART/DTEND lines (#139): the one rule for the emit matrix documented on `CalendarEvent`
+ * and in docs/conventions.md. `endTimeZone` is relative to start, or to the configured zone
+ * when start is absent.
  *
- * `timeZone` describes start alone. `endTimeZone` describes end relative to start (the
- * flight-lands-elsewhere case `validateDateConsistency` permits on write, #140) — EXCEPT
- * when start is absent entirely, where end is compared against the configured zone instead,
- * which is exactly the rule `timeZone` itself uses.
- *
- * The DURATION branch in `parseVEvent` does NOT call this — it calls `attachStartZone` alone
- * and never touches `endTimeZone` at all, deliberately. Reusing `attachEndZone` there would
- * classify whatever raw DTEND line happens to be sitting in the source text even though its
- * VALUE was never used to compute `end` — an empty `DTEND;TZID=Europe/Paris:` still carries a
- * TZID parameter, so `describeDateProperty` reads it as `zoned` and a genuinely unused zone
- * would leak into the response. A DURATION-computed end shares start's frame by construction
- * (`parseICalDuration` returns the new instant in the same spelling it read `start` in — see
- * its own "Return in same format as input start" comment), so there is nothing independent
- * for `endTimeZone` to report regardless of what text a DTEND line happens to still contain.
+ * The DURATION branch in `parseVEvent` calls `attachStartZone` alone, deliberately: an empty
+ * `DTEND;TZID=Europe/Paris:` takes that branch but still reads as `zoned`, and would leak a zone
+ * that never computed `end`. A DURATION-computed end shares start's frame by construction.
  */
 function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: string): void {
   const startDesc = attachStartZone(event, vevent, configuredZone);
@@ -1594,18 +1172,9 @@ function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: 
 }
 
 /**
- * Attach the recurrence markers that say what KIND of date `start` is (#64).
- *
- * Read from the block being parsed rather than from the resource, because that is the
- * distinction being reported: an expanded occurrence has had its RRULE stripped by the
- * server and carries a RECURRENCE-ID, a master carries the rule and no RECURRENCE-ID.
- * Both set `isRecurring`; nothing is set for an ordinary one-off event, per the
- * omit-empty-fields convention.
- *
- * RDATE is read the same way and for the same reason as RRULE (#162): a block may list its
- * occurrences individually rather than state a rule, and such a block repeats just as much as
- * a ruled one does. EVERY RDATE line is read, not the first — RFC 5545 §3.8.5.2 allows the
- * property to appear any number of times, and a first-match read would hide the rest.
+ * Attach the recurrence markers that say what KIND of date `start` is (#64). Read from the
+ * block, not the resource, since that is the distinction reported. EVERY RDATE line is read
+ * (#162): RFC 5545 §3.8.5.2 lets the property repeat.
  */
 function addRecurrenceToEvent(event: CalendarEvent, vevent: string): void {
   const rrule = parseICalValue(vevent, 'RRULE');
@@ -1619,9 +1188,7 @@ function addRecurrenceToEvent(event: CalendarEvent, vevent: string): void {
     event.isRecurring = true;
     event.recurrenceRule = rrule;
   }
-  // Parameters are deliberately dropped and the values kept verbatim — see the field's own
-  // comment on `CalendarEvent`. `findValueBoundary` is what splits the two, quote-aware, so a
-  // colon inside a quoted parameter value cannot be mistaken for the boundary.
+  // Parameters dropped deliberately; see `CalendarEvent.recurrenceDates`.
   const rdateValues = parseAllICalProperties(vevent, 'RDATE')
     .map(line => {
       const colonIdx = findValueBoundary(line);
@@ -1646,14 +1213,8 @@ function addParticipantsToEvent(event: CalendarEvent, vevent: string): void {
 }
 
 /**
- * Unescape an iCalendar text value (RFC 5545 §3.3.11).
- * Reverses escaping of newlines, semicolons, commas, and backslashes.
- *
- * Done in a single left-to-right pass so each escape is decoded exactly once.
- * Chained .replace() calls re-scan the whole string and corrupt an escaped
- * backslash that precedes an escapable char: e.g. "\\n" (an escaped backslash
- * followed by a literal "n") would have its second "\n" turned into a newline,
- * yielding "\<newline>" instead of the correct "\n".
+ * Unescape an iCalendar text value (RFC 5545 §3.3.11). One left-to-right pass: chained
+ * .replace() calls would turn the escaped backslash in "\\n" into "\<newline>".
  */
 export function unescapeICalText(value: string): string {
   return value.replace(/\\(\\|;|,|[nN])/g, (_, ch) => {
@@ -1666,16 +1227,12 @@ export function unescapeICalText(value: string): string {
 
 /**
  * Escape a text value for use in an iCalendar property (RFC 5545 §3.3.11).
- * Backslashes, newlines, commas, and semicolons must be escaped.
  */
 export function escapeICalText(value: string): string {
   return value
-    // Normalize CRLF and BARE CR to LF first — a lone \r would otherwise pass
-    // through untouched and act as a line terminator for downstream parsers,
-    // reopening the property-injection class the date paths are guarded against.
+    // A bare CR would otherwise pass through and act as a line terminator downstream.
     .replace(/\r\n?/g, '\n')
-    // Strip remaining control characters (HTAB is legal in iCal TEXT; LF is
-    // escaped below).
+    // HTAB is legal in iCal TEXT; LF is escaped below.
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
@@ -1690,24 +1247,15 @@ export function escapeICalText(value: string): string {
  *   - YYYY-MM-DDTHH:MM:SS              (floating local)
  *   - YYYY-MM-DDTHH:MM:SSZ             (UTC)
  *   - YYYY-MM-DDTHH:MM:SS+HH:MM        (with offset, normalized to UTC)
- * Rejects any control characters or unexpected content. Returns the ICS-safe
- * serialized form (no `-` or `:`, with `Z` suffix for instants, or `YYYYMMDD`
- * for date-only). Throws on invalid input.
+ * Returns the ICS form (`YYYYMMDD`, or a datetime with `Z` for instants).
  *
- * This is the ONLY thing that turns a caller-supplied start/end into an iCal value:
- * formatDateTimeProperty wraps the result in the property line and never parses the
- * caller's string itself. That matters because the two jobs have opposite instincts —
- * a serializer reaches for `new Date()` to normalize, and `new Date()`'s legacy
- * fallback parser accepts `2026/04/18` and `April 18 2026` and reads them as
- * HOST-LOCAL midnight, which puts the event on a different day for a caller in a
- * different zone. The anchored shapes above are matched explicitly so nothing reaches
- * that parser, and a real-calendar-date probe rejects an impossible day (`2026-02-31`)
- * that Date would otherwise roll silently into the next month. Same reasoning, and the
- * same two traps, as coerceUtcDate in src/coerce.ts.
+ * The ONLY thing that turns a caller-supplied start/end into an iCal value;
+ * formatDateTimeProperty never parses the caller's string itself. The shapes are anchored so
+ * nothing reaches `new Date()`'s legacy parser, which reads `2026/04/18` as HOST-LOCAL
+ * midnight, and an impossible day (`2026-02-31`) is refused rather than rolled into the next
+ * month. Same two traps as coerceUtcDate in src/coerce.ts.
  */
 export function validateAndFormatICalDate(value: string, fieldName: string): string {
-  // Every rejection below names the caller's own field and value, so all of them are
-  // caller-fixable input errors (InvalidParams), never server faults.
   if (typeof value !== 'string') {
     throw new InvalidInputError(`${fieldName} must be a string`);
   }
@@ -1715,27 +1263,19 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
     throw new InvalidInputError(`${fieldName} contains control characters`);
   }
   const trimmed = value.trim();
-  // Date-only: 2026-04-18
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
     assertRealCalendarDate(trimmed, trimmed, fieldName);
     return trimmed.replace(/-/g, '');
   }
-  // Datetime forms: floating, UTC (Z), or with offset (+/-HH:MM, +/-HHMM, +/-HH)
+  // Offset forms: +/-HH:MM, +/-HHMM, +/-HH.
   const dtMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(Z|[+-]\d{2}:?\d{0,2})?$/.exec(trimmed);
   if (!dtMatch) {
-    // The one rejection in this function that quotes back a value nothing has constrained:
-    // it fires precisely BECAUSE the value matched neither anchored shape, and the control
-    // guard above screens `\x00-\x1F\x7F` only — U+2028 is neither, and `.trim()` strips it
-    // just from the ends. Every other rejection that quotes this value reaches its throw only
-    // after the value has matched an anchored digits-and-punctuation shape, which is why they
-    // read as bare slices and this one does not. `echoCallerText` bounds at the same 60 the
-    // slice did, and scrubs.
+    // The only rejection here quoting an unconstrained value (U+2028 passes the control guard),
+    // so it echoes; the others quote values already matched to an anchored shape.
     throw new InvalidInputError(`${fieldName} must be ISO-8601 date or datetime (got: "${echoCallerText(trimmed)}")`);
   }
   const [, datePart, timePart, tz] = dtMatch;
-  // Probe the calendar date on its own rather than the whole value: an offset
-  // legitimately moves the UTC date, so the round-trip check below only holds for the
-  // bare date part.
+  // The date part alone: an offset legitimately moves the UTC date.
   assertRealCalendarDate(datePart, trimmed, fieldName);
   const isoForParse = `${datePart}T${timePart}${tz || ''}`;
   const d = new Date(isoForParse);
@@ -1743,25 +1283,17 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
     throw new InvalidInputError(`${fieldName} is not a valid datetime (got: ${trimmed.slice(0, 60)})`);
   }
   if (!tz) {
-    // Floating: emit as-is without zone designator
     return `${datePart.replace(/-/g, '')}T${timePart.replace(/:/g, '')}`;
   }
-  // UTC or offset: normalize to UTC instant
   const utc = d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   return utc;
 }
 
 /**
- * Reject a YYYY-MM-DD that names a day its month does not have.
+ * Reject a YYYY-MM-DD that names a day its month does not have; `new Date` would silently
+ * roll `2026-02-31` to 3 March. A rolled-over date no longer round-trips through toISOString.
  *
- * `new Date('2026-02-31T00:00:00Z')` parses happily and lands on 3 March, so without
- * this an event asked for on a nonexistent day would be created a few days later and
- * reported as created — a silent move, not an error the caller can see. Round-tripping
- * through toISOString is the check: a rolled-over date no longer starts with the string
- * it was built from.
- *
- * @param echo the caller's whole value, so the message quotes what they wrote rather
- *   than the date fragment this probe happens to look at.
+ * @param echo the caller's whole value, quoted in the message.
  */
 function assertRealCalendarDate(datePart: string, echo: string, fieldName: string): void {
   const probe = new Date(`${datePart}T00:00:00Z`);
@@ -1771,15 +1303,9 @@ function assertRealCalendarDate(datePart: string, echo: string, fieldName: strin
 }
 
 /**
- * FREE/BUSY TRANSPARENCY, IN THE TWO VOCABULARIES IT HAS (#194).
- *
- * `busy`/`free` is what a CALLER says and reads. `OPAQUE`/`TRANSPARENT` is what iCalendar
- * STORES — RFC 5545 §3.8.2.7's `TRANSP` property, whose grammar admits those two tokens and
- * nothing else (unlike most iCalendar properties there is no x-name or IANA-token arm).
- *
- * THE BOUNDARY IS THIS FILE: the iCal spellings appear here and nowhere on the tool surface,
- * and `opaque`/`transparent` is not accepted as a parameter alias. The mapping is total in the
- * write direction and not in the read one — see `readTransparency`.
+ * FREE/BUSY TRANSPARENCY (#194). Callers say `busy`/`free`; iCalendar stores RFC 5545
+ * §3.8.2.7's `OPAQUE`/`TRANSPARENT`. The iCal spellings stay in this file and are not accepted
+ * as parameter aliases. The read direction is not total; see `readTransparency`.
  */
 export const TRANSPARENCY_VALUES = ['busy', 'free'] as const;
 export type Transparency = typeof TRANSPARENCY_VALUES[number];
@@ -1788,8 +1314,7 @@ const ICAL_TRANSP: Record<Transparency, string> = { busy: 'OPAQUE', free: 'TRANS
 const TRANSPARENCY_BY_ICAL_TRANSP: Record<string, Transparency> = { OPAQUE: 'busy', TRANSPARENT: 'free' };
 
 /**
- * The `TRANSP` line for a caller-vocabulary value — the one place the two spellings meet on
- * the write side, so the all-day default and an explicit `transparency` cannot drift apart.
+ * The one write-side mapping, shared by the all-day default and an explicit `transparency`.
  */
 function transpLine(transparency: Transparency): string {
   return `TRANSP:${ICAL_TRANSP[transparency]}`;
@@ -1798,22 +1323,14 @@ function transpLine(transparency: Transparency): string {
 /**
  * A caller's `transparency` argument, resolved to one of the two values this server accepts.
  *
- * WHITELIST, NOT AN ESCAPE. A `TRANSP:` line is assembled by string concatenation like every
- * other property here, so an unchecked value carrying a CRLF would close the property and
- * write iCalendar lines of the caller's choosing into the stored resource. Matching against a
- * closed set means the token that reaches the payload is one of two literals this file owns
- * and never the caller's own text — a stronger guarantee than escaping, and the reason an
- * unrecognised value is refused rather than passed through.
+ * WHITELIST, NOT AN ESCAPE: the line is built by concatenation, so only one of two literals
+ * this file owns ever reaches the payload, never the caller's text.
  *
- * The trim and case-fold are a backstop for a non-validating client and MUST NOT be advertised:
- * `inputSchema` declares a closed `enum: ['busy', 'free']`, so a schema-validating client is
- * stopped before this is reached and the promise would be false for it. Leniency about CASE is
- * not leniency about VOCABULARY — `OPAQUE`/`TRANSPARENT` are refused here too. The refusal
- * echoes through `echoCallerText` because the value is by definition unvalidated (#190).
+ * The trim and case-fold are a backstop for a non-validating client and MUST NOT be
+ * advertised: the schema's closed enum stops a validating client first. `OPAQUE`/`TRANSPARENT`
+ * are refused too. The refusal echoes an unvalidated value (#190).
  */
 export function normalizeTransparency(value: unknown, fieldName = 'transparency'): Transparency {
-  // A non-string reaches the same refusal rather than a TypeError out of `.trim()`: a lenient
-  // client can send anything, and this repo's convention is that such a value is refused by name.
   const text = typeof value === 'string' ? value.trim().toLowerCase() : undefined;
   const match = TRANSPARENCY_VALUES.find(v => v === text);
   if (!match) {
@@ -1828,29 +1345,14 @@ export function normalizeTransparency(value: unknown, fieldName = 'transparency'
 /**
  * What an event's `TRANSP` property says, for the `transparency` response field.
  *
- * THE ABSENT CASE IS DERIVED, NOT READ. RFC 5545 §3.8.2.7 defaults an omitted `TRANSP` to
- * `OPAQUE`, so a record carrying no such property still means busy. An EMPTY value (`TRANSP:`
- * with nothing after the colon) is read the same way — there is no token there to report.
+ * An absent or empty `TRANSP` means `busy` (RFC 5545 §3.8.2.7 default). A token neither
+ * spelling covers is reported verbatim, trimmed: folding it into `busy` would silently drop it.
  *
- * A STORED TOKEN NEITHER SPELLING COVERS IS REPORTED AS IT IS, trimmed and no further. Folding
- * it into `busy` would state as a fact about the event something that is really this parser
- * giving up, which is the silent-drop this repo's conventions forbid. That verbatim report can
- * collide with the caller vocabulary — `TRANSP:free` comes back as `'free'` — and is left
- * alone: what is lost is the value's provenance, never its meaning.
+ * CASE-INSENSITIVE and unfolded, like `hasICalProperty` and unlike `parseICalValue`: a miss
+ * here fails OPEN, reporting busy for a free event.
  *
- * CASE-INSENSITIVE ON THE PROPERTY NAME, and unfolded, which is `hasICalProperty`'s treatment
- * rather than `parseICalValue`'s. The difference is deliberate: `parseICalValue` stays
- * case-sensitive because a lower-cased name there fails CLOSED — the structural scan is
- * case-sensitive too, so the whole record goes invisible rather than being mis-read — while a
- * miss here fails OPEN, reporting `busy` for an event that is free, a confident statement of
- * the opposite of the truth on an availability question. A lower-cased `transp:transparent` is
- * legal per RFC 5545 §3.1. Widening `parseICalValue` itself is the RFC conformance audit's job
- * (#57, #111), not this read's.
- *
- * IT IS FLAT, where `replaceICalProperty` tracks `nestDepth`, so a `TRANSP` inside a `VALARM`
- * is reported here and left untouched by `clearFields: ["transparency"]`. Inherited from the
- * other reads in this file rather than introduced, and left: `TRANSP` is not a valid `VALARM`
- * property, so the disagreement needs an already-malformed record to appear at all.
+ * FLAT, where `replaceICalProperty` tracks `nestDepth`, so a `TRANSP` inside a VALARM is read
+ * here but not cleared by `clearFields`. Left: it needs an already-malformed record.
  */
 function readTransparency(vevent: string): string {
   const name = /^TRANSP[;:]/i;
@@ -1863,106 +1365,63 @@ function readTransparency(vevent: string): string {
 }
 
 /**
- * Validate an email address for use in ATTENDEE lines.
- * Prevents iCal property injection via malicious email values.
+ * Validate an email address for use in ATTENDEE lines, against iCal property injection.
+ * Rejections are caller-fixable; the configured username goes through
+ * validateOrganizerUsername instead, which rethrows as a plain Error.
  */
 export function validateAttendeeEmail(email: string): void {
-  // Participant addresses come straight from the tool call, so every rejection here is
-  // caller-fixable input (InvalidParams). The one place this function is applied to a
-  // value the caller did NOT supply — the configured CalDAV username, embedded in the
-  // ORGANIZER line — goes through validateOrganizerUsername below, which restores the
-  // plain-Error class for that case.
   if (!email || typeof email !== 'string') {
     throw new InvalidInputError('Participant email is required');
   }
-  // Both refusals below quote the address back through the shared echo. Neither guard is a
-  // screen for what a MESSAGE can carry: the addr-spec shape here says nothing about line
-  // separators, and the criterion below detects U+2028 (JS `\s` matches it) and would then
-  // have printed the very character it had just refused. Double quotes, because that is what
-  // the echo's neutralisation protects (docs/conventions.md, untrusted values in prose).
+  // Both refusals echo: neither shape check screens line separators out of the quoted value.
   if (!/^[^@]+@[^@]+$/.test(email)) {
     throw new InvalidInputError(`Invalid participant email: "${echoCallerText(email)}"`);
   }
-  // This is a CRITERION, not a character whitelist: reject the RFC 5322 specials that would
-  // let a bare addr-spec smuggle a route, a display name, a second address, or (via a stray
-  // parameter delimiter) an iCal property injection; reject every whitespace character; and
-  // reject every Unicode category C code point (controls, format characters such as the
-  // U+200E left-to-right mark, surrogates, unassigned) since none of those is legitimate
-  // inside an address and the category catches whole classes no literal list could enumerate.
-  // Everything else — including `.` for dot-atoms, `+` for tagged locals, and `-` in a
-  // domain — stays allowed.
+  // A CRITERION, not a whitelist: RFC 5322 specials (a route, display name, second address or
+  // parameter delimiter), any whitespace, and every Unicode category C code point.
   if (/[()<>[\]:;\\,"]|\s|\p{C}/u.test(email)) {
     throw new InvalidInputError(`Invalid participant email (contains illegal characters): "${echoCallerText(email)}"`);
   }
 }
 
 /**
- * Apply the same strict addr-spec check to the configured CalDAV username, which is
- * embedded verbatim in the ORGANIZER line whenever attendees are present.
- *
- * The address rules are identical to a participant's, but the failure is not: this value
- * is server configuration, so re-forming the tool call cannot fix it. Rethrowing as a
- * plain Error keeps it in the InternalError class instead of telling the caller their
- * arguments were wrong. The message is passed through unchanged.
+ * The participant addr-spec check, applied to the configured CalDAV username (embedded in the
+ * ORGANIZER line). Rethrown as a plain Error: server configuration is not caller-fixable.
  */
 function validateOrganizerUsername(username: string): void {
   try {
     validateAttendeeEmail(username);
   } catch (e) {
-    // The shared validator words its message for a participant address. Say whose
-    // address this actually is, or an operator with a bad CalDAV username spends the
-    // failure hunting a participant who is fine.
-    //
-    // `detail` is that validator's finished sentence, and it is re-rendered whole on purpose:
-    // the only untrusted span inside it has already been echoed at the throw that built it,
-    // and passing a finished sentence through an echo would neutralise the server's own words
-    // along with it (docs/conventions.md — sanitise the value, never the sentence).
+    // `detail` is already echoed at its throw; do not echo the finished sentence
+    // (docs/conventions.md, sanitise the value, never the sentence).
     const detail = e instanceof Error ? e.message : String(e);
     throw new Error(`The configured CalDAV username is not usable as an ORGANIZER address. ${detail}`);
   }
 }
 
 /**
- * Quote a CN parameter value per RFC 5545 §3.2.
- * Uses DQUOTE quoting (NOT escapeICalText backslash escaping).
- * Literal DQUOTEs in the value are replaced with single quotes since
- * RFC 5545 has no escape mechanism for DQUOTE inside quoted parameter values.
- * RFC 6868 caret encoding (^') exists but is poorly adopted;
- * single-quote replacement matches Python icalendar/Outlook behavior.
+ * Quote a CN parameter value per RFC 5545 §3.2: DQUOTE quoting, not backslash escaping.
+ * RFC 5545 cannot escape a DQUOTE inside one, so it becomes a single quote, as Python
+ * icalendar and Outlook do (RFC 6868 caret encoding is poorly adopted).
  */
 export function quoteParamValue(value: string): string {
-  // Strip newlines to prevent iCal property injection via CN values
   let cleaned = value.replace(/[\r\n]+/g, ' ');
-  // Then strip the rest of the control range, mirroring escapeICalText's strip
-  // for TEXT values. Parameter values reach here from model-supplied participant
-  // names, so the remaining C0 controls (HTAB excepted — it is WSP, legal in a
-  // quoted param value), DEL and the C1 range would otherwise be emitted raw
-  // into the ORGANIZER/ATTENDEE lines. The bidi OVERRIDE and ISOLATE characters
-  // go with them: they cannot terminate a line, but they reorder the rendered
-  // text of every downstream client, so a name can be made to display as a
-  // different address than the one it sits beside.
-  // U+200E/200F (LRM/RLM) are deliberately NOT stripped. Unlike the overrides
-  // they carry no nesting scope and cannot reorder text around themselves, and
-  // they occur legitimately in Arabic and Hebrew display names - stripping them
-  // would corrupt real participant names to close a far weaker vector.
+  // Controls (HTAB is legal here), DEL, C1, and the bidi overrides and isolates, which let a
+  // name display as a different address. LRM/RLM are deliberately kept: they cannot reorder
+  // surrounding text and occur legitimately in Arabic and Hebrew names.
   cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, '');
-  // Replace literal double quotes with single quotes
   cleaned = cleaned.replace(/"/g, "'");
-  // Quote if contains comma, semicolon, colon, or if the original had double quotes
   if (/[,;:]/.test(cleaned) || value.includes('"')) {
     return `"${cleaned}"`;
   }
   return cleaned;
 }
 
-// Where a freshly-WRITTEN property's TZID came from (#157) — used only for the
-// designator-less (floating-input) branch of formatDateTimeProperty, since that is the only
-// branch that can attach a TZID at all. Threaded onto `describeDateProperty`'s result as
-// `tzidSource` so a frame-mismatch error can say "your account's configured zone, applied
-// because you named none" instead of naming a zone the caller never wrote:
-//   - 'caller' — the caller passed `timeZone` on this call.
-//   - 'stored' — inherited from the event's own existing TZID (the long-standing behaviour).
-//   - 'default' — no caller zone and nothing to inherit; `create` filled in the configured zone.
+// Where a freshly written TZID came from (#157), so a frame-mismatch error does not name a zone
+// the caller never wrote:
+//   - 'caller' - the caller passed `timeZone` on this call.
+//   - 'stored' - inherited from the event's existing TZID.
+//   - 'default' - nothing to inherit; `create` filled in the configured zone.
 export type TzidSource = 'caller' | 'stored' | 'default';
 
 interface FormattedDateProperty {
@@ -1979,26 +1438,15 @@ interface FormattedDateProperty {
  * 3. Floating time, no `callerZone` → preserve original TZID, else `defaultZone`, else floating
  * 4. UTC/offset (2026-03-20T09:30:00Z) → DTXXX:20260320T093000Z
  *
- * Validation and serialization of the caller's string are delegated wholesale to
- * validateAndFormatICalDate; this function only decides which property FORM the
- * result belongs in, and it decides that from the serialized value rather than by
- * re-reading the input. The serialized form is unambiguous — eight digits is an
- * all-day date, a trailing Z is an instant, anything else is a floating wall-clock
- * time — so the two functions cannot disagree about what the caller wrote, which is
- * exactly what went wrong while each of them parsed the input separately.
+ * The form is decided from validateAndFormatICalDate's serialized value, never by re-reading
+ * the input, so the two cannot disagree about what the caller wrote.
  *
- * `callerZone`/`defaultZone` only ever matter for case 2/3 — a designator-less value has no
- * zone of its own to override, which is exactly what qualifies it for one. Precedence for that
- * case (#157): the caller's own `timeZone` wins first, then the stored TZID this function has
- * always inherited, then `defaultZone`, then plain floating. `create_calendar_event` passes the
- * account's configured zone as `defaultZone`; `update_calendar_event` passes none at all, which
- * is what keeps its designator-less behaviour exactly as it was before `timeZone` existed —
- * inherit-then-floating, never defaulted. See docs/conventions.md for why that split is
- * deliberate rather than an inconsistency to "fix".
+ * `create_calendar_event` passes the configured zone as `defaultZone`; `update_calendar_event`
+ * passes none, so update stays inherit-then-floating and never defaults. That split is
+ * deliberate (docs/conventions.md).
+ *
+ * Exported so `tzidSource` is unit-testable: consumers only distinguish 'default' (#157, #102).
  */
-// Exported for direct unit testing of `tzidSource` (#157, #102): every consumer of the
-// result reads it only through `describeFrame`'s `=== 'default'` branch, so 'stored' and
-// 'caller' are otherwise indistinguishable from outside this function's own return value.
 export function formatDateTimeProperty(
   propName: string,
   value: string,
@@ -2009,25 +1457,17 @@ export function formatDateTimeProperty(
 ): FormattedDateProperty {
   const serialized = validateAndFormatICalDate(value, propName);
 
-  // Date-only
   if (/^\d{8}$/.test(serialized)) {
     return { line: foldICalLine(`${propName};VALUE=DATE:${serialized}`, lineEnding) };
   }
 
-  // Floating time (no offset, no Z)
   if (!serialized.endsWith('Z')) {
-    // The caller's own `timeZone` wins over everything this function would otherwise infer.
-    // Interpolated with no escaping — sound only because `callerZone` reaches here already
-    // validated by `validateCallerTimezone`, which returns ICU's canonical spelling for a name
-    // `isUsableTimezone` proved resolvable. No zone name ICU resolves can contain `:`, `;`, `"`,
-    // CR or LF, so there is no character here `foldICalLine` could mis-fold or that would forge
-    // a second property line. This guard is load-bearing for this call site specifically: it
-    // does not extend to `tzMatch[1]` below, which is read back from whatever a PREVIOUS write
-    // (by this server or another CalDAV client) already stored.
+    // Interpolated unescaped, sound only because `validateCallerTimezone` already returned
+    // ICU's canonical spelling, which cannot contain `:`, `;`, `"`, CR or LF. That does not
+    // extend to the stored TZID below.
     if (callerZone) {
       return { line: foldICalLine(`${propName};TZID=${callerZone}:${serialized}`, lineEnding), tzidSource: 'caller' };
     }
-    // Try to preserve original TZID
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
@@ -2036,7 +1476,7 @@ export function formatDateTimeProperty(
           return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
         }
       }
-      // If propName is DTEND and no TZID found (DURATION-based), fall back to DTSTART's TZID
+      // A DURATION-based event has no DTEND TZID to inherit, so take DTSTART's.
       if (propName === 'DTEND') {
         const startLines = parseAllICalProperties(originalVevent, 'DTSTART');
         if (startLines.length > 0) {
@@ -2047,22 +1487,15 @@ export function formatDateTimeProperty(
         }
       }
     }
-    // Nothing to inherit — fall back to the caller-independent default (create's configured
-    // zone; absent on update, which is what leaves update's no-timeZone behaviour untouched).
     if (defaultZone) {
       return { line: foldICalLine(`${propName};TZID=${defaultZone}:${serialized}`, lineEnding), tzidSource: 'default' };
     }
-    // No TZID to preserve or default — emit as floating
     return { line: foldICalLine(`${propName}:${serialized}`, lineEnding) };
   }
 
-  // UTC or offset — already normalized to a UTC instant
   return { line: foldICalLine(`${propName}:${serialized}`, lineEnding) };
 }
 
-/**
- * Check if a raw iCal property line represents a date-only value (VALUE=DATE).
- */
 function isDateOnlyProperty(rawLine: string): boolean {
   return /;VALUE=DATE[;:]/.test(rawLine) || /;VALUE=DATE$/.test(rawLine);
 }
@@ -2084,12 +1517,7 @@ interface DatePropertyFrame {
   frame: DateFrame;
   /** TZID parameter value, unquoted. Set only when frame === 'zoned'. */
   tzid?: string;
-  /**
-   * Where a `zoned` frame's TZID came from (#157) — passed in by the caller who built the
-   * line, since a raw property line alone cannot say whether its TZID was written because the
-   * caller asked for it, inherited from what was already stored, or defaulted by `create` when
-   * neither applied. Only ever set alongside `frame === 'zoned'`; see `describeFrame`.
-   */
+  /** Where a `zoned` frame's TZID came from (#157); passed in, since a line cannot say. */
   tzidSource?: TzidSource;
   /**
    * Serialized iCal value (20260320 / 20260320T093000 / 20260320T093000Z).
@@ -2101,27 +1529,13 @@ interface DatePropertyFrame {
 }
 
 /**
- * Classify a serialized DTSTART/DTEND property line into its time frame.
+ * Classify a DTSTART/DTEND property line into its time frame. Runs on the line that will be
+ * WRITTEN, not the caller's input, so a floating value that inherited a stored TZID classifies
+ * as `zoned`. The stored and the freshly formatted side go through this one classifier so the
+ * comparison means something.
  *
- * This deliberately runs on the line that will actually be WRITTEN rather than
- * on the caller's raw input, and that is what keeps `formatDateTimeProperty`'s
- * "a floating input preserves the stored TZID" behaviour intact. A floating
- * value aimed at a TZID-bearing event has already been rewritten to carry that
- * TZID by the time it arrives here, so it classifies as `zoned` and agrees with
- * its zoned partner — exactly as before. A floating value aimed at a UTC (or
- * floating) event has no TZID to inherit, stays floating, and is then correctly
- * seen as a different frame from a UTC partner instead of silently converting
- * one half of the event to a wall-clock time.
- *
- * One classifier serves both sides on purpose: an untouched property is read
- * from the stored VEVENT and a changed one from the freshly formatted line, and
- * they have to be judged by identical rules for the comparison to mean anything.
- *
- * @param displayOverride the caller's own input, when the line was built from
- *   it — error messages should echo what the caller wrote, not our rendering.
- * @param tzidSourceOverride where the line's TZID came from (#157), when the caller of this
- *   function knows — see `DatePropertyFrame.tzidSource`. Omitted for a line read straight from
- *   storage, which is always `stored` in spirit but has no wording that depends on saying so.
+ * @param displayOverride the caller's own input, echoed in errors instead of our rendering.
+ * @param tzidSourceOverride see `DatePropertyFrame.tzidSource`; omitted for a stored line.
  */
 function describeDateProperty(rawLine: string, displayOverride?: string, tzidSourceOverride?: TzidSource): DatePropertyFrame {
   // Unfold first: a long TZID can push the line past the 75-octet fold width.
@@ -2152,11 +1566,7 @@ function describeFrame(d: DatePropertyFrame): string {
     case 'floating': return 'a date-time with no time zone';
     case 'utc': return 'a UTC date-time';
     case 'zoned':
-      // A `default` TZID (#157) is one this server filled in on `create` because the caller
-      // named no zone at all — naming it the same way as a caller-chosen or inherited zone
-      // would tell someone who wrote `2026-04-07T14:00:00Z` and no `timeZone` that they typed
-      // a zone they never touched. `caller`/`stored`/undefined all read as an ordinary named
-      // zone, which is the correct reading for each of those.
+      // A `default` TZID (#157) was filled in by this server; do not word it as the caller's.
       if (d.tzidSource === 'default') {
         return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}), applied because you named none`;
       }
@@ -2169,31 +1579,13 @@ function describeFrame(d: DatePropertyFrame): string {
  * the same time frame (RFC 5545 §3.6.1 value-type agreement) and in the right
  * order (RFC 5545 §3.8.2.2, "DTEND MUST be later than DTSTART").
  *
- * The two checks are one check in sequence, not two independent ones: values in
- * different frames are not comparable at all, so ordering can only be judged
- * after the frames agree. That is also why the frame check exists — a mixed
- * pair such as `DTSTART:20260320T093000` (floating) beside
- * `DTEND:20260320T093000Z` (UTC) has no single duration; it renders as a
- * different length for every reader, and in some zones ends before it starts.
+ * Ordering is judged only after the frames agree: a floating/UTC pair has no single duration.
  *
- * EVERY DTSTART/DTEND VALUE THESE THREE REFUSALS RENDER GOES THROUGH `echoCallerText`, INSIDE
- * DOUBLE QUOTES, and that is not decoration. Only a side the caller actually supplied is their
- * own validated input; a side they left alone is read straight from the stored VEVENT, and
- * `describeDateProperty`'s `display` falls back through `formatICalDate`, which hands back
- * anything outside the two forms it parses. So a DTSTART or DTEND that an invitation wrote
- * arrives here verbatim. Two of the three rendered it inside `'…'`, where its own quote closed
- * the span and everything after read as the server's next clause; the all-day refusal rendered
- * it BARE, into a sentence that single-quoted the suggested day (#190).
- *
- * The other two values on these lines are covered differently, and neither is an oversight:
- *
- *   - `describeFrame`'s zone note carries a stored TZID — untrusted for the same reason — and
- *     goes through the SAME echo, but BARE. That is inert here and only here, because these
- *     sentences single-quote nothing: the whole-sentence criterion in `echoCallerText`'s own
- *     comment is what makes it so, and adding a `'…'` span to any of them reopens it.
- *   - `suggestion` is server-computed, and `nextDay` returns it only when it matches
- *     `^\d{4}-\d{2}-\d{2}$`, so no echo can add anything to a value already constrained to
- *     ten characters of digits and hyphens.
+ * Every DTSTART/DTEND value these refusals render goes through `echoCallerText` inside DOUBLE
+ * quotes (#190): a side the caller left alone is read verbatim from the stored VEVENT, so an
+ * invitation wrote it. `describeFrame`'s TZID is echoed BARE, which is inert only because these
+ * sentences single-quote nothing; adding a `'...'` span to any of them reopens it.
+ * `suggestion` needs no echo: `nextDay` constrains it to `^\d{4}-\d{2}-\d{2}$`.
  */
 function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFrame): void {
   if (start.frame !== end.frame) {
@@ -2206,26 +1598,16 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
     );
   }
 
-  // Two TZID-bearing values in DIFFERENT zones are a legal RFC 5545 shape — a flight that
-  // departs in one zone and lands in another — so the frames agree and the event is written.
-  // ORDERING IS STILL CHECKED THERE, ON INSTANTS RATHER THAN WALL CLOCKS (#140). A cross-zone
-  // pair's text says nothing about its order in either direction, so comparing the values as
-  // text both rejects real flights and writes events whose end precedes their start.
-  //
-  // WHAT REMAINS IS A STAND-DOWN ON AN UNRESOLVABLE NAME, and that is an inability, not a
-  // choice. Real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone
-  // ICU can place, so there is no instant to order on and refusing would reject a record the
-  // account already holds. `isUsableTimezone` is the test, and it must run first:
-  // `zoneOffsetMsAt` throws on a name it cannot resolve.
+  // Two different zones (a flight) are legal; order them on INSTANTS, not text (#140). An
+  // unresolvable vendor TZID (`AUS Eastern Standard Time`) has no instant, so the check stands
+  // down rather than reject a record the account already holds. `isUsableTimezone` must run
+  // first: `zoneOffsetMsAt` throws on a name it cannot resolve.
   let ordered: boolean;
   if (start.frame === 'zoned' && start.tzid && end.tzid && !zoneNamesEqual(start.tzid, end.tzid)) {
     if (!isUsableTimezone(start.tzid) || !isUsableTimezone(end.tzid)) return;
-    // `value` is the serialized iCal form (`20260320T093000`); the resolver reads the ISO-ish
-    // spelling, which is what `formatICalDate` turns it into.
     const startMs = resolveCalendarInstantMs(formatICalDate(start.value), start.tzid);
     const endMs = resolveCalendarInstantMs(formatICalDate(end.value), end.tzid);
-    // A value that cannot be placed is the same case as a zone that cannot: no instant to
-    // compare, so the pair is written rather than refused on a reading we do not have.
+    // An unplaceable value stands down the same way.
     if (Number.isNaN(startMs) || Number.isNaN(endMs)) return;
     ordered = startMs < endMs;
   } else {
@@ -2249,14 +1631,10 @@ function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFram
 }
 
 /**
- * The literal TZID spelling of every usable zoned frame among `frames` — as WRITTEN, not
- * canonicalised, so each generated block's own `TZID:` line matches the parameter a reader will
- * look it up by. Two alias-equivalent but differently spelled TZIDs (`US/Pacific` and
- * `America/Los_Angeles`) each get their own entry: a VEVENT referencing both needs one block per
- * spelling actually on the wire, not one per zone identity (#166). A frame
- * that is `date`/`floating`/`utc`, or whose TZID `isUsableTimezone` rejects (a vendor id like
- * `AUS Eastern Standard Time`), contributes nothing — see `validateDateConsistency`'s own
- * stand-down on the same check for why an unresolvable name is left alone rather than refused.
+ * The TZID spelling of every usable zoned frame, as WRITTEN, not canonicalised: a reader looks
+ * a block up by the spelling on the wire, so `US/Pacific` and `America/Los_Angeles` each need
+ * their own block (#166). An unresolvable TZID contributes nothing, as in
+ * `validateDateConsistency`.
  */
 function referencedZoneTzids(frames: DatePropertyFrame[]): Set<string> {
   const tzids = new Set<string>();
@@ -2267,16 +1645,9 @@ function referencedZoneTzids(frames: DatePropertyFrame[]): Set<string> {
 }
 
 /**
- * The UTC instant each labelled, usable zoned frame resolves to — feeding ONE combined span
- * across every zone a VEVENT references (#166), rather than a separate
- * span per zone. A cross-zone event (DTSTART in one zone, DTEND in another — a flight) needs
- * BOTH zones' VTIMEZONE blocks to cover the SAME [min,max] range: the departure zone's block
- * must still cover the moment the event moves into the arrival zone, not stop at its own single
- * instant.
- *
- * `label` names the source property in the thrown message: a frame whose value cannot be
- * resolved to an instant throws rather than being silently skipped (#166)
- * — a span silently missing one of its two endpoints is a wrong span, not a smaller correct one.
+ * The UTC instant of each usable zoned frame, feeding ONE span shared by every zone the VEVENT
+ * references (#166): a cross-zone event needs both zones' blocks to cover the same range.
+ * An unresolvable value throws rather than being skipped: a span missing an endpoint is wrong.
  */
 function collectZoneInstants(labeled: Array<{ label: string; frame: DatePropertyFrame }>): number[] {
   const instants: number[] = [];
@@ -2292,55 +1663,22 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
 }
 
 /**
- * Every VTIMEZONE block in `lines`, with its TZID and its line-index span (inclusive of both
- * `BEGIN:VTIMEZONE` and `END:VTIMEZONE`). The one scan every caller that needs VTIMEZONE
- * boundaries uses — stripVTimezoneBlockFor, removeOrphanedVTimezones — so a resource this
- * malformed is refused identically everywhere rather than only on some paths.
+ * Every VTIMEZONE block in `lines`, with its TZID and inclusive line-index span. The one scan
+ * every caller needing VTIMEZONE boundaries uses, so a malformed resource is refused the same
+ * way on every path.
  *
- * A VTIMEZONE is a direct child of the VCALENDAR, and its boundaries are its own component's:
- * found by tracking nesting depth from every structural BEGIN:/END: line, not by scanning forward
- * to whatever END:VTIMEZONE comes next regardless of what it actually belongs to. Three ways a
- * stored resource is too broken to edit safely — a BEGIN:VTIMEZONE opening somewhere other than
- * directly under the VCALENDAR; anything at ANY depth inside a tracked VTIMEZONE other than
- * STANDARD/DAYLIGHT as its own direct children (RFC
- * 5545 §3.6.5: `standardc`/`daylightc` hold `tzprop` only — no sub-component is legal inside
- * either one, so a wrong grandchild is exactly as forbidden as a wrong direct child); or a
- * BEGIN:/END: marker that only exists once its own fold is undone, which hides a component
- * boundary from this scan entirely (see the guard below) — are all refused as too broken to edit
- * safely. The fold case is refused immediately, with its own message naming what actually
- * happened rather than "malformed"; the other two are only recorded against the block currently
- * being tracked, and the actual disposition is decided once that block's fate is known —
- * "malformed" if its own matching END:VTIMEZONE is reached with something recorded against it,
- * "unterminated" instead if the input ends first regardless of what else went wrong inside it (a
- * resource that never closes its VTIMEZONE cannot be edited safely either way, and this is the
- * only way that fault is ever reached).
- * BEGIN:/END: component names are compared case-insensitively for this one scan (RFC 5545 §3.1
- * does not require a matching case); structuralLine itself stays case-sensitive (#57, #111). A
- * bare `BEGIN:`/`END:` naming no component opens or closes nothing, so it is ignored rather than
- * refused.
+ * Boundaries come from tracking nesting depth, not from scanning to the next END:VTIMEZONE.
+ * Refused as too broken to edit: a VTIMEZONE not directly under the VCALENDAR; anything inside
+ * one other than STANDARD/DAYLIGHT as direct children (RFC 5545 §3.6.5 allows no deeper
+ * component); a BEGIN:/END: hidden behind a fold; and an unterminated block, which takes
+ * precedence over "malformed". Component names compare case-insensitively in this scan only
+ * (#57, #111). A bare `BEGIN:`/`END:` is ignored.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
-  // RFC 5545 §3.1: unfolding precedes component recognition. The stack-tracking scan below reads
-  // PHYSICAL lines (it has to — its {start, end} are physical indices the callers splice), so a
-  // BEGIN:/END: split across a fold is invisible to it: neither physical half matches
-  // /^(BEGIN|END):(.+)$/i, no frame is pushed, and the component it should have opened or closed
-  // is silently absorbed into whatever block happens to be open around it. Checked up front,
-  // across every logical line in the payload, because a hidden marker anywhere makes the
-  // depth-tracking below untrustworthy regardless of where it sits relative to a VTIMEZONE.
-  //
-  // The decision: any logical line that unfolds to a BEGIN:/END: marker but arrived as more than
-  // one physical line is refused outright — including a legal fold of an already-complete marker
-  // line ("BEGIN:VEVENT" split across a fold, or a long custom component name folded at the
-  // 75-octet boundary RFC 5545 §3.1 recommends), which no producer seen here (libical, Cyrus,
-  // this codebase's own generator) ever emits. Refusing fails closed.
-  //
-  // Why refuse rather than unfold and re-derive physical spans: this function's {start, end} are
-  // physical indices the callers splice directly, and refusing needs no logical-to-physical
-  // mapping.
-  //
-  // What it doesn't catch: a folded property whose continuation text merely CONTAINS
-  // "BEGIN:VEVENT" doesn't start with the marker once unfolded (`DESCRIPTION:...BEGIN:VEVENT`
-  // fails the anchored /^(BEGIN|END):/i test below), so it stays untouched.
+  // The depth scan reads PHYSICAL lines (callers splice its physical indices), so a marker split
+  // across a fold would be invisible to it. Any logical line that unfolds to a marker is refused
+  // up front, even a legal fold no producer seen here emits: fails closed with no
+  // logical-to-physical mapping. A property whose text merely CONTAINS a marker is unaffected.
   for (let i = 0; i < lines.length; i++) {
     if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
     let j = i + 1;
@@ -2348,11 +1686,7 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
     if (j === i + 1) continue; // this logical line was never folded
     const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
     if (/^(BEGIN|END):/i.test(logical)) {
-      // Named generically, not as a VTIMEZONE fault: this scan runs over the WHOLE payload before
-      // any VTIMEZONE has even been located (a hidden marker earlier in the document can shift
-      // the depth one is later seen at), so a resource can trip this with no VTIMEZONE in it at
-      // all — reporting "malformed VTIMEZONE block" there would name a component the resource
-      // need not contain.
+      // Worded generically: a resource with no VTIMEZONE at all can trip this.
       throw new InvalidInputError(
         'Stored calendar resource has a component boundary hidden behind a folded line.'
       );
@@ -2361,10 +1695,8 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
 
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
   const stack: string[] = [];
-  // The one VTIMEZONE currently being tracked: the line it opened on, the stack depth it opened
-  // at (so its own closing END: is recognisable regardless of what else nested inside it), and
-  // whether anything seen so far inside it violates the criteria above. A second BEGIN:VTIMEZONE
-  // while one is already open is itself such a violation (see below), never a second candidate.
+  // The VTIMEZONE being tracked. A second BEGIN:VTIMEZONE inside it marks it malformed rather
+  // than becoming a second candidate.
   let candidateStart = -1;
   let candidateOpenDepth = -1;
   let malformed = false;
@@ -2390,9 +1722,7 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
       }
       stack.push(name);
     } else {
-      // An END: whose name does not match what is actually open leaves the stack untouched: it
-      // does not belong to the frame on top, so it cannot be the close a tracked candidate is
-      // waiting for either.
+      // A mismatched END: closes nothing.
       if (stack[stack.length - 1] === name) stack.pop();
       if (candidateStart !== -1 && stack.length === candidateOpenDepth) {
         if (malformed) {
@@ -2404,7 +1734,6 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
       }
     }
   }
-  // A stored resource this broken cannot be edited safely at all, so it is refused outright.
   if (candidateStart !== -1) {
     throw new InvalidInputError('Stored calendar resource has an unterminated VTIMEZONE block.');
   }
@@ -2412,9 +1741,8 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
 }
 
 /**
- * Remove any existing VTIMEZONE block(s) for `tzid`, so a stale one is never left beside the
- * freshly generated replacement `regenerateVTimezones` is about to insert — two blocks
- * disagreeing about the same TZID would leave a reader to pick between them.
+ * Remove any existing VTIMEZONE block(s) for `tzid`, so a stale one never sits beside the
+ * replacement `regenerateVTimezones` inserts.
  */
 function stripVTimezoneBlockFor(icalData: string, tzid: string): string {
   const lineEnding = detectLineEnding(icalData);
@@ -2427,9 +1755,8 @@ function stripVTimezoneBlockFor(icalData: string, tzid: string): string {
 }
 
 /**
- * Insert a generated VTIMEZONE `block` right before the first VEVENT — the same position
- * `createCalendarEvent` places one, between `PRODID` (and any earlier VTIMEZONE) and the event
- * itself.
+ * Insert a generated VTIMEZONE `block` right before the first VEVENT, where
+ * `createCalendarEvent` places one.
  */
 function insertVTimezoneBlock(icalData: string, block: string, lineEnding: string): string {
   const lines = icalData.split(/\r?\n/);
@@ -2439,14 +1766,10 @@ function insertVTimezoneBlock(icalData: string, block: string, lineEnding: strin
 }
 
 /**
- * The end instant of a DURATION applied to a zoned `startIso` wall clock, for the VTIMEZONE span
- * only (RFC 5545 §3.3.6): the week/day components are nominal — "the same wall-clock time N days
- * later" — but the hour/minute/second components are exact elapsed time. Sydney
- * `20261003T230000` + `PT6H` is local 05:00 nominally, but six REAL elapsed hours crossing that
- * night's spring-forward is local 06:00 — the hour DST skips is exactly the hour a naive
- * wall-clock add of the whole duration would lose. Resolving the nominal (week/day-shifted only)
- * wall clock to an instant FIRST, then adding the time components as exact milliseconds to that
- * instant, keeps the two kinds of arithmetic from being conflated.
+ * The end instant of a DURATION from a zoned `startIso`, for the VTIMEZONE span only. RFC 5545
+ * §3.3.6 makes weeks/days nominal (same wall clock N days later) and hours/minutes/seconds exact
+ * elapsed time, so the day shift is resolved to an instant FIRST and the time part added as
+ * milliseconds: across a spring-forward, `PT6H` from 23:00 ends at 06:00, not 05:00.
  */
 function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid: string): number | undefined {
   const parsed = parseICalDurationComponents(durationValue);
@@ -2457,9 +1780,8 @@ function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid:
 
   const [datePart, timePart] = startIso.split('T');
   const [y, mo, d] = datePart.split('-').map(Number);
-  // Same cycle-shift `nextDateOnly` uses, generalized from a fixed +1 day to `nominalDays`:
-  // `Date.UTC` maps a two-digit year to 19xx, so construction itself has to happen a whole
-  // Gregorian cycle away and be shifted back on read, the same as there.
+  // `Date.UTC` maps a two-digit year to 19xx, so build a Gregorian cycle away and shift back,
+  // as `nextDateOnly` does.
   const shifted = new Date(Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d));
   shifted.setUTCDate(shifted.getUTCDate() + nominalDays);
   const year = shifted.getUTCFullYear() - GREGORIAN_CYCLE_YEARS;
@@ -2475,20 +1797,15 @@ function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid:
 
 /**
  * Recompute the VTIMEZONE block(s) the master VEVENT's current DTSTART/DTEND need, after
- * `updateCalendarEvent` has patched them (#166). Called only when `timeChanged`, and only after
- * every other patch has landed, so it reads the FINAL start/end rather than a value about to be
- * overwritten again below it — and before `removeOrphanedVTimezones`, which then drops any block
- * (this function's included) that the patched event no longer references at all.
+ * `updateCalendarEvent` has patched them (#166). Must run after every other patch, so it reads
+ * the FINAL start/end, and before `removeOrphanedVTimezones`.
  */
 export function regenerateVTimezones(icalData: string, lineEnding: string): string {
   const vevent = extractVEvent(icalData);
   if (!vevent) return icalData;
 
-  // Also a plain Error, matching updateCalendarEvent's own "no VEVENT block found": if this
-  // fires at all, the upstream isRecurringSeriesResource refusal has already failed to stop a
-  // recurring VEVENT from reaching here, which is a server bug, not a caller input fault — no
-  // argument this caller could re-form reaches this check. A series-aware span (the series' LAST
-  // occurrence, not the master) is designed under #146.
+  // A plain Error: reaching here means the isRecurringSeriesResource refusal failed, a server
+  // bug. A series-aware span is designed under #146.
   if (hasICalProperty(vevent, 'RRULE') || hasICalProperty(vevent, 'RDATE')) {
     throw new Error(
       'Cannot compute a VTIMEZONE span for a recurring VEVENT (RRULE/RDATE present) — a single ' +
@@ -2498,9 +1815,6 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
 
   const startLine = parseAllICalProperties(vevent, 'DTSTART')[0];
   const endLine = parseAllICalProperties(vevent, 'DTEND')[0];
-  // Only DTSTART, DTEND, and DURATION (RFC 5545 §3.6.1's alternative to DTEND) bound the
-  // VEVENT's own occurrence — nothing else in the component defines an instant range a
-  // VTIMEZONE needs to cover.
   const startFrame = startLine ? describeDateProperty(startLine) : undefined;
   const endFrame = endLine ? describeDateProperty(endLine) : undefined;
   const frames = [startFrame, endFrame].filter((f): f is DatePropertyFrame => f !== undefined);
@@ -2513,9 +1827,7 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   if (endFrame) labeled.push({ label: 'DTEND', frame: endFrame });
   const instants = collectZoneInstants(labeled);
 
-  // DTEND absent, DURATION present: derive the implicit end from DTSTART + DURATION. The
-  // computed end shares DTSTART's own zone (DURATION carries no TZID of its own), so it extends
-  // this SAME combined span rather than introducing a second zone (#166).
+  // A DURATION end shares DTSTART's zone, so it extends the same span (#166).
   if (!endLine && startFrame && startFrame.frame === 'zoned' && startFrame.tzid && isUsableTimezone(startFrame.tzid)) {
     const durationLine = parseAllICalProperties(vevent, 'DURATION')[0];
     if (durationLine) {
@@ -2535,11 +1847,8 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   const spanMinMs = Math.min(...instants);
   const spanMaxMs = Math.max(...instants);
 
-  // Strip every referenced zone's stored block(s) FIRST, then insert one freshly generated block
-  // per literal TZID spelling — never interleaved strip-then-insert per zone: interleaving would
-  // strip the block just inserted for an alias-equal spelling, since `stripVTimezoneBlockFor`
-  // matches by zone IDENTITY (`zoneNamesEqual`), and `US/Pacific` / `America/Los_Angeles` are
-  // alias-equivalent but differently spelled (#166).
+  // Strip ALL first, then insert: `stripVTimezoneBlockFor` matches by zone identity, so
+  // interleaving would strip the block just inserted for an alias spelling (#166).
   let result = icalData;
   for (const tzid of zoneTzids) {
     result = stripVTimezoneBlockFor(result, tzid);
@@ -2550,29 +1859,10 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   return result;
 }
 
-// Returns undefined unless the RESULT is a plain `YYYY-MM-DD`, and both halves of that are
-// load-bearing. The input is not always a date: a stored all-day DTSTART reaches here through
-// `formatICalDate`, which hands back anything outside the two forms it parses. But checking the
-// INPUT alone is not the check — the arithmetic can leave a perfectly valid date outside the
-// range `toISOString` renders in four digits:
-//
-//   9999-12-31   -> `+010000-01-01T…`, sliced to `+010000-01`
-//   275760-09-12 -> `+275760-09-13T…`, sliced to `+275760-09`
-//   275760-09-13 -> past the maximum representable date; `toISOString` THROWS
-//
-// The first two are the worse pair: they returned quietly, and the caller was handed a
-// malformed value in a sentence that says to pass it back. The third turned an entirely
-// caller-fixable refusal into an internal error. So the validity test moves AFTER the
-// increment, and the formatted result is matched against the shape it promises; the refusal
-// then drops its suggestion rather than the sentence.
-//
-// The shape test runs on the WHOLE ISO string and slices after, not the other way round.
-// Slicing first gives ten characters, and `^…$` over a ten-character string is two anchors
-// that cannot do anything: no substring of it could pass the test either way, so neither
-// anchor can be turned red and both read as tested while carrying nothing. Anchored against
-// the full string, the leading `+` an expanded year renders is exactly what the `^` rejects —
-// drop that anchor and `+010000-01-01T…` matches on `0000-01-01T`, handing back the malformed
-// `+010000-01` this function exists to withhold.
+// Returns undefined unless the RESULT is a plain `YYYY-MM-DD`. The input may be any stored
+// text, and valid arithmetic can still leave four-digit years: 9999-12-31 renders as
+// `+010000-01-01T...`, and near the maximum date `toISOString` throws. So the check runs after
+// the increment, on the WHOLE ISO string before slicing, where `^` is what rejects the `+`.
 function nextDay(dateStr: string): string | undefined {
   const d = new Date(dateStr);
   d.setUTCDate(d.getUTCDate() + 1);
@@ -2582,25 +1872,10 @@ function nextDay(dateStr: string): string | undefined {
 }
 
 /**
- * Parse an ISO-ish date/datetime string in a fixed UTC frame.
- *
- * A naive datetime ("2026-03-20T09:30:00") is read as UTC rather than in the process's local
- * timezone, which is what `new Date(...)` would do. The FIXED frame is the point: the two
- * readings it compares have to be placed on one scale, and a frame that varied with the
- * deployment would make the same comparison answer differently by machine.
- *
- * THE WINDOW FILTER USED THIS AND NO LONGER DOES (#162). Placing an event against a window is
- * not a comparison of two like values, and reading a naive value as UTC there is precisely
- * what put a floating time in the wrong day; that path now resolves each value in the zone it
- * belongs to, through `resolveCalendarInstantMs`.
- *
- * SO NOTHING LIVE CALLS THIS. Its only caller in the source is `removeExceptionVEvents`, which
- * matches a RECURRENCE-ID against a set of orphaned ones — and that function has no caller of
- * its own outside its unit tests, because the write path refuses a recurring event outright
- * (see `recurringSeriesRefusal`), so no tool can reach it. Both are kept for their tests and
- * because the fixed frame is what would make that two-sided comparison meaningful if the
- * orphan-removal path is ever wired back up: both sides go through here, so the frame cancels
- * out and only its fixedness matters.
+ * Parse an ISO-ish date/datetime string in a fixed UTC frame, so a naive datetime is not read
+ * in the process's local zone. Only for comparing two values that both pass through here, as
+ * `removeExceptionVEvents` does; never for placing an event against a window, which must use
+ * `resolveCalendarInstantMs` (#162).
  */
 export function parseICalDateAsUTC(iso: string): Date {
   if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return new Date(iso + 'T00:00:00Z');
@@ -2611,35 +1886,13 @@ export function parseICalDateAsUTC(iso: string): Date {
 const DATE_ONLY_EVENT_VALUE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
- * Which zone one of an event's values is really written in: its own TZID where ICU can
- * resolve that name, and the configured zone otherwise.
+ * Which zone one of an event's values is written in: its own TZID where ICU can resolve it,
+ * the configured zone otherwise (absent, floating, or an unresolvable name such as "AUS Eastern
+ * Standard Time", on which `zoneOffsetMsAt` would throw and fail the whole read).
  *
- * The four cases, and why each lands where it does:
- *   ABSENT — `attachZoneFields` omits the field for a value already in the configured zone
- *     (and for a `Z`-designated or date-only one, which the resolver handles by shape), so
- *     absent means "the zone the caller asked about". Configured.
- *   `null` — a genuinely FLOATING value (RFC 5545 §3.3.5). No zone exists to place it in, so
- *     the caller's own clock is the least-wrong reading. Configured.
- *   A RESOLVABLE TZID — the correct reading rather than a best-effort one. Its own zone.
- *   AN UNRESOLVABLE NAME — a Windows zone name such as "AUS Eastern Standard Time" passed
- *     through verbatim rather than rejected. Configured, and the `isUsableTimezone` check is
- *     what makes that happen: `zoneOffsetMsAt` throws on a name it cannot resolve, so without
- *     it one such event would fail the whole read.
- *
- * THE NAME IS NORMALISED BEFORE IT IS TESTED, and that is load-bearing rather than tidying.
- * `attachStartZone` deliberately emits the STORED spelling, so a TZID written in the RFC 5545
- * §3.2.19 global form ('/America/New_York') reaches here with its leading slash, and
- * `isUsableTimezone` says no to it. Testing the raw string would send a genuine New York event
- * to the configured zone and the exact filter would then DROP it — a missing event, which is
- * the direction #64 exists to prevent, arriving only for calendars whose zone happens to be
- * spelled that way. `normalizeZoneForComparison` strips the one leading slash and canonicalises
- * through ICU, so the global form resolves and an alias spelling ('NZ') resolves to the same
- * zone the comparison seam already treats it as. A VENDOR-PREFIXED name
- * ('/vendor.example/Australia/Sydney') still fails the test after the strip and still falls back
- * to configured, which is correct: nothing here can say which registry that name came from.
- *
- * Same rule, and the same reasoning, as `sortEventsByStart` uses to order the same values —
- * literally the same function, so the two cannot drift apart again.
+ * NORMALISED BEFORE IT IS TESTED: the stored spelling can carry RFC 5545 §3.2.19's leading
+ * slash ('/America/New_York'), which `isUsableTimezone` rejects, and the exact window filter
+ * would then drop the event. Shared by the window filter and `sortEventsByStart` so they agree.
  */
 function zoneForValue<Z extends string | undefined>(
   name: string | null | undefined,
@@ -2651,11 +1904,8 @@ function zoneForValue<Z extends string | undefined>(
 }
 
 /**
- * The date-only value one calendar day after a date-only one.
- *
- * `Date.UTC` maps a two-digit year to 19xx, so the arithmetic steps over a whole 400-year
- * Gregorian cycle and back: leap rules repeat exactly across that cycle, so the rollover of
- * month, year and leap day is unaffected while the legacy mapping is not reachable.
+ * The date-only value one calendar day after a date-only one. `Date.UTC` maps a two-digit year
+ * to 19xx, so the arithmetic runs a whole 400-year Gregorian cycle away, where leap rules repeat.
  */
 function nextDateOnly(dateOnly: string): string {
   const [y, mo, d] = dateOnly.split('-').map(Number);
@@ -2666,42 +1916,21 @@ function nextDateOnly(dateOnly: string): string {
 }
 
 /**
- * Whether a parsed event falls inside the requested window. EXACT, and authoritative for what
- * the caller is shown (#162).
+ * Whether a parsed event falls inside the requested window: EXACT, and authoritative for what
+ * the caller is shown (#162). The margin for what the server withholds widens the REQUESTED
+ * range in `getCalendarEvents`; a filter cannot keep what the server never sent.
  *
- * It used to be a residue filter that granted fourteen hours of slack on both edges to any
- * value with no zone designator, on the reasoning that such a value's real instant was
- * unknowable here and keeping an extra row beat dropping a real one. The keeping half of that
- * was right and stays; the fourteen hours were in the wrong place. A FILTER CANNOT KEEP WHAT
- * THE SERVER NEVER SENT, and the server withholds two kinds of event from a narrow window: it
- * matches a date-only value on its UTC day, and it resolves a floating time as UTC. Widening
- * here did nothing about either, while leaving visible residue at both edges. The margin now
- * widens the range REQUESTED (see `getCalendarEvents`), which is the only place it works, and
- * this function judges what comes back against the window the caller actually asked for.
- *
- * Exact does not mean eager to drop. Every value is resolved by WHAT IT IS, never guessed at
- * and never discarded for being hard to read:
+ * Every value is resolved by what it is:
  *   - a `Z` or offset value is the instant it names;
- *   - a date-only value is local midnight in the zone the value belongs to, and a date-only
- *     `end` is ALREADY exclusive in iCalendar (measured, docs/fastmail-action-availability.md),
- *     so a DTSTART..DTEND date span is the full multi-day local span with no day added;
- *   - a wall clock resolves in its own TZID where that resolves, and in the CONFIGURED zone
- *     otherwise — see `zoneForValue`, and note that a naive value must never be read as UTC
- *     here, which on a +10 account is what put a floating 20:00 outside the local evening;
- *   - an event with nothing readable to judge is KEPT. A promised event vanishing with no
- *     trace is worse than one extra row the caller can see and dismiss, and a missing event is
- *     the failure #64 exists to prevent.
+ *   - a date-only value is local midnight in its zone, and a date-only `end` is ALREADY
+ *     exclusive (measured, docs/fastmail-action-availability.md);
+ *   - a wall clock resolves via `zoneForValue`, never as UTC;
+ *   - an event with nothing readable to judge is KEPT: a missing event is what #64 prevents.
  *
- * IT STILL DOES NOT CLOSE THE "SERVER DECLINED TO EXPAND" GAP. On an expanded query a
- * surviving master carries its recurrence carrier and its ORIGINAL DTSTART, and judging that
- * date drops the row entirely — turning a wrongly-dated event into a MISSING one. The caller
- * keeps such a block regardless of its dates (see the recurrence guard in
- * `getCalendarEvents`); this function is not the thing that saves it.
+ * A master the server declined to expand still carries its ORIGINAL DTSTART; the recurrence
+ * guard in `getCalendarEvents` keeps it, not this function.
  *
- * `zone` is REQUIRED rather than defaulted so that no call site can silently fall through to
- * the host zone: `zoneOffsetMsAt` treats an undefined zone as the deployment's own, which
- * would make the same query include or exclude the same event depending on where this server
- * runs.
+ * `zone` is REQUIRED so no call site falls through to the host zone.
  */
 export function eventIntersectsWindow(
   event: Pick<CalendarEvent, 'start' | 'end' | 'timeZone' | 'endTimeZone'>,
@@ -2726,16 +1955,9 @@ export function eventIntersectsWindow(
   if (!Number.isNaN(parsedEnd)) {
     endMs = Math.max(parsedEnd, startMs);
   } else if (event.start && DATE_ONLY_EVENT_VALUE.test(event.start.trim())) {
-    // An all-day event with no end covers its whole day. Collapsing it to a zero-width
-    // instant at local midnight is what dropped it from every window that started later that
-    // morning. The next day is reached in LOCAL days, not by adding 24 hours, so a day a DST
-    // transition makes 23 or 25 hours long still ends where the calendar says it does.
-    //
-    // The NaN arm is reachable only at the very end of the representable range: the day after
-    // '9999-12-31' is '10000-01-01', which is not a four-digit-year date and so does not
-    // resolve. Falling back to a flat 24 hours there is wrong about a DST transition and right
-    // about the thing that matters — an all-day event is never NARROWER than its own day, and
-    // collapsing it to local midnight is exactly the drop this branch exists to prevent.
+    // An all-day event with no end covers its whole day, reached in LOCAL days so a DST day
+    // still ends at midnight. The NaN arm is only '9999-12-31', whose next day does not resolve;
+    // a flat 24 hours there keeps the event at least as wide as its day.
     const nextMidnight = resolveCalendarInstantMs(nextDateOnly(event.start.trim()), anchorZone);
     endMs = Number.isNaN(nextMidnight) ? startMs + 24 * 60 * 60 * 1000 : nextMidnight;
   } else {
@@ -2750,40 +1972,12 @@ export function eventIntersectsWindow(
 }
 
 /**
- * Order events by the INSTANT their start names, ascending, in place.
+ * Order events by the INSTANT their start names, ascending, in place. Not a string sort:
+ * starts arrive as bare wall clocks, `Z` instants and bare dates, which interleave wrongly as
+ * text, and `limit` then cuts a genuinely earlier event. Zones come from `zoneForValue`, shared
+ * with the window filter (#139, #162).
  *
- * Not a string sort, and the difference is not cosmetic. `formatICalDate` drops the TZID
- * parameter, so one event's start reaches here as the bare `2026-03-25T08:30:00` (stored
- * `TZID=Australia/Sydney`, which is how Fastmail writes an event a user created) while the
- * next keeps its `Z` (how an external invitation usually arrives), and an all-day event is a
- * bare date. Compared as text those spellings interleave by their digits: on a +10:00 account
- * the zone-less 08:30 is 9.5 hours EARLIER than the 08:00Z beside it and sorted after it.
- * `limit` slices this list, and expansion means the cap is reached far more often, so the
- * wrong order silently cuts a genuinely earlier event and keeps a later one — under a summary
- * line promising the earliest N.
- *
- * Each start is resolved through the same machinery the window bounds use — but no longer
- * always in the CONFIGURED zone (#139). An event whose own start carries a `timeZone` ICU
- * can resolve is now sorted in ITS zone, the correct reading rather than a best-effort one;
- * the configured zone is only the fallback, used for a genuinely floating value (RFC 5545
- * §3.3.5 — no zone exists to sort it in, so the caller's own clock is the least-wrong guess)
- * and for a `timeZone` this server was handed but ICU cannot resolve (a Windows zone name
- * such as "AUS Eastern Standard Time" passed through verbatim rather than rejected). That
- * fallback matters beyond correctness: `zoneOffsetMsAt` throws on an unresolvable name, so
- * sorting by an unresolvable `timeZone` directly would fail the whole listing over one event.
- *
- * That choice is `zoneForValue`, CALLED rather than restated. The sort and the window filter
- * have to agree about which zone an event is in — a read that filtered an event in one zone
- * and ordered it in another would put it at the wrong place in a list `limit` then truncates —
- * and two copies of the rule are two things to keep in step. One copy is what let a
- * slash-prefixed TZID be normalised on one side and not the other (#162).
- *
- * `zone` may be undefined here, unlike in the filter, because a sort still has to produce an
- * order when no zone was configured at all; `resolveCalendarInstantMs` takes it from there.
- *
- * An unreadable or absent start sorts FIRST. It cannot be placed, and placing it last would
- * put it where `limit` truncates — the one position that turns "cannot order this" into
- * "dropped this".
+ * An unreadable or absent start sorts FIRST: last is where `limit` truncates.
  */
 export function sortEventsByStart(events: CalendarEvent[], zone: string | undefined): void {
   const instants = new Map<CalendarEvent, number>();
@@ -2804,37 +1998,13 @@ export function sortEventsByStart(events: CalendarEvent[], zone: string | undefi
 /**
  * How far a HALF-OPEN calendar window is allowed to run past the bound the caller gave.
  *
- * `startDate` alone, or `endDate` alone, is a natural call — the schema requires neither —
- * and the missing half has to be filled in with something. It used to be filled with
- * 1970-01-01 / 2099-12-31, which was harmless while the window was only a filter. It stopped
- * being harmless when the same window became the range the SERVER EXPANDS OVER: `expand`
- * makes Fastmail materialise one VEVENT per occurrence, so `startDate: <today>` on its own
- * asked it to generate every occurrence of every recurring event for the next 73 years —
- * roughly 26,600 VEVENTs for one daily series, and calendar content here is authored by
- * anyone who can send an invitation, including one carrying FREQ=MINUTELY. Cyrus caps the
- * iteration nowhere, and nothing on this side does either: the whole response is buffered,
- * every block copied by a global regex, parsed, filtered and sorted, and only THEN sliced to
- * `limit` — so `limit` is not a bound on any of the work.
+ * The window is also the range the SERVER EXPANDS OVER, one VEVENT per occurrence with no cap
+ * in Cyrus, and `limit` bounds none of that work, so the missing half of a one-sided window
+ * cannot be open-ended. A month is what a calendar client shows; Cyrus's JMAP
+ * `CalendarEvent/query` and Microsoft Graph's `calendarView` both require an upper bound.
  *
- * A MONTH is the span chosen. It answers the question a one-sided or bounds-free window is
- * actually asking — "what is coming up", "what led up to this date" — and it matches what a
- * calendar client puts on screen at a time, so the invented span is the one a caller reading
- * the answer already has in mind. The expanding APIs nearest to this one do not invent a span
- * at all: Cyrus's own JMAP `CalendarEvent/query` REJECTS an `expandRecurrences` query with no
- * upper bound, and Microsoft Graph's `calendarView` requires both bounds. Inventing a month is
- * already the generous reading; inventing a year was generous twice over, and it held an
- * ordinary daily series to a few hundred rows rather than a few dozen.
- *
- * 31 rather than 30 so the same date next month is always inside the span, from any starting
- * day in any month. The days are fixed 24-hour days, not local days, for the reason
- * `shiftIsoDays` gives: the span is invented rather than asked for, so a DST hour either side
- * of it is not a wrong answer to anything, and the note states the resulting instant.
- *
- * It bounds an INVENTED bound only — a caller that names both bounds gets exactly the window
- * it named, because that span is its own decision.
- *
- * The clamp is never silent: `windowClamp` names the window actually queried and how to ask
- * for more, so "nothing after that date" can't be read as an empty calendar.
+ * 31 so the same date next month is always inside. Fixed 24-hour days; see `shiftIsoDays`.
+ * Applies only to an INVENTED bound, and is disclosed through `windowClamp`.
  */
 export const CALENDAR_OPEN_WINDOW_DAYS = 31;
 
@@ -2842,62 +2012,34 @@ export const CALENDAR_OPEN_WINDOW_DAYS = 31;
  * How many in-window occurrences ONE CalDAV resource may expand to before this server declines
  * to materialise it.
  *
- * The window bound above covers one of the two ways to ask for an unbounded expansion; this
- * covers the other. A caller naming both bounds gets exactly the span it named, because the
- * span is its own decision — but the caller chooses the span and an ATTACKER chooses the
- * DENSITY. Calendar content here is authored by anyone who can send an invitation, and one
- * `FREQ=MINUTELY` series fills any window at all.
- *
- * 5000 is set where it passes the dense-but-real cases and trips the ones nothing legitimate
- * produces:
+ * The caller chooses the span but an invitation sender chooses the DENSITY: one
+ * `FREQ=MINUTELY` series fills any window. 5000 passes dense-but-real cases:
  *
  *   10 years of a DAILY series            3,653   passes
  *   a month at every 10 minutes           4,464   passes
  *   a month at every 5 minutes            8,928   trips
  *   a month of FREQ=MINUTELY             44,640   trips
  *
- * The count is of the blocks the server returned for the widened request, so it can slightly
- * exceed the in-window occurrence count; that imprecision is accepted rather than paying the
- * per-block parse the cap exists to avoid.
+ * It counts blocks returned for the widened request, so it can slightly exceed the in-window
+ * count, accepted to avoid a per-block parse. A tripped resource fails the call with an
+ * InvalidInputError naming the series.
  *
- * IT IS A PARSE-AND-SHOW THRESHOLD, NOT A RESPONSE SIZE. The response stays bounded by `limit`
- * (default 50, hard cap 500) exactly as before; this decides whether one resource's blocks are
- * parsed and offered at all.
- *
- * A TRIPPED RESOURCE FAILS THE CALL. `getCalendarEvents` throws an InvalidInputError naming the
- * series — title, id, occurrence count and calendar — on the first resource over the threshold,
- * and the caller narrows the window and asks again.
- *
- * THE RESIDUAL, stated because it is not fixed: this bounds what this server PARSES and SHOWS,
- * never what Cyrus generates or transfers. Cyrus's `expand_cb` returns 1 unconditionally and
- * its `CALDAV:max-instances` property has no handler, so there is no server-side result limit
- * to ask for; tsdav's `fetchCalendarObjects` has no limit or paging option and buffers the
- * whole multistatus before this code sees any of it. The fetch is the platform's; the parse
- * and the page are the work on this side, and that is what this bounds.
+ * RESIDUAL: this bounds what this server parses and shows, never what Cyrus generates or
+ * transfers. Cyrus's `expand_cb` has no limit and `CALDAV:max-instances` has no handler, and
+ * tsdav's `fetchCalendarObjects` buffers the whole multistatus with no paging.
  */
 export const CALENDAR_MAX_OCCURRENCES_PER_SERIES = 5000;
 
-// The ends of the four-digit-year range every consumer of these bounds can express. Past
-// them `toISOString` emits the expanded form (`+010000-12-30T…`), which tsdav rejects with a
-// plain Error — surfacing a caller-fixable argument as InternalError ("server-side, a bare
-// retry might work"), the exact misclassification the backwards-range check exists to avoid.
+// The four-digit-year range. Past it `toISOString` emits `+010000-...`, which tsdav rejects
+// with a plain Error, surfacing a caller-fixable argument as InternalError.
 const LATEST_REPRESENTABLE_INSTANT = '9999-12-31T23:59:59Z';
 const EARLIEST_REPRESENTABLE_INSTANT = '0000-01-01T00:00:00Z';
 
 /**
- * Pull an already-resolved instant back inside the representable range.
- *
- * Applies to a CALLER-NAMED bound as well as to the invented half, which is the half it used
- * to cover alone. A caller bound is not immune: the local-day rule resolves it through a zone,
- * and an offset is enough to push it over on its own — `endDate: "9999-12-31"` on a UTC-5
- * account resolves to `+010000-01-01T05:00:00Z`, and a date at the other end runs off the
- * bottom the same way. Every one of those reached tsdav's `^\d{4}` check as a plain Error, so
- * an argument the caller could have fixed was reported as a server fault.
- *
- * Saturating rather than rejecting, for the same reason the invented half saturates:
- * `9999-12-31` is a perfectly good question and the last representable instant answers it.
- * Never silently, though — a saturated caller bound is named in the window clamp, because
- * unlike the invented half it is a bound the caller DID choose and now is not getting.
+ * Pull an already-resolved instant back inside the representable range. Applies to a
+ * caller-named bound too: `endDate: "9999-12-31"` on a UTC-5 account resolves past year 9999.
+ * Saturates rather than rejects, since `9999-12-31` is a fair question; a saturated caller
+ * bound is named in the window clamp.
  */
 function saturateInstant(iso: string): string {
   if (/^\d{4}-/.test(iso)) return iso;
@@ -2905,46 +2047,27 @@ function saturateInstant(iso: string): string {
 }
 
 /**
- * Which end of the representable range a value `saturateInstant` moved was pulled to.
- *
- * Only meaningful for a value that DID move — the caller establishes that by comparing the
- * saturated value against the raw one, which is the same test that decides whether to disclose.
+ * Which end a value `saturateInstant` moved was pulled to. Only meaningful for a value that did
+ * move.
  */
 function saturationEdge(saturatedValue: string): 'earliest' | 'latest' {
   return saturatedValue === EARLIEST_REPRESENTABLE_INSTANT ? 'earliest' : 'latest';
 }
 
 /**
- * Shift an ISO-8601 UTC instant by whole days, keeping the seconds-precision form, and
- * SATURATING at the ends of the representable range rather than running past them.
+ * Shift an ISO-8601 UTC instant by whole days, saturating at the representable range.
  *
- * Saturating rather than rejecting because this only ever fills in a bound the caller did NOT
- * give: `startDate: 9999-12-30` is a perfectly good question, and the invented other half
- * landing on the last representable instant answers it. The clamp note states the range
- * actually searched either way, so the saturation is disclosed like any other clamp.
- *
- * The 24-hour day here is deliberate, and deliberately NOT the local-day arithmetic
- * `coerceCalendarWindowEnd` uses. That one advances a bound the CALLER named, where landing an
- * hour inside or past their day is a wrong answer to a question they asked. This one invents a
- * span nobody named, chosen for being roughly a month; a DST hour either side of an arbitrary
- * 31-day bound is not a wrong answer to anything, and the note names the resulting instant.
- *
- * The example that reaches the saturation is `startDate: "9999-12-30"` ON ITS OWN, where the
- * invented END has nowhere to go. `endDate` alone runs the other way and cannot saturate at
- * that end, so the two directions are not interchangeable in an example.
+ * 24-hour days deliberately, NOT `coerceCalendarWindowEnd`'s local days: that advances a bound
+ * the caller named, while this invents one nobody named, so a DST hour is not a wrong answer
+ * and the note names the resulting instant.
  */
 function shiftIsoDays(iso: string, days: number): string {
   return shiftIsoMs(iso, days * 24 * 60 * 60 * 1000);
 }
 
 /**
- * Shift an ISO-8601 UTC instant by milliseconds, keeping the seconds-precision form and
- * SATURATING at the ends of the representable range.
- *
- * Saturation is not optional here. `endDate: "9999-12-31"` plus the request margin below runs
- * off the four-digit year, `toISOString` answers with the expanded `+010000-…` form, and
- * tsdav's `^\d{4}` check throws a plain Error — an InternalError ("server-side, a bare retry
- * might work") raised over an argument the caller could have fixed.
+ * Shift an ISO-8601 UTC instant by milliseconds, saturating at the representable range: the
+ * request margin below pushes `endDate: "9999-12-31"` past it.
  */
 function shiftIsoMs(iso: string, ms: number): string {
   const shifted = new Date(Date.parse(iso) + ms)
@@ -2953,63 +2076,26 @@ function shiftIsoMs(iso: string, ms: number): string {
   return saturateInstant(shifted);
 }
 
-// The widest UTC offset any IANA zone has ever used (+14:00 for Kiritimati; the negative
-// extreme is smaller, so one bound covers both directions), and therefore how far the range
-// SENT TO THE SERVER runs past the window the caller asked for, at each edge (#162).
-//
-// The margin lives here, on the request, because that is the only place it does any work. A
-// client-side filter cannot keep an event the server never sent, and the server withholds two
-// kinds of event from a narrow window — both measured against the live server by
-// scripts/probes/calendar-window-frames.probe.mjs, neither fixable downstream:
-//
-//   AN ALL-DAY EVENT. Cyrus matches a date-only value on its UTC day, and `<C:expand>` emits
-//     zero VEVENTs for a window that touches that UTC day without containing it. "The morning
-//     of the 12th" on a UTC+10 account therefore returned no occurrence at all.
-//   A FLOATING TIME. It is resolved as UTC server-side, so a floating 20:00 sits outside the
-//     same account's local-evening window.
-//
-// Fourteen hours covers the worst case of either, in either direction. What comes back is then
-// judged EXACTLY, by `eventIntersectsWindow`, against the window the caller actually asked
-// for — so widening the request costs the caller nothing but the rows the filter then trims.
+// The widest UTC offset any IANA zone has used (+14:00), and so how far the range SENT TO THE
+// SERVER runs past the caller's window at each edge (#162). Cyrus matches an all-day value on
+// its UTC day and resolves a floating time as UTC, so a narrow window loses both server-side
+// (scripts/probes/calendar-window-frames.probe.mjs). `eventIntersectsWindow` then judges
+// exactly.
 const MAX_UTC_OFFSET_MS = 14 * 60 * 60 * 1000;
-
-// The window arguments quoted back in a rejection go through the SHARED echo in coerce.ts:
-// scrubbed of the control characters that would forge extra lines, trimmed so the value shown
-// is the value the coercion actually judged, and cut with a visible marker. It is the same
-// helper the date rejections themselves use, so one message family cannot end up with two
-// policies (#141).
 
 // Calendar display names are server/user data of unbounded length, so a listing of them is
 // capped the way every other echoed list in this server is.
 export const CALENDAR_NAME_LIST_CAP = 20;
 
-// A calendar URL offered in the not-found error has to arrive USABLE, because it is offered
-// as a `calendarId` to paste straight back — and `echoCallerText`'s default limit of 60 cuts
-// every real one, with nothing in the truncated value to say it was cut. Fastmail's own
-// prefix, `https://caldav.fastmail.com/dav/calendars/user/`, is 47 characters before the
-// account's email address and the collection id even gets a look in. 200 clears a long
-// address with room to spare while still bounding what one entry can add to the message; the
-// list as a whole is bounded separately by CALENDAR_NAME_LIST_CAP. Display NAMES keep the
-// 60-char default: a name is offered to be recognised, not pasted, and a caller who sees it
-// truncated can still read it off `list_calendars`.
-//
-// Deliberately HERE rather than in coerce.ts beside DATE_ECHO_LIMIT and ZONE_ECHO_LIMIT: this
-// one has a single consumer, and it belongs next to CALENDAR_NAME_LIST_CAP, which bounds the
-// other half of the same message.
+// A calendar URL in the not-found error is offered as a `calendarId` to paste back, so it must
+// survive intact: Fastmail's prefix alone is 47 characters before the address. Names keep the
+// 60-char default, since they are read, not pasted.
 export const CALENDAR_URL_ECHO_LIMIT = 200;
 
 /**
- * The bound on ONE broken collection's path wherever it is echoed (#136) — the trailing note
- * the read tools carry, the write tools' note, and the two error messages that name it.
- *
- * Its own constant rather than a share of CALENDAR_URL_ECHO_LIMIT above, because the two are
- * bounding different things for different reasons and would drift apart under any change to
- * either. That one bounds a URL OFFERED AS A HANDLE — it has to survive intact or the caller
- * pastes back a value that fails again — so it is sized to clear Fastmail's own prefix plus an
- * address. This one bounds a path the caller is TOLD ABOUT and can do nothing with: it is
- * server-authored text arriving on a path that has already gone wrong, so it is cut where a
- * reader can still recognise which collection is meant, and it is cut with the shared echo's
- * visible marker so a truncated path can never be mistaken for a short one.
+ * The bound on ONE broken collection's path wherever it is echoed (#136). Not a share of
+ * CALENDAR_URL_ECHO_LIMIT: that is a handle that must survive, this is a path the caller can
+ * only recognise, not act on.
  */
 export const BROKEN_COLLECTION_PATH_ECHO_LIMIT = 160;
 
@@ -3020,68 +2106,35 @@ export const BROKEN_COLLECTION_PATH_ECHO_LIMIT = 160;
 export const BROKEN_COLLECTION_LIST_CAP = 5;
 
 /**
- * How many copies the ambiguity messages name before the rest are counted (#101).
- *
- * Higher than `BROKEN_COLLECTION_LIST_CAP` above, and deliberately so: that list is told to a
- * caller who can do nothing with it, while THIS list is the caller's only way out of the
- * refusal — a copy that is not named cannot be chosen. It is set well past the number of
- * calendars a real account holds, so the cap is a bound on a pathological account rather than a
- * limit a normal one meets, and the overflow is still counted so a truncated list can never read
- * as the whole set.
+ * How many copies the ambiguity messages name before the rest are counted (#101). Higher than
+ * `BROKEN_COLLECTION_LIST_CAP`: a copy that is not named cannot be chosen.
  */
 export const AMBIGUOUS_COPY_LIST_CAP = 12;
 
 /**
- * The bound on ONE copy's calendar AND resource URL wherever the ambiguity is reported (#101).
- *
- * Its own constant rather than `CALENDAR_URL_ECHO_LIMIT`'s 200, because the two bound different
- * URLs. That one bounds a COLLECTION url. This one bounds a url inside a collection — the same
- * value plus a resource name, and Fastmail names the resource after the event's UID, which is
- * written by whoever sent the invitation and is routinely a 36-character UUID and sometimes far
- * longer on an imported event. 320 leaves 120 characters for that name on top of a collection
- * url already sized generously.
- *
- * Sized to survive rather than merely to be recognised, and that is the whole reason it is not
- * a share of anything: this url is THE handle that tells two copies of one id apart, it is the
- * value the refusal tells the caller to pass back, and a resource url — unlike a collection
- * url — cannot be read off `list_calendars` afterwards. Truncated, it is not recoverable.
+ * The bound on ONE copy's calendar and resource URL in the ambiguity report (#101). A resource
+ * url is a collection url plus a UID-derived name (120 characters allowed here), and it is the
+ * handle the caller must pass back, unrecoverable elsewhere if truncated.
  */
 export const AMBIGUOUS_COPY_URL_ECHO_LIMIT = 320;
 
 /**
  * The bound on tsdav's own text inside the login refusal (#182).
  *
- * Wider than `describeUntrusted`'s 64-code-point default for the reason `PATH_ECHO_LIMIT` is
- * wider: what makes that text actionable sits at the END of it. tsdav writes
- * `Invalid credentials: PROPFIND <url> returned 401 Unauthorized`, and the url alone clears 64,
- * so the default cuts the status code off and leaves a refusal that says a request was made and
- * not what came back. 200 carries a real Fastmail principal url plus the status.
+ * Wider than `describeUntrusted`'s 64 default because the status code sits at the END of
+ * `Invalid credentials: PROPFIND <url> returned 401 Unauthorized`.
  */
 export const LOGIN_FAILURE_ECHO_LIMIT = 200;
 
 /**
  * Is this entry of the calendar-home listing BROKEN — i.e. did the server fail to describe it?
  *
- * ONE RULE COVERING BOTH FORMS a failure takes in what tsdav's parser hands back, because they
- * are the same event seen from two places in the multistatus:
+ * Covers both forms in tsdav's output: a failed RESPONSE (non-2xx status, no props) and a
+ * failed PROPSTAT (2xx element, but tsdav keeps props from 2xx propstats only, so
+ * `resourcetype` is gone).
  *
- *   - a failed RESPONSE element keeps its href and a non-2xx status, and carries no propstat
- *     at all (`props` reduces to `{}`);
- *   - a failed PROPSTAT leaves the element itself 2xx but strips the properties, because
- *     tsdav's reducer takes props from 2xx propstats only — so `resourcetype` is simply gone.
- *
- * And that is ALL the raw answer can say. The failure destroyed the display name and the
- * resourcetype together, so nothing here can tell a broken calendar from a broken address book,
- * a broken scheduling collection, or a broken anything else. Every message built on this says
- * "a collection … failed to list" for that reason, and none of them upgrades it to "a calendar".
- *
- * A MISSING resourcetype is the test, NOT an empty one. `<resourcetype/>` parses to `{}`, which
- * is a real answer — an ordinary non-collection resource — and flagging it would report every
- * healthy account as broken. `undefined` is the absence of an answer.
- *
- * `status` is required to be a NUMBER: tsdav always sets one (from the parsed status line, or
- * the HTTP response's), so a non-number is an entry nothing here observed a status for, which
- * is the same "not confirmed" class assertDavOk refuses to wave through.
+ * A MISSING resourcetype is the test, NOT an empty one: `<resourcetype/>` parses to `{}`, an
+ * ordinary resource. A non-number `status` is unconfirmed, as in assertDavOk.
  */
 export function isBrokenCalendarHomeEntry(entry: DAVResponse): boolean {
   const status = entry?.status;
@@ -3099,19 +2152,10 @@ function resolveCollectionUrl(url: string, base: string): URL | undefined {
 }
 
 /**
- * The comparable form of a collection path: its SEGMENTS, each decoded on its own.
- *
- * Decoded because the two sides come from different places — the calendar home URL is the one
- * tsdav resolved at login, each href is whatever the server wrote in its multistatus — and
- * Fastmail's home path carries an email address, so one side spelling `@` as `%40` would make
- * every child look like it sat somewhere else. A malformed escape falls back to that segment's
- * raw text, so both sides still agree on it.
- *
- * SEGMENTS, not one decoded string, because `%2F` inside a segment decodes to a separator that
- * was never a separator. Decoded whole, `/dav/…/probe%2Fwobbly/` reads as a child of
- * `/dav/…/probe/` and gets reported as a broken collection inside this account's calendar home
- * — an href the server can legally write about somewhere else entirely. Comparing segment by
- * segment keeps a decoded slash inside the segment it came from, where it cannot match.
+ * The comparable form of a collection path: its SEGMENTS, each decoded on its own. Decoded
+ * because the two sides may spell the address's `@` differently (`%40`); per segment because a
+ * decoded `%2F` would otherwise become a separator, making `/dav/.../probe%2Fwobbly/` read as a
+ * child of `/dav/.../probe/`.
  */
 function collectionPathSegments(pathname: string): string[] {
   return pathname
@@ -3128,14 +2172,8 @@ function collectionPathSegments(pathname: string): string[] {
 }
 
 /**
- * Is `entry` a path strictly BELOW `container` — inside it, and not the container itself?
- *
- * SEGMENT ARRAYS on both sides, never joined strings, for the `%2F` reason spelled out on
- * `collectionPathSegments`. Two callers ask it the same question about different containers:
- * the broken-collection detection asks it about the calendar home (#136), and the url form of
- * an event id asks it about one calendar collection (#137). A plain string-prefix test would
- * answer both wrongly — `/dav/…/personal-archive/x.ics` starts with `/dav/…/personal` — and
- * the segment comparison is what makes "underneath" mean underneath.
+ * Is `entry` a path strictly BELOW `container`? Segment arrays, never a string prefix, which
+ * would put `/dav/.../personal-archive/x.ics` under `/dav/.../personal` (#136, #137).
  */
 function isPathStrictlyInside(container: string[], entry: string[]): boolean {
   if (entry.length <= container.length) return false;
@@ -3143,18 +2181,9 @@ function isPathStrictlyInside(container: string[], entry: string[]): boolean {
 }
 
 /**
- * The base a relative CalDAV url is resolved against before the confinement test below.
- *
- * It is NEVER a request target and no request is ever made to it: it exists so that both sides
- * of the comparison — a discovered calendar's url and the caller's event id — land on ONE
- * origin when either is written as a relative reference, which is the only way a comparison of
- * origins means anything for both. In production both sides are absolute (tsdav absolutises
- * every href it hands back), so this base is ignored on both; it is what test fixtures written
- * with relative collection paths compare under, and it is what makes a bare relative id like
- * `meeting.ics` resolve OUTSIDE every discovered calendar rather than inside all of them.
- *
- * `.invalid` is the RFC 2606 reserved TLD, so the value cannot name a real host even by
- * accident.
+ * The base a relative CalDAV url is resolved against for the confinement test below. NEVER a
+ * request target: it puts both sides on one origin, and makes a bare `meeting.ics` resolve
+ * outside every calendar. `.invalid` is RFC 2606 reserved.
  */
 const CALDAV_URL_MATCH_BASE = 'https://caldav.invalid/';
 
@@ -3162,22 +2191,11 @@ const CALDAV_URL_MATCH_BASE = 'https://caldav.invalid/';
  * The calendars a caller-supplied URL-shaped event id sits inside, and the resource url to ask
  * each of them for (#137).
  *
- * THE CALLER'S STRING IS NEVER ITSELF A REQUEST TARGET. This client carries the CalDAV app
- * password on every request it makes and nothing else confines where it points, so an id that
- * looks like a URL is resolved by MATCHING it against the collections discovery already found
- * — origin, then path segments — and only a string that lands underneath one of them produces
- * an addressed fetch, made against that known collection. A url that matches nothing is not
- * fetched at all; it simply resolves to no copy, and the caller gets the ordinary not-found.
+ * THE CALLER'S STRING IS NEVER ITSELF A REQUEST TARGET. Every request carries the app password,
+ * so a url-shaped id is MATCHED against discovered collections (origin, then path segments) and
+ * only a match produces a fetch against that known collection; anything else is not-found.
  *
- * The match is on a SEGMENT BOUNDARY (`isPathStrictlyInside`), and each segment is decoded on
- * its own (`collectionPathSegments`), for the `%2F` reason #136 already had to handle: decoded
- * whole, `/dav/…/personal%2Fevil/x.ics` reads as a child of `/dav/…/personal/` when it is
- * nothing of the kind. Discovered collection urls end in `/`, so a plain prefix test would in
- * fact hold on every real value — the segment rule is defensive, and its test is a pin on that
- * defence rather than a reproduction of a bug anyone saw.
- *
- * A list rather than a single target because nothing forbids two discovered collections from
- * nesting; the caller of this dedupes what comes back by resource url either way.
+ * A list because nothing forbids two discovered collections from nesting.
  */
 function resolveEventUrlTargets(
   eventId: string,
@@ -3200,9 +2218,7 @@ function resolveEventUrlTargets(
 }
 
 /**
- * The `filters` tsdav forwards verbatim into a calendar-query REPORT body, taken from the
- * library's own signature so a tsdav upgrade that changes the shape lands here rather than in
- * a cast that has quietly become a lie.
+ * Taken from tsdav's own signature so an upgrade that changes the shape surfaces here.
  */
 type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjects']>[0]['filters']>;
 
@@ -3210,17 +2226,9 @@ type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjec
  * Which hrefs a calendar-object fetch will request. Passed by EVERY `fetchCalendarObjects`
  * call in this file, so that no read reaches a record another read reports as absent (#191).
  *
- * It replaces tsdav's default, `url.includes('.ics')`, which decides a resource's KIND from
- * its NAME — something no part of CalDAV promises — and which tsdav applies BEFORE the
- * multiget, so a resource stored as `.ICS`, extensionless or as a bare UUID was unreachable.
- * Nothing is lost by accepting every name, because what actually keeps non-VEVENT resources
- * out is the VEVENT comp-filter the server is asked for (tsdav's own default filter and
- * `uidEqualsFilter` both carry one) and the `extractVEvent` null-skip on the addressed path.
- *
- * The collection's own url must be excluded HERE: tsdav's calendar branch has no exclusion of
- * its own — unlike its address-book branch — and the name-based default only happened to drop
- * a collection href for want of an `.ics`. `urlEquals` is tsdav's own normalisation, so the
- * two agree about trailing slashes.
+ * Replaces tsdav's default `url.includes('.ics')`, which judges KIND by NAME and made `.ICS` or
+ * extensionless resources unreachable. The VEVENT comp-filter is what keeps other resources
+ * out. The collection's own url must be excluded HERE: tsdav's calendar branch does not.
  */
 function calendarResourceUrlFilter(collectionUrl: string | undefined): (url: string) => boolean {
   return (url: string) => Boolean(url) && !urlEquals(url, collectionUrl);
@@ -3230,39 +2238,14 @@ function calendarResourceUrlFilter(collectionUrl: string | undefined): (url: str
  * The CalDAV `calendar-query` filter that asks one collection for the resources whose VEVENT
  * carries exactly this UID (#137).
  *
- * The shape is the one MEASURED against the live account, not one read off a spec — see
- * `scripts/probes/calendar-uid-query.probe.mjs`, which settled every fact this filter rests on:
+ * MEASURED against the live account (scripts/probes/calendar-uid-query.probe.mjs): Cyrus
+ * honours the CardDAV `match-type` attribute (RFC 6352 §10.5.1) on CalDAV, and with no
+ * `collation` RFC 4791's default `i;ascii-casemap` makes `equals` case-INSENSITIVE. So the
+ * caller's exact-equality check on the PARSED UID is LOAD-BEARING: a loose match would invent
+ * an ambiguity and freeze the writes (#101).
  *
- *   - `match-type` is a CardDAV attribute (RFC 6352 §10.5.1); RFC 4791's own `text-match` has
- *     no such attribute and defaults to CONTAINS semantics. Fastmail's Cyrus honours it on
- *     CalDAV all the same, and the probe's substring query returns zero resources, which is
- *     what says so;
- *   - NO `collation` attribute, so RFC 4791's default `i;ascii-casemap` applies — which is
- *     ASCII case-INSENSITIVE. `equals` under it was measured matching a case-variant UID.
- *
- * That last fact is why the caller's own exact-equality check on the PARSED UID is LOAD-BEARING
- * rather than belt-and-braces, and it is stated there too: this filter narrows what the server
- * sends, and a server matching more loosely than it was asked to still cannot manufacture a
- * copy past a client-side `===`. Two destructive tools count these copies, so a loose match
- * that reached them would not degrade the lookup — it would invent an ambiguity that is not
- * there, and freeze the writes on an id that names one record in the account (#101).
- *
- * xml-js compact form, which is what tsdav forwards verbatim into the REPORT body:
- * `_attributes` for attributes, `_text` for character data, unprefixed names taking the CalDAV
- * namespace.
- *
- * WHAT THE SERIALISER DOES AND DOES NOT NEUTRALISE, MEASURED against the xml-js build this repo
- * pins: `<`, `>` and `&` inside `_text` are escaped, so a UID cannot close this element and
- * write filter markup of its own — the caller's string reaches the server as character data,
- * whatever it spells. Those three are ALL it escapes; everything else is copied through as
- * written, the characters XML 1.0's `Char` production excludes included. What is left after the
- * UTF-8 encoder downstream repairs the surrogates (to U+FFFD, a legal `Char`) is the rest of
- * `Char`'s exclusions: the C0 characters other than tab, CR and LF, and the noncharacters
- * U+FFFE and U+FFFF. Those travel into the body raw, the document is ill-formed, and the server
- * answers 400. That class is closed at the top of `findCalendarObjectByUID` instead of here,
- * because the honest answer to an unsendable value is to refuse the ARGUMENT rather than to
- * send it and report the server's complaint — see XML_UNSENDABLE_CHARS, which also records what
- * stays sendable and why.
+ * xml-js escapes only `<`, `>` and `&` in `_text`, so a UID cannot inject markup; characters
+ * XML cannot carry are refused before this, see XML_UNSENDABLE_CHARS.
  */
 function uidEqualsFilter(uid: string): CalendarQueryFilters {
   return [{
@@ -3280,12 +2263,7 @@ function uidEqualsFilter(uid: string): CalendarQueryFilters {
 }
 
 /**
- * One copy of an event that a lookup RESOLVED, and the calendar it was found in.
- *
- * The calendar is carried as a label rather than the collection, because every consumer wants
- * the same thing from it — a name a caller would recognise, falling back to the url when the
- * collection has no display name — and that fallback is decided once here instead of at each
- * message that names it.
+ * One copy of an event that a lookup RESOLVED, and the label of the calendar it was found in.
  */
 interface CalendarObjectMatch {
   object: DAVCalendarObject;
@@ -3296,28 +2274,13 @@ interface CalendarObjectMatch {
  * What a lookup hands back: every copy the id resolved to, whether the caller ADDRESSED one of
  * them, and what discovery could not search.
  *
- * `matches` IS ORDERED, and the order is part of the contract rather than an accident of the
- * loop. In discovery order: the ADDRESSED copy first when there is one (see `addressed`), then
- * the UID matches, then anything else the url form resolved. `get_calendar_event` returns
- * `matches[0]` and says so on its tool surface, which is only a testable promise because the
- * order is stated here.
+ * `matches` IS ORDERED, and the order is contract: the ADDRESSED copy first, then UID matches,
+ * then anything else the url form resolved. `get_calendar_event` returns `matches[0]`.
  *
- * `addressed` says the caller's string was the ADDRESS of `matches[0]` — a href this code
- * resolved against a discovered collection and then fetched by name — and not merely a value
- * some record carries as its UID. The distinction is the whole reason the field exists.
- *
- * WHY IT DECIDES AMBIGUITY. A UID is written by whoever created the event, so anyone who can
- * send this account an invitation can mint a record whose UID is the literal resource url of an
- * event they want to freeze. Under a plain union that decoy joined the addressed record and
- * both write tools refused, offering as the remedy the very url the caller had just passed — a
- * dead loop, and it made `url` (which every one of these tools offers as the way OUT of an
- * ambiguity) itself ambiguous. Addressing cannot be imitated: a record answers to its own url
- * and no other, so when one was addressed, that is the record the id names and the write tools
- * act on it however many others spell it as a UID. At most one copy can be addressed, because
- * the url form resolves ONE href and the matches dedupe on resource url.
- *
- * A url-shaped id that addresses NOTHING is unchanged by any of this: nothing was addressed, so
- * the UID matches are all there is, and two of them are still an ambiguity.
+ * `addressed` means the caller's string was the resource url of `matches[0]`, not merely a UID.
+ * It DECIDES AMBIGUITY: an invitation sender can mint a decoy whose UID is another event's url,
+ * but addressing cannot be imitated, so an addressed record is the one the writes act on. At
+ * most one copy can be addressed.
  */
 interface CalendarObjectLookup {
   matches: CalendarObjectMatch[];
@@ -3326,52 +2289,24 @@ interface CalendarObjectLookup {
 }
 
 /**
- * Every unsendable character that SURVIVES TO THE WIRE. That is deliberately NOT the whole of
- * what XML 1.0's `Char` production excludes: `Char` also excludes the surrogates, and the UTF-8
- * encoder downstream of the serialiser repairs an unpaired one to U+FFFD before the body is
- * written, so it never reaches the server as itself (see below). What remains is narrower and
- * wider than "control characters": the C0 range except tab, LF and CR (those three are legal
- * character data), AND the two BMP noncharacters U+FFFE and U+FFFF.
+ * Every character XML 1.0's `Char` excludes that SURVIVES TO THE WIRE: C0 except tab, LF and
+ * CR, plus the noncharacters U+FFFE and U+FFFF. xml-js copies them raw, the server answers 400,
+ * and a plain Error would read as InternalError for a value only the caller can fix, so the
+ * argument is refused instead.
  *
- * Why this is a REJECT rather than a value that simply matches nothing: tsdav's xml-js
- * serialiser escapes `<`, `>` and `&` in a text node — MEASURED, see `uidEqualsFilter` — so a
- * hostile UID cannot inject markup into the REPORT. What it does not escape is this class: the
- * characters travel into the body RAW, the document is ill-formed, the server answers 400, and
- * a plain `Error` maps to `InternalError` — "server-side, a bare retry might work" — for a
- * value only the caller can fix. The full scan this replaced never sent the value anywhere, so
- * it came back not-found.
- *
- * THE NONCHARACTERS ARE NOT AN AFTERTHOUGHT, they are the case a C0-only guard got wrong. They
- * are not control characters, they encode to ordinary UTF-8 bytes (`EF BF BE`, `EF BF BF`), and
- * nothing between here and the wire alters them — so they reproduce exactly the 400 this guard
- * exists to prevent while looking nothing like the values it was first written for.
- *
- * WHAT IS DELIBERATELY NOT HERE, because each of these IS sendable and the server answers it:
- *   - tab, CR and LF — legal `Char`, so a value carrying one is sent and comes back not-found,
- *     which is the right answer for an id that is merely wrong rather than unsendable;
- *   - U+FDD0–U+FDEF — noncharacters that XML 1.0 nonetheless admits, unlike U+FFFE/U+FFFF;
- *   - lone surrogates — MEASURED: `TextEncoder` emits `EF BF BD` for an unpaired U+D800, so
- *     what reaches the wire is U+FFFD and the body stays well-formed. The encoder already
- *     neutralises them, and rejecting here would refuse an id the server would have answered.
+ * DELIBERATELY NOT HERE, because each is sendable: tab, CR and LF (legal `Char`, so the id just
+ * comes back not-found); U+FDD0-U+FDEF (admitted by XML 1.0); lone surrogates (MEASURED:
+ * `TextEncoder` repairs them to U+FFFD).
  */
 const XML_UNSENDABLE_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
 
 /**
  * Did this throw from an addressed multiget mean "there is no resource at that href"?
  *
- * tsdav collapses every failure into one message shape — `Collection query failed: <status>
- * <statusText>. …` — so the status is the ONLY signal, and this reads it rather than pretending
- * the failures are alike. 404 and 410 are the two that name an absent resource; every other
- * status, and a network-level throw carrying no such message at all, is about the collection or
- * the connection and belongs to the caller. See the call site for why reading 404 as "absent"
- * stays safe when a whole collection returns it.
- *
- * READS AN `Error`'s MESSAGE AND NOTHING ELSE, so a throw that is not an Error — which nothing
- * promises tsdav or a fetch polyfill will avoid — falls on the rethrow side rather than being
- * stringified into a match. The trailing `\b` is belt-and-braces against a longer number: an
- * HTTP status is three digits and this message interpolates one, so no reachable value reaches
- * it. It stays because the anchor costs nothing and the reason it is unreachable is a property
- * of tsdav's message, not of this function.
+ * tsdav collapses every failure into `Collection query failed: <status> <statusText>. ...`, so
+ * the status is the ONLY signal: 404 and 410 name an absent resource, anything else rethrows.
+ * A non-Error throw is not stringified into a match. See the call site for why a whole
+ * collection answering 404 is still safe.
  */
 function isAddressedResourceMissing(err: unknown): boolean {
   const message = err instanceof Error ? err.message : '';
@@ -3393,18 +2328,12 @@ interface UndecidedResource {
 /**
  * Settle `isRecurring` for the listing rows an EXPANDED read cannot decide (#155).
  *
- * WHAT CANNOT BE DECIDED, AND WHY IT IS NOT A GUESS. Cyrus strips the RRULE from a series'
- * FIRST expanded instance and gives it no RECURRENCE-ID (`expand_cb`, imap/http_caldav.c), so a
- * window holding that instance and no sibling yields a resource whose blob is one markerless
- * block — byte-identical in every respect this parser can read to a genuine one-off. Reading
- * the STORED resource answers it outright, because an unexpanded master keeps its rule.
+ * A series' first expanded instance with no sibling in the window is indistinguishable from a
+ * one-off (see `parseCalendarObjects`); the STORED resource keeps its rule. One request per
+ * calendar, covering nearly every row, since one-offs look the same.
  *
- * ONE REQUEST PER CALENDAR, but NOT a rare one: an ordinary one-off row is a single markerless
- * block too, so a typical listing re-reads nearly every row's stored payload.
- *
- * AN INCOMPLETE ANSWER FAILS THE WHOLE LISTING rather than dropping `isRecurring` from the rows
- * it could not settle, because absence of that field is this tool's claim that an event does
- * not repeat. Both properties are caller-visible; `docs/conventions.md` carries them in full.
+ * AN INCOMPLETE ANSWER FAILS THE WHOLE LISTING: an absent `isRecurring` claims the event does
+ * not repeat. See docs/conventions.md.
  */
 async function settleAmbiguousRecurrence(
   client: DAVClient,
@@ -3429,11 +2358,8 @@ async function settleAmbiguousRecurrence(
     if (!entry) continue;
     const ical = readCalendarData(res);
     if (ical === undefined) continue;
-    // A payload this parser reads no VEVENT out of has not answered the question:
-    // `isRecurringSeriesResource` returns false for it, and false here is not an absence of
-    // evidence but a positive claim that the event does not repeat. A payload whose keywords
-    // are lower-cased arrives this way — legal per RFC 5545 §3.1, and not what the marker
-    // scan reads.
+    // No readable VEVENT (e.g. lower-cased keywords) has not answered: `isRecurringSeriesResource`
+    // would return false, a positive "does not repeat".
     if (extractVEventBlocks(ical).length === 0) continue;
     answered.add(url);
     if (isRecurringSeriesResource(ical)) for (const row of entry.rows) row.isRecurring = true;
@@ -3452,11 +2378,9 @@ async function settleAmbiguousRecurrence(
 }
 
 /**
- * A resource url in one comparable form, whichever form the server wrote it in. Resolution is
- * against the collection url because a DAV server may name a resource with a bare path; an
- * already-absolute url survives resolution unchanged, which is why there is no branch for it.
- * An href that cannot be resolved at all is returned as it came rather than throwing, since the
- * url it is being matched against was built from the same unresolvable base.
+ * A resource url in one comparable form, resolved against the collection since a DAV server may
+ * write a bare path. An unresolvable href is returned as it came: its counterpart was built from
+ * the same base.
  */
 function resolveResponseHref(href: string, collectionUrl: string | undefined): string {
   try {
@@ -3467,10 +2391,7 @@ function resolveResponseHref(href: string, collectionUrl: string | undefined): s
 }
 
 /**
- * A resource url in the form a `<D:href>` in a multiget body takes: path and query, no origin.
- * That is what tsdav writes for every other request it builds, and what a row url has to be
- * converted back to, because tsdav resolves every href it hands us to an absolute url first.
- * A url that cannot be resolved is sent as it came, which is already a path.
+ * A resource url as a multiget `<D:href>`: path and query, no origin, as tsdav writes its own.
  */
 function toRequestHref(url: string, collectionUrl: string | undefined): string {
   try {
@@ -3490,9 +2411,8 @@ function readCalendarData(res: DAVResponse): string | undefined {
 }
 
 /**
- * The resolved copies as a caller sees them (#101), for the write refusal and the read
- * disclosure alike. `isResolvedCalendarObject` is what makes `object.url` safe to read here: a
- * match with no usable url is not a match at all.
+ * The resolved copies as a caller sees them (#101). `object.url` is safe here because
+ * `isResolvedCalendarObject` admitted only matches that carry one.
  */
 function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
   return matches.map(m => ({ calendar: m.calendarLabel, url: m.object.url }));
@@ -3501,21 +2421,10 @@ function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
 /**
  * Did this resource come back COMPLETE enough to be acted on?
  *
- * A resolved copy has to carry all three of a url, a parseable VEVENT and an etag, and the rule
- * is one rule for all three tools and both resolution paths rather than a per-tool test,
- * because the strictest consumer sets it and the others gain nothing by being laxer:
- *
- *   - the URL is what the write is addressed to;
- *   - the DATA is what `isRecurringSeriesResource` reads, and that check is the only thing
- *     standing between `delete_calendar_event` and a cancellation mailed to every attendee of a
- *     series — a payload-less resource would sail past it as "not recurring";
- *   - the ETAG is the `If-Match` of the write. tsdav runs its delete headers through
- *     `cleanupFalsy`, so an object with no etag is sent with NO `If-Match` at all and the
- *     resource is destroyed unconditionally — whatever it has become since it was read.
- *
- * A server that answers with a resource this incomplete has not described the record, so the
- * honest answer is that nothing resolved, not that something did and is missing its parts. The
- * live account was measured returning both data and a non-empty etag on every matched resource
+ * One rule for every tool and both resolution paths: a url (the write's address), a parseable
+ * VEVENT (what the recurrence refusal reads; without it a series passes as "not recurring"),
+ * and an etag (tsdav's `cleanupFalsy` drops an empty `If-Match`, so the delete would be
+ * unconditional). Measured present on every live match
  * (`scripts/probes/calendar-uid-query.probe.mjs`, step 2).
  */
 function isResolvedCalendarObject(obj: DAVCalendarObject): boolean {
@@ -3529,28 +2438,15 @@ function isResolvedCalendarObject(obj: DAVCalendarObject): boolean {
 /**
  * The collections inside `homeUrl`'s own PROPFIND answer that failed to list (#136).
  *
- * An entry qualifies when its href sits UNDER the calendar home, is NOT the home itself, and
- * `isBrokenCalendarHomeEntry` says the server did not describe it. The two positional
- * conditions are what keeps a REQUEST-level failure out of this list, and that distinction is
- * the whole reason they are here rather than being taken for granted:
- *
- *   - a non-multistatus or non-2xx body becomes ONE pseudo-entry whose href is the request URL
- *     (or nothing at all, for a null response element). No href, or the home's own href, means
- *     the home did not answer — which is #100's case, reported by the empty-list guard in
- *     `discoverCalendars` as a whole-discovery failure, and never as one broken child;
- *   - the home's own response element in a healthy depth-1 listing is a collection with no
- *     `calendar` resourcetype. It is not a calendar and never was, so it is not a loss.
- *
- * "Under the home" is tested on the ORIGIN as well as the path. A multistatus href may be an
- * absolute URL on any host — legal, and how a server points at a collection it does not itself
- * hold — and a path-only comparison would read one as a collection inside this account and echo
- * a foreign URL into the note as though it were the caller's.
+ * An entry qualifies when its href is strictly UNDER the home (origin and path) and
+ * `isBrokenCalendarHomeEntry` says so. The positional test keeps a REQUEST-level failure, whose
+ * pseudo-entry carries the request URL or no href, out of this list: that is a whole-discovery
+ * failure (#100), reported by `discoverCalendars`. The origin test stops a foreign absolute href
+ * being echoed as the caller's.
  */
 export function findBrokenCalendarHomeCollections(entries: DAVResponse[], homeUrl: string): BrokenCollections {
   const home = resolveCollectionUrl(homeUrl, homeUrl);
-  // No resolvable calendar home means there is no inside to be inside of, and every test below
-  // would be against nothing. Silence is the safe direction: a missed disclosure, never a
-  // healthy collection reported broken.
+  // Silence is the safe direction: a missed disclosure, never a healthy collection reported.
   if (home === undefined) return [];
   const homeSegments = collectionPathSegments(home.pathname);
   const broken: string[] = [];
@@ -3571,10 +2467,7 @@ export function findBrokenCalendarHomeCollections(entries: DAVResponse[], homeUr
 }
 
 /**
- * The internal always-a-list form turned into the result field, which is ABSENT when nothing
- * broke. Silence is the published "every collection answered" signal, the same discipline the
- * window clamp and the Trash/Spam exclusion follow: an empty array on every healthy response
- * would be a field to interpret rather than a disclosure to act on.
+ * The result field, ABSENT when nothing broke, as the window clamp is.
  */
 function asBrokenCollectionsField(broken: BrokenCollections): BrokenCollections | undefined {
   return broken.length > 0 ? broken : undefined;
@@ -3588,13 +2481,7 @@ interface DiscoveredCalendars {
 
 /**
  * The bytes of one DAV answer, kept so the detection can re-read exactly what tsdav parsed.
- *
- * No `statusText`: the reason phrase is server-authored prose that nothing in the replay reads,
- * and the `Response` constructor THROWS on a control character or DEL in it. Every phrase the
- * grammar actually allows is accepted, so this is not a legal-input problem — it is that a
- * lenient HTTP parser can hand through a phrase the grammar does not allow, and then an
- * otherwise perfect 207 would throw inside the reconstruction and silently cost the detection.
- * A failure caused entirely by copying a value nobody wanted.
+ * No `statusText`: nothing reads it, and the `Response` constructor throws on a malformed one.
  */
 interface CapturedDavAnswer {
   body: string;
@@ -3605,26 +2492,16 @@ interface CapturedDavAnswer {
 /**
  * Re-parse a captured calendar-home answer and report its broken collections (#136).
  *
- * The parse is TSDAV'S OWN, not a second implementation of it: `davRequest` accepts a `fetch`
- * override, so it is handed one that replays the captured bytes and never touches a network.
- * That matters because the detection has to see the entries exactly as `fetchCalendars` saw
- * them — the same status-line reading, the same 2xx-propstats-only property reducer — or it
- * would be judging a different answer from the one that produced the list.
- *
- * A parse that cannot be completed reports NOTHING BROKEN rather than throwing. The likeliest
- * reason is that the answer was never a multistatus — the request-level case, which
- * `discoverCalendars`' empty-list guard already reports as a whole-discovery failure, so there
- * is nothing this could add — and for any other reason, an answer this cannot read is one it
- * cannot judge. Silence is the safe direction: a missed disclosure, never a healthy collection
- * reported broken, and never a disclosure that becomes an exception of its own.
+ * TSDAV'S OWN parse, via a `fetch` override that replays the captured bytes, so the detection
+ * sees exactly what `fetchCalendars` saw. A parse that fails reports nothing broken rather than
+ * throwing: most likely it was never a multistatus, which `discoverCalendars` already reports.
  */
 async function brokenCollectionsInAnswer(captured: CapturedDavAnswer, homeUrl: string): Promise<BrokenCollections> {
   let entries: DAVResponse[];
   try {
     entries = await davRequest({
       url: homeUrl,
-      // No body is sent anywhere — the replaying fetch below ignores everything — but
-      // `convertIncoming: false` keeps the request builder from serialising an absent one.
+      // Nothing is sent; `convertIncoming: false` stops the builder serialising an absent body.
       init: { method: 'PROPFIND', body: undefined },
       convertIncoming: false,
       fetch: async () => new Response(captured.body, {
@@ -3639,14 +2516,8 @@ async function brokenCollectionsInAnswer(captured: CapturedDavAnswer, homeUrl: s
 }
 
 /**
- * The part of the broken-collection disclosure that ends "… in the calendar list failed to
- * list" — the only part of it that is TRUE OF EVERY COUNT (#136).
- *
- * Exported so the tool descriptions quote a string a caller will actually see. The subject in
- * front of it varies with the count ("a collection …" / "3 collections …"), so a description
- * quoting the singular sentence whole would name a line that never prints on a two-collection
- * failure — and a model that cannot find the line it was told to look for reads that as "no
- * note", the one conclusion this disclosure must never produce.
+ * The part of the broken-collection disclosure TRUE OF EVERY COUNT (#136), exported so the tool
+ * descriptions quote a string that always prints; the subject before it varies with the count.
  */
 export const BROKEN_COLLECTION_PHRASE = 'in the calendar list failed to list';
 
@@ -3666,19 +2537,10 @@ export interface BrokenCollectionSummary {
  * The shared half of the broken-collection disclosure: the subject, the capped path list, and
  * the sentence bounding what may be claimed (#136).
  *
- * ONE BUILDER because there are two surfaces and they must not drift: a returned note (built in
- * response-formatters.ts, where every other note's wording lives) and a THROWN clause, which
- * cannot go through a formatter. Maintained as two copies they already disagreed once — both
- * carried singular pronouns under a plural subject — so the count-dependent wording is written
- * here and each surface adds only its own framing and consequence.
- *
- * WHAT IT MAY CLAIM is fixed by what the answer can support: the failure destroys the display
- * name and the resourcetype together, so nothing here can tell a broken calendar from a broken
- * address book. Neither surface upgrades "collection" to "calendar".
- *
- * Each path is echoed as a VALUE through the shared echo — scrubbed of the characters that
- * would forge extra lines, trimmed, cut with a visible marker — and never the finished
- * sentence. See docs/conventions.md.
+ * ONE BUILDER for both surfaces, the returned note (response-formatters.ts) and a THROWN clause,
+ * so the count-dependent wording cannot drift. Neither may upgrade "collection" to "calendar"
+ * (see `BrokenCollections`). Each path is echoed as a value, never the finished sentence
+ * (docs/conventions.md).
  */
 export function summariseBrokenCollections(broken: BrokenCollections): BrokenCollectionSummary {
   const shown = broken
@@ -3702,11 +2564,8 @@ export function summariseBrokenCollections(broken: BrokenCollections): BrokenCol
 }
 
 /**
- * The one clause that names the broken collections inside a THROWN message (#136).
- *
- * The framing around `summariseBrokenCollections` for an error: it has to read as an aside to
- * whatever the message was already about, because the caller's own problem — a bad id, a
- * missing event — is the sentence in front of it and may well be the real one.
+ * The clause naming broken collections inside a THROWN message (#136), worded as an aside: the
+ * caller's own problem in front of it may well be the real one.
  */
 function describeBrokenCollections(broken: BrokenCollections | undefined): string {
   if (!broken || broken.length === 0) return '';
@@ -3716,69 +2575,32 @@ function describeBrokenCollections(broken: BrokenCollections | undefined): strin
 }
 
 /**
- * The display name Fastmail gives the hidden task collection, which `list_calendars` filters
- * out. Named once so every place that hides it hides the same thing — including the
- * not-found error, which must not advertise a calendar the caller cannot see.
+ * The display name of Fastmail's hidden task collection, which `list_calendars` and the
+ * not-found error both hide.
  */
 const HIDDEN_TASK_CALENDAR_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
 
 /**
- * The one place a DAV `displayName` is turned into a name, because tsdav types it as `string`
- * and it is not one.
- *
- * tsdav 2.3.1 reads the property as `rs.props?.displayname?._cdata ?? rs.props?.displayname`
- * (`fetchCalendars`, dist/tsdav.cjs:1004) and hands the result straight through — unlike its
- * address-book path (:744), which guards with `typeof === 'string'`. What reaches us is
- * therefore whatever xml-js produced under tsdav's own parser options (:274-300). The
- * OBSERVED shapes, measured against xml-js with those options rather than assumed:
+ * The one place a DAV `displayName` is turned into a name: tsdav types it `string`, but hands
+ * through whatever xml-js produced (`fetchCalendars`, tsdav 2.3.1). MEASURED shapes:
  *
  *   <displayname>Work</displayname>                 "Work"          a plain string
  *   <displayname>2026</displayname>                 2026            a NUMBER
  *   <displayname>true</displayname>                 true            a BOOLEAN
  *   <displayname><![CDATA[2026]]></displayname>     "2026"          a STRING, not a number
- *       (a string by the time it reaches us: the raw `{_cdata:…}` shape is what the
- *        DEFENSIVE table below covers, because tsdav flattens it before we see it)
  *   <displayname/>  or  <displayname></displayname> {}              an EMPTY OBJECT
  *   <D:displayname xml:lang="en"/>                  {_attributes:…} an OBJECT
  *   <displayname>A</displayname> twice              ['A','B']       an ARRAY
  *   (property absent)                               undefined
  *
- * And the DEFENSIVE ones, which tsdav's own read means cannot arrive today — it flattens
- * `_cdata` before we see the value, and its `textFn` replaces an element with its text so
- * `_text` never survives either. They are handled in case tsdav changes that read, and are
- * NOT evidence about what a live server sends. Do not build a fixture on them believing it
- * reachable; that mistake is what made the first version of this fix claim a bug that could
- * not happen.
+ * `{_cdata}` and `{_text}` are DEFENSIVE only: tsdav flattens both today, so do not build a
+ * fixture believing them reachable.
  *
- *   <displayname><![CDATA[Work]]></displayname>     {_cdata:"Work"} tsdav flattens this today
- *   (a parser leaving compact text in place)        {_text:"Work"}  never produced today
- *
- * The number and boolean come from tsdav's `nativeType` (:104-114), which coerces any element
- * text that looks numeric or reads "true"/"false". It runs on TEXT ONLY, which is why the
- * CDATA row above differs from the plain row directly two lines up: xml-js routes character
- * data past the text callback, so `<![CDATA[2026]]>` survives as the string "2026" while the
- * same four characters written as text arrive as the number 2026. Both name the same
- * calendar, and this function reports both as "2026". THAT COERCION IS LOSSY BEFORE WE SEE IT: a
- * calendar named `1e3` arrives as the number 1000 and can only be listed as "1000", because
- * the original text is gone by then. What this function preserves is not the spelling but the
- * INVARIANT that matters — the name it returns is one the caller can pass straight back as a
- * `calendarId` and have it resolve, because both sides of that comparison come through here.
- * The empty object is xml-js compact mode: tsdav's `textFn` only fires when there IS text, so
- * an empty element keeps its bare compact form. Whitespace-only text is the same case,
- * because `trim: true` leaves nothing behind.
- *
- * The object cases are why this exists. `String({})` is `"[object Object]"` — a TRUTHY string,
- * so every `|| 'Unnamed'` fallback downstream is dead on exactly the input it was written for,
- * and the marker reached the caller as a calendar name.
- *
- * THE ARRAY IS A DELIBERATE DEGRADE, not an oversight: duplicate `<displayname>` elements are
- * a malformed collection, and the old code rendered them joined ("A,B") as though that were
- * the calendar's name. It is not one, so this returns undefined and each call site falls back
- * to something real (the URL, or "Unnamed").
- *
- * No URL fallback lives here. What an absent name should degrade to differs per call site (a
- * literal "Unnamed" in a listing, the collection URL in the too-dense refusal message and in an
- * error message's name list), so the helper answers only "is there a name, and what is it".
+ * tsdav's `nativeType` coerces numeric or boolean TEXT (not CDATA), lossily: `1e3` arrives as
+ * 1000. The invariant kept is that the returned name resolves when passed back as `calendarId`,
+ * since both sides come through here. `String({})` is a truthy "[object Object]", which is why
+ * this exists. An ARRAY (duplicate elements) is deliberately undefined, not "A,B". No fallback
+ * lives here: each call site degrades differently.
  */
 export function unwrapDisplayName(raw: unknown): string | undefined {
   const scalar =
@@ -3790,9 +2612,7 @@ export function unwrapDisplayName(raw: unknown): string | undefined {
     const trimmed = scalar.trim();
     return trimmed.length > 0 ? trimmed : undefined;
   }
-  // A name the parser typed for us is still the name the user gave the calendar, so it is
-  // rendered rather than discarded — a calendar called "2026" keeps its name instead of
-  // becoming "Unnamed". NaN/Infinity cannot come from `nativeType`, which rejects both.
+  // A parser-typed name is still the user's name for the calendar.
   if (typeof scalar === 'number' && Number.isFinite(scalar)) return String(scalar);
   if (typeof scalar === 'boolean') return String(scalar);
   return undefined;
@@ -3800,59 +2620,27 @@ export function unwrapDisplayName(raw: unknown): string | undefined {
 
 /** The calendars a caller is able to name, which is the only set worth listing back at them. */
 function selectableCalendars(calendars: DAVCalendar[]): DAVCalendar[] {
-  // Unwrapped before comparing, for WHITESPACE SYMMETRY and for consistency with every other
-  // read of this field — not because a typed name was leaking through. It was not: the shapes
-  // tsdav can hand back ({}, {_attributes}, a number, a boolean, an array) equal the hidden
-  // name under a raw comparison exactly as rarely as they do under this one, which is never.
-  // Nor is a padded exact name the exception: xml-js parses with `trim: true`, which trims
-  // plain text and CDATA alike, so `'  DEFAULT_TASK_CALENDAR_NAME  '` cannot reach this code
-  // either. There is NO reachable input where the raw comparison and this one disagree. The
-  // unwrap is symmetry insurance — every other read of this field goes through the helper, and
-  // a filter that compared raw would be the one place to re-check if that ever stopped being
-  // true.
   return calendars.filter(c => unwrapDisplayName(c.displayName) !== HIDDEN_TASK_CALENDAR_NAME);
 }
 
 /**
  * The one "no calendar matched that id" error, raised by BOTH the read and the write path.
  *
- * `calendarId` accepts a CalDAV URL or a display name, and the name is matched
- * CASE-SENSITIVELY — surrounding whitespace is ignored on both sides, and `list_calendars`
- * reports the trimmed name, so what it hands back is a value this parameter resolves. "work"
- * for a calendar called "Work" still misses, which is what made a shared, self-correcting
- * message worth more than a bare echo: the available names are listed, so a caller that
- * guessed the spelling can fix the call without a second `list_calendars` round-trip.
+ * Names are matched CASE-SENSITIVELY, so the available names are listed for the caller to fix
+ * the spelling. The listing is filtered HERE so neither path can advertise the hidden task
+ * collection.
  *
- * The listing is filtered HERE rather than at each call site, because the two call sites
- * passed different lists: the read path had already dropped the hidden task collection and
- * the write path had not, so a mistyped id on a create answered with a calendar name that
- * `list_calendars` never shows and no call can obtain. A shared message is only one rule if
- * it is given one input.
- *
- * `broken` (#136) is what turns this into the refusal for a caller who named a collection that
- * FAILED TO LIST. That caller cannot be answered any other way: the failure destroyed the
- * collection's display name, so a name-based miss is indistinguishable from a typo, and its
- * path was filtered out of the calendar list, so a path-based miss lands here too. Naming the
- * broken paths in the same message is what puts the two facts side by side — "that id matched
- * nothing" and "one collection could not be described" — instead of leaving a caller to read
- * the first as proof the calendar does not exist. It is also, by construction, the refusal
- * `create_calendar_event` gives a target on the broken path: a collection that failed to list
- * never became a `DAVCalendar`, so it can never be the resolved write target, and every route
- * to it arrives here.
+ * `broken` (#136): a collection that failed to list has no name and no calendar entry, so any
+ * id aimed at it lands here; naming the broken paths stops the miss reading as proof the
+ * calendar does not exist.
  */
 function calendarNotFoundError(
   calendarId: unknown,
   available: DAVCalendar[],
   broken?: BrokenCollections,
 ): InvalidInputError {
-  // A nameless calendar is listed by its URL rather than dropped. Filtering it out left the
-  // caller a message that silently under-reported what they could name — and the URL is not a
-  // consolation prize here, it is a `calendarId` that works, which is exactly what this
-  // message exists to hand back. Never silently drop a promised field; see CLAUDE.md.
-  //
-  // Which is why the two carry DIFFERENT echo limits rather than sharing one. A URL that is
-  // offered as a working handle and then truncated is worse than one omitted: the caller
-  // pastes it back and gets this same error again, with nothing saying the value was cut.
+  // A nameless calendar is listed by its URL, a `calendarId` that works, at the URL bound so it
+  // survives being pasted back.
   const entries = selectableCalendars(available)
     .map(c => {
       const name = unwrapDisplayName(c.displayName);
@@ -3867,16 +2655,8 @@ function calendarNotFoundError(
     .join(', ');
   const more = entries.length > CALENDAR_NAME_LIST_CAP ? `, …and ${entries.length - CALENDAR_NAME_LIST_CAP} more` : '';
   const listing = entries.length > 0 ? ` Available calendars: ${shown}${more}.` : '';
-  // QUOTED. The two values this path exists to reject — an empty string and a whitespace-only
-  // one — render as nothing at all unquoted, so the message read "Calendar not found: ." with
-  // no sign of what had been rejected, while the available names two clauses later were
-  // quoted. Same value class, same sentence, so the same treatment.
-  //
-  // And echoed at the URL bound, not the 60-char default, because the value being REJECTED is
-  // itself often a URL — a caller who mistyped one is exactly who reaches here. 60 characters
-  // leaves nothing past the 47-character fixed prefix, so two different wrong URLs render
-  // byte-identical and the echo stops telling the caller which one they sent. Same bound the
-  // offered URLs get.
+  // Quoted so an empty or blank value is visible; at the URL bound because the rejected value is
+  // often a mistyped URL, which 60 characters would not distinguish.
   return new InvalidInputError(
     `Calendar not found: "${echoCallerText(calendarId, CALENDAR_URL_ECHO_LIMIT)}". calendarId takes either a calendar's URL ` +
     '(its `id` from list_calendars) or its display name, and the name is matched CASE-SENSITIVELY; ' +
@@ -3889,50 +2669,21 @@ function calendarNotFoundError(
  * The refusal BOTH calendar paths raise when a `calendarId` NAMES more than one calendar
  * (#173), written once so a read and a write state a single rule.
  *
- * WHY A REFUSAL RATHER THAN A PICK OR A UNION. A CalDAV display name is not unique per
- * account — a shared calendar is named by whoever owns it, and nothing stops a second one
- * carrying a name an existing calendar already has — so a name can resolve to two collections.
- * The two paths used to disagree about that, and both answers were wrong in their own
- * direction: the read UNIONED the matches, so "what is on my Work calendar" answered from two
- * calendars at once and named neither, while the create took the FIRST, writing the event into
- * whichever collection discovery happened to reach first and reporting success under the name
- * the caller had asked for, with nothing in the answer saying a choice had been made.
+ * A display name is not unique per account (a shared calendar is named by its owner), and
+ * neither a union nor a first pick says which calendar was meant.
  *
- * THE WAY OUT IS THE URL, AND IT CANNOT BE MADE AMBIGUOUS. A calendar's url ADDRESSES exactly
- * one collection; a name merely NAMES whatever carries it. So the resolver tries the url form
- * FIRST and stands down on ambiguity entirely once a url has matched — including against a
- * calendar whose display NAME is spelled as another calendar's url, which is a decoy anyone who
- * shares a calendar with this account can plant. Without that ordering the remedy this message
- * offers would be circular: the caller passes the url it asked for and is told again that their
- * value is ambiguous, with no next call to make. Same distinction, same reason, as the event-id
- * ambiguity (`ambiguousEventIdError`, #101); see docs/conventions.md.
- *
- * EVERY MATCH HAS A NAME, by construction: a calendar reaches this list only by its unwrapped
- * display name equalling the caller's, so the nameless-calendar fallback `calendarNotFoundError`
- * needs has nothing to do here. The name is still printed per entry rather than once, because
- * it is what the caller recognises the row by, and the pairing is what the event-id refusal
- * already prints.
+ * THE WAY OUT IS THE URL, which cannot be made ambiguous: the resolver tries the url form FIRST,
+ * so a decoy calendar whose NAME spells another's url cannot make the remedy circular. Same
+ * rule as `ambiguousEventIdError` (#101); see docs/conventions.md.
  */
 function ambiguousCalendarNameError(
   calendarId: unknown,
   matches: DAVCalendar[],
   broken?: BrokenCollections,
 ): InvalidInputError {
-  // The SAME caps and bounds `calendarNotFoundError` uses on its own list, because this is the
-  // same class of list — the account's calendars, echoed back at a caller — and two messages
-  // naming calendars must not cut them at two different lengths. CALENDAR_NAME_LIST_CAP bounds
-  // how many are named; the url gets CALENDAR_URL_ECHO_LIMIT because it is offered as a handle to
-  // paste straight back and a truncated one fails again silently, while the name keeps the shared
-  // echo's default because a name is offered to be recognised, not pasted. The overflow is
-  // counted, so a cut list can never read as the whole set.
-  //
-  // NOT `AMBIGUOUS_COPY_URL_ECHO_LIMIT`, though this is an ambiguity message and that constant is
-  // the wider one. Its stated reason does not reach here: it bounds a RESOURCE url, which cannot
-  // be read back off any tool once truncated, so it has to survive intact. These are COLLECTION
-  // urls, and `list_calendars` hands every one of them back unconditionally — a caller who gets a
-  // truncated url here has a listing that gives them the whole one. Same value class as
-  // `calendarNotFoundError` offers, so the same bound. (Considered and declined deliberately;
-  // do not "align" it with the event ambiguity's 320.)
+  // The same caps and bounds as `calendarNotFoundError`. Deliberately NOT
+  // `AMBIGUOUS_COPY_URL_ECHO_LIMIT`: these are COLLECTION urls, which `list_calendars` always
+  // hands back whole.
   const shown = matches
     .slice(0, CALENDAR_NAME_LIST_CAP)
     .map(c => `"${echoCallerText(unwrapDisplayName(c.displayName), undefined)}" ("${echoCallerText(c.url, CALENDAR_URL_ECHO_LIMIT)}")`)
@@ -3940,19 +2691,10 @@ function ambiguousCalendarNameError(
   const more = matches.length > CALENDAR_NAME_LIST_CAP
     ? `, …and ${matches.length - CALENDAR_NAME_LIST_CAP} more`
     : '';
-  // QUOTED, and that is the pairing rather than the decoration: every name and url here is
-  // written by whoever owns the calendar, `echoCallerText` neutralises the double quote, and a
-  // DOUBLE-quoted span is the only kind that swap protects. Echoed at the same bound
-  // `calendarNotFoundError` gives the same value for the same reason — one value class, one
-  // policy. (The reasons THAT message gives for quoting its own rejected value do not carry over:
-  // to reach here the value matched two display names exactly, so it is never empty and never a
-  // mistyped url.)
+  // Double-quoted because the echo's neutralisation protects only double-quoted spans.
   //
-  // THE BROKEN-COLLECTION CLAUSE IS NOT OPTIONAL HERE (#136). This message makes an ACCOUNT-WIDE
-  // count — "names N calendars in this account" — and a collection that failed to list was never
-  // searched, so it may hold an N+1th calendar of that name. Left off, the count reads as
-  // complete when it is a statement about the collections that answered. Never silently drop a
-  // promised field; see CLAUDE.md.
+  // THE BROKEN-COLLECTION CLAUSE IS NOT OPTIONAL (#136): an unsearched collection may hold one
+  // more calendar of that name, so the account-wide count would read as complete.
   return new InvalidInputError(
     `The calendarId "${echoCallerText(calendarId, CALENDAR_URL_ECHO_LIMIT)}" names ${matches.length} calendars ` +
     'in this account, and this server will not guess which one you mean. ' +
@@ -3964,31 +2706,12 @@ function ambiguousCalendarNameError(
 }
 
 /**
- * Resolve a `calendarId` to EXACTLY ONE calendar, or refuse — the one rule the read path and the
- * write path both state (#173).
+ * Resolve a `calendarId` to EXACTLY ONE calendar, or refuse: the one rule for the read and
+ * write paths (#173). The read path's read-everything branch is deliberately outside it.
  *
- * It is one function rather than two agreeing implementations because the two had already drifted
- * once: they shared the filtered list, the trim, the fail-closed treatment of an empty value and
- * the not-found error, and still disagreed about a tie. Anything either path needs to decide about
- * which calendar a string means is decided here, so the next difference has nowhere to appear.
- *
- * The read path's no-`calendarId` branch — read EVERY calendar — is deliberately outside this
- * function: that is not a resolution, and folding it in would mean returning "all of them" from a
- * helper whose whole promise is "exactly one".
- *
- * FAIL-CLOSED ON AN EMPTY VALUE, and only HALF of that falls out of the order. `''` and `'   '`
- * both trim to a value `unwrapDisplayName` answers undefined for, so the NAME arm can never match
- * one — that half needs no check. The URL arm is not free the same way: `c.url === requested` is a
- * raw comparison, so a calendar whose own url is the empty string would be ADDRESSED by an empty
- * `calendarId`, narrowing a read onto a calendar nobody named and, on the write path, creating an
- * event in it. Nothing here can promise a collection always has a usable url — this file's
- * neighbours already refuse that assumption (`calendarNotFoundError` reads it as
- * `typeof c.url === 'string' ? c.url.trim() : ''`, `getCalendars` writes `c.url || ''`) — so the
- * comparison is GUARDED rather than the claim re-worded. A calendar with no usable url cannot be
- * addressed by one; it is still nameable, and still listed by the not-found error.
- *
- * The caller that must NOT let an empty value through at all is the read path's presence test,
- * which decides between "resolve this" and "read everything" before ever calling here.
+ * FAIL-CLOSED ON AN EMPTY VALUE. The name arm cannot match a blank, but the URL comparison is
+ * raw, so it is GUARDED: a calendar with an empty url would otherwise be addressed by an empty
+ * `calendarId`. The read path's presence test must also stop an empty value reaching here.
  */
 function resolveCalendarTarget(
   calendarId: unknown,
@@ -3996,34 +2719,14 @@ function resolveCalendarTarget(
   broken?: BrokenCollections,
 ): DAVCalendar {
   const requested = typeof calendarId === 'string' ? calendarId.trim() : calendarId;
-  // BOTH SIDES through the same normaliser, so the comparison cannot drift. tsdav types a
-  // calendar's name away from string (a calendar called "2026" arrives as the number 2026), and
-  // normalising only the stored side turned a `calendarId` of 2026 — which matched by raw
-  // equality before — into "Calendar not found".
-  // Accepted knowingly: because the CALLER's value comes through here too, a property object such
-  // as `{_cdata: 'Work'}` resolves where it was rejected before. The inputSchema types
-  // `calendarId` as a string so no normal MCP call can produce that shape, and lenient coercion of
-  // what a caller sends is this repo's documented posture (docs/conventions.md) — so this is left
-  // as a widening, not guarded against.
+  // BOTH SIDES through the same normaliser: tsdav delivers a calendar called "2026" as a number.
+  // Accepted knowingly: a caller's `{_cdata: 'Work'}` now resolves too (lenient coercion,
+  // docs/conventions.md).
   const requestedName = unwrapDisplayName(requested);
 
-  // ADDRESSED BEATS NAMED, AND IT IS A SEPARATE PASS, which is the whole of the fix on the write
-  // path and not merely a tidier spelling of it. Both paths used to test url-or-name in ONE
-  // predicate, so nothing expressed a preference: the read path kept every match, and the write
-  // path's `find` returned whichever calendar DISCOVERY ORDER put first. Give the account a
-  // calendar whose display NAME is spelled as another calendar's url — a decoy anyone who shares
-  // a calendar with this account can plant, since they write its name — and list it before the
-  // calendar it imitates, and `create_calendar_event` handed the caller's exact url to the decoy
-  // BY NAME and wrote the event into it, reported as a success under the calendar the caller had
-  // asked for. Trying url first, alone, is what makes an address an address.
-  //
-  // It is also why the refusal below can offer "pass the url" without the remedy being circular.
-  // For the read path this changes one further case, deliberately: a string matching calendar A
-  // by url and calendar B by name used to answer from both, and now reads A alone — the calendar
-  // the caller addressed.
-  //
-  // The url must be a usable one on BOTH sides. See the fail-closed note above: an empty stored
-  // url would otherwise be addressed by an empty `calendarId`.
+  // ADDRESSED BEATS NAMED, in a SEPARATE PASS: one url-or-name predicate let a decoy calendar
+  // whose NAME spells another's url, listed first, receive the write. Guarded against an empty
+  // url, per the fail-closed note above.
   const addressed = selectable.find(
     c => typeof c.url === 'string' && c.url.length > 0 && c.url === requested,
   );
@@ -4032,15 +2735,8 @@ function resolveCalendarTarget(
   const named = requestedName === undefined
     ? []
     : selectable.filter(c => unwrapDisplayName(c.displayName) === requestedName);
-  // A calendarId that matches nothing used to leave the read path's list empty, so its loop never
-  // ran and the tool answered "Showing 0 of 0 results." — an availability question answered "you
-  // are free" because of a typo. Matching is exact, so "work" for "Work" is a plausible first-try
-  // miss. Both paths raise the same error through one helper so a caller sees one rule, not two,
-  // and this is also where a target on a BROKEN collection path lands (#136): a collection that
-  // failed to list never became a `DAVCalendar`, so it is never in `selectable`.
+  // A miss must throw: an empty read would answer "you are free" because of a typo.
   if (named.length === 0) throw calendarNotFoundError(calendarId, selectable, broken);
-  // `broken` reaches BOTH refusals, not just the not-found one: see ambiguousCalendarNameError on
-  // why an account-wide count needs it too.
   if (named.length > 1) throw ambiguousCalendarNameError(calendarId, named, broken);
   return named[0]!;
 }
@@ -4048,24 +2744,11 @@ function resolveCalendarTarget(
 /**
  * The one "no event matched that id" error, raised by get/update/delete alike.
  *
- * It gains the broken-collection clause for the same reason the calendar one does (#136): a
- * collection that failed to list was not searched, so "not found" is a statement about the
- * collections that answered and nothing else. Left bare, it tells a caller their id is wrong
- * about a record that may be sitting in the collection nobody could read.
+ * Carries the broken-collection clause (#136): an unsearched collection may hold the record.
  *
- * `eventId` is ECHOED AND QUOTED, the same treatment `calendarNotFoundError` gives the value it
- * rejects, and for a reason this message acquired when the clause was added: a caller-supplied
- * id sitting immediately in front of " Separately, a collection …" can write that sentence
- * itself, and a forged disclosure is worse than a missing one — it names a collection that never
- * broke, on an account where nothing did.
- *
- * THE QUOTES ARE NOT WHAT STOPS THAT — `echoCallerText` is. Quoting alone would have been
- * decoration: a `"` inside the value closes the span, and the forged sentence walks straight out
- * of it. The echo turns every `"` in the value into a `'`, so no quote pair in the finished
- * message comes from the caller's value — the broken-collection clause wraps each path it names
- * in one of its own — and the whole id stays inside the one pair this line wrote. The quotes
- * then do the job they are here for: showing where a value with spaces in it ends. Echoed at
- * the URL bound because the value reaching here is often a calendar-object URL.
+ * `eventId` is echoed so it cannot forge a " Separately, a collection ..." clause of its own:
+ * the echo, not the quotes, keeps it inside the one quote pair. At the URL bound because the
+ * id is often a resource url.
  */
 function eventNotFoundError(eventId: string, broken?: BrokenCollections): InvalidInputError {
   return new InvalidInputError(
@@ -4074,11 +2757,8 @@ function eventNotFoundError(eventId: string, broken?: BrokenCollections): Invali
 }
 
 /**
- * One copy of an event as a CALLER sees it: the calendar it is in, and the url that names it.
- *
- * The url is the point of the pair. A duplicated id names every copy equally, so the only thing
- * that picks one out is its own resource url — which is why this type exists at all rather than
- * a bare list of calendar names.
+ * One copy of an event as a CALLER sees it. The url is the point: it is the only thing that
+ * picks out one copy of a duplicated id.
  */
 export interface CalendarEventCopy {
   /** The calendar's display name, falling back to its url where the collection has none. */
@@ -4088,27 +2768,14 @@ export interface CalendarEventCopy {
 }
 
 /**
- * The copies an id resolved to, rendered for a message a caller reads.
- *
- * Shared by the write refusal and the read disclosure so the two cannot drift into describing
- * one account two ways. Every value in it is untrusted — a calendar display name is written by
- * whoever owns the calendar, and a resource url by the server — so both go through
- * `echoCallerText`, and both are rendered inside DOUBLE quotes, which is the pairing that
- * makes the echo's quote-neutralisation protect them: it turns a `"` in a value into a `'`, so
- * a value cannot close the span it sits in and write the rest of the sentence itself (#190).
+ * The copies an id resolved to, for the write refusal and the read disclosure alike. Every
+ * value is untrusted, so each is echoed inside DOUBLE quotes (#190).
  */
 export function describeEventCopies(copies: CalendarEventCopy[]): string {
   const listed = copies
     .slice(0, AMBIGUOUS_COPY_LIST_CAP)
-    // BOTH fields at the url bound, not just the url. `calendar` holds a display name OR, for
-    // a collection that has none, that collection's own url — and nothing here can tell which
-    // without re-deriving it. `echoCallerText`'s 60-char default cuts every real Fastmail
-    // collection url, so a nameless calendar would arrive as a truncated prefix identical to
-    // every other nameless calendar in the account: the one field distinguishing the copies
-    // would stop distinguishing them. `calendarNotFoundError` makes the same call for the same
-    // reason; it can afford to decide per entry only because it knows which kind each one is.
-    // The cost — a display name over 320 characters is cut at 320 rather than 60 — is bounded
-    // by AMBIGUOUS_COPY_LIST_CAP on the message as a whole.
+    // BOTH fields at the url bound: `calendar` may be a nameless collection's url, and at 60
+    // characters every such calendar would render identically.
     .map(c => `"${echoCallerText(c.calendar, AMBIGUOUS_COPY_URL_ECHO_LIMIT)}" ("${echoCallerText(c.url, AMBIGUOUS_COPY_URL_ECHO_LIMIT)}")`)
     .join(', ');
   const more = copies.length > AMBIGUOUS_COPY_LIST_CAP
@@ -4121,25 +2788,14 @@ export function describeEventCopies(copies: CalendarEventCopy[]): string {
  * The refusal `update_calendar_event` and `delete_calendar_event` raise when an id names more
  * than one record (#101), written once so the two read as a single rule.
  *
- * WHY A REFUSAL RATHER THAN A PICK. A UID is unique per COLLECTION, not per account, so two
- * calendars can hold one id — and the caller who typed that id named both. Acting on whichever
- * copy discovery happened to reach first would patch or destroy a record the caller did not
- * choose and say nothing about the one it left alone; on the delete path that is irreversible
- * and mails the wrong event's attendees.
+ * A UID is unique per COLLECTION, not per account; acting on the first copy found would patch or
+ * destroy a record the caller did not choose.
  *
- * WHY IT IS RAISED BEFORE THE REPEATING-SERIES REFUSAL. The two can both apply, and the order
- * decides what the caller learns. Told "this is a repeating event" they go to the web interface
- * and never find out a second record exists; told the id is ambiguous they can pass a url, and
- * then get the repeating answer for the copy they actually meant.
+ * RAISED BEFORE THE REPEATING-SERIES REFUSAL, so the caller learns a second record exists.
  *
- * THE ACCEPTED CONSEQUENCE. Anyone who can send this account an invitation chooses the UID it
- * arrives under, so a stranger can freeze an event's writes by minting a duplicate of an id
- * they already know. That is why the url is offered here and named on the tool surface: it is
- * the escape hatch, it always exists, and it cannot be made ambiguous — a resource url
- * ADDRESSES exactly one record, and this lookup acts on the record it addressed however many
- * others merely NAME that string as their UID. The distinction is load-bearing precisely here:
- * this message is printed when a url-shaped id named several records, so a sentence saying a
- * url "names exactly one record" would be contradicted by the very copies listed beside it.
+ * ACCEPTED: an invitation sender can mint a duplicate UID to freeze writes, which is why the
+ * url, which ADDRESSES one record and cannot be made ambiguous, is the offered way out. Word it
+ * "addresses", not "names": the copies listed beside it may all name the url-shaped id.
  */
 export function ambiguousEventIdError(
   eventId: string,
@@ -4148,10 +2804,7 @@ export function ambiguousEventIdError(
   broken?: BrokenCollections,
 ): InvalidInputError {
   return new InvalidInputError(
-    // The ID at CALENDAR_URL_ECHO_LIMIT, not the ambiguity's own bound: this is the same value
-    // eventNotFoundError echoes, so it is bounded the same way in both places, and the
-    // ambiguity constant's stated reason is about one COPY's calendar and url — a reason that
-    // does not reach the caller's own argument.
+    // Bounded as eventNotFoundError bounds the same value.
     `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" names ${copies.length} records `
     + `in this account, and this server will not ${action} one of them without being told which. `
     + `The copies are: ${describeEventCopies(copies)}. `
@@ -4159,23 +2812,14 @@ export function ambiguousEventIdError(
     + 'one record, whatever else spells it as a UID, and this tool accepts it wherever it '
     + 'accepts an id. '
     + 'get_calendar_event still works on this id: it returns the first copy and lists the others.'
-    // NAMES THE COLLECTION THAT COULD NOT BE SEARCHED (#136), for the same reason the calendar
-    // ambiguity does and the same reason eventNotFoundError already did: the count in the first
-    // sentence is ACCOUNT-WIDE, and a collection that failed to list was never searched, so it
-    // may hold a further copy. Both refusals in this file that count records across the account
-    // therefore carry the clause; a caller told "2 copies" while a third was unreachable is
-    // being given a complete-sounding answer to a question nothing could answer completely.
+    // The count is account-wide; an unsearched collection may hold another copy (#136).
     + describeBrokenCollections(broken),
   );
 }
 
 /**
- * Reorder VEVENT blocks so the master (no RECURRENCE-ID) comes first.
- * RFC 5545/4791 do not guarantee component ordering — a resource authored by
- * a third-party client may list an overridden instance before the master.
- * All in-place patch helpers target the first VEVENT, so without this
- * normalization an exception-first payload would have its exception patched
- * (and the recurring-event guard skipped) instead of the master.
+ * Reorder VEVENT blocks so the master (no RECURRENCE-ID) comes first. RFC 5545/4791 do not fix
+ * component order, and every in-place patch helper targets the first VEVENT.
  */
 export function normalizeMasterVEventFirst(icalData: string): string {
   const vevents = extractAllVEvents(icalData);
@@ -4193,24 +2837,12 @@ export function normalizeMasterVEventFirst(icalData: string): string {
 }
 
 /**
- * Assert a tsdav write (create/update/delete calendar object) actually succeeded.
- * tsdav returns the raw Response(s) without throwing on 4xx/5xx, so without this
- * a server-side rejection would be reported to the caller as success. Accepts a
- * single Response or an array; fails loudly on any status outside 2xx AND on a
- * response that carries no numeric status at all — including a bare `{ ok: true }`
- * with nothing else. A write whose outcome nothing here actually confirmed must
- * not be reported as success: the same never-silent rule the contacts client
- * follows for `updated`/`destroyed`, applied to a status this function never
- * observed. (This used to treat a missing status as success, on the theory that
- * an older tsdav shape might omit it; that reading let a response nobody had
- * verified pass as a confirmed write, which is the failure mode this function
- * exists to catch on 4xx/5xx and cannot then wave through on "absent".)
+ * Assert a tsdav write actually succeeded: tsdav returns raw Responses without throwing on
+ * 4xx/5xx. Fails on any status outside 2xx, on a missing numeric status (even `{ ok: true }`),
+ * and on an empty array: an outcome nothing confirmed is not a success.
  */
 function assertDavOk(resp: unknown, action: string): void {
   const responses = Array.isArray(resp) ? resp : [resp];
-  // An empty array confirms nothing either — the loop below would simply never run and
-  // return as though the write succeeded. Same criterion as the missing-status case: a
-  // response nobody here actually observed must not be reported as success.
   if (responses.length === 0) {
     throw new Error(`Failed to ${action}: server returned no status`);
   }
@@ -4221,13 +2853,7 @@ function assertDavOk(resp: unknown, action: string): void {
       throw new Error(`Failed to ${action}: server returned no status`);
     }
     if (status < 200 || status >= 300) {
-      // The reason phrase is SERVER-AUTHORED PROSE landing in a sentence a caller reads back,
-      // so it goes through the shared echo as a value like every other untrusted string here:
-      // scrubbed of the characters that forge extra lines, and bounded so one long phrase
-      // cannot become the whole message. The echo's DEFAULT bound, not one of the calendar
-      // ones: a reason phrase is short prose to be recognised (RFC 9110 says a client may
-      // ignore it outright), never a value anyone pastes back, so nothing here needs the room
-      // a URL offered as a handle needs. See docs/conventions.md.
+      // Server-authored, so echoed; the default bound, since nobody pastes a reason phrase back.
       const reason = (r as any)?.statusText;
       const phrase = typeof reason === 'string' && reason.trim().length > 0
         ? ` ${echoCallerText(reason)}`
@@ -4242,18 +2868,9 @@ function assertDavOk(resp: unknown, action: string): void {
 
 // ---- write-side time zone result (#157) ----
 //
-// What createCalendarEvent/updateCalendarEvent actually put on the wire for `start`/`end`,
-// computed from the WRITTEN property line — never from the caller's input — so a stored
-// inherit or a create default is reported exactly as truthfully as a caller-supplied
-// `timeZone`. describe{Create,Update}CalendarEventResult below turn this into the response
-// sentence index.ts's handlers append; they live here rather than in index.ts (where the
-// handler that calls them lives) because index.ts's CallTool switch has no test harness and
-// the module itself runs `server.connect()` as a load-time side effect, which makes it unsafe
-// to `import` from a unit test — CLAUDE.md's "Handler logic must be unit-testable" pattern
-// (composeDraftEmail/draft-email-handler.ts) is to extract into a safely-importable module
-// instead. This
-// one is co-located with the types it formats rather than a third file, since it has no
-// dependency of its own beyond them.
+// What create/update actually put on the wire for `start`/`end`, computed from the WRITTEN
+// line, never the caller's input, so an inherited or defaulted zone is reported truthfully.
+// The formatters below live here, not in index.ts, so they are unit-testable.
 export interface CalendarZoneWriteInfo {
   /**
    * 'zoned'    — a TZID was written (from `timeZone`, inherited, or create's default).
@@ -4304,11 +2921,7 @@ function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   }
 }
 
-// Given only the structured write result (never the caller's input — a caller-named zone, an
-// inherited stored TZID, and create's configured-zone default all arrive at createCalendarEvent
-// as the same "no designator" input, so only the WRITTEN line can say which one actually
-// happened), returns the sentence index.ts's create_calendar_event handler appends to its
-// response text. Pure and exported for direct unit testing (#157).
+// The sentence create_calendar_event appends, from the written result only (#157).
 export function describeCreateCalendarEventResult(result: CreateCalendarEventResult): string {
   const startDesc = describeCalendarZoneWrite(result.start);
   const endDesc = describeCalendarZoneWrite(result.end);
@@ -4317,9 +2930,7 @@ export function describeCreateCalendarEventResult(result: CreateCalendarEventRes
     : ` Start written in ${startDesc}, end written in ${endDesc}.`;
 }
 
-// Same idea as describeCreateCalendarEventResult, but update only ever touches the sides the
-// caller actually supplied (start/end are each optional on the result), so an untouched side
-// is omitted rather than described.
+// As above, omitting a side the update did not touch.
 export function describeUpdateCalendarEventResult(result: UpdateCalendarEventResult): string {
   const parts: string[] = [];
   if (result.start) parts.push(`start ${describeCalendarZoneWrite(result.start)}`);
@@ -4329,28 +2940,18 @@ export function describeUpdateCalendarEventResult(result: UpdateCalendarEventRes
 }
 
 /**
- * `timeZone` only qualifies a designator-less value — one that carries neither its own
- * `Z`/offset nor a date-only marker. A value that already names its own instant, or an all-day
- * value that has no time component at all, makes `timeZone` a contradiction rather than a
- * qualifier, and this repo rejects a contradicting argument instead of silently ignoring one of
- * the two (docs/conventions.md, fail-closed narrowing arguments). Runs BEFORE
- * formatDateTimeProperty ever sees `callerZone`, so a rejected call never reaches the point of
- * writing anything.
+ * `timeZone` only qualifies a designator-less value; with a `Z`/offset or a date-only value it
+ * is a contradiction, and is rejected rather than ignored (docs/conventions.md). Runs before
+ * anything is written.
  *
- * Validates through the same field name (`DTSTART`/`DTEND`) the real formatting call downstream
- * uses, not the human-readable `label` — otherwise the same malformed date string produces two
- * different rejection sentences depending only on whether `timeZone` happened to be passed
- * alongside it.
+ * Validates under `DTSTART`/`DTEND`, as the formatting call downstream does, so a malformed date
+ * gets one rejection sentence whether or not `timeZone` was passed.
  */
 function rejectTimezoneConflict(value: string, label: 'start' | 'end', callerZone: string): void {
   const propName = label === 'start' ? 'DTSTART' : 'DTEND';
   const serialized = validateAndFormatICalDate(value, propName);
-  // Both refusals echo `value`, even though `validateAndFormatICalDate` has already accepted it.
-  // That check tests `value.trim()` while these quote `value` itself, and JS `.trim()` strips
-  // U+2028/U+2029 as well as spaces — so an unbounded run of line separators in front of a
-  // well-formed date passes validation and then forges lines in the message. Same treatment as
-  // every other date this file quotes back: the shared echo, inside the double quotes its
-  // neutralisation protects (docs/conventions.md, untrusted values in prose).
+  // Echoed although validated: validation tested `value.trim()`, and `.trim()` strips U+2028,
+  // so leading line separators survive into `value` itself.
   if (/^\d{8}$/.test(serialized)) {
     throw new InvalidInputError(
       `timeZone cannot be combined with a date-only ${label} ("${echoCallerText(value)}") — an all-day value has ` +
@@ -4367,14 +2968,9 @@ function rejectTimezoneConflict(value: string, label: 'start' | 'end', callerZon
 }
 
 /**
- * On `update_calendar_event`, `timeZone` combined with only ONE of `start`/`end` can silently
- * strand the untouched side in a different, still-stored zone — manufacturing a two-zone event
- * (the flight-lands-elsewhere shape #140 legitimises) that nobody asked for. Ordering will not
- * catch it: a two-zone pair IS ordered, on instants, but a stranded pair whose instants happen
- * to run forwards is perfectly ordered and still not the event the caller described. Only a
- * STORED, DIFFERENTLY-NAMED `zoned` value is a problem — a stored floating or `Z` value already
- * trips the ordinary frame mismatch inside `validateDateConsistency`, and a stored TZID
- * matching `callerZone` produces no discrepancy — so this fires only where nothing else would.
+ * On update, `timeZone` with only ONE of `start`/`end` can strand the other side in a different
+ * stored zone, a two-zone event (#140) nobody asked for that ordering will not catch. Fires only
+ * on a stored, differently-named `zoned` value; floating or `Z` already trips the frame check.
  */
 function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start' | 'end', callerZone: string): void {
   const strandedProp = updatedSide === 'start' ? 'DTEND' : 'DTSTART';
@@ -4383,16 +2979,8 @@ function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start'
   if (strandedLines.length === 0) return;
   const desc = describeDateProperty(strandedLines[0]);
   if (desc.frame === 'zoned' && desc.tzid && !zoneNamesEqual(desc.tzid, callerZone)) {
-    // THE TWO ZONE NAMES IN THIS SENTENCE ARE NOT THE SAME KIND OF VALUE, which is why they are
-    // quoted differently rather than by oversight. `callerZone` is ICU's own canonical spelling,
-    // produced by `validateCallerTimezone` and never an echo of what was typed — server text, in
-    // the server's `'…'`. The STORED tzid is not: it arrives inside whatever iCalendar an
-    // invitation sent this account carried, so anyone who can send an invitation writes it. It
-    // therefore goes through the shared echo AND inside DOUBLE quotes, because that pairing is
-    // what makes the echo protect it: `echoCallerText` neutralises only the double quote, so a
-    // `'` in the value used to close the `'…'` span this line wrote and every word after it read
-    // as the server's own next sentence (#190). Same rule, same reason, as every other quoted
-    // echo here; see docs/conventions.md on untrusted values in prose.
+    // Quoted differently on purpose: `callerZone` is ICU's canonical spelling (server text), the
+    // stored tzid is invitation-authored, so it is echoed inside DOUBLE quotes (#190).
     throw new InvalidInputError(
       `timeZone would rewrite ${updatedSide} into '${callerZone}' while the stored ${strandedLabel} stays ` +
       `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}" untouched — silently producing a two-zone event. ` +
@@ -4422,38 +3010,19 @@ export class CalDAVCalendarClient {
       },
       authMethod: 'Basic',
       defaultAccountType: 'caldav',
-      // Every request this client makes carries the CalDAV Basic credential, and
-      // the destination is a configured host. A redirect is therefore never
-      // legitimate: following one would replay the credential at whatever host the
-      // response names. The JMAP side applies the same rule to its own fetches.
-      // tsdav merges this into the init of each underlying fetch, so it covers
-      // every method rather than the ones called explicitly.
+      // Following a redirect would replay the Basic credential at whatever host it names.
+      // tsdav merges this into every underlying fetch. See docs/security-model.md.
       fetchOptions: { redirect: 'error' },
     });
 
-    // Built into a local and only assigned to `this.client` after login() resolves
-    // (#143). The previous code assigned `this.client` before the await, so a
-    // rejected login still left an unauthenticated client cached on this long-lived
-    // instance: every later call took the `if (this.client)` fast path above, handed
-    // out the dead client, and failed downstream inside tsdav with a bare "no account
-    // for fetchCalendars" instead of the real auth error. Keeping the client local
-    // until login succeeds makes the invariant structural — `this.client` only ever
-    // holds a logged-in client — so a failed login here means the next call retries
-    // login instead of reusing a dead one.
+    // Assigned to `this.client` only after login() resolves, so a failed login is retried
+    // next call instead of a dead client being cached (#143).
     try {
       await client.login();
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
-      // A login rejection is a credentials/config problem, not a caller argument
-      // problem, so this stays a plain Error (InternalError) rather than
-      // InvalidInputError — same classification as validateOrganizerUsername above.
-      // tsdav's own message doesn't say which credential is wrong, and the CalDAV app password
-      // is separate from the Fastmail JMAP API token, so name it explicitly.
-      //
-      // `detail` IS REMOTE-AUTHORED — tsdav builds it from the server's status, status text and
-      // body — so it takes `describeUntrustedAt` rather than this file's usual `echoCallerText`
-      // (#182): only the former redacts a credential the response echoed back, and only the
-      // former removes the Unicode format characters that survive the control-character scrub.
+      // A plain Error: configuration, not caller input. `detail` is remote-authored, so it takes
+      // `describeUntrustedAt`, which also redacts an echoed credential (#182).
       throw new Error(
         `CalDAV login failed: ${describeUntrustedAt(detail, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password ` +
         `(a separate credential from the Fastmail JMAP API token).`,
@@ -4467,54 +3036,25 @@ export class CalDAVCalendarClient {
   /**
    * Discover the account's calendars, failing loudly instead of returning an empty list.
    *
-   * tsdav's `fetchCalendars` never checks `response.ok`. On a non-2xx PROPFIND its parser
-   * produces an error pseudo-response, which is then filtered out on `props.resourcetype`,
-   * so the call returns `[]` and does NOT throw. Every read here used to take that at face
-   * value, and the consequences all pointed the same way (#100): `list_calendar_events`
-   * reported success with no events, which answers "am I free?" with "yes" on a server
-   * failure; `getCalendarEventById` blamed the caller's event id for a discovery that never
-   * happened; and because `[]` is truthy, `if (!this.calendars)` CACHED the empty result on
-   * this long-lived client, repeating it until the process restarted.
+   * tsdav's `fetchCalendars` never checks `response.ok`, so a failed PROPFIND returns `[]`,
+   * which read as "no events" (#100). Only a non-empty result is cached.
    *
-   * So: cache only a non-empty result, and treat empty as a failure to be explained.
-   *
-   * An empty-BUT-SUCCESSFUL discovery is also treated as a failure, which is the surprising
-   * half and should not be "tidied up" into returning `[]`. Two reasons. The dangerous
-   * direction here is under-reporting — an availability question answered with nothing reads
-   * as free time that may not exist — and this is an account-shape assumption that stays
-   * checkable: a Fastmail account always has at least one calendar collection, so an empty
-   * successful discovery means something went wrong upstream of the status code far more
-   * often than it means the account genuinely has no calendars. If that ever stops being
-   * true of the accounts this server targets, this is the line to revisit.
+   * An empty-BUT-SUCCESSFUL discovery is a failure too; do not "tidy" it into `[]`. A Fastmail
+   * account always has a calendar, and an empty answer to an availability question reads as
+   * free time. Revisit if that account-shape assumption stops holding.
    */
   private async discoverCalendars(): Promise<DiscoveredCalendars> {
     const client = await this.getClient();
     if (this.calendars && this.calendars.length > 0) {
-      // A cached list is by construction a list with no broken entry beside it — nothing is
-      // cached while one exists — so there is nothing to disclose here. The residual is the
-      // other direction and is stated on the tool surface: a calendar that breaks AFTER a
-      // healthy discovery stays in this list for the life of the process.
+      // Nothing is cached while a collection is broken. Residual, stated on the tool surface: a
+      // calendar that breaks after a healthy discovery stays listed for the process's life.
       return { calendars: this.calendars, brokenCollections: [] };
     }
 
-    // THE SAME ANSWER TSDAV PARSED, NEVER A SECOND REQUEST (#136). A second PROPFIND could
-    // disagree with the first in either direction — a collection healthy on the re-ask would
-    // be reported broken, and one that broke between the two would be reported healthy — so
-    // the detection is given the very bytes the list was built from, captured by a fetch
-    // handed to `fetchCalendars` for this one call.
-    //
-    // Delegating to the client's OWN fetch (`fetchOverride`, falling back to the global one)
-    // rather than to the global one directly is what keeps this a wrapper rather than a
-    // second transport: the request goes exactly where it would have gone, carrying the init
-    // tsdav built for it — `fetchOptions`, and so the `redirect: 'error'` guard with it.
-    //
-    // The FIRST request is the home PROPFIND: `fetchCalendars` awaits it before it can fan out
-    // to the per-calendar `supported-report-set` reads. Capturing by position rather than by
-    // URL keeps this off any assumption about how the library spells the home URL — and if a
-    // future tsdav ever put a different request first, the entries parsed out of it would not
-    // sit under the calendar home and NOTHING would be flagged. That is the safe direction to
-    // fail in: a missed disclosure on a library change, never a healthy calendar reported
-    // broken.
+    // THE SAME ANSWER TSDAV PARSED, NEVER A SECOND REQUEST (#136), which could disagree. The
+    // wrapper delegates to the client's own fetch, so `redirect: 'error'` still applies. The
+    // FIRST request is the home PROPFIND; if a future tsdav reorders, nothing sits under the home
+    // and nothing is flagged, the safe direction.
     const baseFetch = client.fetchOverride ?? globalThis.fetch;
     let capturedHomeListing: CapturedDavAnswer | undefined;
     const capturingFetch: typeof globalThis.fetch = async (input, init) => {
@@ -4531,34 +3071,21 @@ export class CalDAVCalendarClient {
     };
 
     const calendars = await client.fetchCalendars({ fetch: capturingFetch });
-    // Only what this cannot pass on at all is guarded here: a non-string home URL, and nothing
-    // captured to read. An EMPTY home URL is deliberately not a case of its own —
-    // `findBrokenCalendarHomeCollections` cannot resolve one and reports nothing, which is the
-    // same answer this guard would give, written once where the reasoning for it lives.
+    // An empty home URL needs no case: `findBrokenCalendarHomeCollections` reports nothing for it.
     const homeUrl = (client as any).account?.homeUrl;
     const brokenCollections = typeof homeUrl === 'string' && capturedHomeListing !== undefined
       ? await brokenCollectionsInAnswer(capturedHomeListing, homeUrl)
       : [];
 
     if (calendars.length > 0) {
-      // NEVER CACHED WHILE A COLLECTION IS BROKEN. Caching here is what made #100's empty
-      // discovery permanent, and it would do the same to a partial one: a collection that
-      // failed once would be missing from every later call for the life of the process, with
-      // the note gone as soon as the second call answered from the cache. Re-discovering on
-      // each call is the cost of the failure being transient, and it is paid only while one
-      // is outstanding.
+      // NEVER CACHED WHILE A COLLECTION IS BROKEN, or a transient failure would become permanent
+      // and its note would vanish on the next call.
       if (brokenCollections.length === 0) this.calendars = calendars;
       return { calendars, brokenCollections };
     }
 
-    // Empty. Re-ask with a status-checked PROPFIND, because the status is the one thing
-    // fetchCalendars threw away — this is the read-path counterpart to assertDavOk, which
-    // exists for the same reason on the write paths. The extra round-trip only ever happens
-    // on the already-broken path.
-    //
-    // Reached with NO healthy calendar, so it covers both the request-level failure (#100)
-    // and a listing whose every calendar entry was broken: neither can be answered around,
-    // and an empty result would read as "there are no events" either way.
+    // Empty: re-ask with a status-checked PROPFIND, since the status is what fetchCalendars
+    // discarded. Only on the already-broken path.
     await this.assertCalendarHomeReachable();
     throw new Error(
       'Calendar discovery returned no calendars. The CalDAV server answered successfully but listed ' +
@@ -4591,14 +3118,8 @@ export class CalDAVCalendarClient {
         displayName: unwrapDisplayName(c.displayName) ?? 'Unnamed',
         url: c.url || '',
         description: c.description || undefined,
-        // Guarded for the same reason `displayName` is, and it is the same defect: tsdav
-        // guards `description` with `typeof === 'string'` but passes `calendarColor` through
-        // raw (dist/tsdav.cjs:1003), so an empty `<calendar-color/>` parses to `{}` — truthy,
-        // so `|| undefined` never fired and an object went out as a colour. Not routed
-        // through `unwrapDisplayName`: this is a colour, and the number/boolean coercions
-        // that make sense for a name would turn a malformed colour into a plausible one.
-        // Trimmed on the way OUT as well as in the guard, so the two agree the way the name
-        // path already does. No reachable input differs; consistency only.
+        // tsdav passes `calendarColor` through raw, so `<calendar-color/>` arrives as `{}`. Not
+        // `unwrapDisplayName`: its number/boolean coercions would make a bad colour plausible.
         color: typeof (c as any).calendarColor === 'string' && (c as any).calendarColor.trim().length > 0
           ? (c as any).calendarColor.trim()
           : undefined,
@@ -4611,56 +3132,23 @@ export class CalDAVCalendarClient {
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
     let targetCalendars = selectableCalendars(calendars);
-    // Tested for PRESENCE, not for truthiness. `calendarId` narrows what the call touches, so it
-    // fails CLOSED: an empty or whitespace-only value is a value that matched no calendar, never
-    // "read every calendar". Under the old truthiness test `''` skipped the filter entirely and
-    // quietly widened the query to the whole account while `'   '` was correctly rejected — two
-    // spellings of the same mistake answered from two different calendars. This test is on the
-    // RAW argument and the trim happens inside the resolver, which is the same decision spelled
-    // one way instead of two: trimming cannot turn a present value absent, so nothing an empty
-    // string does here differs from what it did before. See docs/conventions.md on arguments
-    // that narrow a call.
+    // PRESENCE, not truthiness: a narrowing argument fails CLOSED, so `''` must be refused, never
+    // read as "every calendar" (docs/conventions.md).
     if (calendarId !== undefined && calendarId !== null) {
-      // EXACTLY ONE calendar or a refusal, resolved by the rule the write path states through
-      // the same function (#173) — a url addresses one collection, a name that matches two is
-      // refused rather than unioned. This branch used to keep every match, so a name two
-      // calendars carried listed both of them and named neither in the answer.
       targetCalendars = [resolveCalendarTarget(calendarId, targetCalendars, brokenCollections)];
     }
 
-    // The window is normalised ONCE and then used for two different things — the server's
-    // time-range filter and the local re-filter below — so the two cannot disagree about
-    // which days were asked for.
-    //
-    // A DATE IS A LOCAL DAY. "What is on the 12th?" asks about the caller's own day, so both
-    // bounds resolve in the configured zone; only a value carrying `Z` or an offset is taken
-    // as the instant it names. Read as UTC days instead, a +10:00 account was answered with
-    // the 12th 10:00 to the 13th 10:00 and lost that morning's appointments with nothing
-    // said. The zone is the SAME stored value every email timestamp renders in, so the day a
-    // calendar query covers and the day an email is dated cannot drift apart.
+    // Normalised ONCE for both the server's time range and the local re-filter. A DATE IS A
+    // LOCAL DAY in the configured zone, the same one email dates render in (docs/conventions.md).
     const zone = getDefaultTimezone();
-    // The resolved (ICU-usable) form of `zone`, for the `timeZone`/`endTimeZone` fields
-    // (#139) — those compare a stored TZID against the zone actually in force. Since #157,
-    // `getDefaultTimezone()` is already guaranteed usable (an unusable configured zone stops
-    // the server at startup, and an unusable host zone is replaced by UTC), so this call is a
-    // defensive no-op in production rather than doing real work — kept because
-    // `resolveUsableTimezone` is the one shared seam every other zone-resolving call site here
-    // already goes through, and this stays consistent with them rather than being a special
-    // case that assumes its input differently from the rest. `zone` above stays the raw
-    // configured value (`undefined` meaning the host zone) for `coerceCalendarWindowStart`/`End`
-    // and `startOfLocalDayUtcIso`, which hand it to `zoneOffsetMsAt` unresolved; that is safe
-    // only because of the startup guarantee, since `zoneOffsetMsAt` throws on an unresolvable
-    // name. `sortEventsByStart` is handed `configuredZone`, the same value the window filter
-    // gets, so the sort and the filter read one resolved zone.
+    // `zone` stays raw for the window coercions, which hand it to `zoneOffsetMsAt` unresolved;
+    // safe only because an unusable configured zone stops the server at startup (#157).
+    // `configuredZone` is the one value the filter and the sort both read.
     const configuredZone = resolveUsableTimezone(zone);
     const rawStart = coerceCalendarWindowStart(startDate, 'startDate', zone);
     const rawEnd = coerceCalendarWindowEnd(endDate, 'endDate', zone);
 
-    // A CALLER-NAMED bound is saturated too, not just the invented half. It resolves through
-    // a zone, and an offset alone is enough to push it over the four-digit-year range every
-    // consumer of these values can express — `endDate: "9999-12-31"` on a UTC-5 account
-    // resolves to `+010000-01-01T05:00:00Z`. tsdav's `^\d{4}` check then threw a plain Error,
-    // reporting a caller-fixable argument as a server fault.
+    // Caller-named bounds are saturated too; see `saturateInstant`.
     const start = rawStart === undefined ? undefined : saturateInstant(rawStart);
     const end = rawEnd === undefined ? undefined : saturateInstant(rawEnd);
     const saturated: NonNullable<CalendarWindowClamp['saturated']> = [];
@@ -4673,28 +3161,18 @@ export class CalDAVCalendarClient {
 
     const fetchOptions: any = {};
     let windowClamp: CalendarWindowClamp | undefined;
-    // THE WINDOW THE CALLER ASKED FOR, kept separate from the widened range sent to the server
-    // (#162). Everything caller-facing — the re-filter below and the clamp note — is derived
-    // from these, never from `fetchOptions.timeRange`. Reading the request range back out of
-    // `fetchOptions` is what would silently reinstate the fourteen hours of residue the
-    // exact filter exists to remove.
+    // THE WINDOW THE CALLER ASKED FOR (#162). Everything caller-facing derives from these, never
+    // from the widened `fetchOptions.timeRange`.
     let trueWindowStart: string | undefined;
     let trueWindowEnd: string | undefined;
-    // UNCONDITIONAL: there is no such thing as an unwindowed listing any more. A call naming
-    // neither bound used to be sent with no time range at all, which meant no `expand` either
-    // (tsdav drops it without one) — so the one call most likely to be asked "what is on?" was
-    // the one call that answered with series masters at their original DTSTART instead of the
-    // occurrences that actually fall on those days. Bounding it is also what makes the
-    // expansion safe to turn on there: the window IS the range the server materialises over,
-    // and an absent one is the unbounded case, not the empty case (#142).
+    // UNCONDITIONAL: every listing is windowed, since tsdav drops `expand` without a time range
+    // and the window bounds what the server materialises (#142).
     {
       let windowStart = start;
       let windowEnd = end;
       let invented: 'startDate' | 'endDate' | 'both' | undefined;
       if (!windowStart && !windowEnd) {
-        // The same local-day rule a date-only `startDate` gets, so "no bounds" and "today's
-        // date as startDate" cannot disagree about which day today is. The clock is read once
-        // here, not per bound, so the two ends cannot straddle a midnight.
+        // The local-day rule a date-only `startDate` gets; the clock is read once.
         windowStart = startOfLocalDayUtcIso((this.config.now ?? Date.now)(), zone);
         windowEnd = shiftIsoDays(windowStart, CALENDAR_OPEN_WINDOW_DAYS);
         invented = 'both';
@@ -4706,42 +3184,18 @@ export class CalDAVCalendarClient {
         invented = 'endDate';
       }
 
-      // AFTER the invented half is filled in, not as its alternative. The old `else if` made
-      // this check the both-bounds case only, and the comment below said so — but saturation
-      // means a ONE-SIDED window can come out zero-length too: `startDate:
-      // "9999-12-31T23:59:59Z"` leaves the invented month nowhere to go, so both ends land
-      // on the same instant. Left to tsdav that was a plain Error (InternalError) or, worse, a
-      // silently empty answer under a note claiming a month-long span had been searched.
+      // AFTER the invented half is filled in: saturation can make a ONE-SIDED window
+      // zero-length (`startDate: "9999-12-31T23:59:59Z"`).
       if (Date.parse(windowStart!) >= Date.parse(windowEnd!)) {
-        // Checked here rather than left to tsdav, which throws a plain Error for a backwards
-        // range. That reaches the tool boundary as InternalError ("server-side, a bare retry
-        // might work"), which is false and unactionable for what is plainly a caller-fixable
-        // pair of arguments. See docs/conventions.md on error classification.
-        //
-        // The message echoes what the CALLER typed and states what it resolved to underneath.
-        // Printing only the post-coercion values reported `endDate 2026-08-11T00:00:00Z` back
-        // at someone who passed `2026-08-10`, so the one line meant to explain the whole-day
-        // rule instead quoted a value they could not find in their own call. An omitted bound
-        // is quoted as such rather than as the string "undefined".
-        //
-        // The ZONE is named alongside the resolved range, because otherwise the resolved
-        // range is the confusing part: a caller who passed two dates and gets back two
-        // UTC instants offset from midnight has no way to tell a correct local-day reading
-        // from a bug.
-        //
-        // Equality gets its own sentence. A window whose two bounds are the same instant is
-        // not backwards, it is EMPTY, and printing "the range X .. X" as though one end were
-        // before the other reads as a rounding error rather than as the answer — the shape a
-        // caller lands on by passing the same instant twice, meaning a single day.
+        // Checked here because tsdav's plain Error would read as InternalError
+        // (docs/conventions.md). The message quotes what the caller TYPED beside what it
+        // resolved to, and names the zone, so a local-day reading is recognisable as one.
         const resolved = windowStart === windowEnd
           ? `both resolve to the same instant, ${windowStart}, which is a zero-length window`
           : `which resolve to the range ${windowStart} .. ${windowEnd}`;
         const quote = (v: unknown) => (v === undefined || v === null ? '(omitted)' : `"${echoCallerText(v)}"`);
-        // An INVENTED bound needs its own sentence: the caller cannot "put startDate before
-        // endDate" when they passed one or neither, so the ordinary advice would be
-        // unfollowable. The no-bounds arm is separate again, because there is no bound of
-        // theirs to blame — the default window starts at today and there is nowhere for a
-        // month to go only when today itself sits at the end of the representable range.
+        // An invented bound needs its own advice: "put startDate before endDate" is unfollowable
+        // for a caller who passed one or neither.
         const advice = invented === 'both'
           ? 'Neither startDate nor endDate was given, so the window was taken as a month from today — but today ' +
             'sits at the edge of the range this server can express, so that month had nowhere to go. Pass ' +
@@ -4759,40 +3213,26 @@ export class CalDAVCalendarClient {
         );
       }
 
-      // The clamp reports the window the CALLER asked for, and it is checked against the
-      // pre-widening bounds for the same reason: the caller has to be told when the window
-      // they described was not the window searched, and the margin below does not change that
-      // window — it changes what is asked of the server so the window can be honoured.
+      // Against the pre-widening bounds: the margin below does not change the caller's window.
       if (invented || saturated.length > 0) {
         windowClamp = { invented, saturated: saturated.length > 0 ? saturated : undefined, start: windowStart!, end: windowEnd! };
       }
       trueWindowStart = windowStart;
       trueWindowEnd = windowEnd;
 
-      // WIDENED BY THE REQUEST MARGIN ON BOTH EDGES — see MAX_UTC_OFFSET_MS for what the
-      // server otherwise withholds. The widened bounds are saturated because 14 hours past
-      // `9999-12-31` runs off the four-digit year and tsdav throws a plain Error over it.
-      //
-      // That saturation is deliberately NOT added to `saturated[]`. The disclosure array
-      // reports what happened to bounds the CALLER named, and the caller's window is
-      // untouched by the widening: the row the extra hours would have reached is one the
-      // exact filter drops anyway, so nothing the caller asked for is lost by the shortfall.
+      // WIDENED on both edges; see MAX_UTC_OFFSET_MS. A saturated widening is deliberately NOT
+      // disclosed in `saturated[]`: that reports caller-named bounds, and the exact filter drops
+      // whatever the lost hours would have reached anyway.
       fetchOptions.timeRange = {
         start: shiftIsoMs(windowStart!, -MAX_UTC_OFFSET_MS),
         end: shiftIsoMs(windowEnd!, MAX_UTC_OFFSET_MS),
       };
-      // Expansion is what makes a recurring event report the occurrence that actually falls
-      // in the window instead of the series' original DTSTART (#64). tsdav only forwards
-      // <C:expand> when a timeRange accompanies it, which is why this sits inside the same
-      // branch rather than being set unconditionally. It expands over the range REQUESTED, so
-      // widening that range is also what makes the server materialise the occurrences a
-      // narrow window would otherwise see none of.
+      // Reports the in-window occurrence rather than the original DTSTART (#64). tsdav forwards
+      // <C:expand> only alongside a timeRange.
       fetchOptions.expand = true;
     }
 
-    // Derived from the TRUE window, never from `fetchOptions.timeRange`. Both are always set
-    // now that the window branch is unconditional; the undefined arms stay because the
-    // declarations above are the only thing that says so and a type is not a guarantee.
+    // From the TRUE window, never `fetchOptions.timeRange`.
     const windowStartMs = trueWindowStart === undefined ? NaN : Date.parse(trueWindowStart);
     const windowEndMs = trueWindowEnd === undefined ? NaN : Date.parse(trueWindowEnd);
 
@@ -4803,42 +3243,20 @@ export class CalDAVCalendarClient {
         ...fetchOptions,
         urlFilter: calendarResourceUrlFilter(cal.url),
       });
-      // Keyed by resource url, and settled in one request after the whole calendar is walked
-      // — see `settleAmbiguousRecurrence` (#155).
+      // Settled in one request per calendar; see `settleAmbiguousRecurrence` (#155).
       const undecided = new Map<string, UndecidedResource>();
       for (const obj of objects) {
-        // ONE structural extraction per resource, on whole content lines — never a `/m` regex
-        // or a substring count, which a DESCRIPTION containing the text "BEGIN:VEVENT" defeats
-        // (see docs/conventions.md). The list is counted here and then handed to the parser
-        // rather than re-derived by it.
+        // ONE structural extraction per resource, counted here and handed to the parser.
         const blocks = extractVEventBlocks(obj.data || '');
         if (blocks.length > CALENDAR_MAX_OCCURRENCES_PER_SERIES) {
-          // THE CALL FAILS on the FIRST such resource — nothing is parsed, nothing is
-          // collected, and no listing is returned. Answering without the series put the one
-          // thing the caller most needed to know at the bottom of a response that otherwise
-          // looked complete. InvalidInputError, because narrowing the window is the CALLER's
-          // action: the handler maps it to InvalidParams.
-          //
-          // The title and id come from the first block, which is the same pair a row would
-          // have carried and is two property reads rather than a parse of the whole payload.
+          // THE CALL FAILS on the first such resource, rather than burying the omission under a
+          // complete-looking listing. Title and id come from the first block, without a parse.
           const title = parseICalValue(blocks[0], 'SUMMARY') || 'Untitled';
-          // Not trimmed here, unlike the other UID reads in this file: this one is not an
-          // exact-match comparison, and the padding is removed a few lines down by
-          // echoCallerText before `id` ever reaches the thrown message.
+          // Not trimmed: no exact match here, and the echo trims it.
           const id = parseICalValue(blocks[0], 'UID') || obj.url || '';
-          // UNWRAPPED through the shared helper, the same one `list_calendars` and the
-          // not-found error use. A DAV displayName arrives as a property object whenever the
-          // element is empty or attribute-only, and stringifying one produced a visible
-          // "[object Object]" — truthy, so the url fallback beside it never ran. The helper
-          // answers "is there a name"; the url is the handle that always exists when there is
-          // not.
           const calendar = unwrapDisplayName(cal.displayName) ?? cal.url ?? '';
-          // TITLE, ID AND CALENDAR ARE ATTACKER-AUTHORED — anyone who can send an invitation
-          // wrote them — so each goes through the shared echo: control characters (and
-          // U+2028/2029) scrubbed so none can forge an extra line, trimmed, cut with a visible
-          // marker (#141). The guarantee is "no extra LINES", not "no attacker prose": a title
-          // reading like a second sentence still renders verbatim inside its quotes on this one
-          // line, which is accepted rather than guessed at by a prose filter.
+          // Invitation-authored values, echoed (#141). The guarantee is no extra LINES, not no
+          // attacker prose inside the quotes.
           throw new InvalidInputError(
             `Refused: repeating event "${echoCallerText(title)}" (id ${echoCallerText(id)}, ` +
             `calendar ${echoCallerText(calendar)}) expands to ${blocks.length} occurrences in the ` +
@@ -4848,37 +3266,12 @@ export class CalDAVCalendarClient {
             'issue at https://github.com/JonathanGodley/fastmail-mcp/issues.',
           );
         }
-        // Every VEVENT in the blob, not the first: with `expand` a single resource carries
-        // one block per in-window occurrence, so a first-match read drops all but one.
-        // `expanded` is passed rather than sniffed — see parseCalendarObjects.
-        //
-        // `!!fetchOptions.expand` is always true now that the window branch above is
-        // unconditional, and the defensive read stays for the same reason the
-        // `trueWindowStart === undefined` arms above do: the only thing making it true is that
-        // branch, and a reader who changes the branch should get the old behaviour here rather
-        // than a hardcoded `true` that has quietly become a lie.
+        // `expanded` is passed rather than sniffed; see parseCalendarObjects.
         const kept: CalendarEvent[] = [];
         for (const event of parseCalendarObjects(obj, { expanded: !!fetchOptions.expand, configuredZone, blocks })) {
-          // A block that STILL CARRIES A RECURRENCE CARRIER is never dropped here, whatever
-          // its dates say. This branch runs on an expanded query, so a surviving master means
-          // the server declined to expand that resource — and the master then shows the
-          // series' ORIGINAL DTSTART, which for a long-running weekly event is years before
-          // the window. Judged on that date it fails the intersection test and the row
-          // disappears: the filter would be turning a wrongly-dated row into a missing one, on
-          // exactly the resource the server told us repeats. A recurrence carrier is proof
-          // that DTSTART is not the only date this event has, so it is not a date the filter
-          // is entitled to judge.
-          //
-          // BOTH CARRIERS COUNT, not just RRULE (#162). A series may list its occurrences as
-          // RDATEs instead of stating a rule; such a master carries no RRULE at all, so an
-          // RRULE-only guard read it as an ordinary one-off and dropped it on its original
-          // DTSTART — the missing-event direction this guard exists to prevent.
-          //
-          // THE "WAS A WINDOW ASKED FOR" LEG IS GONE, because there is no longer a call
-          // without one: a caller naming no bounds is given today plus a month (#142), so
-          // `fetchOptions.timeRange` is set on every path through this method and testing it
-          // here only asserted that. Removing it keeps the guard's remaining conditions about
-          // what they are about — whether THIS block is one the window is entitled to judge.
+          // A block still carrying RRULE or RDATE (#162) is never dropped on its dates: a master
+          // the server declined to expand shows its ORIGINAL DTSTART, and judging that would turn
+          // a wrongly-dated row into a missing one.
           const provablyOutside = !event.recurrenceRule
             && !event.recurrenceDates
             && !eventIntersectsWindow(event, windowStartMs, windowEndMs, configuredZone);
@@ -4886,9 +3279,7 @@ export class CalDAVCalendarClient {
           allEvents.push(event);
           kept.push(event);
         }
-        // EXACTLY THE SET `blockCountProvesSeries` CANNOT DECIDE: one block, and nothing on it
-        // (RECURRENCE-ID, RRULE or RDATE) that says the resource repeats. Rows the window
-        // filter dropped are not asked about: there is nothing left to label.
+        // Exactly the set `blockCountProvesSeries` cannot decide, among rows still kept.
         if (blocks.length === 1 && kept.length > 0 && !kept.some(e => e.isRecurring) && obj.url) {
           undecided.set(resolveResponseHref(obj.url, cal.url), {
             requestHref: toRequestHref(obj.url, cal.url),
@@ -4897,28 +3288,18 @@ export class CalDAVCalendarClient {
         }
       }
       await settleAmbiguousRecurrence(client, cal, undecided);
-      // NOTE: no early exit on `limit`. Breaking out of this loop once enough events had
-      // been gathered meant later calendars were never queried at all, so with several
-      // calendars the "earliest N" were the earliest N *of whichever calendar happened to be
-      // read first* — silently, and fatally for any cross-calendar availability check (#100).
-      // Every target calendar is read, and only then is the combined set sorted and trimmed,
-      // which is what makes the slice a genuine top-N.
+      // No early exit on `limit`: the slice is only a genuine top-N across calendars once every
+      // calendar is read (#100).
     }
 
     sortEventsByStart(allEvents, configuredZone);
 
-    // `total` is "how many events matched, of which `limit` trimmed the rest". Every series in
-    // the window is in it: a resource too dense to materialise fails the call above rather than
-    // being quietly left out of this count.
     return {
       events: allEvents.slice(0, limit),
       total: allEvents.length,
       windowClamp,
-      // The listing is built from the calendars that DID list, and says so (#136). A
-      // collection that failed at discovery is a different failure class from a calendar
-      // that listed and then failed when its events were read: that one still fails this
-      // whole call, from `fetchCalendarObjects` above, because the collection answered for
-      // itself and then broke — there is no "the rest of it" to answer from.
+      // Collections that failed at discovery (#136). A calendar that listed and then failed on
+      // its event read still fails the whole call.
       brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }
@@ -4926,34 +3307,16 @@ export class CalDAVCalendarClient {
   /**
    * Find every stored copy of the event this id names, by UID or by URL (#137).
    *
-   * ONE TARGETED QUERY PER SELECTABLE CALENDAR, not a download of every event in the account.
-   * The filter (`uidEqualsFilter`) asks the server for the resources whose VEVENT carries this
-   * UID; the exact-equality check below is what turns the server's answer into an answer this
-   * code is willing to act on. There is deliberately NO FALLBACK to the old full scan when the
-   * server refuses the filter: tsdav throws on a refused query, that throw reaches the caller,
-   * and the caller sees a failed call rather than a quietly slower one that may have searched
-   * a different set of records than it says it did.
+   * ONE TARGETED QUERY PER CALENDAR (`uidEqualsFilter`), then an exact-equality check. There is
+   * deliberately NO FALLBACK to a full scan when the server refuses the filter: the caller sees
+   * a failed call, not one that searched something other than it says.
    *
-   * BOTH FORMS OF THE ID ARE TRIED, AND THE RESULTS UNIONED — never branched between on the
-   * shape of the string. UIDs here are attacker-authored (anyone who can send this account an
-   * invitation writes one), so a UID can perfectly well be url-shaped, and dispatching on shape
-   * would make such an event unfindable by its own id. Both run; the results dedupe by resource
-   * url.
-   *
-   * Hands back what discovery could NOT search alongside the copies (#136), because "no object
-   * matched" and "one collection could not be looked in" are two different answers and every
-   * caller of this needs both: the not-found errors say so, and the write paths that DO find a
-   * copy report the path they could not check.
+   * BOTH FORMS OF THE ID ARE TRIED AND UNIONED, never branched on the string's shape: a UID can
+   * be url-shaped, and dispatching would make that event unfindable by its own id.
    */
   private async findCalendarObjectByUID(eventId: string): Promise<CalendarObjectLookup> {
-    // Before any query is built, and here rather than in the handler: the handler's guard is
-    // falsy-only, so a whitespace-only id used to reach the lookup and come back as "Calendar
-    // event not found" — a statement about the account, for a call that never named an event.
-    // All three tools inherit the rejection by going through this one method.
+    // Here, not in the handler, whose guard is falsy-only; all three tools inherit it.
     const wanted = requireNonEmpty(eventId, 'eventId', 'pass an event id or url from list_calendar_events');
-    // Beside the empty check and for the same reason: a value this call can never send is a
-    // fact about the ARGUMENT, and saying so beats letting the server reject the request and
-    // reporting that as a server-side failure. See XML_UNSENDABLE_CHARS for the bound.
     if (XML_UNSENDABLE_CHARS.test(wanted)) {
       throw new InvalidInputError(
         'eventId contains a character that no XML request can carry, which no calendar id or '
@@ -4961,42 +3324,27 @@ export class CalDAVCalendarClient {
       );
     }
     const client = await this.getClient();
-    // Routed through discovery so a failed lookup can only mean "no object matched". A
-    // discovery failure throws here instead, which is what keeps getCalendarEventById from
-    // telling the caller their event id is wrong about a call that never reached a
-    // calendar (#100).
+    // Via discovery, so a discovery failure throws rather than reading as a wrong id (#100).
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
-    // The SELECTABLE calendars, matching the read path. Searching the unfiltered list let
-    // get/update/delete reach a collection `list_calendars` never shows and
-    // `list_calendar_events` answers "Calendar not found" for — a record this server would
-    // destroy but would not let you look at.
+    // SELECTABLE only: this server must not destroy a record no read tool would show.
     const selectable = selectableCalendars(calendars);
 
     const matches: CalendarObjectMatch[] = [];
     const seenUrls = new Set<string>();
     const collect = (calendar: DAVCalendar, obj: DAVCalendarObject) => {
-      // A copy COUNTS only when the resource came back whole — see isResolvedCalendarObject
-      // for why the same bar binds both resolution paths and all three tools.
       if (!isResolvedCalendarObject(obj)) return;
-      // Deduped on the resource url, which is what makes the union of the two resolution paths a
-      // union: an id that is both a valid UID and a valid url resolves the same resource twice.
+      // Deduped on resource url: an id can resolve the same resource by UID and by url.
       const url = obj.url;
       if (seenUrls.has(url)) return;
       seenUrls.add(url);
       matches.push({ object: obj, calendarLabel: calendarLabel(calendar) });
     };
 
-    // Resolved ONCE, before either loop, because these hrefs are needed twice: to make the
-    // addressed fetches below, and afterwards to say which match — if any — the caller
-    // actually addressed rather than merely named.
     const urlTargets = resolveEventUrlTargets(wanted, selectable);
     const addressedHrefs = new Set(urlTargets.map(t => t.objectUrl));
 
-    // EVERY selectable calendar is queried and every match kept: the scan does not stop at the
-    // first hit. A UID is unique per COLLECTION and not per account, so stopping early answered
-    // a two-copy account with whichever copy happened to be discovered first and said nothing
-    // about the other (#101).
+    // No early exit: a UID is unique per collection, not per account (#101).
     for (const calendar of selectable) {
       const objects = await client.fetchCalendarObjects({
         calendar,
@@ -5006,22 +3354,14 @@ export class CalDAVCalendarClient {
       for (const obj of objects) {
         const vevent = extractVEvent(obj.data || '');
         if (!vevent) continue;
-        // Trimmed here because this is an exact-match comparison against the caller's id,
-        // the same exact-match category as the TZID substring check.
         const uid = parseICalValue(vevent, 'UID')?.trim();
-        // LOAD-BEARING, not belt-and-braces. The query carries no `collation`, so RFC 4791's
-        // default `i;ascii-casemap` applies and `equals` was MEASURED matching a case-variant
-        // UID on the live account (scripts/probes/calendar-uid-query.probe.mjs, step 5). This
-        // is what keeps a server matching more loosely than it was asked to from manufacturing
-        // a copy — which, since two destructive tools now count these copies, would invent an
-        // ambiguity that is not in the account at all and refuse a write that should stand.
+        // LOAD-BEARING: the server matches case-insensitively; see `uidEqualsFilter`.
         if (uid !== wanted) continue;
         collect(calendar, obj);
       }
     }
 
-    // The URL form, resolved by MATCHING and only then fetched — see resolveEventUrlTargets for
-    // why the caller's string is never itself a request target.
+    // The URL form; see resolveEventUrlTargets.
     for (const { calendar, objectUrl } of urlTargets) {
       let objects: DAVCalendarObject[];
       try {
@@ -5031,32 +3371,18 @@ export class CalDAVCalendarClient {
           urlFilter: calendarResourceUrlFilter(calendar.url),
         });
       } catch (err) {
-        // NOT-FOUND ONLY IS SWALLOWED. tsdav turns EVERY failure of an addressed multiget into
-        // the same throw — a per-href 404 inside a 207, a collection 500, a 401 — and the only
-        // thing separating them is the status in the message (MEASURED against real tsdav; the
-        // pin test drives it through a fetch override). The 404/410 class is the ordinary case
-        // and genuinely means "no copy at that address": a caller pasting the url of an event
-        // since deleted. Anything else is a statement about the COLLECTION, and swallowing it
-        // would let a transient outage change which record a destructive call acts on — the
-        // copy in the failing collection would silently stop counting toward the ambiguity
-        // rule, so a write those two tools should refuse would go through. So it is rethrown.
-        //
-        // Why the 404 swallow is safe even though a collection-level 404 wears the same
-        // message: this collection ANSWERED the UID calendar-query moments earlier, in the loop
-        // above, so a collection that is genuinely gone or unreachable would already have
-        // thrown there. What is left is a race, and its honest reading is the same one — there
-        // is no copy at that address now.
+        // NOT-FOUND ONLY IS SWALLOWED. Any other failure is about the collection, and swallowing
+        // it would drop a copy from the ambiguity count so a write that should be refused goes
+        // through. A collection-level 404 is safe to swallow: this collection answered the UID
+        // query just above, so what is left is a race meaning the same thing.
         if (!isAddressedResourceMissing(err)) throw err;
         continue;
       }
       for (const obj of objects) collect(calendar, obj);
     }
 
-    // The addressed copy LEADS. Not a re-sort: exactly one match can be addressed, so this
-    // moves that one match to the front and leaves every other order untouched. See
-    // CalendarObjectLookup for why addressing beats a UID that merely spells the same string.
-    // `> 0` rather than `>= 0` only to skip a no-op — splicing index 0 out and unshifting it
-    // back is the identity — so the two spellings behave alike and no test can separate them.
+    // The addressed copy LEADS (see CalendarObjectLookup); every other order is untouched.
+    // `> 0` only skips a no-op, so it is indistinguishable from `>= 0` by any test.
     const addressedIndex = matches.findIndex(m => addressedHrefs.has(m.object.url));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 
@@ -5065,31 +3391,15 @@ export class CalDAVCalendarClient {
 
   async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
     const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
-    // The FIRST copy in the lookup's stated order (see CalendarObjectLookup).
     const obj = matches[0]?.object;
-    // Throw rather than return null so the MCP tool surfaces a real not-found
-    // error — matches updateCalendarEvent/deleteCalendarEvent below. A null
-    // here used to reach callers as a successful "null" tool response.
-    // InvalidInputError, not a plain Error: a wrong event id is caller-fixable,
-    // so it must reach the boundary as InvalidParams ("re-form the call") rather
-    // than InternalError ("server-side, a bare retry might work").
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
     }
     return {
-      // `includeDefaultTransparency` (#194): a caller who asked about ONE event and got no
-      // field back cannot tell "it blocks your calendar" from "nobody looked", so this tool
-      // states free/busy even when the answer is the RFC default. The listing path does not.
+      // Always states free/busy (#194): on a single event, absence cannot mean "busy".
       event: parseCalendarObject(obj, { includeParticipants: true, includeDefaultTransparency: true, configuredZone: resolveUsableTimezone(getDefaultTimezone()) }),
-      // ANSWERS AND DISCLOSES, where the write tools refuse (#101). A read cannot damage the
-      // copy it was not asked about, so refusing would withhold the one thing that makes the
-      // ambiguity fixable — the url of each copy — from the only tool that can hand it over.
-      // Omitted entirely for an unambiguous id: an empty list is a disclosure that says nothing.
-      //
-      // Still disclosed when the caller ADDRESSED a copy, because the other records exist and
-      // answer to the same string; what changes is only what the note SAYS about them, since
-      // the write tools will not refuse an addressed id. Hence `addressedByUrl` travelling
-      // beside the list rather than the list being suppressed.
+      // ANSWERS AND DISCLOSES where the writes refuse (#101): a read harms no copy, and this is
+      // the tool that hands over each copy's url. Disclosed even when a copy was addressed.
       otherCopies: matches.length > 1 ? matchesToCopies(matches.slice(1)) : undefined,
       addressedByUrl: addressed,
       brokenCollections: asBrokenCollectionsField(brokenCollections),
@@ -5105,56 +3415,27 @@ export class CalDAVCalendarClient {
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
     /**
-     * IANA zone name for a designator-less `start`/`end` (fork issue #157). Omitted means the
-     * account's configured zone is written — never floating; see docs/conventions.md for why
-     * `create` defaults where `update` does not. `null` and an empty/whitespace string are
-     * rejected (validateCallerTimezone) rather than read as "write floating", and so is a
-     * value that already carries `Z`/an offset or is date-only (rejectTimezoneConflict).
+     * IANA zone name for a designator-less `start`/`end` (#157). Omitted writes the configured
+     * zone, never floating (docs/conventions.md). `null` and blank are rejected, not read as
+     * "floating".
      */
     timeZone?: string | null;
-    /**
-     * Free/busy transparency (#194). Supplied, it is written on BOTH frames and overrides the
-     * all-day default; omitted, that default stands. See the TRANSP block in the payload
-     * assembly.
-     */
+    /** Free/busy (#194); overrides the all-day default. See the TRANSP block below. */
     transparency?: string;
   }): Promise<CreateCalendarEventResult> {
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
-    // RESOLVED BY LITERALLY THE SAME FUNCTION AS THE READ PATH, which is what makes the parity
-    // this comment claims a property of the code rather than of two implementations agreeing.
-    // They share the filtered calendar list, the trim, the fail-closed treatment of an empty
-    // value, the not-found error — and, since #173, what happens on a tie: a url addresses one
-    // collection and wins alone, a name matching two calendars is refused on a read and on a
-    // write alike. They once shared only the error message, so an event could be written into —
-    // and later deleted from — a collection no read tool would show, `" Work "` failed here
-    // while succeeding on a list, and a create silently wrote into the first of two calendars
-    // sharing a name while a list answered from both.
-    //
-    // THE SHARPEST THING THAT CHANGED IS ON THIS PATH, not the read one. url-or-name used to be
-    // ONE predicate here, resolved with `find`, so DISCOVERY ORDER decided rather than any
-    // preference for an address: a calendar whose display NAME was spelled as another calendar's
-    // url, listed first, took a create aimed by that exact url and received the event itself.
-    // A display name is written by whoever owns the calendar, so on a shared account that decoy
-    // is plantable. Resolving the url in its own pass, first, is what closes it.
-    //
-    // THE NOT-FOUND ARM IS ALSO THE REFUSAL FOR A TARGET ON A BROKEN PATH (#136), and it is one
-    // by construction rather than by a check of its own: a collection that failed to list never
-    // becomes a `DAVCalendar`, so it is never in `selectable` and can never be the resolved
-    // target. The write therefore cannot land in a collection this server could not describe,
-    // and the caller is told which collection could not be described rather than being left to
-    // read "not found" as "that calendar does not exist".
+    // The same resolver as the read path (#173). A broken collection is never in `selectable`,
+    // so the write cannot land in one (#136).
     const selectable = selectableCalendars(calendars);
     const targetCal = resolveCalendarTarget(event.calendarId, selectable, brokenCollections);
 
     const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@fastmail-mcp`;
     const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
-    // --- timeZone validation (#157) ---
-    // Offset-shape/resolvability rejection and the null/empty/whitespace fail-closed live in
-    // validateCallerTimezone; the two conflict rules below (timeZone combined with a
-    // Z/offset-designated or date-only value) need the start/end VALUES, so they run here.
+    // The conflict rules need the start/end values, so they run here rather than in
+    // validateCallerTimezone (#157).
     let callerZone: string | undefined;
     if (event.timeZone !== undefined) {
       callerZone = validateCallerTimezone(event.timeZone);
@@ -5162,29 +3443,19 @@ export class CalDAVCalendarClient {
       rejectTimezoneConflict(event.end, 'end', callerZone);
     }
 
-    // Resolved here, before any of the payload is assembled, so a value outside the RFC's two
-    // tokens is refused without a partly-built event behind it (#194).
     const callerTransparency = event.transparency !== undefined
       ? normalizeTransparency(event.transparency)
       : undefined;
 
-    // The account's configured zone, resolved to a name ICU can actually use — `create`'s
-    // default for a designator-less value with no caller `timeZone` (#157). Never floating:
-    // a bare `2026-04-07T14:00:00` used to be written verbatim (a different instant for every
-    // reader); this is the deliberate behaviour change docs/conventions.md documents.
+    // Create's default for a designator-less value, so it is never written floating (#157).
     const configuredZone = resolveUsableTimezone(getDefaultTimezone());
 
-    // Format start/end with all-day event support
     const startFormatted = formatDateTimeProperty('DTSTART', event.start, null, '\r\n', callerZone, configuredZone);
     const endFormatted = formatDateTimeProperty('DTEND', event.end, null, '\r\n', callerZone, configuredZone);
     const startLine = startFormatted.line;
     const endLine = endFormatted.line;
 
-    // Time frame + ordering consistency. Classifying the serialized lines rather
-    // than the raw inputs is the same thing the update path does, so create and
-    // update reject an identical set of bad pairs. tzidSource is threaded through so a
-    // frame-mismatch error names a DEFAULTED zone as defaulted, not as something the caller
-    // wrote.
+    // Classified from the serialized lines, as update does, so both reject the same pairs.
     const startFrame = describeDateProperty(startLine, event.start, startFormatted.tzidSource);
     const endFrame = describeDateProperty(endLine, event.end, endFormatted.tzidSource);
     validateDateConsistency(startFrame, endFrame);
@@ -5217,25 +3488,10 @@ export class CalDAVCalendarClient {
       foldICalLine(`SUMMARY:${escapeICalText(event.title)}`),
     ];
 
-    // AN ALL-DAY EVENT IS WRITTEN FREE, A TIMED ONE BUSY — the Fastmail client's own defaults
-    // (#195). RFC 5545 §3.8.2.7 defaults an ABSENT TRANSP to OPAQUE, so writing nothing is not
-    // neutral: it is a positive claim that the account is busy, and every all-day event created
-    // here used to block the whole day in this account's free/busy with nothing showing it.
-    //
-    // The timed path therefore emits NOTHING deliberately: the RFC default already says busy,
-    // and a redundant TRANSP:OPAQUE would differ from what the client writes for no gain. The
-    // client is the reference — its all-day fixtures in docs/fastmail-action-availability.md
-    // all carry TRANSP:TRANSPARENT, no timed fixture carries TRANSP at all.
-    //
-    // CHOOSING A DEFAULT IS CREATE'S ALONE. This path picks an initial value where there is no
-    // prior one to respect; `updateCalendarEvent` never writes TRANSP unless asked, because by
-    // then an absent property is one of the two ways of holding "busy", not a gap to fill.
-    //
-    // Keyed on the CLASSIFIED line — the same describeDateProperty result validateDateConsistency
-    // has just accepted — so "all-day" means here what it means everywhere else on this path. An
-    // explicit `transparency` wins over both arms (#194), which is why one branch decides the
-    // whole property: the caller's value is a statement about this event, the all-day rule is
-    // what to do when nobody made one.
+    // ALL-DAY IS WRITTEN FREE, TIMED IS LEFT BUSY: the Fastmail client's defaults (#195,
+    // docs/fastmail-action-availability.md). An absent TRANSP means OPAQUE (RFC 5545 §3.8.2.7),
+    // so the timed path deliberately writes nothing. Choosing a default is create's alone;
+    // update never writes TRANSP unasked. An explicit `transparency` wins (#194).
     if (callerTransparency !== undefined) {
       icalLines.push(transpLine(callerTransparency));
     } else if (startFrame.frame === 'date') {
@@ -5249,23 +3505,19 @@ export class CalDAVCalendarClient {
       icalLines.push(foldICalLine(`LOCATION:${escapeICalText(event.location)}`));
     }
 
-    // Participant support
     if (event.participants && event.participants.length > 0) {
-      // Validate all emails first
       for (const p of event.participants) {
         validateAttendeeEmail(p.email);
       }
 
-      // ORGANIZER required when ATTENDEEs present. Validate the username as a
-      // strict addr-spec (rejects ; , : CR LF etc.) so it can't corrupt or inject
-      // into the ORGANIZER line when embedded below.
+      // ORGANIZER is required when ATTENDEEs are present.
       const caldavUsername = this.config.username;
       validateOrganizerUsername(caldavUsername);
       const displayName = resolveDisplayName(this.config.displayName, caldavUsername);
       const cnPart = `;CN=${quoteParamValue(displayName)}`;
       icalLines.push(foldICalLine(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
 
-      // ATTENDEE lines — do NOT emit RSVP=TRUE by default (RFC 5545 §3.2.17 defaults to FALSE)
+      // No RSVP=TRUE by default (RFC 5545 §3.2.17 defaults to FALSE).
       for (const p of event.participants) {
         const cnParam = p.name ? `;CN=${quoteParamValue(p.name)}` : '';
         icalLines.push(foldICalLine(`ATTENDEE${cnParam}:mailto:${p.email}`));
@@ -5275,7 +3527,7 @@ export class CalDAVCalendarClient {
     icalLines.push('END:VEVENT');
     icalLines.push('END:VCALENDAR');
 
-    // Trailing CRLF per RFC 5545 §3.1
+    // Trailing CRLF per RFC 5545 §3.1.
     const ical = icalLines.join('\r\n') + '\r\n';
 
     const createResp = await client.createCalendarObject({
@@ -5301,82 +3553,47 @@ export class CalDAVCalendarClient {
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
     clearFields?: string[];
-    // Explicit zone for a designator-less start/end (#157). Unlike create,
-    // update NEVER defaults this when omitted — omitting it preserves
-    // whatever the event already has (inherited stored TZID, or floating).
-    // See validateCallerTimezone and the module-level reject* helpers above
-    // the class for the full set of rejection rules this triggers.
+    // Explicit zone for a designator-less start/end (#157). Unlike create, update NEVER defaults
+    // an omitted zone: the stored TZID, or floating, is preserved.
     timeZone?: string | null;
     /**
-     * Free/busy transparency (#194). Sets or replaces `TRANSP`; omitted leaves the stored
-     * value alone, whatever else this call changes. Mutually exclusive with
-     * `clearFields: ['transparency']`, which removes the property instead.
+     * Free/busy (#194). Omitted leaves the stored value alone; exclusive with
+     * `clearFields: ['transparency']`.
      */
     transparency?: string;
   }): Promise<UpdateCalendarEventResult> {
     const client = await this.getClient();
-    // PROCEEDS ON THE COPY IT FOUND, and names the collection it could not check (#136).
-    //
-    // The alternative — refusing every write while any collection is unhealthy — was weighed
-    // and rejected, and the reasoning has to survive because "refuse when unsure" reads as the
-    // safe default and is not one here. Refusing would block EVERY calendar write for as long
-    // as one borrowed or shared collection stays unhealthy, and it would do so to guard a case
-    // that needs two things at once: a DUPLICATE UID across collections, AND the failure
-    // landing on the very collection holding the other copy. Against that, nothing is ever
-    // left half-done by proceeding — this path searches first and writes exactly once, to the
-    // one resource it resolved — so the worst outcome is that a second copy elsewhere goes
-    // unpatched, which the note names the path of.
+    // PROCEEDS ON THE COPY IT FOUND, naming the collection it could not check (#136). Refusing
+    // every write while one collection is unhealthy is NOT the safe default here: it guards only
+    // a duplicate UID whose other copy sits in the broken collection, and this path writes once,
+    // to the one resource it resolved.
     const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
-      // Caller-fixable bad id, same as getCalendarEventById: InvalidParams, not the
-      // InternalError a plain Error maps to.
       throw eventNotFoundError(eventId, brokenCollections);
     }
 
-    // BEFORE the repeating-series refusal below and before any argument validation, because
-    // nothing in the arguments can make an ambiguous id legal and the order of the two refusals
-    // decides what the caller learns — see ambiguousEventIdError (#101).
-    //
-    // `addressed` is what keeps the escape hatch open: a caller who passed a resource url named
-    // ONE record, and this acts on it however many others carry that url as their UID.
+    // Before the repeating-series refusal and all argument validation; see ambiguousEventIdError
+    // (#101). `addressed` keeps the url escape hatch open.
     if (!addressed && matches.length > 1) {
       throw ambiguousEventIdError(eventId, 'update', matchesToCopies(matches), brokenCollections);
     }
 
-    // UNREACHABLE DEFENCE, not a live case (#137): `isResolvedCalendarObject` already requires
-    // a payload holding a parseable VEVENT before a resource is collected as a match at all, so
-    // a payload-less object never reaches here — it resolves to nothing and the not-found above
-    // fires instead. Kept because it is the last statement of an invariant two destructive
-    // paths depend on, and because it costs nothing; do not read its presence as evidence that
-    // the lookup can hand back an empty payload.
-    //
-    // Stays a plain Error rather than an InvalidInputError: were it ever reached, the event was
-    // found and the server handed back an object with no usable iCal payload, and nothing in
-    // the caller's arguments could change that.
-    // Structural, not a substring test: `includes('BEGIN:VEVENT')` is true of a payload whose
-    // only occurrence of that text sits inside a DESCRIPTION, which then fell through to a
-    // different error message about the same condition.
+    // UNREACHABLE DEFENCE (#137): `isResolvedCalendarObject` already requires a VEVENT. A plain
+    // Error, since no argument could fix it.
     if (!obj.data || extractVEventBlocks(obj.data).length === 0) {
       throw new Error('Cannot update event: no iCal data found');
     }
 
-    // Raised before ANY argument validation, because nothing in the arguments can make this
-    // call legal — reporting a date-format problem first would imply fixing it would help.
-    // Keyed on the resolved RESOURCE rather than the argument, so the `url` form of the id
-    // (which findCalendarObjectByUID accepts, and which every serialised row carries) reaches
-    // the same refusal as the UID form. See recurringSeriesRefusal for the reasoning (#146).
+    // Before ANY argument validation: nothing in the arguments can make this legal. Keyed on
+    // the resolved RESOURCE, so the url form of the id reaches it too (#146).
     if (isRecurringSeriesResource(obj.data)) {
       throw recurringSeriesRefusal('update', calendarObjectTitle(obj.data, eventId));
     }
 
-    // Validate date inputs early before any processing
     const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
-    // The value echoed here is by definition one nothing has validated — that is what the check
-    // just decided — so it goes through `echoCallerText` inside double quotes like every other
-    // echo in this file. Rendered bare, a CRLF in it split one refusal into what read as two
-    // lines of server output.
+    // Unvalidated by definition, so echoed.
     if (fields.start !== undefined && !datePattern.test(fields.start) && !dateTimePattern.test(fields.start)) {
       throw new InvalidInputError(`Invalid start date format: "${echoCallerText(fields.start)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
@@ -5384,13 +3601,8 @@ export class CalDAVCalendarClient {
       throw new InvalidInputError(`Invalid end date format: "${echoCallerText(fields.end)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
 
-    // Validate clearFields: only the optional, string-settable, not-otherwise-
-    // clearable fields may be cleared, and a field can't be both set and cleared.
-    //
-    // `transparency` joins the set (#194) even though it is an ENUM rather than free text: what
-    // makes a field clearable here is that the property is OPTIONAL, and removing TRANSP is the
-    // only way back to the shape the Fastmail client writes for an ordinary busy event. It is a
-    // change to the RECORD, not the STATE — an absent TRANSP and `TRANSP:OPAQUE` both read busy.
+    // `transparency` is clearable (#194) though an enum: removing TRANSP is the only way back to
+    // the shape the Fastmail client writes for a busy event, a change to the record, not the state.
     const CLEARABLE_FIELDS = new Set(['description', 'location', 'transparency']);
     const providedStringFields = new Set<string>();
     if (fields.description !== undefined) providedStringFields.add('description');
@@ -5398,8 +3610,6 @@ export class CalDAVCalendarClient {
     if (fields.transparency !== undefined) providedStringFields.add('transparency');
     validateClearFields(fields.clearFields, CLEARABLE_FIELDS, providedStringFields);
 
-    // Resolved before any patching, like the timeZone validation above and for the same
-    // reason: a value outside the RFC's two tokens is refused before the payload is touched.
     const callerTransparency = fields.transparency !== undefined
       ? normalizeTransparency(fields.transparency)
       : undefined;
@@ -5407,30 +3617,21 @@ export class CalDAVCalendarClient {
     const lineEnding = detectLineEnding(obj.data);
     const fold = (line: string) => foldICalLine(line, lineEnding);
 
-    // All patch helpers target the FIRST VEVENT — make sure that's the master,
-    // not an overridden instance (component order is not guaranteed by RFC).
     const normalizedData = normalizeMasterVEventFirst(obj.data);
 
-    // Capture original VEVENT before any patching for reads
     const originalVevent = extractVEvent(normalizedData);
-    // Also a plain Error: the stored object is malformed, which is not a caller input fault.
     if (!originalVevent) {
       throw new Error('Cannot update event: no VEVENT block found');
     }
 
-    // Trimmed here for the same reason as the other UID reads: it is echoed back as the
-    // result's `eventId`, which a caller may then pass straight into another exact-match
-    // UID lookup.
+    // Trimmed: returned as `eventId`, which a caller may feed to an exact-match lookup.
     const existingUid = parseICalValue(originalVevent, 'UID')?.trim() || eventId;
     let data = normalizedData;
 
-    // --- timeZone validation (#157) ---
-    // Runs before any patching so a rejection never leaves the object half-modified.
+    // timeZone validation (#157), before any patching.
     let callerZone: string | undefined;
     if (fields.timeZone !== undefined) {
       callerZone = validateCallerTimezone(fields.timeZone);
-      // timeZone with neither side supplied has nothing to qualify.
-      // Still reachable — re-send start/end unchanged alongside timeZone to re-zone them.
       if (fields.start === undefined && fields.end === undefined) {
         throw new InvalidInputError(
           `timeZone was supplied ('${callerZone}') but neither start nor end was. timeZone only ` +
@@ -5439,12 +3640,8 @@ export class CalDAVCalendarClient {
           "or drop timeZone."
         );
       }
-      // timeZone can't be combined with a value that already names its own instant
-      // (Z/offset) or has no time component (all-day).
       if (fields.start !== undefined) rejectTimezoneConflict(fields.start, 'start', callerZone);
       if (fields.end !== undefined) rejectTimezoneConflict(fields.end, 'end', callerZone);
-      // A single-sided update that would re-zone one side while leaving the other
-      // stranded in a DIFFERENT stored zone would silently produce a two-zone event.
       if (fields.start !== undefined && fields.end === undefined) {
         rejectStrandedZoneMismatch(originalVevent, 'start', callerZone);
       }
@@ -5453,7 +3650,6 @@ export class CalDAVCalendarClient {
       }
     }
 
-    // --- Patch fields ---
     let newStartFormatted: FormattedDateProperty | null = null;
     let newEndFormatted: FormattedDateProperty | null = null;
     let newStartLine: string | null = null;
@@ -5482,31 +3678,19 @@ export class CalDAVCalendarClient {
       newEndFormatted = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding, callerZone);
       newEndLine = newEndFormatted.line;
       data = replaceICalProperty(data, 'DTEND', newEndLine);
-      // Remove DURATION — DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1)
+      // DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1).
       data = removeAllICalProperties(data, 'DURATION');
       timeChanged = true;
     }
 
-    // AN UPDATE CHANGES FREE/BUSY ONLY WHEN ASKED TO (#195, #194). These two blocks are the only
-    // things on this path that touch TRANSP, and both of them are the caller saying so; editing
-    // an event's dates, title or attendees leaves the property exactly as stored.
-    //
-    // That is the rule, not an omission. RFC 5545 §3.8.2.7 gives TRANSP three spellings and two
-    // states: absent and `OPAQUE` both mean busy, `TRANSPARENT` means free. So an event carrying
-    // no TRANSP is not silent about free/busy — it SAYS busy — and there is no gap here to fill.
-    //
-    // No folding and no escaping below: the value is one of two literals this file owns by the
-    // time it gets here, and the whole line is shorter than the fold width.
+    // AN UPDATE CHANGES FREE/BUSY ONLY WHEN ASKED (#195, #194): an absent TRANSP already says
+    // busy, so there is no gap to fill. No fold or escape: the line is a short owned literal.
     if (callerTransparency !== undefined) {
       data = replaceICalProperty(data, 'TRANSP', transpLine(callerTransparency));
     }
 
-    // Clear requested fields by removing the property line entirely. `validateClearFields` has
-    // already rejected any field also passed as a value, so this cannot undo a patch above it.
-    //
-    // ONE OCCURRENCE EACH: `replaceICalProperty` removes the first matching line, and RFC 5545
-    // allows DESCRIPTION, LOCATION and TRANSP at most once per VEVENT, so a second copy only
-    // exists in already-malformed input. `removeAllICalProperties` is the tool if that changes.
+    // ONE OCCURRENCE EACH: RFC 5545 allows these at most once per VEVENT.
+    // `removeAllICalProperties` is the tool if that changes.
     if (fields.clearFields && fields.clearFields.length > 0) {
       const KEY_BY_FIELD: Record<string, string> = { description: 'DESCRIPTION', location: 'LOCATION', transparency: 'TRANSP' };
       for (const field of fields.clearFields) {
@@ -5514,18 +3698,13 @@ export class CalDAVCalendarClient {
       }
     }
 
-    // Time frame + ordering consistency, judged on the pair that will actually
-    // be written: the freshly formatted line for a side the caller supplied,
-    // and the STORED line for a side they left alone. Comparing only the
-    // caller's own values would miss the single-sided update entirely, which is
-    // where both a frame flip (a floating start landing beside a UTC end) and a
-    // backwards DTEND come from. The check is skipped when neither side was
-    // touched, so a title-only edit is never blocked by an inconsistency that
-    // was already in the stored event.
+    // Judged on the pair that will be WRITTEN, the stored line standing in for an untouched side,
+    // which is where single-sided frame flips come from. Skipped when neither side changed, so
+    // a title edit is never blocked by an inconsistency already stored.
     if (fields.start !== undefined || fields.end !== undefined) {
       const startLine = newStartLine ?? parseAllICalProperties(originalVevent, 'DTSTART')[0];
       const endLine = newEndLine ?? parseAllICalProperties(originalVevent, 'DTEND')[0];
-      // A DURATION-based event has no stored DTEND — nothing to compare against.
+      // A DURATION-based event has no stored DTEND to compare.
       if (startLine && endLine) {
         validateDateConsistency(
           describeDateProperty(startLine, newStartLine ? fields.start : undefined, newStartFormatted?.tzidSource),
@@ -5540,19 +3719,14 @@ export class CalDAVCalendarClient {
     }
 
     if (fields.participants !== undefined) {
-      // Validate emails
       for (const p of fields.participants) {
         validateAttendeeEmail(p.email);
       }
-      // Remove all existing ATTENDEE lines
       data = removeAllICalProperties(data, 'ATTENDEE');
-      // Clearing all participants must also strip ORGANIZER — an ORGANIZER with
-      // no ATTENDEEs is a malformed scheduling VEVENT (RFC 5545 §3.8.4.3). On the
-      // length>0 path below the ORGANIZER is re-added, so this is gated to ===0.
+      // An ORGANIZER with no ATTENDEEs is a malformed scheduling VEVENT (RFC 5545 §3.8.4.3).
       if (fields.participants.length === 0) {
         data = removeAllICalProperties(data, 'ORGANIZER');
       }
-      // Build and insert all ATTENDEE lines in one pass
       if (fields.participants.length > 0) {
         const attendeeLines = fields.participants.map(p => {
           const cnParam = p.name ? `;CN=${quoteParamValue(p.name)}` : '';
@@ -5560,23 +3734,16 @@ export class CalDAVCalendarClient {
         }).join(lineEnding);
         data = insertBeforeEndVEvent(data, attendeeLines);
       }
-      // Add ORGANIZER if absent and participants are being added (RFC 5545 §3.8.4.1)
+      // RFC 5545 §3.8.4.1.
       if (fields.participants.length > 0 && !hasICalProperty(extractVEvent(data) || '', 'ORGANIZER')) {
         const caldavUsername = this.config.username;
-        // Same strict addr-spec check the create path applies. A bare
-        // .includes('@') admits ; , : CR LF, which would corrupt or inject into
-        // the ORGANIZER line built below — the two paths emit the identical line
-        // from the identical value, so they validate it identically.
         validateOrganizerUsername(caldavUsername);
         const displayName = resolveDisplayName(this.config.displayName, caldavUsername);
-        // Always a CN: resolveDisplayName falls back to the username, which the check
-        // above has just proved is a usable address, so it can never be empty.
         const cnPart = `;CN=${quoteParamValue(displayName)}`;
         data = replaceICalProperty(data, 'ORGANIZER', fold(`ORGANIZER${cnPart}:mailto:${caldavUsername}`));
       }
     }
 
-    // --- SEQUENCE increment ---
     const hasAttendees = hasICalProperty(originalVevent, 'ATTENDEE');
     const schedulingSignificant = fields.start !== undefined || fields.end !== undefined ||
       fields.participants !== undefined || fields.location !== undefined;
@@ -5586,14 +3753,11 @@ export class CalDAVCalendarClient {
       data = replaceICalProperty(data, 'SEQUENCE', `SEQUENCE:${existingSeq + 1}`);
     }
 
-    // --- Update DTSTAMP and LAST-MODIFIED ---
     const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
     data = replaceICalProperty(data, 'DTSTAMP', `DTSTAMP:${now}`);
     data = replaceICalProperty(data, 'LAST-MODIFIED', `LAST-MODIFIED:${now}`);
 
-    // --- VTIMEZONE regeneration + orphan cleanup (LAST — after all modifications) ---
-    // regenerateVTimezones runs first: a re-zoned or re-timed event needs a freshly computed
-    // block (new span, new TZUNTIL) before the orphan sweep decides what is still referenced.
+    // LAST, after every patch; regeneration before the orphan sweep.
     if (timeChanged) {
       data = regenerateVTimezones(data, lineEnding);
       data = removeOrphanedVTimezones(data);
@@ -5613,28 +3777,20 @@ export class CalDAVCalendarClient {
 
   async deleteCalendarEvent(eventId: string): Promise<DeleteCalendarEventResult> {
     const client = await this.getClient();
-    // Acts on the copy it found and names the path it could not check — the same call as
-    // update's, made for the same reasons; see the comment there (#136).
+    // Proceeds on the copy it found, as update does (#136).
     const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
-      // Caller-fixable bad id, matching getCalendarEventById/updateCalendarEvent.
       throw eventNotFoundError(eventId, brokenCollections);
     }
 
-    // BEFORE the repeating-series refusal below, the same rule and the same order as update's,
-    // and standing down on an ADDRESSED id for the same reason; see ambiguousEventIdError
-    // (#101). Sharper here than there: this call destroys, and the copy it would have picked is
-    // not the one the caller may have meant.
+    // Same rule and order as update's; see ambiguousEventIdError (#101).
     if (!addressed && matches.length > 1) {
       throw ambiguousEventIdError(eventId, 'delete', matchesToCopies(matches), brokenCollections);
     }
 
-    // Raised AFTER the lookup and BEFORE the delete, so it covers both ways an id resolves:
-    // findCalendarObjectByUID matches a UID or a `url` interchangeably, and `url` is on every
-    // row this server serialises, so a guard keyed on the argument's shape would be bypassed
-    // by passing the row's url. Reading the resolved RESOURCE cannot be. See
-    // recurringSeriesRefusal for why this refuses rather than confirms (#146).
+    // Keyed on the resolved RESOURCE, not the argument's shape, so passing a row's url cannot
+    // bypass it (#146).
     if (isRecurringSeriesResource(obj.data)) {
       throw recurringSeriesRefusal('delete', calendarObjectTitle(obj.data, eventId));
     }
