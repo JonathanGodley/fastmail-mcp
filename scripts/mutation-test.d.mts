@@ -4,7 +4,11 @@
 export const USAGE: string;
 export const EXCLUDED_TESTS: string[];
 export const MUTATE_ALL: string[];
-export function parseArgs(argv: string[]): { all: true } | { commit: string } | { error: string };
+export function parseArgs(argv: string[]):
+  | { all: true; shard?: { i: number; n: number } }
+  | { commit: string }
+  | { error: string };
+export function partition(files: [path: string, bytes: number][], n: number): string[][];
 export function isMutable(file: string): boolean;
 export function testFiles(srcNames: string[]): string[];
 export function diffToRanges(diff: string): string[];

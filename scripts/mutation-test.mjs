@@ -3,6 +3,8 @@
 //
 //   node scripts/mutation-test.mjs <commit>   mutate only the src/ lines that commit changed
 //   node scripts/mutation-test.mjs --all      mutate all of src/, incrementally (reports/)
+//   node scripts/mutation-test.mjs --all --shard <i>/<n>
+//                                             mutate shard i of n, with json/html reports in reports/
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -11,7 +13,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const USAGE = 'Usage: node scripts/mutation-test.mjs <commit> | --all';
+export const USAGE = 'Usage: node scripts/mutation-test.mjs <commit> | --all [--shard <i>/<n>]';
 
 // These read src/ as text or run the built dist/, so under Stryker they either fail its initial
 // run (its instrumentation reads process.env and reprints the mutated file whole) or measure
@@ -19,9 +21,16 @@ export const USAGE = 'Usage: node scripts/mutation-test.mjs <commit> | --all';
 export const EXCLUDED_TESTS = ['index-env', 'readme-inventory', 'tool-schema', 'config-surface', 'built-server', 'server-lifecycle']
   .map((name) => `src/${name}.test.ts`);
 
-/** Returns { all: true }, { commit }, or { error } for anything else. */
+/** Returns { all: true, shard? }, { commit }, or { error } for anything else. */
 export function parseArgs(argv) {
   if (argv.length === 1 && argv[0] === '--all') return { all: true };
+  if (argv.length === 3 && argv[0] === '--all' && argv[1] === '--shard') {
+    const m = /^(\d+)\/(\d+)$/.exec(argv[2]);
+    const i = Number(m?.[1]);
+    const n = Number(m?.[2]);
+    if (!m || i < 1 || i > n) return { error: `--shard takes <i>/<n> with 1 <= i <= n, got ${argv[2]}` };
+    return { all: true, shard: { i, n } };
+  }
   if (argv.length === 1 && !argv[0].startsWith('-')) return { commit: argv[0] };
   return { error: argv.length === 0 ? 'A commit or --all is required.' : `Unexpected arguments: ${argv.join(' ')}` };
 }
@@ -53,6 +62,22 @@ export function diffToRanges(diff) {
   return ranges;
 }
 
+/**
+ * Deals [path, bytes] pairs into n shards of similar total size: largest first, each to the
+ * lightest shard so far (lowest index on a tie). Returns n sorted path lists.
+ */
+export function partition(files, n) {
+  if (!Number.isInteger(n) || n < 1) throw new Error(`shard count must be a positive integer, got ${n}`);
+  const shards = Array.from({ length: n }, () => ({ bytes: 0, paths: [] }));
+  const bySize = [...files].sort(([a, x], [b, y]) => y - x || (a < b ? -1 : a > b ? 1 : 0));
+  for (const [file, bytes] of bySize) {
+    const lightest = shards.reduce((min, s) => (s.bytes < min.bytes ? s : min));
+    lightest.bytes += bytes;
+    lightest.paths.push(file);
+  }
+  return shards.map((s) => s.paths.sort());
+}
+
 function main() {
   const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -77,6 +102,18 @@ function main() {
     mutate = diffToRanges(git('diff', `${sha}~1`, sha, '-U0', '--', 'src'));
     if (mutate.length === 0) fail(`${args.commit} changed no mutable src/ lines.`);
   }
+  const { shard } = args;
+  const tag = shard ? `-${shard.i}-of-${shard.n}` : '';
+  if (shard) {
+    // Blob sizes at HEAD, not on-disk sizes, so every platform and line-ending setting deals
+    // the same shards and each shard's incremental file keeps matching its files.
+    const files = git('ls-tree', '-r', '-l', 'HEAD', '--', 'src').trim().split('\n')
+      .map((line) => /^\S+ blob \S+\s+(\d+)\t(.+)$/.exec(line))
+      .filter((m) => m && isMutable(m[2]))
+      .map((m) => [m[2], Number(m[1])]);
+    mutate = partition(files, shard.n)[shard.i - 1];
+    if (mutate.length === 0) fail(`Shard ${shard.i}/${shard.n} has no files; use fewer shards.`);
+  }
 
   // A git worktree has no node_modules; `npm install` runs once, in the primary checkout. Rather
   // than link anything, the sandboxes live in the primary's .stryker-tmp, so Node's ordinary
@@ -99,8 +136,10 @@ function main() {
     symlinkNodeModules: false,
     cleanTempDir: 'always',
     incremental: Boolean(args.all),
-    incrementalFile: 'reports/stryker-incremental.json',
-    reporters: ['clear-text', 'progress'],
+    incrementalFile: `reports/stryker-incremental${tag}.json`,
+    reporters: ['clear-text', 'progress', ...(shard ? ['json', 'html'] : [])],
+    jsonReporter: { fileName: `reports/mutation${tag}.json` },
+    htmlReporter: { fileName: `reports/mutation${tag}.html` },
     // Stryker's tsconfig rewriter calls an API TypeScript 7 removed; a missing file skips it.
     tsconfigFile: 'tsconfig.stryker-skip.json',
   };

@@ -8,13 +8,13 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  EXCLUDED_TESTS, MUTATE_ALL, diffToRanges, isMutable, parseArgs, testFiles,
+  EXCLUDED_TESTS, MUTATE_ALL, diffToRanges, isMutable, parseArgs, partition, testFiles,
 } from '../scripts/mutation-test.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +25,36 @@ test('parseArgs accepts one commit or --all, and nothing else', () => {
   for (const argv of [[], ['a', 'b'], ['--all', 'a'], ['--tests=x'], ['--help']]) {
     assert.ok('error' in parseArgs(argv), argv.join(' '));
   }
+});
+
+test('parseArgs accepts --all --shard i/n and rejects a bad i/n', () => {
+  assert.deepEqual(parseArgs(['--all', '--shard', '2/4']), { all: true, shard: { i: 2, n: 4 } });
+  assert.deepEqual(parseArgs(['--all', '--shard', '1/1']), { all: true, shard: { i: 1, n: 1 } });
+  for (const s of ['0/4', '5/4', '1/0', '0/0', '-1/4', '2', '2/', '/4', 'a/b', '1.5/4', '2/4/6', '']) {
+    assert.ok('error' in parseArgs(['--all', '--shard', s]), s);
+  }
+  for (const argv of [['--shard', '1/4'], ['abc', '--shard', '1/4'], ['--all', '--shard'], ['--shard', '1/4', '--all']]) {
+    assert.ok('error' in parseArgs(argv), argv.join(' '));
+  }
+});
+
+test('partition covers every file exactly once, balanced by size, deterministically', () => {
+  const files: [string, number][] = [['src/a.ts', 900], ['src/b.ts', 500], ['src/c.ts', 400], ['src/d.ts', 300], ['src/e.ts', 100], ['src/f.ts', 100]];
+  const shards = partition(files, 3);
+  assert.deepEqual(shards, [['src/a.ts'], ['src/b.ts', 'src/e.ts', 'src/f.ts'], ['src/c.ts', 'src/d.ts']]);
+  assert.deepEqual(shards.flat().sort(), files.map(([f]) => f).sort());
+  assert.deepEqual(partition([...files].reverse(), 3), shards, 'input order must not matter');
+  assert.deepEqual(partition(files, 1), [files.map(([f]) => f)]);
+  assert.deepEqual(partition(files.slice(0, 2), 3), [['src/a.ts'], ['src/b.ts'], []]);
+  for (const n of [0, -1, 1.5, NaN]) assert.throws(() => partition(files, n), /positive integer/);
+});
+
+test('partition over the real src tree keeps every mutable file in exactly one shard', () => {
+  const real = readdirSync(join(REPO, 'src')).map((n) => `src/${n}`).filter(isMutable);
+  const shards = partition(real.map((f) => [f, statSync(join(REPO, f)).size] as [string, number]), 4);
+  assert.equal(shards.flat().length, real.length);
+  assert.deepEqual(new Set(shards.flat()), new Set(real));
+  assert.ok(shards.every((s) => s.length > 0));
 });
 
 test('isMutable keeps src/*.ts and drops index.ts, tests, testing/ and non-src files', () => {
