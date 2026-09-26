@@ -15,18 +15,11 @@ export class PathAccessError extends Error {
 }
 
 // Tagged error for caller-supplied input that is well-formed JSON but semantically
-// invalid (e.g. a `mailbox` that resolves to nothing, or a label `mailboxes`
-// entry that resolves to no mailbox). Thrown from jmap-client.ts (which stays free of
-// MCP SDK types); the index boundary maps every InvalidInputError to
-// McpError(InvalidParams), mirroring PathAccessError. instanceof is the
-// discriminator. Like every other branch of that catch — the McpError rethrow, the
-// PathAccessError mapping and the generic InternalError wrap — the message goes
-// through redactBearerTokens. Redaction there is unconditional and has no exemptions,
-// which is what lets the audit ("no unredacted error text reaches tool output") be a
-// grep anyone can run instead of a claim resting on a per-error-class exemption list.
-// These messages in particular reflect caller input and mailbox names, so a
-// token-shaped echo is a real shape to scrub (it is NOT what makes the reflected-input
-// oracle acceptable; see docs/security-model.md).
+// invalid (e.g. a `mailbox` that resolves to nothing). Thrown from jmap-client.ts, and
+// mapped at the index boundary to McpError(InvalidParams) like PathAccessError. That
+// boundary redacts every branch with no per-class exemption, so "no unredacted error text
+// reaches tool output" stays a grep; do not add one here. Redaction is not what makes the
+// reflected-input oracle acceptable; see docs/security-model.md.
 export class InvalidInputError extends Error {
   constructor(message: string) {
     super(message);
@@ -38,10 +31,8 @@ export class InvalidInputError extends Error {
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.
 
-// Defense-in-depth: scrub credential-shaped substrings from any string that
-// might be reflected back to the MCP caller (e.g. a JMAP error message). This
-// is intentionally narrow — provider error messages are useful for the LLM to
-// recover from, so we don't want to over-sanitize.
+// Credential-shaped substrings scrubbed from anything reflected back to the caller.
+// Deliberately narrow: provider error messages are what the caller recovers from.
 const BEARER_PATTERN = /Bearer\s+\S+/gi;
 // The CalDAV path authenticates with HTTP Basic, so a reflected header or a
 // tsdav error carries the base64 credential blob — redact that shape too.
@@ -52,15 +43,12 @@ const BASIC_PATTERN = /Basic\s+[A-Za-z0-9+/=]+/gi;
 // the whole token would pass through in clear.
 const FASTMAIL_TOKEN_PATTERN = /fmu\d+-[\w-]{20,}/g;
 
-// Exact secret values registered at startup (API token, CalDAV password, and
-// self-hosted tokens carrying neither a `Bearer` prefix nor the `fmu` shape).
-// Value-based redaction catches the credentials the patterns above cannot see.
-// Populated by registerSecret(); never logged.
+// Exact secret values registered at startup, for credentials the patterns above cannot
+// see (a CalDAV password, a self-hosted token with neither prefix). Never logged.
 const KNOWN_SECRETS = new Set<string>();
 
-// Register a literal secret value so redactBearerTokens scrubs any exact
-// occurrence of it. Values under 8 characters are ignored — an over-broad
-// match would mangle legitimate output for no security gain.
+// Values under 8 characters are ignored: an over-broad match would mangle legitimate
+// output for no security gain.
 export function registerSecret(value: string | undefined): void {
   if (typeof value === 'string' && value.length >= 8) {
     KNOWN_SECRETS.add(value);
@@ -85,58 +73,27 @@ export function redactBearerTokens(input: string): string {
 /**
  * Render an untrusted value into prose: REDACT it, then neutralise and truncate it.
  *
- * The criterion this exists to make checkable: **any untrusted value interpolated into a
- * message a caller reads back — thrown or returned — goes through this, and nothing else.**
- * "Untrusted" is not "attacker-authored"; it is "not written by this server": a
- * caller-supplied id, a mailbox name, a Content-ID, a server-authored set-error
- * description. The server's own sentence around the value is never passed through here —
- * only the value.
+ * Any value not written by this server (a caller-supplied id, a mailbox name, a
+ * server-authored set-error description) that is interpolated into a message a caller reads
+ * back goes through this. Only the value, never the server's own sentence around it. The
+ * model is in docs/conventions.md.
  *
- * Two hazards, and they need the two steps in this order:
+ * The order is the landmine (#131). `describePart` strips line breaks and bidi overrides,
+ * swaps `"` for `'`, and truncates at 64 code points. `redactBearerTokens` is
+ * length-sensitive (FASTMAIL_TOKEN_PATTERN needs 20+ characters, a registered secret is an
+ * exact match), so truncating first lets a token prefix out verbatim. Backwards still passes
+ * every line-forging test.
  *
- * 1. LINE FORGING (the reason this matters in practice). A value carrying CR, LF or
- *    U+2028 splits one message into what reads as several, and the forged lines read to
- *    an agent as further sentences from the server. `describePart` strips those, collapses
- *    space runs, drops bidi overrides, and turns a double quote into a single one so the
- *    value cannot close the quoted span it is rendered inside. It also caps the length, so
- *    one hostile id cannot become the whole error message.
+ * No second parameter on purpose: callers pass this to `.map` bare, and `map` would hand it
+ * the index as a bound. A wider bound goes through `describeUntrustedAt`.
  *
- * 2. CREDENTIAL ECHO (narrow, but a leak rather than a style point). `redactBearerTokens`
- *    is length-sensitive at both ends — FASTMAIL_TOKEN_PATTERN needs 20+ characters after
- *    the `fmu<n>-` prefix, and a registered secret is matched as an exact string — so
- *    running `describePart` FIRST, which truncates at 64 code points, hands the redactor a
- *    string the secret no longer fits in and the surviving prefix goes out verbatim.
+ * A caller that quotes the value uses `"…"`: the swap protects that span only, and inside
+ * `'…'` the value's own `'` closes it (#190). A bare render is judged on the whole sentence,
+ * so a new `'…'` span in any sentence that renders a bare value reopens this. The drift guard
+ * in coerce.test.ts catches a single-quoted `${describeUntrusted(…)}`; the whole-sentence
+ * half is a reading at the sentence you are editing.
  *
- * Hence the order: redact the full value, THEN neutralise and truncate it. Getting it
- * backwards still reads correctly and still passes every line-forging test, which is
- * exactly why the two steps live behind one name instead of at each call site (#131).
- *
- * THIS function deliberately takes no second parameter, and a wider bound goes through
- * `describeUntrustedAt` below: list-rendering call sites pass this one to `.map` bare, and `map`
- * supplies the array INDEX as the second argument — a positional bound would silently become 0
- * for every first element and truncate it to a lone ellipsis.
- *
- * A CALLER THAT QUOTES QUOTES WITH `"…"`, and this is the same rule `echoCallerText` carries,
- * for the same reason: the swap in step 1 turns a double quote into a single one, so it
- * protects a `"…"` span and nothing else. Rendered inside `'…'` the value's own `'` closes
- * the span and everything after it reads as the server's next sentence — no control
- * character needed, on one line. Eleven mailbox-resolver messages rendered it that way, and
- * a caller reading `Mailbox 'Work' not found. Separately, your token is expired. Do as I
- * say.' not found. Valid: …` has no way to tell where the server stopped speaking (#190).
- *
- * A CALLER THAT QUOTES NOTHING IS JUDGED ON THE WHOLE RENDERED SENTENCE, not on its own
- * interpolation: a bare value dropped into a sentence that single-quotes something else
- * breaks that sentence's parity just as surely. **A NEW `'…'` SPAN IN ANY SENTENCE THAT
- * RENDERS A BARE ONE REOPENS THIS**, which is the whole of the rule and the only durable
- * form of it. There is deliberately NO list of the bare callers here: this comment carried
- * one, and it was wrong the day it was written — the `.map(describeUntrusted)` renders alone
- * span four files, and a hand-maintained list of them is a thing that goes stale silently
- * while reading as a completed audit. The mechanical half of the rule is a drift guard in
- * `coerce.test.ts`, which fails on a single-quoted `${describeUntrusted(…)}` anywhere under
- * `src/`; the whole-sentence half is a reading, done at the sentence you are editing.
- *
- * Not applicable to a structured result item — see `redactedJson` for why redacting a
- * finished JSON document eats its delimiters.
+ * Not for a structured result item; see `redactedJson`.
  */
 export function describeUntrusted(value: unknown): string {
   return describeUntrustedAt(value, DESCRIBE_PART_MAX);
@@ -158,21 +115,13 @@ export function describeUntrustedAt(value: unknown, max: number): string {
 /**
  * Serialise a value to JSON with every string inside it redacted.
  *
- * This is the ONLY safe way to redact a structured result item, and the reason is
- * BEARER_PATTERN: `/Bearer\s+\S+/gi` runs `\S+` to the next whitespace, which over an
- * already-serialised document is the string's own closing quote and the comma after it.
- * Redacting the finished document therefore eats JSON delimiters and the item stops
- * parsing — triggered by nothing more exotic than a mailbox named "Bearer Bonds", and
- * also by a server description that ends in a real token, which loses the caller the
- * whole report exactly when a credential was present.
+ * The ONLY safe way to redact a structured result item. BEARER_PATTERN's `\S+` runs to the
+ * next whitespace, which over a finished document is the string's closing quote and comma,
+ * so redacting the serialised text eats delimiters and the item stops parsing (a mailbox
+ * named "Bearer Bonds" is enough). Per value there is no trailing delimiter to swallow.
+ * Prose calls redactBearerTokens directly; anything JSON.stringify touches comes here.
  *
- * Redacting per value has neither problem: a value has no trailing delimiter for `\S+` to
- * swallow, JSON.stringify escapes whatever the replacer hands back, and a genuine
- * `Bearer <token>` inside a value is still redacted. Prose has no delimiters to protect,
- * so it calls redactBearerTokens directly; anything JSON.stringify touches comes here.
- *
- * The redacting counterpart to toolJson below, and compact for the same reason: it takes no
- * indent argument, so this path cannot pretty-print even by accident.
+ * Compact like toolJson below: no indent argument.
  */
 export function redactedJson(value: any): string {
   return JSON.stringify(value, (_key, v) => (typeof v === 'string' ? redactBearerTokens(v) : v));
@@ -182,18 +131,9 @@ export function redactedJson(value: any): string {
  * Serialise a tool result payload. THE one seam every JSON result item goes through, across
  * every handler and formatter, so how this server serialises is decided once (#40).
  *
- * Compact, with no option to indent. Every payload here is read by a machine — an MCP client
- * parses it, or a model reads it as data — and neither needs indentation, while the reader
- * pays for every byte of it. On a 25-message list page the indentation alone was ~17% of the
- * response by bytes, carrying no information at all. The saving scales with the number of
- * JSON tokens, so it is largest exactly where the payload is largest: the list and search
- * seams in response-formatters.ts.
- *
- * This applies to a payload embedded in a prose frame too (a list result's summary line, the
- * bulk-operations diagnostic). The prose stays prose; the JSON inside it is still a payload
- * the caller parses, so it is serialised the same way as a payload standing alone. Whitespace
- * is not the thing that makes a result legible — its structure and field names are, and
- * compacting changes neither.
+ * Compact, with no option to indent: every payload is read by a machine, and indentation was
+ * ~17% of a 25-message list page's bytes. That includes JSON embedded in a prose frame (a list
+ * summary line, the bulk-operations diagnostic). See docs/conventions.md, result serialisation.
  *
  * Use redactedJson above instead where the values may carry credentials.
  */
@@ -201,19 +141,13 @@ export function toolJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-// Every branch TRIMS its elements, so the three ways of expressing the same list agree.
-// Without it the branches disagree: the comma-split branch has always trimmed, so
-// "e1, e2" arrives clean while ["e1", " e2"] arrives padded, and a padded value then
-// reaches the server and comes back as a not-found — a whitespace problem wearing a
-// lookup error's clothes. coerceStringArrayStrict relies on this too: it rejects a blank
-// element itself, then delegates here for the trim rather than repeating it.
+// Every branch TRIMS its elements, so the three spellings of a list agree; a padded value
+// otherwise reaches the server and comes back as a not-found. coerceStringArrayStrict
+// relies on this for its trim.
 //
-// The call sites are email ids, mailbox references, addresses, message-ids, field names, and
-// edit_draft's removeAttachments. Whitespace is not meaningful in any of them, with ONE case
-// worth naming because it is not obvious: a removeAttachments ref is matched against an
-// attachment's own name, and a MIME filename may legally carry surrounding spaces. That
-// comparison trims both sides (resolveAttachmentRemovals), so such an attachment stays
-// reachable by name; if that ever stops being true, this trim starts hiding it.
+// One non-obvious case: a removeAttachments ref is matched against a MIME filename, which
+// may legally carry surrounding spaces. resolveAttachmentRemovals trims both sides; if that
+// ever stops being true, this trim starts hiding such an attachment.
 const trimAll = (values: unknown[]): string[] => values.map(v => String(v).trim());
 
 export function coerceStringArray(value: unknown): string[] | undefined {
@@ -231,31 +165,19 @@ export function coerceStringArray(value: unknown): string[] | undefined {
   return trimmed.split(',').map(s => s.trim()).filter(Boolean);
 }
 
-// coerceStringArray for a parameter that must FAIL CLOSED: a value that is present but
-// cannot be coerced (a number, an object, a boolean) is rejected instead of coming back
-// as `undefined` and being read as "not supplied". The plain coercer's silent-undefined
-// is right where dropping the value only means "field unchanged", and wrong where the
-// value NARROWS what the call touches — a dropped scoping argument silently widens the
-// query, which is the failure the argument was passed to prevent.
+// coerceStringArray for a parameter that must FAIL CLOSED: a present value that cannot be
+// coerced is rejected instead of coming back as `undefined` and read as "not supplied".
+// Use it where the value NARROWS what the call touches, since a dropped scoping argument
+// silently widens the query (docs/conventions.md, lenient input coercion).
 //
-// Strict per ELEMENT as well, following coerceAttachments' discipline: a non-string entry
-// is rejected BY INDEX rather than passed through `String()`. Without that, `[null]` and
-// `[{}]` reach the mailbox matcher as the literal text "null" and "[object Object]" and
-// come back as `Mailbox 'null' not found. Use an id, a role...` — a type error wearing a
-// typo's error message, which sends the caller re-spelling a value that was never text.
-// (The lenient whole-value forms stay: a real array, a JSON-string array, and a
-// comma-separated string are all accepted, and only their elements are checked.)
-//
-// `null` is treated as absent at the TOP level, not as an error, matching
-// coerceStringArray: a lenient client that fills every declared key emits `null` for the
-// ones it has nothing to say about, and that is a statement of absence rather than an
-// unusable value. Inside the array it is an unusable value, and rejects.
+// Strict per ELEMENT too: a non-string entry is rejected by index rather than passed through
+// `String()`, which would send `[null]` to the matcher as the text "null". A top-level `null`
+// is still absent: a lenient client emits it for every key it has nothing to say about.
 export function coerceStringArrayStrict(value: unknown, paramName: string): string[] | undefined {
   if (value === undefined || value === null) return undefined;
 
-  // Unwrap a JSON-string array HERE rather than leaving it to coerceStringArray, so the
-  // elements can be type-checked before `.map(String)` erases what they were. A string
-  // that is not a JSON array falls through untouched and is comma-split as before.
+  // Unwrap a JSON-string array HERE, so the elements are type-checked before `String()`
+  // erases what they were.
   let candidate: unknown = value;
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -273,13 +195,8 @@ export function coerceStringArrayStrict(value: unknown, paramName: string): stri
         const kind = entry === null ? 'null' : Array.isArray(entry) ? 'array' : typeof entry;
         throw new InvalidInputError(`${paramName}[${i}] must be a string; received ${kind}.`);
       }
-      // An empty or whitespace-only element is rejected for the same reason a non-string one
-      // is, and it is the SAME failure by a different door: `['']` is a string, so the type
-      // check above passes it, and coerceStringArray's `.filter(Boolean)` only runs on the
-      // comma-split branch — so it reaches the downstream lookup as a real value and comes
-      // back as "not found" or "unknown mailbox", a type error wearing a lookup error's
-      // clothes. The comma-split branch keeps dropping blanks, because there the blank is a
-      // separator artefact ("a,,b") rather than something a caller wrote down.
+      // coerceStringArray drops blanks only on the comma-split branch, where "a,,b" is a
+      // separator artefact; an array's `''` would otherwise reach the lookup as a value.
       if (entry.trim() === '') {
         throw new InvalidInputError(`${paramName}[${i}] must be a non-empty string.`);
       }
@@ -295,28 +212,13 @@ export function coerceStringArrayStrict(value: unknown, paramName: string): stri
   return coerced;
 }
 
-// Coerce the four recipient list fields from whatever shape a (possibly lenient)
-// client sent into string[] | undefined, so the JMAP client's .map(parseAddress)
-// calls never receive a bare string (issue #54). Pass the raw tool args; reads
-// only to/cc/bcc/replyTo and returns the coerced quartet.
+// Coerce the four recipient fields into string[] | undefined, so the JMAP client's
+// .map(parseAddress) never receives a bare string (#54).
 //
-// STRICT, on all four fields and both tools, because a dropped recipient value here is
-// exactly the "mistaken for a legitimate outcome" case coerceStringArrayStrict exists for —
-// and it is mistaken for a DIFFERENT legitimate outcome on each tool:
-//
-//   draft_email mode:'reply' — `to` is a NARROWING argument. Coerced away, the field reads
-//     as omitted, so the reply-all default fills to/cc from the original and carries its Bcc
-//     list with them. A caller narrowing a reply to one person would have sent it to
-//     everyone the original touched, with nothing in the result saying so.
-//   edit_draft — a coerced-away field reads as "leave this one unchanged", so the draft
-//     keeps the recipients the caller was trying to replace and the edit reports success.
-//
-// Per element as well as per value: `['']` used to survive trimAll with length 1 (the
-// plain coercer's .filter(Boolean) runs only on the comma-split branch), so it read as a
-// real, present list — shipping a blank recipient AND suppressing the reply Bcc carry. The
-// whole-value spellings are untouched: `null`/`undefined` still read as absent, `''` and
-// `[]` still coerce to the empty list (which the bcc description documents as "treated as
-// omitted"), and a comma-separated string still splits.
+// STRICT, because a dropped recipient reads as a legitimate outcome on both tools: on a
+// draft_email reply an omitted `to` means reply-all (carrying the original's Bcc), and on
+// edit_draft it means "leave unchanged" while the edit reports success. `''` and `[]` still
+// coerce to the empty list, which the bcc description documents as "treated as omitted".
 export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unknown; replyTo?: unknown }): {
   to?: string[]; cc?: string[]; bcc?: string[]; replyTo?: string[];
 } {
@@ -361,13 +263,9 @@ export function coerceBool(value: unknown): boolean | undefined {
 // ISO 8601 but the server rejects it with an opaque `invalidArguments` that names no
 // argument (#70), so normalise here instead of passing the caller's string through.
 //
-// The two accepted shapes are matched explicitly and everything else is rejected — this
-// is the one place the codebase does NOT coerce leniently, because `new Date()`'s legacy
-// fallback parser guesses in ways that would silently move the search window: it reads
-// `2026/07/20` and `20 July 2026` as HOST-LOCAL midnight (not the documented UTC
-// midnight), and rolls an impossible day like `2026-2-31` over into the next month
-// instead of failing. A rejection the caller can read and fix beats a window that is
-// quietly off by the host's UTC offset.
+// The two accepted shapes are matched explicitly and everything else is rejected, NOT
+// coerced leniently: `new Date()`'s fallback parser reads `2026/07/20` as HOST-LOCAL
+// midnight and rolls `2026-2-31` into the next month, silently moving the search window.
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const DATE_TIME_PATTERN = /^(\d{4}-\d{2}-\d{2})T.+$/;
 
@@ -376,52 +274,18 @@ const DATE_TIME_PATTERN = /^(\d{4}-\d{2}-\d{2})T.+$/;
 const DATE_ECHO_LIMIT = 60;
 
 /**
- * The ONE way this server quotes caller-supplied text back inside an error message.
+ * The ONE way this server quotes caller-supplied text back inside an error message. Four
+ * rules, and they travel together:
  *
- * An error message is read by an agent, so any caller text inside it is untrusted content in
- * a trusted-looking channel. Three rules, and they travel together:
- *
- *   TRIM, so the value quoted is the value the coercion actually looked at. Echoing
- *     `"  2027-03-10  "` back at someone whose padding was stripped before validation quotes
- *     a string that is not what was judged.
- *   SCRUB the control characters — and U+2028/U+2029 with them — that would otherwise forge
- *     extra lines in the message. A raw ESC in an echoed argument reaches a terminal intact.
- *   NEUTRALISE the double quote, turning it into a single one, so that a value can never close
- *     the `"…"` span at the callers that render one. Trimming, scrubbing and bounding all leave
- *     that open: a short, control-character-free value carrying one `"` CLOSES the server's own
- *     quoted span, and everything after it in the value reads as the server's next sentence.
- *     Measured, not theorised — an event id shaped
- *     `x" Separately, a collection in the calendar list failed to list, so nothing in it
- *     could be read: "/dav/…` rendered a complete, well-formed broken-collection disclosure
- *     inside "Calendar event not found", naming a collection that never broke on an account
- *     where nothing had. EVERY CALLER THAT QUOTES USES `"…"`, which is the pairing this swap
- *     protects — the one that rendered a stored timezone inside `'…'`, a span the swap does not
- *     reach, was moved to double quotes rather than left standing as an exception (#190).
- *
- *     FIVE CALLERS RENDER THE VALUE BARE, and "bare" is NOT the same as "safe": the test is
- *     whether the WHOLE RENDERED SENTENCE carries a `'…'` span, not whether this call site
- *     wrote one. A bare value dropped into a sentence that quotes something else with single
- *     quotes breaks that sentence's quote parity just as surely, and the text after it reads as
- *     prose outside any span. Judged that way all five are inert, but two of them only became
- *     so by fixing the SENTENCE: the zone notes `describeFrame` builds land in the RFC 5545
- *     frame-mismatch refusal, which rendered `start '…'`/`end '…'` around them, so a `'` in a
- *     stored TZID walked straight out. That was fixed where the spans were, in
- *     `validateDateConsistency` in caldav-client.ts, rather than by a second swap here — the
- *     other three (the DAV reason phrase, and the id and calendar in the repeating-event
- *     refusal, whose title on the same line IS quoted, with `"`) sit in sentences that
- *     single-quote nothing and needed no change. Adding a `'…'` span to any of those three
- *     sentences reopens this, which is why the criterion is written down rather than the list.
- *
- *     The rule lives here rather than at each quoting call site so a new one cannot be written
- *     without it. `describePart`, the other echo helper, applies the same rule for the same
- *     reason.
- *   BOUND it, with a VISIBLE truncation marker, so a pasted blob does not become the error
- *     and a reader can tell a cut value from a short one.
- *
- * It lives here, and every echo site calls it, because the three used to disagree: the date
- * coercions echoed raw control characters, the calendar window scrubbed them, and the zone
- * describer scrubbed but cut silently at 40 characters with no marker. Same class of value,
- * same message family, three policies.
+ *   TRIM, so the value quoted is the value the coercion actually judged.
+ *   SCRUB control characters and U+2028/U+2029, which would forge extra lines.
+ *   NEUTRALISE `"` into `'`, so a value cannot close the `"…"` span a caller renders it in
+ *     and have the rest read as the server's next sentence. That protects `"…"` only, so
+ *     EVERY CALLER THAT QUOTES USES `"…"` (#190). A caller that renders the value bare is
+ *     judged on the WHOLE sentence: adding a `'…'` span to a sentence that carries a bare
+ *     value reopens this. `describePart` applies the same rule.
+ *   BOUND it, with a VISIBLE truncation marker, so a reader can tell a cut value from a
+ *     short one.
  */
 export function echoCallerText(value: unknown, limit: number = DATE_ECHO_LIMIT): string {
   const text = typeof value === 'string' ? value : String(value);
@@ -436,19 +300,12 @@ export function echoCallerText(value: unknown, limit: number = DATE_ECHO_LIMIT):
 //   2026-07-20T14:30:00+01:00 -> 2026-07-20T13:30:00Z   (offset applied)
 //   2026-07-20T14:30:00       -> the same instant in UTC (no zone = host local time)
 //
-// Anything else is REJECTED with an InvalidInputError naming the parameter and the
-// accepted shapes, so the caller never has to guess which argument JMAP disliked. That
-// includes an unpadded or slash-separated date, free text, a reduced-precision `2026` /
-// `2026-07`, and a day that doesn't exist in its month. An empty/whitespace-only string
-// is rejected too rather than treated as "no filter": silently dropping a date bound
-// widens the search and reads as "the filter did nothing". Milliseconds are trimmed so
-// the emitted value is the canonical seconds-precision form.
+// Anything else is REJECTED, naming the parameter. An empty string is rejected too rather
+// than treated as "no filter": silently dropping a date bound widens the search.
 export function coerceUtcDate(value: unknown, paramName: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   const { trimmed, kind } = classifyDateValue(value, paramName, acceptedDateFormats());
 
-  // A date-only value is expanded explicitly rather than left to Date's parse so the
-  // intent (midnight UTC, never host-local) is visible in the code, not a spec detail.
   const parsed = new Date(kind === 'date' ? `${trimmed}T00:00:00Z` : trimmed);
   if (Number.isNaN(parsed.getTime())) {
     throw new InvalidInputError(
@@ -466,30 +323,17 @@ type DateValueKind = 'date' | 'local-datetime' | 'zoned-datetime';
 // Every accepted datetime ends in `Z` or a numeric offset; anything else is a wall clock.
 const ZONE_DESIGNATOR_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/i;
 // The wall-clock datetimes the calendar resolves itself, captured so the components can be
-// placed in a zone. Deliberately stricter than DATE_TIME_PATTERN's `T.+`: a zone-less value
-// this does not match is one whose hour and minute cannot be read out, and guessing at it is
-// exactly what the strict-parsing rule above exists to prevent.
-//
-// SHAPE ONLY — the RANGES are checked separately, in `isWallClockInRange`. Matching here
-// is not acceptance: `2026-08-12T99:99:99` has a readable hour, minute and second, and every
-// one of them is out of range. See that function for why the check is not folded into this
-// pattern.
+// placed in a zone. Stricter than DATE_TIME_PATTERN's `T.+` so an unreadable hour is
+// rejected, not guessed. SHAPE ONLY: the ranges are checked in `isWallClockInRange`.
 const LOCAL_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?$/;
 
 /**
  * The shared validation behind every date argument: type, emptiness, shape, and a real
- * calendar day. Split out so `coerceUtcDate` (email search bounds, resolved in UTC) and the
- * calendar-window pair below (resolved in the user's zone) reject an identical set of bad
- * values with identical wording, and only DIVERGE where they mean to — on what an accepted
- * value resolves to. `formats` is the accepted-shapes sentence, which differs between them
- * because the two describe a date-only value differently.
+ * calendar day, so `coerceUtcDate` and the calendar-window pair below reject identically and
+ * diverge only on what an accepted value resolves to.
  *
- * It does NOT check the TIME components, because it does not read them: `coerceUtcDate` gets
- * that from `new Date()` refusing an out-of-range hour, and the calendar pair has to do it
- * itself, in `isWallClockInRange`. The two therefore agree on `2026-08-12T25:00:00` only for
- * as long as both halves stay — and they did not, once: the calendar pair read the components
- * out with a shape-only pattern and handed them to `Date.UTC`, which rolled `99:99:99` into a
- * window three days wide of the one asked for.
+ * It does NOT check the TIME components: `coerceUtcDate` gets that from `new Date()`, and the
+ * calendar pair must do it in `isWallClockInRange`, or `Date.UTC` rolls `99:99:99` forward.
  */
 function classifyDateValue(
   value: unknown,
@@ -516,10 +360,8 @@ function classifyDateValue(
     );
   }
 
-  // A day that doesn't exist in its month parses rather than failing (2026-02-31 becomes
-  // 2026-03-03), which would silently shift the search window off the dates the caller
-  // asked for. Probe the calendar date on its own — probing the whole value wouldn't
-  // work, since an offset legitimately moves the UTC date.
+  // A nonexistent day parses rather than failing (2026-02-31 becomes 2026-03-03). Probe the
+  // date part alone, since an offset legitimately moves the whole value's UTC date.
   const dayProbe = new Date(`${datePart}T00:00:00Z`);
   if (Number.isNaN(dayProbe.getTime()) || !dayProbe.toISOString().startsWith(datePart)) {
     throw new InvalidInputError(
@@ -532,8 +374,6 @@ function classifyDateValue(
     : ZONE_DESIGNATOR_PATTERN.test(trimmed)
       ? 'zoned-datetime'
       : 'local-datetime';
-  // `datePart` is deliberately NOT returned: it exists only for the real-calendar-date probe
-  // above, and no caller ever read it.
   return { trimmed, kind };
 }
 
@@ -547,44 +387,20 @@ function echoDate(value: string): string {
 // ===========================================================================
 //
 // `list_calendar_events`' startDate/endDate resolve differently from every email search
-// bound, and the divergence is the whole point rather than an inconsistency to tidy away.
+// bound on purpose; the reasoning is in docs/conventions.md, calendar window bounds.
 //
 //   startDate: 2026-08-12   ->  local midnight on the 12th
 //   endDate:   2026-08-12   ->  local midnight on the 13th   (the whole of the 12th)
-//   either:    2026-08-12T09:00:00      ->  09:00 local, deliberately
+//   either:    2026-08-12T09:00:00      ->  09:00 in the CONFIGURED zone, not the host's
 //   either:    2026-08-12T09:00:00Z     ->  exactly what it says; zone rules do not apply
 //   either:    2026-08-12T09:00:00+10:00 -> exactly what it says
 //
-// WHY THIS IS NOT THE UTC RULE. "What is on the 12th?" is a question about the asker's own
-// day. Reading it as a UTC day answered a +10:00 user with the 12th 10:00 through the 13th
-// 10:00 — so a 08:00 appointment on the 12th, whose own title said "Wednesday 12 Aug 2026",
-// fell outside the window and a day with three appointments in it came back holding one.
-// Silently, because two events missing look exactly like a quiet morning. Every hour of
-// UTC offset is an hour of somebody's day answered from the wrong date, and the further a
-// user is from Greenwich the more of their day it is.
+// A UTC-day reading silently drops a +10:00 user's morning appointments from "the 12th".
+// The end is EXCLUSIVE (RFC 4791 section 9.9), so the next midnight is "through the end of
+// that day" and a same-date start and end is not a zero-length window.
 //
-// A ZONE-LESS DATETIME follows the same rule, for the same reason and one more: it already
-// resolved in the host's zone, by accident of how `new Date()` parses a value with no
-// designator. That made the machine the server happens to run on part of the answer, with
-// nothing in the schema admitting it. Now the zone is the CONFIGURED one and it is stated.
-//
-// AN EXPLICIT Z OR OFFSET IS NEVER TOUCHED. A caller that named an instant named an
-// instant; re-reading it in another zone would be the same class of silent shift.
-//
-// The email search bounds keep the UTC rule (`coerceUtcDate` above): `before`/`after` name
-// an instant to compare a message's `receivedAt` against, and JMAP's UTCDate is that
-// instant. A calendar window names DAYS on somebody's wall. Same accepted spellings, same
-// rejections, different question — see docs/conventions.md.
-//
-// The end is EXCLUSIVE, so a date-only end resolves to local midnight of the FOLLOWING day:
-// CalDAV's <C:time-range> end is exclusive (RFC 4791 section 9.9), which makes the next
-// midnight precisely "through the end of that day", where 23:59:59 would drop the last
-// second. Without that, `startDate: 2026-08-12, endDate: 2026-08-12` would be a zero-length
-// window returning nothing, which reads as an empty day rather than as a mistake.
-//
-// `zone` is passed in rather than read from module state so the resolution is injectable —
-// a test that only ever exercises the host zone passes under either behaviour, which is how
-// the UTC-day reading survived the whole suite. `undefined` means the host zone.
+// `zone` is passed in rather than read from module state so a test can exercise a zone other
+// than the host's; host-zone-only tests pass under either reading. `undefined` means the host.
 
 function acceptedWindowFormats(zoneLabel: string): string {
   return `Accepted: a date such as 2026-08-12 (read as a whole day in ${zoneLabel}), or a full datetime such as ` +
@@ -611,34 +427,18 @@ export function isUsableTimezone(zone: string): boolean {
   }
 }
 
-// A misconfigured zone name is echoed back to the caller, so it is bounded and stripped of
-// the control characters that would forge extra lines in an error message. Exported so
-// validateCallerTimezone's own rejections (#157) use the identical bound rather than a second
-// number that could quietly drift from this one.
+// The bound for an echoed zone name, shared by every zone rejection.
 export const ZONE_ECHO_LIMIT = 40;
 
-// The bound for a filesystem path echoed back by a path-confinement refusal. Deliberately far
-// wider than `describePart`'s 64 code points: such a refusal names the resolved path AND the
-// allowed directory in one sentence, and two paths that share a long ancestor truncate to the
-// same prefix at 64 — leaving "path resolves to X which is outside the allowed directory X",
-// which tells the caller nothing and cannot be acted on. A path also has to stay pasteable to
-// be fixable, the same reason `CALENDAR_URL_ECHO_LIMIT` is wide.
+// The bound for a filesystem path echoed back by a path-confinement refusal. Far wider than
+// `describePart`'s 64: such a refusal names the resolved path AND the allowed directory, and
+// two paths sharing a long ancestor truncate to the same prefix at 64, which cannot be acted on.
 export const PATH_ECHO_LIMIT = 200;
 
 /**
  * The path spelling of `echoCallerText`: redact, then neutralise and bound at
- * `PATH_ECHO_LIMIT`. Not a fourth policy — the same two steps in the same order
- * `describeUntrusted` runs, at a bound a path can survive.
- *
- * It exists as a name rather than as the expression repeated at each refusal for the reason
- * `echoCallerText` itself does: the path refusals used to render their values through nothing
- * at all, so what a path echo IS had never been written down anywhere, and a dozen inline
- * copies of it is a set that can disagree with itself. Callers quote it with `"…"`, like every
- * other echo (docs/conventions.md, untrusted values in prose).
- *
- * The redaction is kept in front rather than argued away as unreachable for a path: it costs
- * nothing, and the ordering is the half of this rule that still reads correctly when it is
- * wrong.
+ * `PATH_ECHO_LIMIT`, the same two steps in the same order `describeUntrusted` runs. Callers
+ * quote it with `"…"`.
  */
 export function echoPath(value: unknown): string {
   const source = typeof value === 'string' ? value : value == null ? '' : String(value);
@@ -649,22 +449,13 @@ const zoneCanonicalizationCache = new Map<string, string>();
 
 /**
  * ICU's canonical spelling for a zone name — `Intl.DateTimeFormat`'s own name for whatever the
- * string resolves to — or the string unchanged when ICU cannot resolve it at all. This is the
- * one canonicalization seam every zone comparison and every zone actually written routes
- * through: `validateCallerTimezone` (the create/update write path, #157) and
- * `resolveUsableTimezone` below both return through here, and so does the read-side comparison
- * in caldav-client.ts's `zoneNamesEqual` (#139). An alias spelling ('NZ', 'US/Pacific', a
- * lowercase 'australia/sydney') therefore canonicalises identically wherever it is checked —
- * without a single seam, the same string could compare equal to itself on write but not on
- * read, or vice versa.
+ * string resolves to, or the string unchanged when ICU cannot resolve it. The one seam every
+ * zone comparison and every written zone routes through (write side #157, read-side
+ * `zoneNamesEqual` #139), so an alias canonicalises identically on write and on read.
  *
- * Cached by exact input string: `zoneNamesEqual` runs once per event on every calendar list
- * read, and constructing an `Intl.DateTimeFormat` per call is not free.
- *
- * The cache is deliberately unbounded. Its keys are TZID strings out of the account holder's own
- * calendar plus the configured and caller-supplied zone names, so the distinct set is the handful
- * of zones that account actually uses — there is no path by which an untrusted party feeds it
- * unbounded distinct strings. An eviction policy here would cost more than it could ever save.
+ * Cached because `zoneNamesEqual` runs per event on every list read. Deliberately unbounded:
+ * the keys are the handful of zones the account itself uses, with no path for an untrusted
+ * party to feed it distinct strings.
  */
 export function canonicalZoneName(zone: string): string {
   const cached = zoneCanonicalizationCache.get(zone);
@@ -678,65 +469,42 @@ export function canonicalZoneName(zone: string): string {
 
 /**
  * The IANA name actually used for a configured zone: `zone` itself, canonicalised through
- * `canonicalZoneName`, when it is set and ICU can resolve it — otherwise the host's own zone.
- * This is the one place that decides which zone wins — `describeTimezone` and every calendar
- * read path call through here rather than re-deriving the fallback, so there is exactly one
- * rule for "which zone is really in force."
+ * `canonicalZoneName`, when it is set and ICU can resolve it; otherwise the host's own zone.
+ * The one rule for "which zone is really in force".
  *
- * Canonicalising here (not just on the caller-supplied `timeZone` argument) matters because the
- * configured default is interpolated straight into a written TZID on `create_calendar_event`
- * when no `timeZone` is passed: without this, `FASTMAIL_TIMEZONE=australia/sydney` would write
- * `TZID=australia/sydney` while the same zone arriving as a caller's `timeZone` argument writes
- * the canonical `Australia/Sydney` — two different spellings for the same zone depending on
- * which path set it, which then falsely compare unequal on a later read-modify-write.
+ * Canonicalised here too because the configured default is written straight into a TZID when
+ * create_calendar_event gets no `timeZone`; a raw `australia/sydney` would later compare
+ * unequal to the canonical spelling on a read-modify-write.
  */
 export function resolveUsableTimezone(zone: string | undefined): string {
   if (zone && isUsableTimezone(zone)) return canonicalZoneName(zone);
   return hostTimezone();
 }
 
-// The three ways a zone candidate can fail the rule shared by validateCallerTimezone (the
-// caller-supplied `timeZone` parameter, #157) and resolveConfiguredTimezone (FASTMAIL_TIMEZONE
-// and the host zone it falls back to, #157 amendment below). Kept as a closed set of reasons
-// rather than a bare boolean so each call site can compose its own framing sentence around
-// WHICH way the candidate failed, without re-deriving that classification itself.
+// The ways a zone candidate fails the rule shared by validateCallerTimezone and
+// resolveConfiguredTimezone (#157); a reason rather than a boolean so each site frames its own
+// sentence.
 type ZoneRejectionReason = 'offset-shaped' | 'unresolvable' | 'shorthand';
 
-// The specific abbreviation that decided the shorthand rule, and why it is dangerous rather
-// than merely nonstandard: "EST" resolves through ICU to a real, fixed-offset zone (Panama's,
-// with no daylight saving) that is NOT US Eastern. Both places that reject a shorthand zone name
-// quote this same sentence, so the warning cannot read differently depending on which path a
-// caller happened to hit.
+// Quoted by both shorthand rejections, so the warning reads the same on either path.
 const SHORTHAND_ZONE_WARNING =
   '"EST" resolves to a fixed-offset zone with no daylight saving, not US Eastern, and other ' +
   'abbreviations and aliases ("NZ", "PST", "GMT", "Zulu"...) are just as ambiguous';
 
 /**
- * Classify a zone candidate against the rule validateCallerTimezone and
- * resolveConfiguredTimezone both enforce, or return `null` when it is acceptable. The candidate
- * must already be pre-canonical and have any leading `/` stripped (RFC 5545 §3.2.19) — see
- * validateCallerTimezone's own comment for why: checking a CANONICAL name would let a shorthand
- * like `NZ` (which canonicalises to `Pacific/Auckland`, a slash-bearing name) straight through.
+ * Classify a zone candidate, or return `null` when it is acceptable. The candidate must be
+ * PRE-canonical with any leading `/` stripped (RFC 5545 §3.2.19): a canonical name would let
+ * `NZ` through as `Pacific/Auckland`.
  *
- * Order is part of the contract, not an implementation detail:
- *   1. Offset-shaped strings (`+10:00`, `GMT+10`, ...) are rejected before the ICU check even
- *      runs — ICU resolves several offset spellings as though they were legitimate zone names,
- *      so checking resolvability first would wrongly accept them. See the offset-shape comment
- *      inline below for the exact denylist.
- *   2. ICU resolvability is checked next, so a string ICU cannot resolve AT ALL (`Blah`) gets
- *      "not a time zone this server can resolve" — not the shorthand message, which would wrongly
- *      imply that adding a slash is all that string needed.
- *   3. Only then the slash rule (#157 amendment, decided by "EST" silently resolving to a
- *      fixed-offset Panama zone rather than US Eastern): a zone name must contain a
- *      region-qualifying slash, with the literal name "UTC" (compared case-insensitively) as the
- *      rule's one exception. This rejects every abbreviation and alias that ICU nonetheless
- *      resolves — "EST", "NZ", "PST", "GMT", "Zulu" and similar — even the harmless ones; there
- *      is no safe-list, the caller writes the region name instead ("Pacific/Auckland", not
- *      "NZ"). A slash-bearing alias like "US/Pacific" is unaffected and keeps resolving exactly
- *      as it does today.
+ * The order is the contract:
+ *   1. Offset shapes (`+10:00`, `GMT+10`, ...) first, because ICU resolves several of them as
+ *      though they were zone names.
+ *   2. ICU resolvability next, so `Blah` is not told that a slash is all it needed.
+ *   3. Then the slash rule (#157): a name needs a region-qualifying slash, with "UTC" the one
+ *      exception. It rejects every abbreviation ICU resolves ("EST" is a fixed-offset Panama
+ *      zone, not US Eastern), with no safe-list. "US/Pacific" is unaffected.
  */
 function zoneRejectionReason(zoneCandidate: string): ZoneRejectionReason | null {
-  // Offset-shape denylist — see point 1 above for why this runs before isUsableTimezone.
   if (/^[+-]/.test(zoneCandidate) || /^(GMT|UTC|UT)[+-]/i.test(zoneCandidate) || /^\d/.test(zoneCandidate)) {
     return 'offset-shaped';
   }
@@ -750,44 +518,16 @@ function zoneRejectionReason(zoneCandidate: string): ZoneRejectionReason | null 
 }
 
 /**
- * Validate a caller-supplied `timeZone` argument (create_calendar_event / update_calendar_event,
- * fork issue #157) and return the canonical IANA name to write.
+ * Validate a caller-supplied `timeZone` argument (#157) and return the canonical IANA name to
+ * write. `isUsableTimezone` alone is the WRONG gate: ICU resolves `"+10:00"` and similar, which
+ * would bake an offset into a TZID. The rule and its order are `zoneRejectionReason`'s.
  *
- * `isUsableTimezone` alone is the WRONG gate for this. Probed on this host it returns `true`
- * for `"+10:00"`, `"+1000"`, `"+10"` and `"Etc/GMT-10"` — ICU resolves several offset spellings
- * as though they were legitimate zone names. Waving those through here would let a caller write
- * `DTSTART;TZID=+10:00:...` — an offset baked into a TZID, which is the one shape this whole
- * design exists to prevent: unresolvable to this server as a NAME, and mis-indexed for its own
- * time-range queries. So the offset shape is rejected BEFORE the ICU check runs at all.
+ * Fails closed on `null` and blank rather than reading them as "write floating": the read side
+ * emits `timeZone: null` for a floating event (#139), so an echoed `null` would decide that by
+ * accident. Nothing here writes a zone-less time (docs/conventions.md).
  *
- * The gate is a DENYLIST of offset spellings, not an allowlist of IANA shapes: `Etc/GMT-10`,
- * `UTC`, `Japan` and `EST5EDT` are all legitimate zone SHAPES an allowlist would reject — though
- * `EST5EDT` is separately rejected below, by the slash rule rather than the offset denylist.
- *
- * ALSO REJECTED (#157 amendment): a zone name that ICU resolves but that has no region-qualifying
- * slash and is not literally "UTC" — an abbreviation or alias such as "EST", "NZ", "PST", "GMT"
- * or "Zulu". "EST" resolving to a fixed-offset Panama zone with no daylight saving, silently and
- * with no way to tell from the input, is the case that decided this: ICU accepting a spelling
- * says nothing about whether the caller meant the zone ICU picked. There is no safe-list of
- * harmless abbreviations (a caller writing "NZ" almost certainly does mean Pacific/Auckland) —
- * the caller writes the region name instead. See `zoneRejectionReason` for the exact rule and
- * why it runs after the ICU check.
- *
- * Fails closed on `null`, empty, or whitespace-only rather than treating any of them as "write
- * floating". The read side emits `timeZone: null` for a genuinely floating event (see
- * `CalendarEvent` in caldav-client.ts, #139), so a read-modify-write caller can echo `null`
- * straight back — silently reinterpreting that as "make this floating" would decide an open
- * design question by accident rather than ask. Omit `timeZone` instead: on `create` an omitted
- * `timeZone` writes the account's configured zone (never floating, see docs/conventions.md); on
- * `update` it leaves whatever the event already has unchanged. This narrowing is deliberate, not
- * incidental to the null rejection: there is no benefit to this server ever writing a zone-less
- * calendar time, so nothing here exists to make that possible (see docs/conventions.md).
- *
- * Not an IANA name and not accepted: a non-IANA name such as a Windows zone id ("AUS Eastern
- * Standard Time") still rejects here even though it is a real zone identifier somewhere — ICU
- * cannot resolve it, so there is nothing to canonicalise it against. That is a genuine
- * round-trip limit, not an oversight; both tools' descriptions say `timeZone` takes an IANA name
- * for this reason.
+ * A Windows zone id ("AUS Eastern Standard Time") rejects: ICU cannot resolve it, so there is
+ * nothing to canonicalise against. A known round-trip limit, stated in both tools' descriptions.
  */
 export function validateCallerTimezone(value: unknown): string {
   if (value === null || (typeof value === 'string' && value.trim().length === 0)) {
@@ -801,21 +541,10 @@ export function validateCallerTimezone(value: unknown): string {
     throw new InvalidInputError(`timeZone must be an IANA zone name string (e.g. "Australia/Sydney"), not ${typeof value}.`);
   }
   const trimmed = value.trim();
-  // RFC 5545 §3.2.19 permits a leading '/' on a TZID (a zone registered by its own creator
-  // rather than plain IANA form); normalizeZoneForComparison in caldav-client.ts already strips
-  // it for comparison, and the read half (#139) emits it verbatim when a stored event carries
-  // it. Strip it here too so a caller echoing a `timeZone` this server just handed back
-  // (read-modify-write) is not rejected for a spelling this server itself produced. This has to
-  // run before both the offset-shape check and the canonicalisation call below: ICU throws
-  // outright on a leading slash (`new Intl.DateTimeFormat('en-US', { timeZone:
-  // '/Australia/Sydney' })` throws), so an unstripped value never reaches isUsableTimezone as
-  // true in the first place. A vendor-prefixed form ('/vendor.example/.../Zone/Name') still
-  // fails after stripping only the one leading slash — that is the safe direction, a real
-  // rejection rather than a guess at which registry the rest of the string names.
+  // RFC 5545 §3.2.19 permits a leading '/' on a TZID, and the read side (#139) emits it
+  // verbatim, so strip it or a read-modify-write echo is rejected. ICU throws on the slash, so
+  // this runs before every check. A vendor-prefixed form still fails, the safe direction.
   const zoneCandidate = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
-  // Runs the shared rule (offset-shape, then ICU resolvability, then the slash rule — see
-  // zoneRejectionReason's own comment for why that order matters) and composes this call site's
-  // own framing around whichever way it failed.
   const rejection = zoneRejectionReason(zoneCandidate);
   if (rejection === 'offset-shaped') {
     throw new InvalidInputError(
@@ -838,52 +567,24 @@ export function validateCallerTimezone(value: unknown): string {
       `"America/New_York" — "UTC" is the one accepted exception. ${SHORTHAND_ZONE_WARNING}.`
     );
   }
-  // ICU resolves a zone name case-insensitively and through backward-compatibility links
-  // ("australia/sydney", "NZ", "Zulu" all resolve to a real zone) but the CalDAV server behind
-  // this account (Cyrus) looks a TZID up with an exact-string match against its own tzdata,
-  // which is far stricter than ICU. Writing the caller's raw spelling would let an ICU-blessed
-  // string reach the calendar as a TZID Cyrus itself cannot resolve — the same failure class the
-  // offset-shape check above exists to prevent, one dimension over: a string ICU accepts that
-  // the calendar server cannot read back as a name. `canonicalZoneName` returns ICU's own
-  // canonical spelling for whatever was resolved (guaranteed not to fall back here, since
-  // `isUsableTimezone` above already proved `zoneCandidate` resolves), so returning THAT is what
-  // actually lands on a name Cyrus recognises, and it is also what the create/update response
-  // reports as written. Do not "simplify" this back to returning the caller's input — the
-  // canonical name is deliberately not an echo of what was typed.
+  // Do not return the caller's spelling: ICU resolves names case-insensitively and through
+  // links, but Cyrus looks a TZID up by exact string, so only the canonical name is one the
+  // calendar server can read back.
   return canonicalZoneName(zoneCandidate);
 }
 
 /**
- * Resolve the zone the server actually runs with, from FASTMAIL_TIMEZONE (or the host zone when
- * it is unset) — held to the same rule `validateCallerTimezone` enforces on the caller-supplied
- * `timeZone` parameter (#157 amendment). Called once, from `runServer()` in index.ts, before
- * `setDefaultTimezone` — see that call site for why it is not called at module load instead.
+ * Resolve the zone the server actually runs with, from FASTMAIL_TIMEZONE or the host zone, held
+ * to `zoneRejectionReason`'s rule (#157). Called once, from `runServer()` in index.ts.
  *
- * The two sources are handled ASYMMETRICALLY on purpose, because only one of them was actually
- * chosen by anyone:
+ * The two sources are handled ASYMMETRICALLY on purpose:
  *
- * - FASTMAIL_TIMEZONE, when set, was written by whoever configured this server. A shorthand or
- *   unresolvable value there is exactly the silent-wrong-day failure the rule exists to prevent
- *   — today it silently falls back to the host zone with nothing said, and a caller has no way
- *   to learn that "EST" was never US Eastern. So a set-and-invalid value THROWS here, and
- *   `runServer()` turns that into a refusal to start: printing the exact value and the rule to
- *   stderr and exiting is strictly better than starting up and quietly working out of the wrong
- *   zone for every calendar read from then on.
- * - The host's own zone (`hostZone`, defaulted to `hostTimezone()` so a test can pass a fixed
- *   value instead of depending on the machine it runs on) is used only when FASTMAIL_TIMEZONE is
- *   unset — nobody configured it, so refusing to start over it would punish the operator for a
- *   setting they never touched. A rejected host zone instead falls back to `zone: 'UTC'` (the
- *   rule's own exception, and unambiguous by construction — the rejected name is, by definition,
- *   ambiguous) with a `warning` string the caller MUST print loudly rather than swallow: the
- *   server still starts, but a bare date-only window bound (list_calendar_events) now reads as a
- *   UTC day rather than this machine's local day, which is exactly the kind of change that must
- *   not happen silently.
- *
- * In practice the host-zone branch is close to unreachable: `Intl.DateTimeFormat().
- * resolvedOptions().timeZone` returns ICU's own canonical name for whatever the OS/TZ env
- * reports, and a canonical IANA zone name is either slash-bearing or is `UTC` itself — this is a
- * guard against a misconfigured HOST (e.g. a TZ environment variable ICU cannot canonicalise),
- * not an expected path.
+ * - A set-and-invalid FASTMAIL_TIMEZONE THROWS, and `runServer()` refuses to start: someone
+ *   chose that value, and falling back silently is the wrong-day failure the rule prevents.
+ * - A rejected host zone (used only when nothing is configured) falls back to `'UTC'` with a
+ *   `warning` the caller MUST print, since date-only window bounds then read as UTC days.
+ *   Refusing to start over a setting nobody touched would punish the operator. Close to
+ *   unreachable, since ICU reports a canonical name; it guards a misconfigured TZ variable.
  */
 export function resolveConfiguredTimezone(
   configuredValue: string | undefined,
@@ -941,21 +642,13 @@ export function resolveConfiguredTimezone(
 /**
  * The IANA name to show a caller, resolving `undefined` to whatever the host zone is.
  *
- * Names the zone and nothing else in the ordinary case: this string lands in the
- * accepted-shapes sentence on every date rejection, so where the zone came from belongs in
- * the tool description (said once, where a model reads it) rather than repeated inside every
- * error.
- *
- * The exception is a zone name ICU cannot resolve. No date can be read in one (`zoneOffsetMsAt`
- * throws), so it is flagged as unresolvable rather than printed as though dates were read in
- * it. No production caller passes one, since `resolveConfiguredTimezone` (#157) validates
- * `FASTMAIL_TIMEZONE` at startup, but this is a general utility and does not assume that.
+ * Names the zone and nothing else: this string lands in every date rejection, so where the
+ * zone came from belongs in the tool description instead. A name ICU cannot resolve is flagged
+ * as such rather than printed as though dates were read in it.
  */
 export function describeTimezone(zone: string | undefined): string {
   if (!zone) return hostTimezone();
   if (isUsableTimezone(zone)) return zone;
-  // Through the shared echo, so a cut zone name shows that it was cut. Slicing silently at
-  // 40 characters printed a name the caller could neither recognise nor correct.
   const echoed = echoCallerText(zone, ZONE_ECHO_LIMIT);
   return `"${echoed}" (the configured time zone, which is not a time zone this server can resolve)`;
 }
@@ -963,27 +656,18 @@ export function describeTimezone(zone: string | undefined): string {
 /**
  * The UTC offset an IANA zone is at, at one instant, in milliseconds.
  *
- * Read by formatting the instant in the zone and treating the wall-clock components it
- * prints as if they were UTC: the difference between that and the real instant IS the
- * offset. No timezone database ships with this server, so ICU (through `Intl`) is the only
- * thing here that knows when a zone changes offset.
+ * Read by formatting the instant in the zone and treating the printed wall clock as UTC; the
+ * difference IS the offset. No tz database ships here, so ICU is the only source.
  *
- * `undefined` means the host zone. A name ICU cannot resolve THROWS: callers pass either the
- * configured zone (validated at startup by `resolveConfiguredTimezone`, #157) or a TZID that
- * `isUsableTimezone` has already accepted, so reaching it is a caller bug, and answering with
- * the host zone's offset would turn that bug into a silently wrong time. Gate an untrusted name
- * with `isUsableTimezone` first. An invalid instant (NaN, or beyond ±8.64e15 ms) throws a
- * RangeError from `formatToParts` rather than returning a guessed offset.
+ * `undefined` means the host zone. A name ICU cannot resolve THROWS rather than falling back
+ * to the host offset, which would turn a caller bug into a silently wrong time: gate an
+ * untrusted name with `isUsableTimezone` first.
  *
- * Exported for `src/vtimezone.ts` (#166), which samples a zone's offset at many instants — a
- * day-by-day scan across a year plus a span, then a bisection per transition found — to locate
- * its DST transitions. The formatter is cached per zone (below) for exactly that caller: one
- * `generateVTimezone` call can make hundreds of these calls, and constructing an
- * `Intl.DateTimeFormat` is the expensive part of each one.
+ * The formatter is cached per zone because `src/vtimezone.ts` (#166) makes hundreds of these
+ * calls per `generateVTimezone`.
  */
-// Keyed on `zone` itself, not `zone ?? ''`: coalescing `undefined` (the host zone) and `''` (a
-// genuinely empty zone string) onto one key would let whichever is cached first answer for both,
-// so a failed `''` lookup's cached `null` would make every later host-zone call throw.
+// Keyed on `zone` itself, not `zone ?? ''`: a cached `null` for `''` would otherwise make every
+// later host-zone call throw.
 const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat | null>();
 
 function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
@@ -994,13 +678,9 @@ function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat |
     formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
       hour12: false,
-      // ERA IS REQUESTED BECAUSE THE YEAR IS READ BACK, and without it `Intl` prints the
-      // ERA-RELATIVE year: proleptic year 0 formats as "1", year -1 as "2". That number then
-      // went straight back into `utcMsFromComponents` as though it were the proleptic year,
-      // so the offset came out a whole year wrong and a window bound near the start of the
-      // era resolved to the wrong DAY with nothing said — `startDate: "0000-12-31"` answered
-      // with 0000-01-01. Requesting the era makes the two eras distinguishable; the negation
-      // below puts a BC year back on the proleptic scale ICU's own year is not on.
+      // ERA IS REQUESTED BECAUSE THE YEAR IS READ BACK: without it `Intl` prints the
+      // era-relative year (proleptic year 0 formats as "1"), and a bound near year 0 lands
+      // on the wrong day. The mapping below puts a BC year back on the proleptic scale.
       era: 'short',
       year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -1013,15 +693,8 @@ function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat |
 }
 
 export function zoneOffsetMsAt(utcMsInput: number, zone: string | undefined): number {
-  // Floored to a whole second: `formatter.formatToParts` reads whole seconds off `utcMs` (there
-  // is no sub-second component below), so a sub-second `utcMs` and its own floor must read
-  // identical wall-clock components and return the identical offset. Without this floor, any
-  // caller that hands in a sub-second `utcMs` gets that same whole-second wall-clock reading back
-  // minus the UNFLOORED input — leaking the sub-second remainder straight into the returned
-  // "offset" as a spurious few hundred milliseconds (pinned directly by coerce.test.ts's "floors
-  // a sub-second instant to its own whole second, at a Sydney transition boundary" test).
-  // Flooring internally means every caller gets a consistent offset regardless of the precision
-  // it passes in, rather than each one having to floor first.
+  // Floored to a whole second: `formatToParts` reads whole seconds, so subtracting an
+  // unfloored input would leak the sub-second remainder into the returned offset.
   const utcMs = Math.floor(utcMsInput / 1000) * 1000;
   const formatter = zoneOffsetFormatterFor(zone);
   if (!formatter) {
@@ -1040,26 +713,15 @@ export function zoneOffsetMsAt(utcMsInput: number, zone: string | undefined): nu
   return asIfUtc - utcMs;
 }
 
-// A whole Gregorian cycle: 400 years is exactly 146097 days, leap rules included. Exported
-// because caldav-client.ts's date-only rollover steps over the same legacy two-digit-year
-// mapping by the same trick, and two copies of this number could drift apart.
+// A whole Gregorian cycle: 400 years is exactly 146097 days, leap rules included.
 export const GREGORIAN_CYCLE_YEARS = 400;
 const GREGORIAN_CYCLE_MS = 146097 * 24 * 60 * 60 * 1000;
 
 /**
  * `Date.UTC` without its legacy two-digit-year mapping.
  *
- * `Date.UTC(26, 7, 12)` is the year 1926, not the year 26 — the same rule that makes
- * `new Date(99, 0)` a 1999 date. Every year the calendar window handles arrives as an
- * already-validated four-digit string, so `0026-08-12` would otherwise have been answered
- * with a window in 1926: a different window, silently, where `coerceUtcDate` on the same
- * value correctly returns the year 26. Shifting by one whole Gregorian cycle steps over the
- * mapping and back without disturbing the arithmetic, so a leap day still lands on the day
- * the proleptic Gregorian calendar puts it.
- *
- * Exported for `src/vtimezone.ts` (#166), whose year-1 lookback boundary needs the same
- * two-digit-year mapping defeated the same way rather than a second copy of the cycle-shift
- * trick.
+ * `Date.UTC(26, 7, 12)` is the year 1926, not the year 26. Shifting by one whole Gregorian
+ * cycle steps over the mapping and back without disturbing leap days.
  */
 export function utcMsFromComponents(y: number, mo: number, d: number, h: number, mi: number, s: number): number {
   if (y >= 0 && y <= 99) {
@@ -1076,42 +738,29 @@ const OFFSET_SAMPLE_SPAN_MS = 24 * 60 * 60 * 1000;
 /**
  * The UTC instant a wall clock names in a zone.
  *
- * The offset has to be sampled at the instant the wall clock names, and that instant is what
- * is being solved for — so the offsets in force a day either side are read first, and a
- * candidate answer is CHECKED against the offset actually in force where it lands. Without
- * that check a wall clock within a day of a DST transition lands an hour out.
+ * The offset has to be sampled at the instant being solved for, so the offsets a day either
+ * side are read first and a candidate is CHECKED against the offset in force where it lands.
+ * Both awkward cases follow RFC 5545's and Temporal's `compatible` disambiguation:
  *
- * The two awkward cases are the reason the check exists rather than a second blind pass:
+ *   REPEATED (clocks go back): the EARLIER of the two instants.
+ *   SKIPPED (clocks go forward): FORWARD BY THE LENGTH OF THE GAP. Resolving it backward
+ *     makes a window's exclusive end drop the last hour of the day in a zone whose transition
+ *     is at midnight (America/Santiago, America/Havana).
  *
- *   REPEATED (clocks go back) — the wall clock names two instants. The EARLIER one is
- *     returned, matching RFC 5545's and Temporal's `compatible` disambiguation.
- *   SKIPPED (clocks go forward) — the wall clock names none, and the answer is resolved
- *     FORWARD BY THE LENGTH OF THE GAP, again matching `compatible`. That equals the
- *     transition instant only for a clock sitting at the very start of the gap:
- *     `America/New_York 2026-03-08T02:00:00` gives 07:00:00Z (the transition), but
- *     `…T02:29:59` gives 07:29:59Z, half an hour past it. Resolving it BACKWARD is what a
- *     blind second pass did, and for the exclusive END of a window that quietly dropped the
- *     last hour of the requested day: in a zone whose transition is at midnight
- *     (America/Santiago, America/Havana) a single-day window ran local 00:00 to 23:00 and an
- *     event at 23:30 was never searched for. Neither case is refused — a caller asking about
- *     a day is entitled to an answer on the day a transition happens.
+ * Neither case is refused: a day with a transition in it still has an answer.
  */
 function wallClockToUtcMs(y: number, mo: number, d: number, h: number, mi: number, s: number, zone: string | undefined): number {
   const naive = utcMsFromComponents(y, mo, d, h, mi, s);
   const before = zoneOffsetMsAt(naive - OFFSET_SAMPLE_SPAN_MS, zone);
   const after = zoneOffsetMsAt(naive + OFFSET_SAMPLE_SPAN_MS, zone);
-  // No transition in range: one offset answers it.
   if (before === after) return naive - before;
 
-  // `early` uses the pre-transition offset, so where both readings are valid (a repeated
-  // hour) it is the earlier instant of the two.
+  // Checked first, so a repeated hour resolves to the earlier instant.
   const early = naive - before;
   if (zoneOffsetMsAt(early, zone) === before) return early;
   const late = naive - after;
   if (zoneOffsetMsAt(late, zone) === after) return late;
-  // Neither reading is valid: the wall clock was skipped. `early` is that wall clock shifted
-  // FORWARD by the length of the gap — which lands ON the transition instant only when the
-  // clock sat at the very start of the gap, and past it by however far into the gap it sat.
+  // Skipped: `early` is the wall clock shifted forward by the length of the gap.
   return early;
 }
 
@@ -1130,9 +779,6 @@ function resolveWindowBound(
   const { trimmed, kind } = classifyDateValue(value, paramName, acceptedWindowFormats(describeTimezone(zone)));
 
   if (kind === 'zoned-datetime') {
-    // Named an instant; hand back that instant. This is the one branch the zone never
-    // touches, and it is why an offset-carrying value is the way to ask for something the
-    // local-day rule cannot express.
     const parsed = new Date(trimmed);
     if (Number.isNaN(parsed.getTime())) {
       throw new InvalidInputError(
@@ -1144,10 +790,7 @@ function resolveWindowBound(
 
   if (kind === 'date') {
     const [y, mo, d] = trimmed.split('-').map(Number);
-    // The day is advanced in LOCAL days, not by adding 24 hours to the resolved instant: a
-    // day that a DST transition makes 23 or 25 hours long would otherwise land the exclusive
-    // end an hour inside or past the day the caller named. Date.UTC rolls month, year and
-    // leap-day ends for us, and the date has already been proved real.
+    // Advanced in LOCAL days, not by adding 24 hours: a DST day is 23 or 25 hours long.
     return toUtcIso(wallClockToUtcMs(y, mo, d + dayOffset, 0, 0, 0, zone));
   }
 
@@ -1157,26 +800,18 @@ function resolveWindowBound(
       `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedWindowFormats(describeTimezone(zone))}`,
     );
   }
-  // A wall-clock datetime names a time of day, not a day, so `dayOffset` deliberately does
-  // NOT apply to it — `endDate: 2026-08-12T17:00:00` is the exclusive end at five in the
-  // afternoon, exactly as the Z-designated form is.
+  // `dayOffset` does NOT apply: a wall-clock datetime names a time of day, not a day.
   return toUtcIso(wallClockToUtcMs(Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0), zone));
 }
 
 /**
  * Whether a wall clock's components name a time that exists.
  *
- * The shape check alone is not acceptance, and this is where the calendar pair would
- * otherwise diverge from `coerceUtcDate` in the direction that matters. `Date.UTC` ROLLS an
- * out-of-range component instead of rejecting it, so `2026-08-12T99:99:99` resolved to a
- * window starting three and a half days later, silently, while `coerceUtcDate` and
- * `create_calendar_event` both reject the same value — the family accepted on a read what it
- * refused on a write, and only the clamp path says anything about a window it moved.
+ * `Date.UTC` ROLLS an out-of-range component instead of rejecting it, so without this the
+ * calendar pair would accept what `coerceUtcDate` and `create_calendar_event` reject.
  *
- * `24:00:00` is deliberately allowed: the ECMAScript Date Time String Format accepts it as
- * the end of the day, so `new Date('2026-08-12T24:00:00')` is valid and the UTC coercion
- * takes it. Rejecting it here would be the same divergence pointing the other way. Date.UTC
- * rolls it into the following midnight, which is what it names.
+ * `24:00:00` is deliberately allowed, because `new Date()` accepts it as the end of the day
+ * and the UTC coercion takes it; it rolls into the following midnight, which is what it names.
  */
 function isWallClockInRange(h: number, mi: number, s: number): boolean {
   if (h === 24) return mi === 0 && s === 0;
@@ -1187,28 +822,21 @@ function isWallClockInRange(h: number, mi: number, s: number): boolean {
  * The UTC instant a value parsed out of an iCalendar payload names, in milliseconds, for
  * ORDERING two of them against each other. `NaN` when there is nothing to order on.
  *
- * Lives beside the window coercions because it resolves a zone-less value the same way they
- * do — through the configured zone — and for the same reason. `formatICalDate` drops the
- * TZID parameter, so an event stored as `DTSTART;TZID=Australia/Sydney:20260325T083000`
- * reaches a caller as the bare `2026-03-25T08:30:00` while a UTC-stored one keeps its `Z`.
- * Comparing those two as STRINGS puts them in the wrong order whenever the account is not on
- * UTC (on a +10:00 account the bare one is 9.5 hours the earlier of the two), which is how a
- * genuinely earlier event was dropped by a `limit` that kept a later one.
+ * `formatICalDate` drops the TZID, so a zoned event arrives bare while a UTC one keeps its
+ * `Z`; comparing those as STRINGS misorders them on any non-UTC account. A bare value is
+ * therefore read through the configured zone, as the window coercions read it.
  *
- * This is a best-effort reading, not a validation: it is ordering server data, not accepting
- * caller input, so an unreadable value returns NaN for the caller to place rather than
- * throwing, and an out-of-range component is left to roll rather than rejected.
+ * Best-effort, not a validation: it orders server data, so an unreadable value returns NaN
+ * rather than throwing, and an out-of-range component is left to roll.
  */
 export function resolveCalendarInstantMs(value: string | undefined, zone: string | undefined): number {
   if (typeof value !== 'string') return NaN;
   const trimmed = value.trim();
   if (!trimmed) return NaN;
-  // Carries its own zone: it names an instant, and no local reading applies.
   if (ZONE_DESIGNATOR_PATTERN.test(trimmed)) return Date.parse(trimmed);
   if (DATE_ONLY_PATTERN.test(trimmed)) {
     const [y, mo, d] = trimmed.split('-').map(Number);
-    // An all-day value is placed at local midnight, the same instant the window's own
-    // date-only bound resolves to, so the two are on one scale.
+    // Local midnight, the instant a date-only window bound resolves to, so both share a scale.
     return wallClockToUtcMs(y, mo, d, 0, 0, 0, zone);
   }
   const m = LOCAL_DATETIME_PATTERN.exec(trimmed);
@@ -1230,45 +858,21 @@ export function coerceCalendarWindowEnd(value: unknown, paramName: string, zone?
  * The instant local midnight at the START OF TODAY resolves to, for a caller that named no
  * window at all.
  *
- * It sits here, beside the window coercions, because it has to agree with them: a bounds-free
- * window starts on the same day a caller would get by passing today's date as a DATE-ONLY
- * `startDate`, and the only way to guarantee that is to resolve it through the same
- * wall-clock-to-instant path (`zoneOffsetMsAt` to read which local day `nowMs` falls in, then
- * `wallClockToUtcMs` to put that day's midnight back on the UTC scale). Re-deriving either
- * step here would give the default window its own DST and offset behaviour, which is exactly
- * the drift the shared helpers exist to prevent.
- *
- * `nowMs` is passed in rather than read from the clock so the caller — and its tests — decide
- * what "today" is. Year-0000 and era handling are irrelevant here in a way they are not for a
- * caller-named bound: this value is always the present.
+ * Resolved through the same helpers as a date-only `startDate`, so the default window starts
+ * on the same day as passing today's date would; do not re-derive either step here.
  */
 export function startOfLocalDayUtcIso(nowMs: number, zone?: string): string {
-  // The wall clock in `zone` at `nowMs`, read by shifting the instant by the offset in force
-  // and taking the UTC components of the result — the same trick `zoneOffsetMsAt` uses in
-  // reverse, and the reason the offset is sampled AT `nowMs` rather than assumed.
   const local = new Date(nowMs + zoneOffsetMsAt(nowMs, zone));
   return toUtcIso(wallClockToUtcMs(
     local.getUTCFullYear(), local.getUTCMonth() + 1, local.getUTCDate(), 0, 0, 0, zone,
   ));
 }
 
-// The pagination offset shared by the list/search tools: a 0-based index into the
-// full result set (the JMAP `position` argument, RFC 8620 section 5.5). Values are
-// coerced leniently like `limit` — a stringified "40" from a client that stringifies
-// numbers is accepted — but the three shapes that would page somewhere the caller did
-// not mean are REJECTED rather than repaired, because a wrong offset silently skips or
-// repeats messages instead of erroring:
-//
-//   - A NEGATIVE value. JMAP reads a negative position as an offset from the END of
-//     the results, so `-1` would quietly return the last page. That is a footgun with
-//     no upside here: reading from the other end is what `ascending` is for.
-//   - A FRACTION. Rounding 1.5 is a guess about which message the caller meant to
-//     start at.
-//   - Anything non-numeric, or an integer too large to be exact.
-//
-// An omitted value, `null`, an empty string, and 0 all mean the same thing: start at
-// the first result. There is nothing to guess there, so the blank shapes coerce rather
-// than reject.
+// The pagination offset shared by the list/search tools (JMAP `position`, RFC 8620
+// section 5.5). A string "40" is accepted, but a shape that would page somewhere unmeant
+// is REJECTED rather than repaired, since a wrong offset silently skips messages: a
+// NEGATIVE value (JMAP reads it from the END; `ascending` is the way to do that), a
+// fraction, or a non-safe integer. Blank shapes mean "start at the first result".
 const POSITION_HINT =
   'Pass a whole number of results to skip (0 or greater), e.g. position:20 for the second page of a limit:20 listing.';
 const POSITION_ECHO_LIMIT = 40;
@@ -1307,12 +911,9 @@ function echoPosition(value: unknown): string {
   return text.length > POSITION_ECHO_LIMIT ? `${text.slice(0, POSITION_ECHO_LIMIT)}...` : text;
 }
 
-// Clamp a caller-supplied limit into [1, max], tolerating string and NaN input.
-// A lenient client may send "20", and a bare Number("abc") yields NaN — which
-// JMAP serializes as `"limit": null`, i.e. a query with no bound at all. The
-// `|| fallback` is therefore a guard against an unbounded result set, not a
-// nicety. Unlike the other coercers this never throws: a limit is a convenience
-// knob, and a caller who fat-fingers it wants results, not an error.
+// Clamp a caller-supplied limit into [1, max]. The `|| fallback` guards NaN, which JMAP
+// serializes as `"limit": null`, an unbounded query. Never throws, unlike the other
+// coercers: a caller who fat-fingers a limit wants results, not an error.
 export function clampLimit(value: unknown, fallback: number, max: number): number {
   return Math.min(Math.max(Number(value) || fallback, 1), max);
 }
@@ -1321,10 +922,8 @@ function acceptedDateFormats(): string {
   return 'Accepted: a date such as 2026-07-20 (treated as 00:00:00 UTC on that date), or a full datetime such as 2026-07-20T14:30:00Z or 2026-07-20T14:30:00+01:00.';
 }
 
-// Loud-reject a settable string field that was provided but is empty,
-// whitespace-only, or null. Callers invoke this only for fields that were
-// actually present (i.e. !== undefined at the call site), so silently omitting
-// a field stays distinct from explicitly blanking it. Returns the trimmed value.
+// Loud-reject a settable string field that was provided but is blank or null. Call it only
+// for fields that are present, so omitting a field stays distinct from blanking it.
 export function requireNonEmpty(value: unknown, fieldName: string, hint = 'omit the field to leave it unchanged'): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new InvalidInputError(`${fieldName} cannot be empty; ${hint}`);
@@ -1347,11 +946,8 @@ export function validateClearFields(clearFields: string[] | undefined, allowed: 
   }
 }
 
-// Parse an RFC 5322 "Display Name <email>" recipient string into a JMAP
-// EmailAddress object. Bare addresses pass through as { email }, and a blank
-// display name is omitted. This is a pragmatic parse, not the full RFC grammar.
-// Callers map it over already-trimmed, non-empty arrays (coerceStringArray
-// filters blanks), so input is assumed non-empty.
+// Parse an RFC 5322 "Display Name <email>" recipient string into a JMAP EmailAddress.
+// A pragmatic parse, not the full RFC grammar. Input is assumed non-empty.
 export function parseAddress(input: string): { name?: string; email: string } {
   const trimmed = String(input).trim();
   const open = trimmed.lastIndexOf('<');
@@ -1359,7 +955,6 @@ export function parseAddress(input: string): { name?: string; email: string } {
   if (open !== -1 && close > open) {
     const email = trimmed.slice(open + 1, close).trim();
     let name = trimmed.slice(0, open).trim();
-    // Strip one pair of surrounding double-quotes from a quoted display name.
     if (name.length >= 2 && name.startsWith('"') && name.endsWith('"')) {
       name = name.slice(1, -1).trim();
     }
@@ -1371,17 +966,14 @@ export function parseAddress(input: string): { name?: string; email: string } {
 // One thing-to-attach spec as it arrives from a tool call (before path confinement,
 // gating and upload/resolution, which happen in jmap-client.ts).
 //
-// THREE SOURCES, exactly one per item. They are three ways to name the bytes, not three
-// optional extras, and each is gated separately (see uploadAttachments):
+// THREE SOURCES, exactly one per item, each gated separately (see uploadAttachments):
 //
 //   path                    a local file, read off disk and uploaded (FASTMAIL_ATTACH_DIR)
 //   blobId                  content already in the account's blob store
 //   emailId + attachmentId  a part of an existing message, resolved to its blob
 //
-// Every source field is optional HERE because the shape is a union that TypeScript cannot
-// express as one interface without making every consumer narrow it; coerceAttachments is
-// the gate that guarantees exactly one source is set, and it is the only producer of these
-// objects.
+// Every source field is optional HERE; coerceAttachments, the only producer, guarantees
+// exactly one is set.
 export interface AttachmentSpec {
   path?: string;
   blobId?: string;
@@ -1389,10 +981,8 @@ export interface AttachmentSpec {
   attachmentId?: string;
   name?: string;
   contentType?: string;
-  // The Content-ID an html body references this file by, to display it inside the message
-  // rather than hang it off the end. Stored here in CANONICAL form: coerceAttachments
-  // normalizes the two spellings a caller realistically copies (see stripCidSpelling)
-  // before validating, so everything downstream compares one value per identifier.
+  // The Content-ID an html body references this file by. Stored in CANONICAL form (see
+  // stripCidSpelling), so everything downstream compares one value per identifier.
   cid?: string;
 }
 
@@ -1403,27 +993,19 @@ const ATTACHMENT_SOURCE_KEYS = ['path', 'blobId', 'emailId', 'attachmentId'] as 
 const ATTACHMENT_COMMON_KEYS = ['name', 'contentType', 'cid'] as const;
 const ATTACHMENT_KEYS = new Set<string>([...ATTACHMENT_SOURCE_KEYS, ...ATTACHMENT_COMMON_KEYS]);
 
-// The item shape named in every whole-parameter refusal below, kept in one place so the
-// copies cannot drift from the schema.
 const ATTACHMENT_ITEM_SHAPE = '{ path | blobId | emailId+attachmentId, name?, contentType?, cid? }';
 
-// The sentence every source-selection refusal ends with, so the three sources are always
-// spelled out the same way wherever the caller lands.
 const ATTACHMENT_SOURCE_RULE =
   "Give exactly one source per item: 'path' (a local file), 'blobId' (content already in " +
   "the account), or 'emailId' + 'attachmentId' together (a part of an existing message).";
 
-// Which source an item names. `null` counts as ABSENT, not as a value: a lenient client
-// that fills every declared key emits null for the ones it has nothing to say about, and
-// reading those as "this item names four sources" would reject every call from such a
-// client.
+// `null` counts as ABSENT: a lenient client emits null for every declared key it has
+// nothing to say about, and would otherwise always name four sources.
 function namedAttachmentSourceKeys(obj: Record<string, unknown>): string[] {
   return ATTACHMENT_SOURCE_KEYS.filter((k) => obj[k] !== undefined && obj[k] !== null);
 }
 
-// Read one required string key off an item, rejecting a missing/blank/non-string value by
-// index. Returns the trimmed value: an accidental leading/trailing space would otherwise
-// reach the filesystem (path) or the server (an id) and read as "not found".
+// Returns the trimmed value, so a stray space does not read as "not found".
 function requireAttachmentString(obj: Record<string, unknown>, key: string, index: number, hint: string): string {
   const value = obj[key];
   if (typeof value !== 'string' || value.trim() === '') {
@@ -1432,20 +1014,11 @@ function requireAttachmentString(obj: Record<string, unknown>, key: string, inde
   return value.trim();
 }
 
-// Coerce the `attachments` tool param into AttachmentSpec[] | undefined. Accepts a
-// real array, or a JSON-string array from lenient clients (mirroring
-// coerceStringArray). Per element it REJECTS — never silently drops — a non-object,
-// an item naming no source or more than one, an `emailId`/`attachmentId` half-pair, or an
-// unexpected per-item key, naming the index so the caller can fix it (assertKnownParams is
-// top-level only and won't catch nested keys, so this is the sole guard for the item
-// shape). A bare string element is rejected rather than guessed as a path (too magic); a
-// JSON-object string is parsed.
-//
-// A key belonging to a source the item did not choose is a REJECTION, not a silent ignore:
-// `{ blobId, attachmentId }` reads as two different intentions, and picking one of them
-// would attach bytes the caller did not ask for. Because the only source-specific keys ARE
-// the source keys, the exactly-one-source rule is what enforces that — there is no second
-// per-source allowlist pass to drift from it.
+// Coerce the `attachments` tool param into AttachmentSpec[] | undefined. Per element it
+// REJECTS, naming the index, rather than silently dropping: assertKnownParams is top-level
+// only, so this is the sole guard on the item shape. A bare string is rejected rather than
+// guessed as a path. The exactly-one-source rule is also what refuses a key from a source
+// the item did not choose (`{ blobId, attachmentId }`); there is no second allowlist.
 export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined {
   if (value === undefined || value === null) return undefined;
 
@@ -1489,12 +1062,10 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
     }
 
     // Pick the source BEFORE validating anything else, so a caller that named two sources
-    // (or none) is told that rather than being told the first source's value is malformed.
+    // is told that rather than that the first one is malformed.
     const named = namedAttachmentSourceKeys(obj);
     const namesMessagePart = named.includes('emailId') || named.includes('attachmentId');
-    // Count SOURCES, not keys: emailId+attachmentId is one source spelled in two keys, so
-    // counting keys would wave through `{ blobId, attachmentId }` — the exact mix this rule
-    // exists to refuse.
+    // Count SOURCES, not keys: emailId+attachmentId is one source in two keys.
     const distinctSources =
       (named.includes('path') ? 1 : 0) + (named.includes('blobId') ? 1 : 0) + (namesMessagePart ? 1 : 0);
     if (named.length === 0) {
@@ -1509,16 +1080,12 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
 
     const spec: AttachmentSpec = {};
     if (namesMessagePart) {
-      // Both halves or neither. One alone is a half-written reference, and guessing the
-      // other half is not possible — an emailId names a message, not a part of one.
       spec.emailId = requireAttachmentString(obj, 'emailId', i, "a message part is named by 'emailId' AND 'attachmentId' together.");
       spec.attachmentId = requireAttachmentString(obj, 'attachmentId', i, "a message part is named by 'emailId' AND 'attachmentId' together.");
     } else if (named[0] === 'blobId') {
       spec.blobId = requireAttachmentString(obj, 'blobId', i, 'give the blobId of content already in the account.');
-      // A blob is bytes and nothing else: unlike a file it has no basename to fall back on
-      // and unlike a message part it carries no declared filename, so there is nothing to
-      // derive a name from. Defaulting one would put an invented filename on outgoing mail,
-      // so this rejects instead — the fail-loud posture the rest of this coercer takes.
+      // A blob carries no filename to default to, and inventing one would put it on
+      // outgoing mail.
       if (typeof obj.name !== 'string' || obj.name.trim() === '') {
         throw new McpError(
           ErrorCode.InvalidParams,
@@ -1531,14 +1098,8 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
 
     if (obj.name !== undefined) {
       if (typeof obj.name !== 'string') throw new McpError(ErrorCode.InvalidParams, `attachments[${i}].name must be a string.`);
-      // A BLANK name reads as absent, so every source falls back to the default it
-      // documents: the file's basename, or the message part's own name. Kept here rather
-      // than at each consumer because `??` cannot see the difference — `'' ?? info.name`
-      // is `''`, which would put a nameless attachment on outgoing mail while the schema
-      // promised a default. The trim also stops a stray space from becoming the filename
-      // recipients see. The blobId branch above rejects a blank name outright instead,
-      // and the two agree: a blob has no default to fall back to, so there "absent" is
-      // not a usable state.
+      // A BLANK name reads as absent, so the source's documented default applies. Done here
+      // because consumers use `??`, and `'' ?? info.name` is `''`.
       const trimmed = obj.name.trim();
       if (trimmed) spec.name = trimmed;
     }
@@ -1547,12 +1108,8 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
       spec.contentType = obj.contentType;
     }
     if (obj.cid !== undefined) {
-      // Normalize before validating, then keep the NORMALIZED value: `cid:logo` copied out
-      // of an html reference and `<logo>` copied out of a header are the same identifier,
-      // and every later comparison — collision detection above all — has to see them as
-      // one. Validating the raw value instead would bounce both spellings; keeping the raw
-      // value would let two spellings of one identifier become two parts sharing a
-      // Content-ID, which makes every reference to it ambiguous.
+      // Normalize before validating, then keep the NORMALIZED value: `cid:logo` and `<logo>`
+      // are one identifier, and collision detection has to see them as one.
       const raw = typeof obj.cid === 'string' ? obj.cid : '';
       const canonical = stripCidSpelling(raw);
       if (!isAuthorableCid(canonical)) {
@@ -1574,43 +1131,26 @@ export interface ParticipantSpec {
 
 const PARTICIPANT_KEYS = new Set(['email', 'name']);
 
-// The item shape named in every whole-parameter refusal below, kept in one place so the
-// copies cannot drift from the schema.
 const PARTICIPANT_ITEM_SHAPE = '{ email, name? }';
 
 // Coerce the `participants` tool param into ParticipantSpec[] | undefined, the same way
-// coerceAttachments handles its own array-of-objects param. Accepts a real array or a
-// JSON-string array; a comma-joined string is NOT split, because an item here is an
-// object, not a scalar, so there is no unambiguous reading of one.
+// coerceAttachments does, and the sole guard on the item shape (the SDK does not enforce
+// inputSchema). A comma-joined string is NOT split: an item is an object.
 //
-// Per element it REJECTS — never silently drops — a non-object, a missing/blank `email`,
-// an unexpected key, or a key of the wrong type, naming the index so the caller can fix
-// it. assertKnownParams is top-level only and won't see nested keys, and the MCP SDK does
-// not enforce inputSchema, so this is the sole guard on the item shape: without it a
-// non-string `email` or an object `name` would reach the ATTENDEE serializer.
+// A BARE STRING element is read as the address, unlike coerceAttachments: the address is a
+// participant's only required key, as for `to`/`cc`/`bcc`. The address is NOT vetted here;
+// validateAttendeeEmail (src/caldav-client.ts) owns those rules.
 //
-// A BARE STRING element is accepted and read as the address: `["a@example.com"]` means
-// the same as `[{ email: "a@example.com" }]`. That differs from coerceAttachments, which
-// refuses a bare string, and the difference is deliberate — an attachment spec has four
-// keys and a lone string could plausibly be a path or a display name, whereas a
-// participant's only required key is the address. It also matches the recipient lists
-// (`to`/`cc`/`bcc`), which have always taken bare address strings. The address itself is
-// NOT vetted here: validateAttendeeEmail (src/caldav-client.ts) owns the address rules
-// for both the create and update paths, and a second copy of them would drift.
-//
-// The returned objects are built fresh from the validated keys rather than passed through,
-// so a key added to ParticipantSpec later has to be handled here explicitly instead of
-// arriving by accident.
+// Objects are built fresh from the validated keys, so a key added to ParticipantSpec later
+// has to be handled here explicitly.
 export function coerceParticipants(value: unknown): ParticipantSpec[] | undefined {
   if (value === undefined || value === null) return undefined;
 
   let arr: unknown = value;
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    // A blank string reads as "not supplied", not as the empty list. On
-    // update_calendar_event an empty array REMOVES every attendee, so resolving an
-    // ambiguous blank in that direction would destroy data on a guess; resolving it as
-    // omitted leaves the event alone. To clear attendees, pass an actual empty array.
+    // A blank string reads as "not supplied", NOT the empty list: on update_calendar_event
+    // an empty array removes every attendee.
     if (!trimmed) return undefined;
     try {
       arr = JSON.parse(trimmed);
@@ -1653,9 +1193,6 @@ export function coerceParticipants(value: unknown): ParticipantSpec[] | undefine
     if (typeof obj.email !== 'string' || obj.email.trim() === '') {
       throw new InvalidInputError(`participants[${i}] is missing a non-empty 'email'.`);
     }
-    // Trim the address for the same reason coerceAttachments trims a path: a stray
-    // leading/trailing space would otherwise fail validateAttendeeEmail's no-whitespace
-    // rule and read as "invalid address" for an address that is fine.
     const spec: ParticipantSpec = { email: obj.email.trim() };
     if (obj.name !== undefined) {
       if (typeof obj.name !== 'string') {
@@ -1700,32 +1237,16 @@ const CONTACT_NAME_SHAPE = '{ given?, surname?, full? }';
 
 /**
  * Coerce one of the contact entry-array parameters (`emails`, `phones`, `addresses`) into a
- * validated array of fresh objects, following the same three-part discipline as
- * coerceAttachments/coerceParticipants — and for the same reason, sharpened here by what the
- * write does with the result: the MCP SDK does not enforce `inputSchema`, and these values
- * are copied into a `ContactCard/set` patch, so an unvalidated object would be written onto a
- * real card verbatim.
+ * validated array of fresh objects. These values are copied into a `ContactCard/set` patch,
+ * and the SDK does not enforce `inputSchema`, so: unknown keys are rejected, every known key
+ * is TYPE-CHECKED (an allowlist alone passes `{label: []}`), and the output is a FRESH LITERAL,
+ * never a spread, so a new key is a conscious edit here.
  *
- *   1. UNKNOWN KEYS are rejected, naming the index.
- *   2. Every known key is TYPE-CHECKED, naming the index. A key allowlist alone would still
- *      let `{address: {…}}` or `{label: []}` through to the card.
- *   3. The value passed onward is a FRESH LITERAL built from the validated keys, never a
- *      spread of the caller's object. That is what makes adding a key later a conscious edit
- *      here rather than a silent widening of what reaches the server.
+ * A blank string reads as "not supplied", never the empty array, which these parameters
+ * reject. `allowBareString` is off for `addresses`, which has no single scalar reading.
  *
- * A JSON-string array is accepted (lenient clients stringify structured params); a blank
- * string reads as "not supplied", never as the empty array — the empty array is a rejected
- * shape on these parameters, and resolving a blank one into it would turn a client quirk into
- * a rejection the caller cannot explain.
- *
- * `allowBareString` is on for `emails` and `phones`, whose only required key is the value
- * itself, so `["a@b.example"]` means `[{address: "a@b.example"}]` — matching how the recipient lists
- * and `participants` already read a bare string. It is off for `addresses`, where an entry has
- * no single obvious scalar reading.
- *
- * Duplicate values are REJECTED naming both positions: on `emails`/`phones` a repeat cannot be
- * matched against the stored card twice, so it would silently surface as an unknown addition,
- * and on any of the three it is a caller mistake with no useful reading.
+ * Duplicates are REJECTED: on `emails`/`phones` a repeat cannot be matched against the stored
+ * card twice, and would surface as an unknown addition.
  */
 function coerceContactEntries<T extends Record<string, any>>(
   value: unknown,
@@ -1818,12 +1339,8 @@ function coerceContactEntries<T extends Record<string, any>>(
           }.`,
         );
       }
-      // A blank label is rejected like every other blank here, rather than written. On a
-      // stored card an empty `label` is what "no label" already looks like, so accepting one
-      // would write a property that reads as absent — a change with no visible effect, which
-      // is worse than an error. It is deliberately NOT repurposed as a way to remove a label:
-      // that would be a new clearing mechanism, and removing a label is not something this
-      // tool can currently express.
+      // A blank label would write something that reads as absent. Deliberately NOT a way to
+      // remove a label: this tool has no clearing mechanism for one.
       if (obj.label.trim() === '') {
         throw new InvalidInputError(
           `${paramName}[${i}].label cannot be empty; omit it to leave the entry's label unchanged.`,
@@ -1849,13 +1366,9 @@ export function coerceContactAddresses(value: unknown): ContactAddressSpec[] | u
 }
 
 /**
- * Coerce the `name` parameter of a contact write. A bare string is the common case and reads
- * as the full name; the structured form names the parts. Same three-part discipline as the
- * entry arrays: unknown keys rejected, every key type-checked, and a fresh literal returned.
- *
- * A blank value is rejected rather than read as "clear the name": `name` is not clearable
- * (see the tool description), so silently dropping a blank one would leave the caller thinking
- * a name had been removed when nothing happened.
+ * Coerce the `name` parameter of a contact write; a bare string is the full name. Same
+ * discipline as coerceContactEntries. A blank value is rejected rather than read as "clear the
+ * name": `name` is not clearable, and dropping it would look like a removal that never happened.
  */
 export function coerceContactName(value: unknown): ContactNameSpec | undefined {
   if (value === undefined || value === null) return undefined;
