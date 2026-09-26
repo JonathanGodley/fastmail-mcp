@@ -1,0 +1,111 @@
+name: mutation
+
+# Weekly mutation testing of all of src/, split into shards so no job nears the 6-hour cap.
+# Survivors are the output, never a failure: only an error running Stryker fails a shard.
+on:
+  schedule:
+    # Off the hour, since scheduled runs at the top of the hour are often delayed.
+    - cron: '17 15 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # To find the last successful run and download its incremental files.
+  actions: read
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # A cache entry unused for 7 days is evicted, so a weekly run carries its incremental
+      # state as an artifact of the last successful run instead.
+      - name: Find the last successful run
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutation.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty') \
+            || { echo "::warning::Could not list earlier runs; this shard runs cold."; run_id=''; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      # Absent on the first run or once the artifact expires; the shard then runs cold.
+      - name: Fetch the previous incremental file
+        if: steps.previous.outputs.run_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mutation-incremental-${{ matrix.shard }}-of-4
+          path: reports
+          run-id: ${{ steps.previous.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Mutation test
+        run: node scripts/mutation-test.mjs --all --shard ${{ matrix.shard }}/4
+
+      - name: Upload the incremental file
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-incremental-${{ matrix.shard }}-of-4
+          path: reports/stryker-incremental-${{ matrix.shard }}-of-4.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-report-${{ matrix.shard }}-of-4
+          path: |
+            reports/mutation-${{ matrix.shard }}-of-4.json
+            reports/mutation-${{ matrix.shard }}-of-4.html
+          retention-days: 30
+          if-no-files-found: ignore
+
+  summary:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Download the shard reports
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mutation-report-*
+          path: reports
+          merge-multiple: true
+
+      # The summariser uses only Node built-ins, so no install is needed.
+      - name: Write the run summary
+        run: |
+          shopt -s nullglob
+          node scripts/mutation-summary.mjs reports/mutation-*.json >> "$GITHUB_STEP_SUMMARY"
