@@ -129,7 +129,8 @@ a cold `--all` run (about 15,700 mutants) takes roughly 1 to 1.5 hours on an
 
 `.github/workflows/mutation.yml` runs the full set weekly, and on manual
 dispatch, as four `--all --shard <i>/4` jobs that each carry their incremental
-file forward from the last successful run. Read the results in the run's
+file forward from the newest run that uploaded one, whether or not that run
+passed. Read the results in the run's
 summary (counts, score and each surviving mutant) or in its report artifacts.
 Survivors never fail the workflow; only an error running Stryker does.
 

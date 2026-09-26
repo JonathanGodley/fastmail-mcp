@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  # To find the last successful run and download its incremental files.
+  # To find and download earlier runs' incremental files.
   actions: read
 
 jobs:
@@ -36,15 +36,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # A cache entry unused for 7 days is evicted, so a weekly run carries its incremental
-      # state as an artifact of the last successful run instead.
-      - name: Find the last successful run
+      # A cache entry unused for 7 days is evicted, so a weekly run carries each shard's
+      # incremental state as an artifact instead. The newest unexpired one is taken whatever its
+      # run concluded, so one failed shard does not send the others cold the next week.
+      - name: Find the previous incremental file
         id: previous
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT: mutation-incremental-${{ matrix.shard }}-of-4
         run: |
-          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutation.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty') \
-            || { echo "::warning::Could not list earlier runs; this shard runs cold."; run_id=''; }
+          run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT&per_page=100" \
+            --jq '[.artifacts[] | select(.expired | not)] | max_by(.created_at) | .workflow_run.id // empty') \
+            || { echo "::warning::Could not list earlier artifacts; this shard runs cold."; run_id=''; }
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
 
       # Absent on the first run or once the artifact expires; the shard then runs cold.
@@ -61,8 +64,22 @@ jobs:
       - name: Mutation test
         run: node scripts/mutation-test.mjs --all --shard ${{ matrix.shard }}/4
 
-      - name: Upload the incremental file
+      # On a cancel or timeout Stryker saves the results so far, which the next run resumes from.
+      # A file cut short mid-write would instead fail every later run of this shard, and each
+      # failure would upload it again, so only a file that parses is uploaded.
+      - name: Check the incremental file
+        id: incremental
         if: always()
+        run: |
+          file=reports/stryker-incremental-${{ matrix.shard }}-of-4.json
+          if node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$file"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::$file is missing or does not parse, so it is not uploaded."
+          fi
+
+      - name: Upload the incremental file
+        if: always() && steps.incremental.outputs.ok == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutation-incremental-${{ matrix.shard }}-of-4
