@@ -2227,8 +2227,10 @@ type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjec
  * call in this file, so that no read reaches a record another read reports as absent (#191).
  *
  * Replaces tsdav's default `url.includes('.ics')`, which judges KIND by NAME and made `.ICS` or
- * extensionless resources unreachable. The VEVENT comp-filter is what keeps other resources
- * out. The collection's own url must be excluded HERE: tsdav's calendar branch does not.
+ * extensionless resources unreachable. The VEVENT comp-filter keeps other resources out of a
+ * calendar-query. The url-form multiget sends none, so there `isResolvedCalendarObject`'s
+ * VEVENT test is the only guard. The collection's own url must be excluded HERE: tsdav's
+ * calendar branch does not.
  */
 function calendarResourceUrlFilter(collectionUrl: string | undefined): (url: string) => boolean {
   return (url: string) => Boolean(url) && !urlEquals(url, collectionUrl);
@@ -2425,7 +2427,9 @@ function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
  * VEVENT (what the recurrence refusal reads; without it a series passes as "not recurring"),
  * and an etag (tsdav's `cleanupFalsy` drops an empty `If-Match`, so the delete would be
  * unconditional). Measured present on every live match
- * (`scripts/probes/calendar-uid-query.probe.mjs`, step 2).
+ * (`scripts/probes/calendar-uid-query.probe.mjs`, step 2). The VEVENT requirement is also what
+ * keeps non-event resources out of the url-form path (see `calendarResourceUrlFilter`), so it
+ * must not be relaxed for a read-only caller.
  */
 function isResolvedCalendarObject(obj: DAVCalendarObject): boolean {
   if (typeof obj.url !== 'string' || obj.url.trim().length === 0) return false;

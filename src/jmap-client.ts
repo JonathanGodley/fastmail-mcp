@@ -2031,8 +2031,10 @@ export class JmapClient {
     // §4.1.4): reading `attachments` alone would silently drop a body-routed image.
     const storedParts: any[] = buildUnionParts(existingEmail).map((u: UnionPart) => u.part);
 
-    // The recreate rebuilds from flat props, which cannot spell a part it cannot
-    // re-reference nor an interleaved body: refused loudly rather than mangled (#13, #85).
+    // The recreate rebuilds from flat props. Fastmail assembles the multipart/related
+    // embedding from a flat create (live-probed; scripts/probes/foreign-draft-roundtrip.mjs),
+    // so embedded images survive it. What flat props cannot spell (a part it cannot
+    // re-reference, an interleaved body) is refused loudly rather than mangled (#13, #85).
     const bodyShape = classifyDraftBodyShape(existingEmail);
     if (bodyShape.uncarriablePart) {
       const { part, isMedia } = bodyShape.uncarriablePart;

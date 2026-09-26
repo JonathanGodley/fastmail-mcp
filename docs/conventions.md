@@ -2410,14 +2410,14 @@ the first real component — inside a `VTIMEZONE`'s `TZNAME`, say — which open
 enough to swallow the zone rule's own `DTSTART` and report the event dated 1970.
 
 **"Every structural scan" includes the one that decides where to INSERT.** Of the four scans
-`replaceICalProperty` runs, the insert-position one looks for the first sub-component so a new
-property lands before a `VALARM` (RFC 5545's `eventprop *alarmc` order). A trimmed compare
-there reads ` BEGIN:phase two of the agenda` — the head of a folded `DESCRIPTION` — as that
-sub-component and splices the new line into the MIDDLE of the description: the description
-loses its tail and the inserted property swallows it, two stored records damaged in one write
-with nothing reported. It is reachable from every `update_calendar_event` that ADDS a property
-the event does not already have, which is the ordinary case for setting a location or
-participants. When a scan in this
+`replaceICalProperty` runs, the insert-position one was the last converted: it looks for the
+first sub-component so a new property lands before a `VALARM` (RFC 5545's `eventprop *alarmc`
+order). A trimmed compare there would read ` BEGIN:phase two of the agenda` — the head of a
+folded `DESCRIPTION` — as that sub-component and would splice the new line into the MIDDLE of
+the description: the description would lose its tail and the inserted property would swallow
+it, two stored records damaged in one write with nothing reported. It would be reachable from
+every `update_calendar_event` that ADDS a property the event does not already have, which is
+the ordinary case for setting a location or participants. When a scan in this
 file compares a line, it uses `structuralLine`; a `.trim()` there is a bug even when the
 function around it already looks converted.
 

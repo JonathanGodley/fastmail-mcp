@@ -627,9 +627,11 @@ success while leaving the draft unchanged.
 The recreate is faithful (`8afbf68`): it carries `In-Reply-To` / `References`,
 re-references attachments by `blobId`, and preserves keywords. Ordering is
 create-then-dispose (create the new draft, confirm, then dispose of the old one) so there
-is no data-loss window. A draft carrying an inline `cid:` image (a `multipart/related`
-tree that can't round-trip through the flat draft fields) is rejected rather than
-silently flattened. That reconstruction is tracked as a follow-on in issue #13.
+is no data-loss window. A draft carrying an inline `cid:` image is carried through the
+recreate: Fastmail assembles the `multipart/related` structure from the re-referenced
+flat part (`blobId` + `cid` + `disposition`), so the embedded image survives (#13,
+shipped). Only a part the recreate cannot re-reference, or a body that interleaves
+multiple same-type text parts, is refused rather than silently mangled (#85).
 
 ### Disposing of the replaced draft: Trash, never destroy (#65)
 
