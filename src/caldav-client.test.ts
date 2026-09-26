@@ -3012,7 +3012,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
   }
 
   function createMockedPatchClient(calendarObjects: Array<{ data: string; url: string; etag?: string }>) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -3439,7 +3439,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('ORGANIZER'));
-    assert.ok(updatedData.includes('mailto:test@fastmail.com'));
+    assert.ok(updatedData.includes('mailto:test@example.com'));
     assert.ok(updatedData.includes('ATTENDEE'));
   });
 
@@ -3464,7 +3464,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     await client.updateCalendarEvent('forgedorg@fm', { participants: [{ email: 'carol@example.com' }] });
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-    assert.match(updatedData, /(^|\r\n)ORGANIZER;CN=[^\r\n]*:mailto:test@fastmail\.com(\r\n|$)/);
+    assert.match(updatedData, /(^|\r\n)ORGANIZER;CN=[^\r\n]*:mailto:test@example\.com(\r\n|$)/);
     assert.ok(updatedData.includes('ATTENDEE;CN=' ) || updatedData.includes('ATTENDEE:mailto:carol@example.com'));
   });
 
@@ -3649,7 +3649,7 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
   const RECURRING_EVENT_URL = RECURRING_CALENDAR_URL + 'recur.ics';
 
   function createMockedRecurringClient(ical: string, url = RECURRING_EVENT_URL) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const objects = [{ data: ical, url }];
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: RECURRING_CALENDAR_URL }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(objects)),
@@ -4016,7 +4016,7 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
 
 describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
   function createMockedCreateClient() {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -4038,8 +4038,8 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
     });
 
     const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
-    assert.ok(ical.includes(':mailto:me@fastmail.com'), 'ORGANIZER should have mailto URI');
-    assert.ok(/ORGANIZER;CN=.+:mailto:me@fastmail.com/.test(ical), 'ORGANIZER should have CN parameter');
+    assert.ok(ical.includes(':mailto:me@example.com'), 'ORGANIZER should have mailto URI');
+    assert.ok(/ORGANIZER;CN=.+:mailto:me@example.com/.test(ical), 'ORGANIZER should have CN parameter');
     assert.ok(ical.includes('ATTENDEE;CN=Alice:mailto:alice@example.com'));
     assert.ok(ical.includes('ATTENDEE;CN=Bob:mailto:bob@example.com'));
   });
@@ -4299,7 +4299,7 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
   }
 
   function createMockedClient(calendarObjects: Array<{ data: string; url: string }>) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -4667,7 +4667,7 @@ describe('removeOrphanedVTimezones counts only real TZID parameters', () => {
 
 describe('updateCalendarEvent — a hostile recurrence rule is never expanded', () => {
   function mockClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/dos.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 207 })),
@@ -4717,7 +4717,7 @@ describe('CalDAV write status checking (assertDavOk)', () => {
       'DTSTART:20260101T090000Z', 'DTEND:20260101T093000Z', 'SUMMARY:S',
       'END:VEVENT', 'END:VCALENDAR',
     ].join('\r\n');
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status })),
@@ -4757,7 +4757,7 @@ describe('CalDAV write status checking (assertDavOk)', () => {
       'DTSTART:20260101T090000Z', 'DTEND:20260101T093000Z', 'SUMMARY:S',
       'END:VEVENT', 'END:VCALENDAR',
     ].join('\r\n');
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: ical, url: '/cal/s.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => response),
@@ -4785,7 +4785,7 @@ describe('CalDAV write status checking (assertDavOk)', () => {
 
 describe('resolveDisplayName', () => {
   it('uses the env value when it is a real string', () => {
-    assert.equal(resolveDisplayName('Jeremy G', 'fallback@example.com'), 'Jeremy G');
+    assert.equal(resolveDisplayName('Sam Organiser', 'fallback@example.com'), 'Sam Organiser');
   });
   it('falls back when unset or blank', () => {
     assert.equal(resolveDisplayName(undefined, 'fb'), 'fb');
@@ -4803,7 +4803,7 @@ describe('resolveDisplayName', () => {
 describe('ORGANIZER display name comes from the client config', () => {
   function mockedCreateClient(displayName?: string) {
     const client = new CalDAVCalendarClient({
-      username: 'me@fastmail.com',
+      username: 'me@example.com',
       password: 'test',
       displayName,
     });
@@ -4837,7 +4837,7 @@ describe('ORGANIZER display name comes from the client config', () => {
 
   function mockedPatchClient(displayName?: string) {
     const client = new CalDAVCalendarClient({
-      username: 'me@fastmail.com',
+      username: 'me@example.com',
       password: 'test',
       displayName,
     });
@@ -4856,11 +4856,11 @@ describe('ORGANIZER display name comes from the client config', () => {
   }
 
   it('uses the configured display name as the ORGANIZER CN on a created event', async () => {
-    const { client, mockDAVClient } = mockedCreateClient('Jeremy G');
+    const { client, mockDAVClient } = mockedCreateClient('Sam Organiser');
     await createWithParticipant(client);
 
     const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
-    assert.ok(ical.includes('ORGANIZER;CN=Jeremy G:mailto:me@fastmail.com'), ical);
+    assert.ok(ical.includes('ORGANIZER;CN=Sam Organiser:mailto:me@example.com'), ical);
   });
 
   it('falls back to the CalDAV username when no display name is configured', async () => {
@@ -4868,7 +4868,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     await createWithParticipant(client);
 
     const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
-    assert.ok(ical.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), ical);
+    assert.ok(ical.includes('ORGANIZER;CN=me@example.com:mailto:me@example.com'), ical);
   });
 
   it('falls back when the configured display name is blank or an unresolved placeholder', async () => {
@@ -4877,16 +4877,16 @@ describe('ORGANIZER display name comes from the client config', () => {
       await createWithParticipant(client);
 
       const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
-      assert.ok(ical.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), ical);
+      assert.ok(ical.includes('ORGANIZER;CN=me@example.com:mailto:me@example.com'), ical);
     }
   });
 
   it('uses the configured display name when adding an ORGANIZER on update', async () => {
-    const { client, mockDAVClient } = mockedPatchClient('Jeremy G');
+    const { client, mockDAVClient } = mockedPatchClient('Sam Organiser');
     await addParticipant(client);
 
     const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-    assert.ok(data.includes('ORGANIZER;CN=Jeremy G:mailto:me@fastmail.com'), data);
+    assert.ok(data.includes('ORGANIZER;CN=Sam Organiser:mailto:me@example.com'), data);
   });
 
   it('falls back to the username when adding an ORGANIZER on update with none configured', async () => {
@@ -4894,7 +4894,7 @@ describe('ORGANIZER display name comes from the client config', () => {
     await addParticipant(client);
 
     const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-    assert.ok(data.includes('ORGANIZER;CN=me@fastmail.com:mailto:me@fastmail.com'), data);
+    assert.ok(data.includes('ORGANIZER;CN=me@example.com:mailto:me@example.com'), data);
   });
 });
 
@@ -4913,7 +4913,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
   after(() => setDefaultTimezone(undefined));
 
   function createMockedCreateClient() {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -5056,7 +5056,7 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
 // before it — so they are the evidence for validating the value in one place.
 describe('createCalendarEvent rejects date spellings that would be resolved by guesswork', () => {
   function createMockedCreateClient() {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -5121,7 +5121,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
 
 describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   function mockClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -5498,7 +5498,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
 // value changed says so with `transparency` (#194), which the suite after this one covers.
 describe('TRANSP: create writes an all-day event free, update leaves it alone (#195)', () => {
   function createClient() {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -5507,7 +5507,7 @@ describe('TRANSP: create writes an all-day event free, update leaves it alone (#
   }
 
   function updateClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -5629,7 +5629,7 @@ describe('TRANSP: create writes an all-day event free, update leaves it alone (#
 // passed, which is nothing at all.
 describe('transparency: busy and free as caller values (#194)', () => {
   function createClient() {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -5638,7 +5638,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
   }
 
   function updateClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -5648,7 +5648,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
   }
 
   function readClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
     });
@@ -6025,7 +6025,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
         storedEvent('lbusy@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z']),
         storedEvent('lfree@fm', ['DTSTART:20261003T110000Z', 'DTEND:20261003T120000Z', 'TRANSP:TRANSPARENT']),
       ];
-      const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+      const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
       (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
         fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) =>
           both.map((data, i) => ({ data, url: `/cal/l${i}.ics`, etag: FIXTURE_ETAG }))),
@@ -6047,7 +6047,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
       const { event } = await readClient(free).getCalendarEventById('ser@fm');
       assert.match(toolJson(event), /"transparency":"free"/);
 
-      const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+      const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
       (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
         fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: free, url: '/cal/ser.ics', etag: FIXTURE_ETAG }]),
       });
@@ -6111,7 +6111,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
 // and the create/update default split.
 describe('timeZone parameter (#157)', () => {
   function createClient() {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -6120,7 +6120,7 @@ describe('timeZone parameter (#157)', () => {
   }
 
   function updateClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -6524,7 +6524,7 @@ describe('VTIMEZONE embedding (#166)', () => {
     after(() => setDefaultTimezone(undefined));
 
     function createMockedClient() {
-      const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+      const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
       const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
         createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
       });
@@ -6612,7 +6612,7 @@ describe('VTIMEZONE embedding (#166)', () => {
     }
 
     function updateMockedClient(icalData: string) {
-      const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+      const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
       const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
         fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
         updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -6682,7 +6682,7 @@ describe('VTIMEZONE embedding (#166)', () => {
       after(() => setDefaultTimezone(undefined));
 
       function createMockedClient() {
-        const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+        const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
         const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
           createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
         });
@@ -6731,7 +6731,7 @@ describe('VTIMEZONE embedding (#166)', () => {
       }
 
       function updateMockedClient(icalData: string) {
-        const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+        const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
         const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
           fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
           updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -7572,7 +7572,7 @@ describe('VTIMEZONE embedding (#166)', () => {
 // while still misreporting what got written. These drive the real methods end to end.
 describe('calendar write result classification, driven from real create/update calls (#157)', () => {
   function createClient() {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -7581,7 +7581,7 @@ describe('calendar write result classification, driven from real create/update c
   }
 
   function updateClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
@@ -10601,7 +10601,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     // The read path selected from `selectableCalendars` and the write path from the raw list,
     // so an event could be created in — and later destroyed from — the hidden task collection
     // that `list_calendars` never shows and `list_calendar_events` answers "not found" for.
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient(
       [
         { displayName: 'Personal', url: '/cal/personal/' },
@@ -10635,7 +10635,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
   });
 
   it('trims a calendarId on the write path, as the read path already did', async () => {
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Work', url: '/cal/work/' }], {
       createCalendarObject: mock.fn(async (_params: CreateObjectParams) => ({ status: 200 })),
     });
@@ -10654,7 +10654,7 @@ describe('calendarNotFoundError lists only calendars a caller can name', () => {
   it('does not advertise the hidden task collection on the create path', async () => {
     // The read path filtered it out before calling the shared helper and the write path did
     // not, so a mistyped id on a create named a calendar list_calendars never shows.
-    const client = new CalDAVCalendarClient({ username: 'me@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
     (client as any).client = makeMockDAVClient(
       [
         { displayName: 'Personal', url: '/cal/personal/' },
@@ -11353,7 +11353,7 @@ describe('a stored date value rendered into a refusal (#190)', () => {
   const LINE_SEPARATOR = String.fromCharCode(0x2028);
 
   function updateClient(icalData: string) {
-    const client = new CalDAVCalendarClient({ username: 'test@fastmail.com', password: 'test' });
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
       updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),

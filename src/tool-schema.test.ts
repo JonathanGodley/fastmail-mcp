@@ -402,7 +402,7 @@ function collectRequiredParams(): Map<string, Set<string>> {
 // module). Comment lines are dropped, so prose quoting a call is never mistaken for one.
 //
 // This attribution is by POSITION, which is its known limit: logic extracted out of the
-// switch into an injected-client handler module — the refactor CLAUDE.md's Testing section
+// switch into an injected-client handler module — the refactor CONTRIBUTING.md's testing section
 // pushes toward — leaves no line under the case label to find. Every assertion built on
 // this therefore carries a floor on how many sites it matched, so the extraction shows up
 // as a failure here instead of as silent coverage loss.
@@ -713,7 +713,7 @@ describe('the limit bound is owned by the handlers', () => {
 //
 // This covers the wiring only. The DEFAULT each flag falls back to, and the append of the
 // exclusion note itself, are still uncovered: they sit in the CallTool switch, which
-// CLAUDE.md records as having no test harness. That residual is accepted here rather than
+// CONTRIBUTING.md records as having no test harness. That residual is accepted here rather than
 // tracked — the extractable part of these handlers is a destructure-and-delegate, and the
 // injected-client extraction the Testing section prescribes is for handlers that
 // orchestrate. What made the residual worth narrowing at all is that the mis-wire above is
