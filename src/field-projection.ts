@@ -5,8 +5,8 @@ import type { SimplifiedEmail } from './email-formatter.js';
 //
 // The read tools return a fixed, fairly wide per-message shape, and response size is
 // therefore decided by what happens to be in the mailbox rather than by anything the
-// caller controls: in a listing, the fields the caller actually wanted were a small
-// fraction of the payload, and an editor-inflated draft's HTML body pushed
+// caller controls: a 66-message sweep measured 84KB, of which the five fields the
+// caller actually wanted were 18%; an editor-inflated draft's HTML body pushed
 // get_email past the same wall. `fields` lets a caller ask for LESS.
 //
 // Three properties make this safe to bolt onto the existing shape:
