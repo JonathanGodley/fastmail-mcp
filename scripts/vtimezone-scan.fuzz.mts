@@ -26,17 +26,17 @@
 // Needs no credentials and touches no network: it imports the source functions directly and
 // runs them in-process.
 //
-// Run: npx tsx scripts/probes/vtimezone-scan.fuzz.mts [iterations]   (default 200000)
+// Run: npx tsx scripts/vtimezone-scan.fuzz.mts [iterations]   (default 200000)
 // Prints the accepted/refused/unexpected counts and the first three failing inputs, and exits
 // non-zero on any invariant violation or unexpected throw.
 
-import { removeOrphanedVTimezones, regenerateVTimezones } from '../../src/caldav-client.js';
+import { removeOrphanedVTimezones, regenerateVTimezones } from '../src/caldav-client.js';
 
 const DEFAULT_ITERATIONS = 200000;
 const arg = process.argv[2];
 const N = arg === undefined ? DEFAULT_ITERATIONS : Number(arg);
 if (!Number.isInteger(N) || N < 1) {
-  console.error(`Usage: npx tsx scripts/probes/vtimezone-scan.fuzz.mts [iterations]  (a positive integer, default ${DEFAULT_ITERATIONS})`);
+  console.error(`Usage: npx tsx scripts/vtimezone-scan.fuzz.mts [iterations]  (a positive integer, default ${DEFAULT_ITERATIONS})`);
   process.exit(2);
 }
 

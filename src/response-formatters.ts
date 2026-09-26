@@ -563,7 +563,7 @@ function listIds(ids: string[]): string {
  * different outcomes, and reporting them with the same sentence leaves the caller telling the
  * user "label removed" about a message that has moved. Silence here would also be the one
  * outcome of this call that nothing reports, which is the failure the never-silently-drop rule
- * in CLAUDE.md names.
+ * in CONTRIBUTING.md names.
  *
  * Ids run through listIds for the same reason they do everywhere else in this file: they are
  * CALLER-supplied and can carry a newline that would forge extra lines in this prose.

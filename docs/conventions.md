@@ -465,7 +465,7 @@ granularity is the point, and it is the narrow reading that stays correct as the
 grows: refuse when the KIND of record is unmakeable, not when a record merely carries fields the
 create tool cannot set. Nearly every real card has titles, organizations or photos this server
 cannot write, and refusing to delete those would break the tool. The general rule lives in
-`CLAUDE.md` ("A destroy must not remove what this server cannot recreate") because it governs
+`CONTRIBUTING.md` ("A destroy must not remove what the server cannot recreate") because it governs
 delete paths not yet written.
 
 **The override is scoped to the field that was actually ambiguous**, not to the call.
@@ -1158,7 +1158,7 @@ and the Trash/Spam exclusion note describe the *query*, not a message.
 
 Projection is an **output** transform. It deliberately does not narrow what is fetched from
 the server — the JMAP property sets are held identical across the read methods on purpose
-(see the JMAP-property-consistency rule in `CLAUDE.md`), and making the fetch shape depend
+(see the JMAP properties rule in `CONTRIBUTING.md`), and making the fetch shape depend
 on a caller's projection would trade that invariant for a saving the caller never sees.
 
 ## Result serialisation

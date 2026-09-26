@@ -182,7 +182,7 @@ other mailbox" returns **0 of 15,843**. Fastmail never creates an Archive-plus-l
 
 **Mode dependence.** Fastmail's own MCP describes the operation as "in folders mode the emails are
 moved to the Archive folder; in labels mode the Inbox label is removed and any user-applied labels
-are preserved" (`docs/official-mcp-surface.md:60`). The rows above are labels mode. In folders mode
+are preserved" (its `tools/list` description of `archive_email`). The rows above are labels mode. In folders mode
 every message has a single membership, so the Inbox-plus-others case cannot arise and the
 Inbox-only case is already correct; the no-op row is the one that would differ. This server does not
 detect the mode (fork #122).
@@ -196,7 +196,7 @@ client is the authority here and reading the server source cannot substitute for
 
 ## What is NOT known about Fastmail's own API
 
-`docs/official-mcp-surface.md` was produced by a script that calls only `tools/list` and
+What is known of it comes from `scripts/dump-official-surface.mjs`, which calls only `tools/list` and
 deliberately makes no `tools/call`, so it records Fastmail's tool *description* and never their
 behaviour. Their `archive_email` documents no refusal and is annotated `idempotentHint=true`, but
 absence of a documented refusal is not evidence of no refusal — do not cite it as a contrast with
