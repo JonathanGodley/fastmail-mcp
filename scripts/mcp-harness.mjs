@@ -4,31 +4,16 @@
 // not hand-rewritten (and re-bugged) each time. The server speaks newline-delimited
 // JSON over stdio and logs only to stderr, so stdout is pure protocol.
 //
-// Importing from OUTSIDE the repo (a scratchpad driver): an absolute Windows path
-// in an ESM `import` fails with ERR_UNSUPPORTED_ESM_URL_SCHEME (the drive letter
-// reads as a protocol, "Received protocol 'c:'") — import via a file:/// URL
-// instead, e.g. `await import('file:///C:/.../scripts/mcp-harness.mjs')`.
-//
 // Before use:
 //   1. `npm run build`  (the server runs from dist/index.js, not src/)
 //   2. set FASTMAIL_API_TOKEN in the environment (and FASTMAIL_ATTACH_DIR for
-//      attachment tests). This harness references those var *names* only and never
-//      prints their values.
+//      attachment tests). The harness spawns dist/index.js with the env you pass,
+//      references those variable names only, and never prints their values.
+//      Never write a token to a file to get it there; scripts/probes/run-probe.py
+//      shows one way to inject it from an MCP client's config in memory.
 //
-// If the shell environment has no live token (or a stale one), do NOT copy the
-// token around by hand or write it to a file. Source it from wherever the working
-// MCP client is configured (e.g. the client config's mcpServers.<name>.env block)
-// at spawn time, in memory only — a tiny wrapper that reads the config and injects
-// the value into the child process env, then streams the probe's output:
-//
-//   import json, os, subprocess, sys                        # run-probe wrapper (python)
-//   cfg = json.load(open(os.path.expanduser('~/.claude.json'), encoding='utf-8'))
-//   env = dict(os.environ)
-//   env['FASTMAIL_API_TOKEN'] = cfg['mcpServers']['fastmail']['env']['FASTMAIL_API_TOKEN']
-//   sys.exit(subprocess.run(['node', 'the-probe.mjs'], env=env).returncode)
-//
-// The token never touches disk, stdout, or the conversation; the probe and this
-// harness never echo env values on any path.
+// Importing from outside the repo on Windows: an absolute path in an ESM `import`
+// fails with ERR_UNSUPPORTED_ESM_URL_SCHEME, so import via a file:/// URL instead.
 //
 // Usage as a module:
 //   import { createClient } from './scripts/mcp-harness.mjs';

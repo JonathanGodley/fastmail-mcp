@@ -95,7 +95,7 @@ five would be inferring a view from a role's name, which the extension rule at t
 file forbids. This matters beyond bookkeeping, because `src/jmap-client.ts` cites this table as
 the evidence that its refusal set is exactly the set that was measured.
 
-**Role mailboxes are not uniformly exclusive.** Two real messages on this account are filed in both
+**Role mailboxes are not uniformly exclusive.** A real message can be filed in both
 `snoozed` and `sent`, so "which refusal applies" is a live case rather than a hypothetical. Inbox
 and Trash are the two that do behave exclusively.
 
@@ -174,15 +174,15 @@ settle whether a grouped account applies a picker choice to every message in the
 | Message is filed in | Archive does | Evidence |
 | --- | --- | --- |
 | Inbox + a label | Inbox removed, label kept, **Archive not added** | a newsletter went `{Inbox, Gmail}` → `{Gmail}`, keywords unchanged |
-| Inbox only | **Moves to Archive** | Inbox 43→42, Inbox-only 31→30, Archive 15843→15844 |
+| Inbox only | **Moves to Archive** | the Inbox, Inbox-only and Archive counts each moved by one |
 | A label only, no Inbox | **Nothing**; the UI says "already archived" | re-archiving changed no mailbox and no count |
 
 Account-wide corroboration for the first row: `Email/query` for "in Archive AND in at least one
-other mailbox" returns **0 of 15,843**. Fastmail never creates an Archive-plus-label message.
+other mailbox" returns **none**. Fastmail never creates an Archive-plus-label message.
 
 **Mode dependence.** Fastmail's own MCP describes the operation as "in folders mode the emails are
 moved to the Archive folder; in labels mode the Inbox label is removed and any user-applied labels
-are preserved" (`docs/official-mcp-surface.md:60`). The rows above are labels mode. In folders mode
+are preserved" (its `tools/list` description of `archive_email`). The rows above are labels mode. In folders mode
 every message has a single membership, so the Inbox-plus-others case cannot arise and the
 Inbox-only case is already correct; the no-op row is the one that would differ. This server does not
 detect the mode (fork #122).
@@ -196,7 +196,7 @@ client is the authority here and reading the server source cannot substitute for
 
 ## What is NOT known about Fastmail's own API
 
-`docs/official-mcp-surface.md` was produced by a script that calls only `tools/list` and
+What is known of it comes from `scripts/dump-official-surface.mjs`, which calls only `tools/list` and
 deliberately makes no `tools/call`, so it records Fastmail's tool *description* and never their
 behaviour. Their `archive_email` documents no refusal and is annotated `idempotentHint=true`, but
 absence of a documented refusal is not evidence of no refusal — do not cite it as a contrast with
@@ -408,8 +408,8 @@ with what the create path says it produced.
 server's own create path (`create_calendar_event`, driven against the built `dist/` over the MCP
 harness, no participants) into a collection minted by
 `scripts/probes/server-authored-events.probe.mjs` with `MKCALENDAR`, and each was opened in the
-Fastmail **web** client the same day. The account's configured zone was `Australia/Sydney`, on AEST
-at the time. This is a fourth method in this file: the pixels of the client's event popup, read
+Fastmail **web** client the same day. The server was configured with `Australia/Sydney` as its
+test zone, on AEST at the time. This is a fourth method in this file: the pixels of the client's event popup, read
 against bytes this server wrote rather than bytes the client wrote. Also measured in passing: the
 `MKCALENDAR`'d collection appeared in the client's calendar list under its display name with no
 further step.

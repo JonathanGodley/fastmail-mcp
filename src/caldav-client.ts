@@ -335,7 +335,7 @@ function calendarObjectTitle(icalData: string | null | undefined, eventId: strin
 /**
  * The one refusal update and delete raise on a repeating event. It refuses outright because
  * `create_calendar_event` cannot make a repeating event, so this server must not destroy or
- * rewrite one (CLAUDE.md, "a destroy must not remove what this server cannot recreate").
+ * rewrite one (CONTRIBUTING.md, "A destroy must not remove what the server cannot recreate").
  * Per-occurrence editing is #146, design in #109. There is deliberately NO override parameter,
  * and the message says so, or an LLM caller spends turns hunting for one.
  */
@@ -2870,7 +2870,8 @@ function assertDavOk(resp: unknown, action: string): void {
 //
 // What create/update actually put on the wire for `start`/`end`, computed from the WRITTEN
 // line, never the caller's input, so an inherited or defaulted zone is reported truthfully.
-// The formatters below live here, not in index.ts, so they are unit-testable.
+// The formatters below live here, not in index.ts, so they are unit-testable
+// (CONTRIBUTING.md, "Handler logic must be unit-testable").
 export interface CalendarZoneWriteInfo {
   /**
    * 'zoned'    — a TZID was written (from `timeZone`, inherited, or create's default).

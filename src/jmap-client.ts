@@ -301,7 +301,7 @@ export interface ExclusionResult {
   unresolvedRoles: string[];
 }
 
-// Shared Email/get property lists — keep in sync per CLAUDE.md rules.
+// Shared Email/get property lists — keep in sync per CONTRIBUTING.md (JMAP properties).
 // COMPACT: used by the list/search tools and getThread (metadata + preview, no bodies).
 // `textBody` here fetches only the body-part *structure* (partId/type/size), NOT the
 // body content — no `bodyValues`/fetchTextBodyValues — so the response stays "no bodies"
@@ -1903,7 +1903,7 @@ export class JmapClient {
    * successCount` is the number of ids `effectiveTotal` counts that are neither a reported
    * failure nor a reported success — reachable only when a non-compliant server drops an id
    * from both its `updated` and `notUpdated` maps — and is surfaced as its own clause rather
-   * than folded into either number, per the never-silently-drop-a-field rule in CLAUDE.md.
+   * than folded into either number, per the never-silently-drop-a-field rule in CONTRIBUTING.md.
    * No caller in this repository can drive it above 0 today: all six close their
    * `notUpdated` map over every id they submitted before calling here, all six through
    * `withUnaccountedFailures` — `bulkRemoveLabels` reaches it via `applyLabelRemoval`, which
