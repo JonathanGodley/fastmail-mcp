@@ -348,9 +348,11 @@ describe('body tokens — a long run of braces is scanned in linear time', () =>
     const started = Date.now();
     const scan = scanBodyTokens(part);
     const elapsed = Date.now() - started;
-    assert.deepEqual(scan.tokens, []);
-    assert.deepEqual(scan.nearMisses, []);
-    assert.deepEqual(scan.otherSpellings, []);
+    // Lengths, not deepEqual against []: a broken pattern can match at every brace, and
+    // node:assert's diff of 100,001 sites against [] needs gigabytes.
+    assert.equal(scan.tokens.length, 0);
+    assert.equal(scan.nearMisses.length, 0);
+    assert.equal(scan.otherSpellings.length, 0);
     assert.ok(elapsed < 2000, `scanning 100,000 braces took ${elapsed}ms`);
   });
 
