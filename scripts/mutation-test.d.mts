@@ -4,6 +4,7 @@
 export const USAGE: string;
 export const EXCLUDED_TESTS: string[];
 export const MUTATE_ALL: string[];
+export const TEST_HEAP_MB: number;
 export function parseArgs(argv: string[]):
   | { all: true; shard?: { i: number; n: number } }
   | { commit: string }

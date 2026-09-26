@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  EXCLUDED_TESTS, MUTATE_ALL, diffToRanges, isMutable, parseArgs, partition, testFiles,
+  EXCLUDED_TESTS, MUTATE_ALL, TEST_HEAP_MB, diffToRanges, isMutable, parseArgs, partition, testFiles,
 } from '../scripts/mutation-test.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -55,6 +55,11 @@ test('partition over the real src tree keeps every mutable file in exactly one s
   assert.equal(shards.flat().length, real.length);
   assert.deepEqual(new Set(shards.flat()), new Set(real));
   assert.ok(shards.every((s) => s.length > 0));
+});
+
+test('the test-process heap cap leaves four runners room on a 16 GB CI runner', () => {
+  assert.ok(Number.isInteger(TEST_HEAP_MB) && TEST_HEAP_MB >= 256, String(TEST_HEAP_MB));
+  assert.ok(TEST_HEAP_MB * 4 <= 8 * 1024, String(TEST_HEAP_MB));
 });
 
 test('isMutable keeps src/*.ts and drops index.ts, tests, testing/ and non-src files', () => {

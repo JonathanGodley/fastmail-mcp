@@ -21,6 +21,12 @@ export const USAGE = 'Usage: node scripts/mutation-test.mjs <commit> | --all [--
 export const EXCLUDED_TESTS = ['index-env', 'readme-inventory', 'tool-schema', 'config-surface', 'built-server', 'server-lifecycle']
   .map((name) => `src/${name}.test.ts`);
 
+// A mutant that grows the JavaScript heap without bound would otherwise take the whole machine
+// before Stryker's timeout, and a CI runner with it. Capped, it crashes its own test process
+// and is reported as a RuntimeError. A test process's old space peaks under 50 MB, and four of
+// these fit a 16 GB runner. The cap does not reach ArrayBuffer memory.
+export const TEST_HEAP_MB = 1024;
+
 /** Returns { all: true, shard? }, { commit }, or { error } for anything else. */
 export function parseArgs(argv) {
   if (argv.length === 1 && argv[0] === '--all') return { all: true };
@@ -128,7 +134,7 @@ function main() {
     coverageAnalysis: 'perTest',
     tap: {
       testFiles: testFiles(readdirSync(path.join(REPO, 'src'))),
-      nodeArgs: ['--test-reporter=tap', '--import', 'tsx', '-r', '{{hookFile}}', '{{testFile}}'],
+      nodeArgs: [`--max-old-space-size=${TEST_HEAP_MB}`, '--test-reporter=tap', '--import', 'tsx', '-r', '{{hookFile}}', '{{testFile}}'],
     },
     mutate,
     ignorePatterns: ['/dist', '/.claude', '/coverage'],

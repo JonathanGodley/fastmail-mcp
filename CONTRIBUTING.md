@@ -125,7 +125,9 @@ through Stryker's incremental file in `reports/`. A surviving mutant is a line
 no test notices changing: add or tighten a test rather than deleting the line.
 Each mutant takes about 0.25 s, so a commit usually finishes in under a minute;
 a cold `--all` run (about 15,700 mutants) takes roughly 1 to 1.5 hours on an
-8-core desktop. `src/index.ts` is never mutated.
+8-core desktop. `src/index.ts` is never mutated. Each test process's heap is
+capped at 1 GB, so a mutant that grows the heap without bound fails as a
+RuntimeError instead of exhausting the machine.
 
 `.github/workflows/mutation.yml` runs the full set weekly, and on manual
 dispatch, as four `--all --shard <i>/4` jobs that each carry their incremental
