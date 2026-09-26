@@ -1,115 +1,65 @@
 import { InvalidInputError } from './coerce.js';
 
-// Plain-text quote stripping for the READ path (#73): given a message's text/plain body,
-// remove the quoted correspondence that a reply carries below (or above) the new content,
-// and report how many bytes went. A long thread re-sends the same reply chain at ever
-// deeper quote depths, so the quoted tail dominates the tokens while the new information
-// per message stays constant.
-//
-// This is a different job from anything in reply-quote.ts, which is why it lives in its
-// own module: that module WRITES our own quote (buildQuoteBlocks) and so knows exactly what
-// shape it emitted. Here the input is whatever a FOREIGN client produced, and a match
-// DELETES text from the output — so the rules below are deliberately narrower and every
+// Plain-text quote stripping for the READ path (#73). Unlike reply-quote.ts, which writes
+// our own quote, the input here is a FOREIGN client's and a match DELETES text, so every
 // match must be one of a small set of conventional, machine-emitted shapes.
 //
-// Posture: recognise confidently or not at all. When no marker matches, the body is
-// returned byte-identical and `quotedBytesStripped` is 0 — an unrecognised shape passes
-// through unchanged BY DESIGN rather than being guessed at. Callers can therefore treat a
-// 0 as "this body is verbatim" and re-read nothing.
-//
-// The failure modes run BOTH ways, and the docs name both (docs/email-bodies.md). Under-
-// strip is the safe one and the one to prefer at every fork. Over-strip is real, because
-// the markers are conventions rather than syntax: a leading ">" is also a markdown
-// blockquote and the prompt of a shell/REPL transcript, and those are stripped as quotes
-// per the feature's own marker list. The remedy is the signal — a quotedBytesStripped that
-// looks large for a short message means re-read without the flag.
+// Recognise confidently or not at all: an unrecognised shape passes through byte-identical
+// with `quotedBytesStripped` 0. Prefer under-strip at every fork. Over-strip is real (a
+// leading ">" is also markdown or a shell prompt); both failure modes are in
+// docs/email-bodies.md.
 
 export interface QuoteStripResult {
-  // The body with every recognised quoted region removed. Byte-identical to the input
-  // when nothing matched.
   text: string;
-  // UTF-8 bytes removed: the quoted lines themselves plus the attribution/marker lines
-  // and the separator whitespace that framed them. 0 means no marker matched.
+  // Includes the attribution/marker lines and framing whitespace. 0 means no marker matched.
   quotedBytesStripped: number;
 }
 
-// A quoted line: a leading ">" run, optionally indented a little (clients occasionally
-// pad). Nesting (">>", "> >") is the same shape and needs no separate rule.
 const QUOTE_LINE = /^[ \t]{0,3}>/;
 const BLANK_LINE = /^\s*$/;
 
-// Attribution ("On <date>, <someone> wrote:") — recognised only as the last line of the
-// run directly above a quote block, never on its own. Gmail wraps a long attribution, so
-// a line that merely ENDS with "wrote:" can be joined to up to two preceding lines when
-// one of them opens with "On".
+// Recognised only directly above a quote block, never on its own. Gmail wraps a long
+// attribution, so the "On" opener may be up to two lines above the "wrote:" line.
 const ATTRIBUTION_END = /\bwrote:\s*$/i;
 const ATTRIBUTION_START = /^[ \t]*On\b/;
 const ATTRIBUTION_MAX_WRAPPED_LINES = 3;
 
-// "-----Original Message-----" (Outlook's separator; the dash count and inner spacing
-// vary between clients, and Fastmail's own forward block uses the same words). Anchored
-// as a whole line so a mention of the phrase inside a sentence can't match.
+// Anchored as a whole line so the phrase inside a sentence can't match.
 const ORIGINAL_MESSAGE = /^[ \t]*-{2,}[ \t]*Original Message[ \t]*-{2,}\s*$/i;
 
-// Outlook's header block, which opens a quoted section with no ">" prefixing at all.
-// Confidence comes from the BLOCK, not the single line: a "From:" line whose value looks
-// like an ADDRESS, then at least two more header lines within the next few lines, with
-// nothing but headers and blanks in between.
-//
-// The address requirement is what keeps this rule on the right side of the strip/keep
-// trade, because this marker class cuts to the END of the message. Pasted content that
-// merely looks header-ish — a job posting or a newsletter carrying "From: The Hiring
-// Team" over To:/Subject: lines — would otherwise take the reader's own question below
-// the paste with it. A genuine quoted or forwarded header carries an addr-spec, so
-// requiring one costs almost nothing; where it does cost (Outlook can render a known
-// contact as a bare display name) the failure is an UNDER-strip, reported as a
-// quotedBytesStripped of 0, which is the direction this module errs in by design.
+// Outlook's unprefixed header block, recognised as a BLOCK: an addressed "From:" line, then
+// at least two more header lines. The ADDRESS requirement matters because this marker cuts
+// to the END of the message: pasted "From: The Hiring Team" over To:/Subject: lines would
+// otherwise take the reader's own text below it. A bare display-name From: under-strips.
 const HEADER_FROM = /^[ \t]*From:[ \t]*(\S.*)$/;
 const ADDRESS_TOKEN = /@|<[^<>]*>/;
 const HEADER_SIBLING = /^[ \t]*(Sent|Date|To|Cc|Bcc|Subject|Reply-To):/i;
 const HEADER_BLOCK_LOOKAHEAD = 6;
 const HEADER_BLOCK_MIN_SIBLINGS = 2;
 
-// A horizontal rule ("________" / "-------") directly above a header block or an
-// "Original Message" marker is part of the separator, not content.
+// A rule directly above a to-end marker is part of the separator, not content.
 const SEPARATOR_RULE = /^[ \t]*[_-]{3,}\s*$/;
 
 function byteLength(s: string): number {
   return Buffer.byteLength(s, 'utf8');
 }
 
-// A line inside a quote run that carries no ">" of its own and yet belongs to the quoted
-// block rather than to the reader (#181). Some clients' HTML-to-text conversion breaks a
-// long quoted line so that the continuation is emitted without the prefix; the run then
-// ended one line early, the fragment was never marked for removal, and it leaked into the
-// kept output — once per quote depth where the sender's wrap recurred.
+// A quoted line some converters wrap without its ">" prefix (#181). Two conditions tell it
+// from a person's INLINE REPLY, which eating would delete the sender's own writing, and both
+// must hold:
 //
-// The two conditions are what tell a machine's broken line from a person's INLINE REPLY,
-// which sits between two quoted blocks in exactly the same crude shape. Eating an inline
-// reply deletes the sender's own new writing, which is the worst thing this module can do,
-// so both must hold:
+//   1. It does not begin at the left margin; a typed line is flush left.
+//   2. It is glued to the quote: a quote line directly above with no blank between, and one
+//      again within QUOTE_GAP_MAX_LINES below. An inline reply is set off by a blank line.
 //
-//   1. The line does not begin at the left margin. A composer writes a typed line flush
-//      left; a fragment that fell out of a converter's line-breaking need not.
-//   2. It is glued to the quote — a quote line directly above with no blank line between,
-//      and a quote line again within QUOTE_GAP_MAX_LINES below. A person's interleaved
-//      paragraph is set off from the quoted text by a blank line; that break is what makes
-//      an inline reply readable, and it is present in every inline reply worth keeping.
-//
-// Each condition alone would eat a real shape the other saves: a flush-left "Yes." written
-// straight under a quoted question with no blank line (kept by 1), and an indented block a
-// reader pasted between two quoted paragraphs (kept by 2). A flush-left continuation stays
-// a documented under-strip, unchanged from before: it is not distinguishable from the terse
-// inline reply, and under-strip is the direction to fail in.
+// Each alone would eat a shape the other saves: a flush-left "Yes." under a quoted question
+// (kept by 1), an indented block pasted between quoted paragraphs (kept by 2). A flush-left
+// continuation is a documented under-strip.
 const UNPREFIXED_CONTINUATION = /^[ \t]+\S/;
-// One soft-wrap of a long line yields one continuation, and a continuation that itself
-// wraps yields two. Past that the gap is a block of text, not a broken line, and the safe
-// reading is that the quote ended there.
+// A wrap of a wrap yields two; past that the gap is a block of text, not a broken line.
 const QUOTE_GAP_MAX_LINES = 2;
 
-// The quote line that resumes the run after the unprefixed continuation at `j`, or -1 when
-// the run genuinely ends there. Bounded on both sides: no quote line directly above, no
-// quote line within reach below, or a gap line that starts at the left margin, all end it.
+// The quote line that resumes the run after the unprefixed continuation at `j`, or -1.
 function continuationResumesQuote(lines: string[], j: number): number {
   if (j === 0 || !QUOTE_LINE.test(lines[j - 1])) return -1;
   for (let k = j; k < lines.length && k - j < QUOTE_GAP_MAX_LINES; k++) {
@@ -119,11 +69,8 @@ function continuationResumesQuote(lines: string[], j: number): number {
   return -1;
 }
 
-// End of a run of quoted lines: blank lines inside the run are tolerated (clients often
-// drop the "> " from an empty quoted line), but the run ends at the LAST quoted line, so
-// a blank separator before following content is never swallowed. An unquoted content line
-// ends the run — text below a quote block is the reader's own writing and is kept — unless
-// it is the wrapped continuation described above, which is part of the quote.
+// Blank lines inside the run are tolerated (clients drop the "> " from an empty quoted
+// line), but the run ends at the LAST quoted line, so a trailing blank separator is kept.
 function quoteRunEnd(lines: string[], start: number): number {
   let last = start;
   for (let j = start; j < lines.length; j++) {
@@ -131,8 +78,7 @@ function quoteRunEnd(lines: string[], start: number): number {
     if (BLANK_LINE.test(lines[j])) continue;
     const resume = continuationResumesQuote(lines, j);
     if (resume < 0) break;
-    // Resume ON the quote line that closed the gap, so `last` advances only to quote lines
-    // and the run still ends at the last of them.
+    // Resume ON the quote line, so `last` advances only to quote lines.
     j = resume - 1;
   }
   return last;
@@ -148,9 +94,7 @@ function quoteRegionStart(lines: string[], q: number): number {
 
   let a = i;
   if (!ATTRIBUTION_START.test(lines[a])) {
-    // Wrapped attribution: walk back over consecutive non-blank lines looking for the
-    // "On ..." opener. Bounded, and abandoned entirely if it isn't found — a "wrote:"
-    // line with no recognisable opener strips only itself.
+    // Wrapped attribution. With no opener found, the "wrote:" line strips only itself.
     for (let k = a - 1; k >= 0 && a - k < ATTRIBUTION_MAX_WRAPPED_LINES; k--) {
       if (BLANK_LINE.test(lines[k])) break;
       if (ATTRIBUTION_START.test(lines[k])) { a = k; break; }
@@ -181,20 +125,9 @@ function isHeaderBlock(lines: string[], i: number): boolean {
   return siblings >= HEADER_BLOCK_MIN_SIBLINGS;
 }
 
-// Strip every recognised quoted region from a plain-text body.
-//
-// REGIONS, not a single boundary. A top-posted reply is the common case (new text, then
-// one quote block running to the end) and falls out of this as the degenerate case, but
-// scanning for regions also handles the two shapes a single "everything below the first
-// marker" cut would destroy: a bottom-posted reply (quote first, new text under it) and an
-// inline reply interleaved between quoted paragraphs. Unquoted text is never removed for
-// being *positioned* after a quote.
-//
-// The two marker classes that have no end delimiter — an Outlook header block and
-// "-----Original Message-----" — do run to the end of the message, because that is what
-// they mean. Note the consequence for a FORWARD: a forwarded message's content sits below
-// exactly that marker, so stripping a forward leaves the covering note only. That is
-// reported through quotedBytesStripped rather than guessed around; see README/docs.
+// REGIONS, not a single boundary: a "below the first marker" cut would destroy bottom-posted
+// and inline replies. Only the two markers with no end delimiter (the Outlook header block,
+// "Original Message") run to the end, so stripping a FORWARD leaves the covering note only.
 export function stripQuotedText(text: string): QuoteStripResult {
   if (!text) return { text: text ?? '', quotedBytesStripped: 0 };
 
@@ -219,25 +152,19 @@ export function stripQuotedText(text: string): QuoteStripResult {
     }
   }
 
-  // Nothing recognised: hand back the caller's bytes untouched.
   if (!matched) return { text, quotedBytesStripped: 0 };
 
   const kept = lines.filter((_, idx) => !remove[idx]);
-  // Removing a region can leave the body opening or closing on blank lines; trim those
-  // (they are counted in quotedBytesStripped like any other removed byte).
   while (kept.length > 0 && BLANK_LINE.test(kept[0])) kept.shift();
   while (kept.length > 0 && BLANK_LINE.test(kept[kept.length - 1])) kept.pop();
 
-  // Trailing whitespace on the final kept line goes too — otherwise a CRLF body ends on
-  // a stray lone CR whose LF was removed with the quote.
+  // Otherwise a CRLF body ends on a lone CR whose LF went with the quote.
   const stripped = kept.join('\n').replace(/\s+$/, '');
   return { text: stripped, quotedBytesStripped: byteLength(text) - byteLength(stripped) };
 }
 
-// stripQuoted rewrites the simplified body; `raw` is the pure-JMAP escape valve that
-// external clients JSON.parse wholesale. Rather than silently ignoring one of the two
-// (leaving the caller to believe the response was stripped when it was not), the
-// combination is rejected with the two ways forward.
+// Rejected rather than silently ignoring one flag, which would leave the caller believing
+// the response was stripped.
 export function assertStripQuotedNotRaw(stripQuoted: boolean, raw: boolean): void {
   if (stripQuoted && raw) {
     throw new InvalidInputError(

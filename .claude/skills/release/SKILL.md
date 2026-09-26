@@ -5,21 +5,21 @@ description: Cut a fastmail-mcp fork release on origin (JonathanGodley/fastmail-
 
 # Cut a fork release
 
-This encodes the **Releasing** and **Version** sections of `CLAUDE.md` as a runnable checklist. Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). This checkout pins bare `gh` commands to the fork via `gh repo set-default`; keep the explicit `--repo JonathanGodley/fastmail-mcp` on every release/tag/issue command anyway, so the command stays correct in a checkout without that default.
+This encodes the **Releasing** section of `CLAUDE.md` and **Bumping the version** in `CONTRIBUTING.md` as a runnable checklist. Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). This checkout pins bare `gh` commands to the fork via `gh repo set-default`; keep the explicit `--repo JonathanGodley/fastmail-mcp` on every release/tag/issue command anyway, so the command stays correct in a checkout without that default.
 
 The dangerous steps (anything that pushes, publishes, or closes a public issue) are grouped AFTER the checkpoint in step 4. Do the verification steps first; do not cross the checkpoint until its precondition holds.
 
 ## 1. Preconditions
 
 - **The user explicitly asked to release THIS session.** Releases are never automatic. If they did not ask, the job of this skill is to STOP and report the procedure — a speculative or dry-read invocation must never trigger a release.
-- **Large or feature release? Triage first — strongly suggested.** `/triage-release` answers "would cutting now ship a known defect": it enumerates the delta since the last tag, re-derives every open issue's claim from the code, and bands what blocks the cut vs what ships as a release-note known. Run it before bundling any release carrying more than a handful of commits or any new feature surface; a two-line fix release does not need it.
+- **Large or feature release? Triage first, strongly suggested.** Answer "would cutting now ship a known defect": enumerate the delta since the last tag, re-derive every open issue's claim from the code, and band what blocks the cut vs what ships as a release-note known. Run it before bundling any release carrying more than a handful of commits or any new feature surface; a two-line fix release does not need it.
 - **Confirm what is bundled.** Prefer batching related changes: every shipped change pays the documentation + 3-file version-bump tax, so a cluster amortizes it.
 - **Check upstream drift.** `git fetch upstream && git log --oneline $(git merge-base HEAD upstream/main)..upstream/main`. Releases are the fork's natural cadence, so this is where a growing divergence gets noticed rather than discovered at 97 commits. A two-digit list means schedule a sync — the method is `docs/upstream-sync.md`. This check never blocks a release; it just makes the drift visible while someone is looking.
-- **Confirm the documentation tax was paid.** Each bundled change must already have shipped its README + tool-description (`src/index.ts`) updates (`CLAUDE.md` "Documentation is mandatory"). A release does not retroactively excuse a missed doc update — if one is outstanding, fix it before tagging.
+- **Confirm the documentation tax was paid.** Each bundled change must already have shipped its README + tool-description (`src/index.ts`) updates (`CONTRIBUTING.md` "Documentation ships with the change"). A release does not retroactively excuse a missed doc update — if one is outstanding, fix it before tagging.
 
 ## 2. Bump the version — three hand-edited sites, then regenerate the lockfile
 
-Named in `CLAUDE.md` **Version** — match by content, line numbers drift:
+Named in `CONTRIBUTING.md` **Bumping the version**; match by content, line numbers drift:
 - `package.json`
 - `manifest.json`
 - the `Server` constructor in `src/index.ts`

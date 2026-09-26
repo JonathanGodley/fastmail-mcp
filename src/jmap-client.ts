@@ -253,7 +253,7 @@ export interface ExclusionResult {
   unresolvedRoles: string[];
 }
 
-// Shared Email/get property lists; keep in sync per CLAUDE.md rules.
+// Shared Email/get property lists; keep in sync per CONTRIBUTING.md (JMAP properties).
 // COMPACT: list/search tools and getThread. `textBody` fetches only the part STRUCTURE,
 // not content, for the `bodyTextSize` hint (#59).
 export const EMAIL_PROPERTIES_COMPACT = [
@@ -3316,7 +3316,7 @@ export class JmapClient {
     // Fail closed on an id the server accounted for in neither list.
     const unaccounted = ids.filter(id => !byId.has(id) && !notFound.has(id));
     if (unaccounted.length > 0) {
-      // Caller-supplied ids: sanitised and capped (docs/conventions.md, untrusted values).
+      // Caller-supplied ids: sanitised and capped (docs/conventions.md, untrusted values in prose).
       const shown = unaccounted.slice(0, EMAIL_ID_LIST_CAP).map(describeUntrusted).join(', ');
       const more = unaccounted.length > EMAIL_ID_LIST_CAP ? `, …and ${unaccounted.length - EMAIL_ID_LIST_CAP} more` : '';
       throw new Error(
@@ -4383,7 +4383,7 @@ export class JmapClient {
     // "The DEFAULT exclusion is active": drives the hidden count and the note, NOTHING
     // else. Gating the filter on it would drop the caller's excludes (fail-open).
     const doExclude = exclusion.excludeIds.length > 0;
-    // ONE union array, assigned UNGATED (docs/conventions.md, mailbox-query scoping).
+    // ONE union array, assigned UNGATED (docs/conventions.md, "Scoping a query").
     // Into `base` BEFORE baseEmpty, or an exclusion-only query drops the exclusion.
     const allExcludeIds = [...exclusion.excludeIds, ...callerExcludeIds];
     if (allExcludeIds.length > 0) base.inMailboxOtherThan = allExcludeIds;
@@ -4531,7 +4531,7 @@ export class JmapClient {
     for (const id of requiredMailboxIds) conds.push({ inMailbox: id });
 
     // Caller excludes are NOT an explicit scope. getEmails carries its own copy of this
-    // expression; keep the two in step (docs/conventions.md, the exclusion sites).
+    // expression; keep the two in step (docs/conventions.md, "Scoping a query").
     const hasExplicitScope = !!resolvedMailboxId || requiredMailboxIds.length > 0;
     const exclusion = computeExclusion(mailboxes, {
       includeTrash: filters.includeTrash,

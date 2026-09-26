@@ -387,7 +387,7 @@ function echoDate(value: string): string {
 // ===========================================================================
 //
 // `list_calendar_events`' startDate/endDate resolve differently from every email search
-// bound on purpose; the reasoning is in docs/conventions.md, calendar window bounds.
+// bound on purpose; the reasoning is in docs/conventions.md, "A calendar window's DAY is a local day".
 //
 //   startDate: 2026-08-12   ->  local midnight on the 12th
 //   endDate:   2026-08-12   ->  local midnight on the 13th   (the whole of the 12th)
