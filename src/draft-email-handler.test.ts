@@ -1955,14 +1955,14 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
   });
 
   it("carries the Bcc too when the account's own message had one", async () => {
-    // The same message with a Bcc header: both carries run off the one call, and neither
-    // takes anything from the other. A Bcc header is how the account's own copy is told
-    // from a received one — a received message never carries one.
+    // The same message with a Bcc header, filed in Sent: both carries run off the one call,
+    // and neither takes anything from the other.
     const { client, calls } = plainClient(makeOriginal({
       from: [{ name: 'Test User', email: 'me@example.com' }],
       to: [{ email: 'dana@example.com' }],
       cc: [{ email: 'raj@example.com' }],
       bcc: [{ name: 'Ada Byron', email: 'ada@example.com' }, { email: 'bo@example.com' }],
+      _mailboxRoles: ['sent'],
     }));
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
     assert.deepEqual(calls.draft.to, ['Test User <me@example.com>']);
@@ -2088,12 +2088,13 @@ const BCC_SIX_FORMATTED = [
   'eve@example.com',
 ];
 
-/** The measured original: From self, To self, Bcc the six. */
+/** The measured original: From self, To self, Bcc the six, filed in Sent. */
 function selfBccOriginal(over: any = {}) {
   return makeOriginal({
     from: [{ name: 'Test User', email: 'me@example.com' }],
     to: [{ email: 'me@example.com' }],
     bcc: BCC_SIX,
+    _mailboxRoles: ['sent'],
     ...over,
   });
 }
@@ -2140,6 +2141,7 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
       to: [{ email: 'me@example.com' }],
       cc: [{ email: 'raj@example.com' }],
       bcc: [{ email: 'raj@example.com' }, { email: 'ada@example.com' }],
+      _mailboxRoles: ['sent'],
     }));
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
     assert.deepEqual(calls.draft.cc, ['raj@example.com']);
@@ -2152,6 +2154,24 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
     }));
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
     assert.deepEqual(calls.draft.bcc, ['ada@example.com']);
+  });
+
+  // A sender can write a Bcc header into mail they send this account, so a Bcc on a
+  // received message would plant hidden recipients in the reply. Only the account's own
+  // Sent copy carries it; an original whose mailboxes could not be read carries nothing.
+  it('carries nothing, and says nothing, from an original that is not in Sent', async () => {
+    for (const roles of [['inbox'], ['archive'], undefined]) {
+      const { client, calls } = plainClient(selfBccOriginal({ _mailboxRoles: roles }));
+      const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+      assert.equal('bcc' in calls.draft, false, JSON.stringify(roles));
+      assert.equal(r.notes?.includes(NOTE_BCC_CARRIED) ?? false, false);
+    }
+  });
+
+  it('carries the Bcc from a Sent copy that is also labelled elsewhere', async () => {
+    const { client, calls } = plainClient(selfBccOriginal({ _mailboxRoles: ['inbox', 'sent'] }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.bcc, BCC_SIX_FORMATTED);
   });
 
   it('carries nothing, and says nothing, when the original has no Bcc', async () => {
