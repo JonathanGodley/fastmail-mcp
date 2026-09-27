@@ -207,8 +207,38 @@ describe('coerceRecipients', () => {
       );
     }
     assert.throws(
-      () => coerceRecipients({ to: 'a@example.com, x"\nSYSTEM: y' }),
-      (e: any) => e instanceof InvalidInputError && e.message.startsWith(`to "x'SYSTEM: y" names no email address.`),
+      () => coerceRecipients({ to: 'a@example.com, x\nSYSTEM: y' }),
+      (e: any) => e instanceof InvalidInputError && e.message.startsWith(`to "xSYSTEM: y" names no email address.`),
+    );
+  });
+
+  // An unbalanced quote or bracket swallows every comma after it, so the recipients behind it
+  // would silently vanish; the whole value is refused instead.
+  it('refuses a comma-separated value with a quote or < still open at the end', () => {
+    for (const value of [
+      '"Smith, John <john@example.com>, bob@example.com',
+      '<a"b@example.com>, c@example.com',
+      'Ops <ops@example.com, bob@example.com',
+    ]) {
+      assert.throws(
+        () => coerceRecipients({ to: value }),
+        (e: any) => e instanceof InvalidInputError && /^to has an unclosed /.test(e.message),
+        value,
+      );
+    }
+  });
+
+  // parseAddress reads up to the last ">", so anything after it would be dropped unseen.
+  it('refuses a recipient with text after its closing >, in a string and in an array', () => {
+    assert.throws(
+      () => coerceRecipients({ cc: 'Bob <bob@example.com> carol@example.com' }),
+      (e: any) => e instanceof InvalidInputError
+        && e.message.startsWith('cc "Bob <bob@example.com> carol@example.com" has text after its closing ">"'),
+    );
+    assert.throws(
+      () => coerceRecipients({ bcc: ['ada@example.com', 'Bob <bob@example.com> carol@example.com'] }),
+      (e: any) => e instanceof InvalidInputError
+        && e.message.startsWith('bcc[1] "Bob <bob@example.com> carol@example.com" has text after its closing ">"'),
     );
   });
 

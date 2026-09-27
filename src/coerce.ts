@@ -233,17 +233,18 @@ export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unkno
 // The comma form of a recipient list splits only on a comma outside "…" and <…>, since a
 // display name may carry one ("Smith, John" <john@example.com>). An unquoted name's comma
 // still splits, so a piece that names no address is REFUSED rather than sent to: that is
-// what "Smith, John <john@example.com>" becomes, and "Smith" is not a recipient.
+// what "Smith, John <john@example.com>" becomes, and "Smith" is not a recipient. A quote or
+// "<" left open swallows every comma after it, and parseAddress reads only up to the last
+// ">", so both would drop recipients unseen: each is refused too.
 function coerceRecipientList(value: unknown, paramName: string): string[] | undefined {
-  if (typeof value !== 'string') return coerceStringArrayStrict(value, paramName);
-  const trimmed = value.trim();
-  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-    try {
-      if (Array.isArray(JSON.parse(trimmed))) return coerceStringArrayStrict(value, paramName);
-    } catch { /* not JSON: split it below */ }
+  if (typeof value !== 'string' || isJsonArrayString(value)) {
+    const entries = coerceStringArrayStrict(value, paramName);
+    entries?.forEach((entry, i) => refuseTextAfterAngle(entry, `${paramName}[${i}]`));
+    return entries;
   }
-  const pieces = splitRecipientList(trimmed).map((p) => p.trim()).filter(Boolean);
+  const pieces = splitRecipientList(value.trim(), paramName).map((p) => p.trim()).filter(Boolean);
   for (const piece of pieces) {
+    refuseTextAfterAngle(piece, paramName);
     if (!parseAddress(piece).email.includes('@')) {
       throw new InvalidInputError(
         `${paramName} "${describeUntrusted(piece)}" names no email address. A comma separates ` +
@@ -255,7 +256,29 @@ function coerceRecipientList(value: unknown, paramName: string): string[] | unde
   return pieces;
 }
 
-function splitRecipientList(text: string): string[] {
+function isJsonArrayString(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!(trimmed.startsWith('[') && trimmed.endsWith(']'))) return false;
+  try {
+    return Array.isArray(JSON.parse(trimmed));
+  } catch {
+    return false;
+  }
+}
+
+function refuseTextAfterAngle(entry: string, label: string): void {
+  const trimmed = entry.trim();
+  const close = trimmed.lastIndexOf('>');
+  if (close !== -1 && trimmed.lastIndexOf('<') < close && close < trimmed.length - 1) {
+    throw new InvalidInputError(
+      `${label} "${describeUntrusted(trimmed)}" has text after its closing ">", which would be ` +
+      'dropped. Give each recipient its own entry (or separate them with a comma).',
+    );
+  }
+}
+
+function splitRecipientList(text: string, paramName: string): string[] {
   const pieces: string[] = [];
   let current = '';
   let inQuotes = false;
@@ -275,6 +298,12 @@ function splitRecipientList(text: string): string[] {
       continue;
     }
     current += ch;
+  }
+  if (inQuotes || inAngle) {
+    throw new InvalidInputError(
+      `${paramName} has an unclosed ${inQuotes ? 'double quote' : '"<"'}, so the recipients after it ` +
+      'cannot be told apart and none were read. Close it, or pass an array.',
+    );
   }
   pieces.push(current);
   return pieces;
