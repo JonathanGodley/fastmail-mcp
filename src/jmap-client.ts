@@ -289,13 +289,13 @@ export interface SourceReferences {
   sourceEmailId?: string;
 }
 
-// The JMAP header form used to SET and GET the recorded source instance. It is NOT
-// stripped on send (EmailSubmission transmits the stored bytes verbatim); the decision is
-// recorded in docs/security-model.md.
 // The not-found refusal of the two attachment tools, which take the same emailId.
 const ATTACHMENT_EMAIL_NOT_FOUND =
   'Email not found: that emailId matches no message. Pass an id from list_emails, search_emails or get_thread.';
 
+// The JMAP header form used to SET and GET the recorded source instance. It is NOT
+// stripped on send (EmailSubmission transmits the stored bytes verbatim); the decision is
+// recorded in docs/security-model.md.
 export const SOURCE_ID_HEADER = 'header:X-Fastmail-MCP-Source-Id:asText';
 
 // Anything that is not an RFC 8620 id is treated as absent rather than risking a
@@ -1689,14 +1689,6 @@ export class JmapClient {
     );
   }
 
-  // A per-id set-error out of a JMAP `notUpdated` map, or undefined when the server did not
-  // list that id. Three things a bare `notUpdated[id]` gets wrong:
-  //
-  // 1. hasOwnProperty: the id is CALLER-supplied, and "constructor" would index a prototype
-  //    function and fabricate a failure.
-  // 2. KEY PRESENCE is the refusal, not truthiness: a null value is still a refusal, hence
-  //    the `?? {}`.
-  // 3. isPlainResponseMap: an array-shaped map would answer for the id "0".
   /**
    * Throw unless a single-id Email/set confirmed `id` in `updated`: a SetError is classified
    * by throwSingleSetError, and an id in NEITHER map is a failure, as the bulk tools count it
@@ -1714,6 +1706,14 @@ export class JmapClient {
     }
   }
 
+  // A per-id set-error out of a JMAP `notUpdated` map, or undefined when the server did not
+  // list that id. Three things a bare `notUpdated[id]` gets wrong:
+  //
+  // 1. hasOwnProperty: the id is CALLER-supplied, and "constructor" would index a prototype
+  //    function and fabricate a failure.
+  // 2. KEY PRESENCE is the refusal, not truthiness: a null value is still a refusal, hence
+  //    the `?? {}`.
+  // 3. isPlainResponseMap: an array-shaped map would answer for the id "0".
   private setErrorFor(notUpdated: any, id: string): any | undefined {
     if (!isPlainResponseMap(notUpdated)) return undefined;
     return Object.prototype.hasOwnProperty.call(notUpdated, id) ? (notUpdated[id] ?? {}) : undefined;

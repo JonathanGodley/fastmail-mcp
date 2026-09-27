@@ -2510,15 +2510,15 @@ function readCalendarData(res: DAVResponse): string | undefined {
   return typeof cdata === 'string' ? cdata : undefined;
 }
 
-/**
- * The resolved copies as a caller sees them (#101). `object.url` is safe here because
- * `isResolvedCalendarObject` admitted only matches that carry one.
- */
 /** A resource's own UID, trimmed as the lookup compares it; undefined when it has none. */
 function ownUid(obj: DAVCalendarObject): string | undefined {
   return parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim();
 }
 
+/**
+ * The resolved copies as a caller sees them (#101). `object.url` is safe here because
+ * `isResolvedCalendarObject` admitted only matches that carry one.
+ */
 function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
   return matches.map(m => ({ calendar: m.calendarLabel, url: m.object.url }));
 }
