@@ -357,8 +357,7 @@ function noteSignatureNotPlaced(identityEmail: string | undefined): string {
  *
  * A note of its own rather than a line on the image sentence, because the loss is the
  * FORMATTING first: a formatted message forwarded as plain text is degraded even with no
- * images at all. The image half is said only when an image really rode as an
- * attachment.
+ * images at all.
  */
 function noteForwardTextForm(imagesRode: boolean): string {
   return (
@@ -983,7 +982,7 @@ export async function composeDraftEmail(
       readBack: (id) => client.getEmailById(id),
     }),
     ...emptyTokenNotes(expansions),
-    ...(forwardTextFormOnly ? [noteForwardTextForm(pooled.length > 0)] : []),
+    ...(forwardTextFormOnly ? [noteForwardTextForm(pooled.some((p) => isImageType(p.type)))] : []),
     // Presence on the PRE-expansion scan of a SUPPLIED non-blank body, so it cannot false-fire
     // and an attachment-only stash, a body-less reply (a blank part included) and an
     // asAttachment filler are silent. It fires on every deliberately unsigned message: the

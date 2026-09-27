@@ -737,6 +737,22 @@ describe('draft_email — {{forward}} shipping in the text form over an html ori
     }
   });
 
+  it('does not say images rode when the only pooled body part is not an image', async () => {
+    const inlinePdf = {
+      partId: '5', blobId: 'blob-pdf', type: 'application/pdf', size: 70, name: 'doc.pdf',
+      disposition: 'inline', cid: 'doc-1',
+    };
+    const { client, calls } = spyClient(makeOriginal({ attachments: [inlinePdf] }));
+    const r = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], textBody: 'FYI\n{{forward}}' },
+      client,
+    );
+    assert.equal(calls.draft.attachments.filter((p: any) => p.blobId === 'blob-pdf').length, 1);
+    assert.ok(r.notes!.every((n) => n !== TEXT_FORM_NOTE), JSON.stringify(r.notes));
+    assert.ok(r.notes!.some((n) => n.endsWith('loses its formatting; put {{forward}} in htmlBody to keep it.')),
+      JSON.stringify(r.notes));
+  });
+
   it('names a remedy the tool accepts when an html forward pools an image it cannot embed', async () => {
     // An inline image the html never references is body media the block cannot display.
     const unreferenced = makeOriginal({ attachments: [inlinePng] });
