@@ -13,3 +13,5 @@ export function partition(files: [path: string, bytes: number][], n: number): st
 export function isMutable(file: string): boolean;
 export function testFiles(srcNames: string[]): string[];
 export function diffToRanges(diff: string): string[];
+export function reportOutputs(args: { all?: true; commit?: string; shard?: { i: number; n: number } }):
+  { reporters: string[]; tag: string };
