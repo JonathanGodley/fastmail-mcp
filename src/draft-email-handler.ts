@@ -753,12 +753,10 @@ export async function composeDraftEmail(
   // --- 10. Assemble ---------------------------------------------------------
   const params: DraftEmailParams = { from, replyTo };
   if (toArg?.length) params.to = toArg;
-  if (cc) params.cc = cc;
-  // bcc on LENGTH: coerceRecipients returns [] for '' and [], and a truthy [] would reach
-  // `result.bcc`. createDraft drops an empty recipient list itself, so this is about the
-  // reported field, not the stored draft. `cc` keeps truthiness because an empty `result.cc`
-  // is inert (formatDraftEmailResult renders only a non-empty list), and `replyTo` is not a
-  // result field at all.
+  // On LENGTH: coerceRecipients returns [] for '' and [], and a truthy [] would reach the
+  // result. createDraft drops an empty recipient list itself, so this is about the reported
+  // fields, not the stored draft.
+  if (cc?.length) params.cc = cc;
   if (bcc?.length) params.bcc = bcc;
 
   let fillerBody: true | undefined;

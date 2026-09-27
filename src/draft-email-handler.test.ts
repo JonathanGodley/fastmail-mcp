@@ -1973,6 +1973,18 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
     }
   });
 
+  it('never hands createDraft an empty cc array, and never reports one', async () => {
+    for (const empty of [[], '']) {
+      const { client, calls } = plainClient();
+      const r = await compose(
+        { mode: 'new', to: ['a@b.example'], subject: 'Hi', textBody: 'x', cc: empty },
+        client,
+      );
+      assert.equal('cc' in calls.draft, false, `for cc: ${JSON.stringify(empty)}`);
+      assert.equal('cc' in r, false);
+    }
+  });
+
   it('never hands createDraft an empty bcc array, and never reports one', async () => {
     // coerceRecipients returns [] for '' and for [], and [] is truthy — so a truthiness test
     // would put `bcc: []` into these params and into the result. createDraft drops an empty
