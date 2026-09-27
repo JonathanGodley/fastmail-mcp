@@ -40,6 +40,7 @@ import {
   CALENDAR_NAME_LIST_CAP,
   AMBIGUOUS_COPY_URL_ECHO_LIMIT,
   LOGIN_FAILURE_ECHO_LIMIT,
+  CALENDAR_UID_ECHO_LIMIT,
   isBrokenCalendarHomeEntry,
   findBrokenCalendarHomeCollections,
 } from './caldav-client.js';
@@ -3038,6 +3039,13 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     const result = await client.updateCalendarEvent('padded-uid', { title: 'New Title' });
 
     assert.equal(result.eventId, 'padded-uid');
+  });
+
+  // The echoed UID is fed back to an exact-match lookup, so a long one must come back whole.
+  // Exchange-style UIDs are over 100 hex characters.
+  it('echoes a UID longer than 64 code points whole at CALENDAR_UID_ECHO_LIMIT', () => {
+    const uid = '040000008200E00074C5B7101A82E008' + 'A'.repeat(150);
+    assert.equal(describeUntrustedAt(uid, CALENDAR_UID_ECHO_LIMIT), uid);
   });
 
   it('returns the stored UID when the event was addressed by its url', async () => {

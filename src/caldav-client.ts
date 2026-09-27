@@ -2120,6 +2120,13 @@ export const AMBIGUOUS_COPY_LIST_CAP = 12;
 export const AMBIGUOUS_COPY_URL_ECHO_LIMIT = 320;
 
 /**
+ * The bound on a stored UID echoed as an id to pass back. Nothing caps a UID's length, and
+ * Exchange-generated ones run past 100 hex characters, so 320 keeps every real UID whole while
+ * a hostile one still cannot fill the reply.
+ */
+export const CALENDAR_UID_ECHO_LIMIT = 320;
+
+/**
  * The bound on tsdav's own text inside the login refusal (#182).
  *
  * Wider than `describeUntrusted`'s 64 default because the status code sits at the END of
