@@ -5,8 +5,7 @@
 // images, asAttachment untouched, and the send_draft transmit receipt (one
 // send-to-self, swept afterwards). Fixtures are received-like messages created
 // in Inbox via raw JMAP; every artifact is trashed on exit, including the copy the
-// transmit delivers back, and the cleanup itself is CHECKED - a sweep that quietly
-// removes nothing is the one failure this probe cannot afford.
+// transmit delivers back, and the cleanup itself is CHECKED.
 import { createClient } from '../mcp-harness.mjs';
 import { makeChecker, text, jsonOf, idOf, rawBodies } from './probelib.mjs';
 import { getSession, jmap, upload, makePng } from './jmaplib.mjs';
@@ -87,11 +86,9 @@ try {
   check('reply: derived text has no cid leak', !st.txt.includes('cid:'), JSON.stringify(st.txt.slice(0, 120)));
 
   // 2. edit of that reply, handing the quote back: the minted cid is DURABLE (unchanged)
-  // The draft's html is handed back whole, minted reference and all, which is what an edit
-  // that keeps the quote looks like now that nothing is preserved for the caller. The cid
-  // still names a part this draft carries, so the reserved-shape guard permits it; what is
-  // being measured is that the identifier survives the recreate rather than being re-minted,
-  // because a caller holding that html across two edits would otherwise reference nothing.
+  // The html is handed back whole, minted reference and all; the cid names a part this draft
+  // carries, so the reserved-shape guard permits it. It must survive the recreate rather than
+  // be re-minted, or a caller holding that html across two edits would reference nothing.
   r = await c.call('get_email', { emailId: d1, fields: ['bodyText', 'bodyHtml', 'bodyHash'] });
   const hash1 = jsonOf(text(r)).bodyHash;
   check('edit: the draft read issued a bodyHash', typeof hash1 === 'string' && hash1.length > 0, text(r).slice(0, 200));
@@ -158,12 +155,8 @@ try {
   for (const id of trash) { try { await c.call('delete_email', { emailId: id }); } catch { /* swept below */ } }
   await new Promise(res => setTimeout(res, 3000));
 
-  // Ids out of the PARSED payload, never a regex over the rendered text. Result payloads are
-  // serialised compact, so the pattern this replaced - written against pretty-printed output,
-  // with a space after the colon - matched nothing the moment that landed. It failed silently:
-  // the sweep found no ids, deleted nothing, and the run still printed a count taken from
-  // `trash` and passed, leaving two real messages live in the mailbox on every run. jsonOf is
-  // whitespace-agnostic, so it cannot rot the same way.
+  // Ids out of the PARSED payload, never a regex over the rendered text: a regex written
+  // against pretty-printed output once matched nothing and the sweep silently deleted nothing.
   //
   // search_emails' default scope excludes Trash, so this reads as "still live in the mailbox"
   // both before the sweep (what to remove) and after it (what the sweep failed to remove).
@@ -188,8 +181,6 @@ try {
       await new Promise(res => setTimeout(res, 3000));
     }
     await new Promise(res => setTimeout(res, 3000));
-    // The whole point of asserting on the cleanup: a sweep nobody checks is a sweep that can
-    // stop working without anyone noticing, which is exactly what happened here.
     const remaining = await stillLive();
     check('cleanup: nothing matching the probe mark is still live', remaining.length === 0,
       remaining.length ? `${remaining.length} message(s) left in the mailbox: ${remaining.join(', ')} — search_emails query "${MARK}"` : '');

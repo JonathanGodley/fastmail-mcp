@@ -2,18 +2,10 @@
 # and injects them into the child process environment. Values are never printed,
 # logged, or written to disk. Usage: python scripts/probes/run-probe.py <probe.mjs>
 #
-# FASTMAIL_API_TOKEN is required (the JMAP probes cannot run without it). The CalDAV
-# username/password and the CalDAV display name are optional and only injected when
-# the config carries them, because the calendar probes need a separate app password
-# that a JMAP-only setup will not have. A missing CalDAV credential is left to the
-# probe to report, so a JMAP probe still runs on a config that has no calendar
-# access configured.
-#
-# FASTMAIL_TIMEZONE is forwarded the same way but is not calendar-scoped - it also
-# governs email `date` rendering (see README.md), so a JMAP-only setup routinely
-# sets it. It is optional here because the server itself falls back to the host's
-# own zone when it is unset; unlike a missing CalDAV credential, that fallback is
-# silent, not something a probe reports.
+# FASTMAIL_API_TOKEN is required. The CalDAV credentials and display name are
+# injected only when the config carries them (a JMAP-only setup has no calendar app
+# password), and a missing one is left to the probe to report. FASTMAIL_TIMEZONE is
+# optional too: when unset, the server silently falls back to the host's own zone.
 import json, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))

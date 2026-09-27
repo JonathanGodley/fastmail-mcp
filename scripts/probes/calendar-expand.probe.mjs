@@ -14,30 +14,24 @@
 // calendar-data blob per resource (which `parseCalendarObject` would silently reduce to
 // the first, changing the symptom without fixing the bug) or as separate objects.
 //
-// This probe answers that by querying the same window both ways and printing the
-// structure of what comes back. It is READ-ONLY: it creates nothing. That is deliberate
-// beyond ordinary tidiness — creating an event with participants makes the server send
-// real iTIP invitations (see the README), so a calendar probe that writes is not a safe
-// default.
+// This probe queries the same window both ways and prints the structure of what comes
+// back. It is READ-ONLY: creating an event with participants makes the server send real
+// iTIP invitations (see the README).
 //
 // SECOND PASS: does the FIRST instance of a series carry a RECURRENCE-ID?
 // -----------------------------------------------------------------------
-// The pass above queries one fixed window and says nothing about a window that contains a
-// series' ORIGINAL DTSTART — and that turned out to be the case that matters. Cyrus's
-// `expand_cb` sets a RECURRENCE-ID only on instances after the first, so such a window
-// returns [first-instance-with-no-RECURRENCE-ID, occurrence, occurrence, …]. Any parser
-// that identifies "the block without a RECURRENCE-ID" as a series master reads block 0 as
-// one and drops every sibling; a five-year window over a yearly series reported ONE event.
-// The default window here contains no series start, which is exactly why the original pass
-// never saw it, so the second pass finds a real recurring series in the account, builds a
-// window from its own DTSTART, and asserts the shape directly.
+// The first pass's default window contains no series' ORIGINAL DTSTART, and that is the case
+// that matters. Cyrus's `expand_cb` sets a RECURRENCE-ID only on instances after the first,
+// so such a window returns [first-instance-with-no-RECURRENCE-ID, occurrence, …]. A parser
+// that takes "the block without a RECURRENCE-ID" as a series master drops every sibling; a
+// five-year window over a yearly series reported ONE event. The second pass finds a real
+// recurring series in the account, builds a window from its own DTSTART, and asserts the
+// shape directly.
 //
 // Run: python scripts/probes/run-probe.py calendar-expand.probe.mjs [startDate endDate]
 
 import { DAVClient } from 'tsdav';
-// The shared PASS/FAIL harness. This probe talks to tsdav rather than to the MCP server, so
-// it uses nothing else from probelib — but it takes its `check` from there so the two
-// calendar probes cannot disagree about the argument order, which they did.
+// Only `check` comes from probelib, so every probe shares one argument order.
 import { makeChecker } from './probelib.mjs';
 
 const USERNAME = process.env.FASTMAIL_CALDAV_USERNAME;
@@ -92,9 +86,8 @@ const client = new DAVClient({
 
 const { check, failures } = makeChecker();
 
-// Series masters seen in the plain (unexpanded) pass, used to build the first-instance
-// window below: a master carries the RRULE and the series' ORIGINAL DTSTART, which is
-// precisely the date the expanded pass needs to include.
+// Series masters from the plain pass: each carries the RRULE and the series' ORIGINAL
+// DTSTART, which the first-instance window must include.
 const seriesCandidates = [];
 
 await client.login();
@@ -146,7 +139,6 @@ for (const cal of calendars) {
     }
   }
 
-  // Remember any series master seen here, for the first-instance pass below.
   for (const obj of plain) {
     for (const b of describeBlob(obj.data || '')) {
       if (b.rrule && b.dtstart && !b.recurrenceId) seriesCandidates.push({ calendar: cal, name, ...b });
@@ -154,9 +146,7 @@ for (const cal of calendars) {
   }
 }
 
-// ---------------------------------------------------------------------------
 // Second pass: a window that CONTAINS the series' first instance.
-// ---------------------------------------------------------------------------
 
 /** The ISO instant a DTSTART line names, read as UTC (TZID names are not resolved here). */
 function dtstartInstant(dtstartLine) {
@@ -220,8 +210,7 @@ if (usable.length === 0) {
     }
     const bare = matched.filter(p => !p.recurrenceId);
     check('the window holds more than one occurrence of the series', matched.length > 1, `veventsInBlob=${matched.length}`);
-    // THE FACT THIS PASS EXISTS FOR. A parser that treats "the block with no RECURRENCE-ID"
-    // as a series master finds exactly one here and discards every sibling.
+    // THE FACT THIS PASS EXISTS FOR.
     check(
       'exactly ONE expanded block carries no RECURRENCE-ID — the series FIRST instance',
       bare.length === 1,
