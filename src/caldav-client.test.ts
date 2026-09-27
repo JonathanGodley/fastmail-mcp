@@ -2012,6 +2012,15 @@ describe('CalDAVCalendarClient event lookup', () => {
     }
   });
 
+  it('returns the deleted record\'s own UID when it was addressed by url', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
+    });
+    const deleted = await client.deleteCalendarEvent(realUrl);
+    assert.equal(deleted.eventId, 'real@fm');
+  });
+
   it('reaches the addressed record by its own UID and the other by its url', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
     for (const [id, target] of [['real@fm', realUrl], [WORK_URL + 'decoy.ics', WORK_URL + 'decoy.ics']]) {

@@ -745,6 +745,16 @@ describe('update_calendar_event echoes the resolved event id', () => {
       /Calendar event updated\. Event ID: "\$\{describeUntrustedAt\(result\.eventId, CALENDAR_UID_ECHO_LIMIT\)\}"/,
     );
   });
+
+  it('and delete_calendar_event reports its deleted.eventId the same way', () => {
+    const body = collectCaseBodies().get('delete_calendar_event');
+    assert.ok(body, 'could not find the delete_calendar_event case in src/index.ts');
+    const code = body.join('\n');
+    assert.match(
+      code,
+      /Calendar event deleted\. Event ID: "\$\{describeUntrustedAt\(deleted\.eventId, CALENDAR_UID_ECHO_LIMIT\)\}"/,
+    );
+  });
 });
 
 // A falsy guard would refuse `eventId: 0` or `false` as "required" before the client's

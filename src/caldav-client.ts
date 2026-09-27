@@ -142,8 +142,10 @@ export interface CalendarEventResult {
   brokenCollections?: BrokenCollections;
 }
 
-/** What `deleteCalendarEvent` returns. Only the disclosure: a delete has nothing else to say. */
+/** What `deleteCalendarEvent` returns. */
 export interface DeleteCalendarEventResult {
+  /** The deleted record's own UID, as update reports it, whichever form of id was passed. */
+  eventId: string;
   brokenCollections?: BrokenCollections;
 }
 
@@ -3917,6 +3919,7 @@ export class CalDAVCalendarClient {
 
     const deleteResp = await client.deleteCalendarObject({ calendarObject: obj });
     assertDavOk(deleteResp, 'delete calendar event');
-    return { brokenCollections: asBrokenCollectionsField(brokenCollections) };
+    const uid = parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim() || eventId;
+    return { eventId: uid, brokenCollections: asBrokenCollectionsField(brokenCollections) };
   }
 }
