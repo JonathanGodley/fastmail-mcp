@@ -79,6 +79,12 @@ export async function editDraft(
   // updateDraft owns the refusal order (body-shape guards first) but runs after the upload.
   // The hash presence check needs no network, so a call that would upload runs it here, or
   // the likeliest refusal orphans the uploaded blobs. Staleness needs the stored draft.
+  //
+  // Every refusal that needs the stored draft (not found, not a draft, stale bodyHash, an
+  // unverified from, a body-shape guard) still runs after the upload and leaves those blobs
+  // unreferenced. Accepted: nothing can reach them, and moving the checks ahead would read
+  // the draft twice. RFC 8620 section 6 lets a server delete an unreferenced blob after an
+  // hour; whether Fastmail does is not verified.
   const touchesBody = textBody !== undefined || htmlBody !== undefined
     || (clearFields ?? []).some((f) => f === 'textBody' || f === 'htmlBody');
   if (specs?.length && touchesBody && (typeof bodyHash !== 'string' || bodyHash.trim() === '')) {

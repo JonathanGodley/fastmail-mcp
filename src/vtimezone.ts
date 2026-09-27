@@ -170,7 +170,12 @@ export function abbreviationFormatterCacheSize(): number {
 
 /** ICU's `en-US` short name for `zone` at `utcMs` (e.g. `AEDT`, or `GMT+11` where ICU has no
  * abbreviation for it) — the `TZNAME` value. Cached per canonical zone for the same reason
- * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times. */
+ * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times.
+ *
+ * The key is canonical but the formatter is built from the first spelling looked up, and ICU
+ * names some aliases differently (`Etc/Greenwich` is `GMT`, its canonical `UTC` is `UTC`), so
+ * TZNAME follows whichever alias came first in this process. Accepted: the offsets are
+ * identical, and TZNAME is descriptive only (RFC 5545 section 3.8.3.2). */
 function zoneAbbreviation(zone: string, utcMs: number): string {
   const key = canonicalZoneName(zone);
   let formatter = abbreviationFormatterCache.get(key);
