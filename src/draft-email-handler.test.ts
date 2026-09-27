@@ -159,6 +159,24 @@ describe('draft_email — mode', () => {
     }
   });
 
+  it('reads an explicit null on a mode-only parameter as absent, as a lenient client sends it', async () => {
+    const nulls = {
+      asAttachment: null, includeOriginalAttachments: null, mailbox: null,
+      inReplyTo: null, references: null,
+    };
+    const { client, calls } = spyClient();
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'hi', ...nulls }, client);
+    assert.equal(calls.draft.inReplyTo?.[0], 'orig-msg@example.com');
+    await compose({ mode: 'new', textBody: 'hi', originalEmailId: null, ...nulls }, client);
+    assert.equal(calls.draft.textBody, 'hi');
+    assert.equal('mailbox' in calls.draft, false);
+    // A real value on the wrong mode is still refused.
+    await assert.rejects(
+      () => compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'hi', asAttachment: false }, client),
+      /asAttachment applies to mode:'forward' only/,
+    );
+  });
+
   it('requires `to` on a forward — there is no default recipient', async () => {
     const { client } = spyClient();
     await assert.rejects(

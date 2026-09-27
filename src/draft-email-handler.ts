@@ -642,17 +642,19 @@ export async function composeDraftEmail(
   const asAttachment = coerceBool(args?.asAttachment) ?? false;
   const includeOriginalAttachments = coerceBool(args?.includeOriginalAttachments) ?? true;
 
-  assertModeOnly(args?.asAttachment !== undefined, 'asAttachment', 'forward', mode);
+  // `!= null`, not `!== undefined`: a lenient client sends null for every declared key, and
+  // null reads as absent (docs/conventions.md).
+  assertModeOnly(args?.asAttachment != null, 'asAttachment', 'forward', mode);
   assertModeOnly(
-    args?.includeOriginalAttachments !== undefined, 'includeOriginalAttachments', 'forward', mode,
+    args?.includeOriginalAttachments != null, 'includeOriginalAttachments', 'forward', mode,
   );
-  assertModeOnly(a.mailbox !== undefined, 'mailbox', 'new', mode);
-  assertModeOnly(a.inReplyTo !== undefined, 'inReplyTo', 'new', mode);
-  assertModeOnly(a.references !== undefined, 'references', 'new', mode);
+  assertModeOnly(a.mailbox != null, 'mailbox', 'new', mode);
+  assertModeOnly(a.inReplyTo != null, 'inReplyTo', 'new', mode);
+  assertModeOnly(a.references != null, 'references', 'new', mode);
 
   const originalEmailId = a.originalEmailId;
   if (mode === 'new') {
-    if (originalEmailId !== undefined) {
+    if (originalEmailId != null) {
       throw bad("originalEmailId applies to mode:'reply' and mode:'forward' only.");
     }
   } else if (!originalEmailId) {
@@ -858,7 +860,7 @@ export async function composeDraftEmail(
   params.htmlBody = expandedHtml;
 
   if (mode === 'new') {
-    if (a.mailbox !== undefined) params.mailbox = a.mailbox;
+    if (a.mailbox != null) params.mailbox = a.mailbox;
     params.inReplyTo = coerceStringArray(a.inReplyTo);
     params.references = coerceStringArray(a.references);
     params.subject = subjectOverride;
