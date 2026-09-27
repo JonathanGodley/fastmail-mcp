@@ -326,6 +326,14 @@ describe('draft_email — token refusals, decided before anything is built', () 
       ),
       /\{\{quote\}\} is in textBody but not in htmlBody\./,
     );
+    assert.equal(
+      await messageFrom(() => compose(
+        { mode: 'reply', originalEmailId: 'o1', htmlBody: '<p>hi</p>', textBody: 'hi\n{{quote}}' },
+        client,
+      )),
+      'MCP error -32602: {{quote}} is in textBody but not in htmlBody. When you supply both ' +
+      'parts, place each token in both, or supply only one part.',
+    );
   });
 
   it('refuses the same token twice in one part', async () => {
@@ -555,6 +563,89 @@ describe('draft_email — the authored-image plan reads PRE-expansion, the closu
     assert.equal(about.length, 1, JSON.stringify(r.notes));
     assert.match(about[0], /inside a comment or an attribute/);
     assert.match(about[0], /includeOriginalAttachments is false/);
+    assert.equal(
+      about[0],
+      '1 image(s) the forwarded original displayed ("pic.png") were left out: after expansion ' +
+      'no body written by this call references them, and includeOriginalAttachments is false. ' +
+      'A token placed inside a comment or an attribute is the usual cause.',
+    );
+  });
+
+  it('names no part when the undisplayed forwarded image has no filename', async () => {
+    const { name: _unnamed, ...nameless } = inlinePng;
+    const { client } = plainClient(withInlineImage({ attachments: [nameless] }));
+    const r = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>hi</p><!-- {{forward}} -->' },
+      client,
+    );
+    assert.deepEqual(r.notes, [
+      '1 image(s) the forwarded original displayed ride as regular attachments: after expansion ' +
+      'no body written by this call references them. A token placed inside a comment or an ' +
+      'attribute is the usual cause.',
+    ]);
+  });
+
+  // An apostrophe in the original closes a single-quoted attribute part-way through the block,
+  // so the images before it are inside the attribute and the ones after it are live: a PARTIAL
+  // drop. More are dropped than kept, and a Content-ID shared by two parts sits among the live
+  // ones, so the counts each filter feeds cannot coincide by accident.
+  const splitByApostrophe = () => makeOriginal({
+    bodyValues: {
+      t: { value: 'original text' },
+      h: {
+        value: '<p><img src="cid:img-1"><img src="cid:img-2"></p><p>it\'s</p>' +
+          '<p><img src="cid:img-3"><img src="cid:twin"></p>',
+      },
+    },
+    attachments: [
+      { ...inlinePng, partId: '4', blobId: 'blob-1', name: 'one.png', cid: 'img-1' },
+      { ...inlinePng, partId: '5', blobId: 'blob-2', name: 'two.png', cid: 'img-2' },
+      { ...inlinePng, partId: '6', blobId: 'blob-3', name: 'three.png', cid: 'img-3' },
+      { ...inlinePng, partId: '7', blobId: 'blob-t1', name: 't1.png', cid: 'twin' },
+      { ...inlinePng, partId: '8', blobId: 'blob-t2', name: 't2.png', cid: 'twin' },
+    ],
+  });
+
+  it('on a reply, embeds the image still displayed and drops only the one that is not', async () => {
+    const { client, calls } = plainClient(splitByApostrophe());
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', htmlBody: "<p title='{{quote}}'>x</p>" }, client,
+    );
+    const attached = calls.draft.attachments.map((p: any) => p.blobId);
+    assert.deepEqual(attached, ['blob-3']);
+    assert.match(calls.draft.attachments[0].cid, MINTED_CID);
+    assert.deepEqual(r.notes, [
+      'Embedded 1 of 3 image part(s) referenced by the quote (1 KB embedded); 2 could not be ' +
+      'embedded and are not part of this draft.',
+      '2 image(s) the quoted original displayed ("one.png", "two.png") were dropped: after ' +
+      'expansion no body written by this call references them. A token placed inside a comment ' +
+      'or an attribute is the usual cause.',
+    ]);
+  });
+
+  it('on a forward, embeds the image still displayed and carries only the one that is not', async () => {
+    const { client, calls } = plainClient(splitByApostrophe());
+    const r = await compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        htmlBody: "<p title='{{forward}}'>x</p>",
+      },
+      client,
+    );
+    const shape = calls.draft.attachments.map((p: any) => [p.blobId, MINTED_CID.test(p.cid ?? '') ? 'minted' : p.disposition]);
+    assert.deepEqual(shape, [
+      ['blob-1', 'attachment'], ['blob-2', 'attachment'], ['blob-t1', 'attachment'],
+      ['blob-t2', 'attachment'], ['blob-3', 'minted'],
+    ]);
+    assert.deepEqual(r.notes, [
+      'This draft embeds 1 image(s) from the original (1 KB).',
+      '2 media part(s) could not be embedded and were attached as regular attachments: ' +
+      '"t1.png", "t2.png" — drop {{forward}} and pass asAttachment: true to forward the ' +
+      'original whole, then delete this draft.',
+      '2 image(s) the forwarded original displayed ("one.png", "two.png") ride as regular ' +
+      'attachments: after expansion no body written by this call references them. A token ' +
+      'placed inside a comment or an attribute is the usual cause.',
+    ]);
   });
 });
 
@@ -568,6 +659,18 @@ describe('draft_email — nothing is added that the caller did not place', () =>
     const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'hi\n{{quote}}' }, client);
     assert.doesNotMatch(calls.draft.textBody, /Kind regards/);
     assert.ok(r.notes!.some((n) => /has a signature; this body has no \{\{signature\}\}/.test(n)));
+  });
+
+  it('warns about the signature when any supplied part has content, text read as text', async () => {
+    // A literal "<br>" in a text part is two visible characters, not an html line break.
+    for (const bodies of [{ textBody: '<br>' }, { textBody: 'hi', htmlBody: '' }]) {
+      const { client } = spyClient();
+      const r = await compose({ mode: 'reply', originalEmailId: 'o1', ...bodies }, client);
+      assert.ok(
+        (r.notes ?? []).some((n) => /has a signature/.test(n)),
+        `${JSON.stringify(bodies)}: ${JSON.stringify(r.notes)}`,
+      );
+    }
   });
 
   it('says nothing about the signature on a reply whose only supplied body is blank', async () => {
