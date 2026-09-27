@@ -8,8 +8,7 @@ import { InvalidInputError } from './coerce.js';
 // repeatedly re-slicing the REMAINDER of the line — so its cost grows with the square of
 // the field length, and each fold allocates a fresh copy of the tail. Measured on this
 // code: ~135ms to fold a 200KB value, and the process runs out of memory somewhere near
-// 800KB. Nothing upstream bounded these fields, so a single oversized `description` —
-// a pasted document, or a model that decided to inline a transcript — was enough to
+// 800KB, so one oversized `description` (a pasted document, an inlined transcript) would
 // stall or kill the server for every other request on the same process. The cap is not
 // an iCalendar rule; it is a bound on that quadratic serializer. Do not remove it
 // without first making the folding linear.
@@ -56,8 +55,7 @@ function describeBytes(limit: number): string {
 }
 
 // Measure one field, add it to the running total, and reject if it alone is over the
-// per-field cap. The message names the field, its actual size and the limit, so a single
-// retry with a shorter value fixes it.
+// per-field cap.
 function measureField(name: string, value: unknown, totals: { bytes: number }): void {
   if (typeof value !== 'string') return;
   const size = byteLength(value);
@@ -73,15 +71,12 @@ function measureField(name: string, value: unknown, totals: { bytes: number }): 
 /**
  * Reject a calendar-event input whose text fields exceed the serialization bounds above.
  *
- * REJECTS rather than truncates. A silently trimmed description is data loss the caller
- * never learns about — the event would be created, reported as created, and be missing
- * the half of the agenda nobody thought to re-read. An error naming the field and the
- * limit is recoverable in one retry.
+ * REJECTS rather than truncates: a silently trimmed description is data loss the caller
+ * never learns about, while an error naming the field and the limit is recoverable in one
+ * retry.
  *
- * Throws `InvalidInputError`, which the CallTool boundary maps to `InvalidParams`: this
- * is the caller's input and the caller can fix it. A plain `Error` would surface as
- * `InternalError` — "server-side, a bare retry might work" — which would be false here,
- * and would invite exactly the retry that repeats the expensive serialization.
+ * Throws `InvalidInputError` (InvalidParams): an `InternalError` would invite exactly the
+ * bare retry that repeats the expensive serialization.
  */
 export function assertICalTextLimits(input: ICalTextInput): void {
   const totals = { bytes: 0 };

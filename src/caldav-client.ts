@@ -496,7 +496,6 @@ export function parseAttendee(rawLine: string): Participant {
   const params: string[] = [];
   let current = '';
   let inQuote = false;
-  // Skip the property name (ATTENDEE or ORGANIZER) — start after first ;
   const firstSemi = paramPart.indexOf(';');
   const paramStr = firstSemi >= 0 ? paramPart.substring(firstSemi + 1) : '';
 
@@ -556,12 +555,10 @@ export function formatICalDate(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const cleaned = raw.replace(/\r/g, '');
 
-  // All-day date: 20260324 (8 digits)
   if (/^\d{8}$/.test(cleaned)) {
     return `${cleaned.slice(0, 4)}-${cleaned.slice(4, 6)}-${cleaned.slice(6, 8)}`;
   }
 
-  // DateTime: 20260320T083000 or 20260320T083000Z
   const dtMatch = cleaned.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/);
   if (dtMatch) {
     const [, y, m, d, hh, mm, ss, z] = dtMatch;
@@ -2440,7 +2437,6 @@ function isResolvedCalendarObject(obj: DAVCalendarObject): boolean {
   return extractVEventBlocks(obj.data).length > 0;
 }
 
-
 /**
  * The collections inside `homeUrl`'s own PROPFIND answer that failed to list (#136).
  *
@@ -2876,8 +2872,6 @@ function assertDavOk(resp: unknown, action: string): void {
 //
 // What create/update actually put on the wire for `start`/`end`, computed from the WRITTEN
 // line, never the caller's input, so an inherited or defaulted zone is reported truthfully.
-// The formatters below live here, not in index.ts, so they are unit-testable
-// (CONTRIBUTING.md, "Handler logic must be unit-testable").
 export interface CalendarZoneWriteInfo {
   /**
    * 'zoned'    — a TZID was written (from `timeZone`, inherited, or create's default).
