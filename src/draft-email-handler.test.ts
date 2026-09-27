@@ -717,6 +717,26 @@ describe('draft_email — {{forward}} shipping in the text form over an html ori
     assert.ok(r.notes!.every((n) => !/re-run with asAttachment: true for full fidelity/.test(n)));
   });
 
+  it('says only the formatting is lost when no inline image rode as an attachment', async () => {
+    const FORMAT_ONLY =
+      '{{forward}} ships in the text form only and the original ships HTML, so this forward ' +
+      'loses its formatting; put {{forward}} in htmlBody to keep it.';
+    const cases: [string, any, any][] = [
+      ['an original with no images', makeOriginal(), {}],
+      ['images left behind by includeOriginalAttachments:false', withInlineImage(), { includeOriginalAttachments: false }],
+    ];
+    for (const [label, original, extra] of cases) {
+      const { client, calls } = spyClient(original);
+      const r = await compose(
+        { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], textBody: 'FYI\n{{forward}}', ...extra },
+        client,
+      );
+      assert.equal((calls.draft.attachments ?? []).length, 0, label);
+      assert.ok(r.notes!.includes(FORMAT_ONLY), `${label}: ${JSON.stringify(r.notes)}`);
+      assert.ok(r.notes!.every((n) => n !== TEXT_FORM_NOTE), label);
+    }
+  });
+
   it('says nothing when the block ships as html', async () => {
     const { client } = spyClient(withInlineImage());
     const r = await compose(

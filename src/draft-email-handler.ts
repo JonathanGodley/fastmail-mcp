@@ -417,12 +417,18 @@ function noteSignatureNotPlaced(identityEmail: string | undefined): string {
  * A token note of its own rather than a line on the image sentence, because the loss is the
  * FORMATTING first: the images riding as attachments is the visible half, but a forward of a
  * formatted message reproduced as plain text is degraded even when it carries no images at
- * all. The remedy has to terminate, so it names the one move that fixes both halves.
+ * all. The remedy has to terminate, so it names the one move that fixes both halves. The
+ * image half is said only when an image really rode as an attachment.
  */
-const NOTE_FORWARD_TEXT_FORM =
-  '{{forward}} ships in the text form only and the original ships HTML, so this forward loses ' +
-  'its formatting and its inline images ride as attachments; put {{forward}} in htmlBody to ' +
-  'keep both.';
+function noteForwardTextForm(imagesRode: boolean): string {
+  return (
+    '{{forward}} ships in the text form only and the original ships HTML, so this forward loses ' +
+    (imagesRode
+      ? 'its formatting and its inline images ride as attachments; put {{forward}} in ' +
+        'htmlBody to keep both.'
+      : 'its formatting; put {{forward}} in htmlBody to keep it.')
+  );
+}
 
 /**
  * What the pooled-media sentence ends on for THIS tool, on the path above.
@@ -791,7 +797,7 @@ export async function composeDraftEmail(
 
   let forwardSourceParts: { part: CidPart; inBodyList: boolean }[] = [];
   // True when the forwarded block ships in its TEXT form while the original really has html
-  // worth reproducing — the cell NOTE_FORWARD_TEXT_FORM is about. Read off the builder's own
+  // worth reproducing — the cell noteForwardTextForm is about. Read off the builder's own
   // `htmlQuotable`, so it cannot disagree with the arm that chose the form.
   let forwardTextFormOnly = false;
   if (historyPlaced && mode === 'forward') {
@@ -1108,7 +1114,7 @@ export async function composeDraftEmail(
       readBack: (id) => client.getEmailById(id),
     }),
     ...emptyTokenNotes(expansions),
-    ...(forwardTextFormOnly ? [NOTE_FORWARD_TEXT_FORM] : []),
+    ...(forwardTextFormOnly ? [noteForwardTextForm(pooled.length > 0)] : []),
     // Presence only, on a SUPPLIED non-blank body, so a body-less reply (a blank part
     // included) and an attachment-only stash are silent.
     ...(!signaturePlaced && signature && supplied.some((p) => !isBlank(p.authored))
