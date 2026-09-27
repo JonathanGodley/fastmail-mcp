@@ -1169,7 +1169,7 @@ const TOOLS = [
       },
       {
         name: 'create_contact',
-        description: 'Create a contact in the address book. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape get_contact returns (verbose/raw apply); if only that read-back fails, the contact still exists and the result is its id with a note saying so - do not create it again. Every entry array accepts both a bare string and an object: emails ["a@b.example"] or [{address, label}], phones ["+1…"] or [{number, label}]; addresses take objects only. An empty array is rejected in every one of them — omit the field instead, the same rule update_contact applies. An unknown per-item key, or a key of the wrong type, is rejected naming its position (e.g. emails[2]).',
+        description: 'Create a contact in the address book. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape get_contact returns (verbose/raw apply); if only that read-back fails, the contact still exists and the result is its id with a note saying so - do not create it again. Every entry array accepts both a bare string and an object: emails ["a@b.example"] or [{address, label}], phones ["+1…"] or [{number, label}]; addresses take objects only. An empty array, or a blank string, is rejected in every one of them — omit the field instead, the same rule update_contact applies. An unknown per-item key, or a key of the wrong type, is rejected naming its position (e.g. emails[2]).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1191,7 +1191,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] or a blank string is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
               type: ['array', 'string'],
@@ -1202,7 +1202,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] or a blank string is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
               type: ['array', 'string'],
@@ -1213,7 +1213,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] or a blank string is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',
@@ -1240,7 +1240,7 @@ const TOOLS = [
           'Update a contact, MERGING per entry rather than overwriting the card. Returns {contact, previousCard}: the updated card (verbose/raw apply to it) and the card exactly as it stood before the write. ' +
           CONTACT_ECHO_DESC +
           CONTACT_STATE_GUARD_DESC +
-          ' Only the fields you pass are touched; omit a field to leave it alone. emails/phones merge by value: an entry whose address/number matches one already stored keeps everything the simplified output does not show (contexts, pref, and any other stored field), and only what you supply is written over it. Resending an entry exactly as you read it changes nothing, and a stored entry you could not have named is kept as it is: one with an empty address/number (which the default view does not show), or a stored duplicate of an address/number you sent. To remove one, clear the array with clearFields and then write it again. LABELS ARE ADD-AND-OVERRIDE, NOT A CLEAN REWRITE: a label that differs from the one you read is written as this card\'s `label` property, which then wins here — but Fastmail\'s own apps commonly store the label as a `contexts` set instead, and that set is left as it was, so the two can end up disagreeing outside this server. A label cannot currently be removed at all. A single call that BOTH drops a stored entry AND adds one the card does not have is rejected as ambiguous, and the rejection prints the dropped entries in full (up to 50; past that it says how many more and to read them with get_contact verbose:true) so you can resend them losslessly; pass allowEntryReplace:true to go ahead anyway, which rewrites every entry of THAT array from what you supplied and does NOT carry those hidden fields (arrays in the same call that merged cleanly are unaffected). addresses do NOT merge (an address entry has no matchable key) — supplying them replaces the whole set. name merges into the stored structured name: a bare string sets the full name and keeps the given/surname components, and {given}/{surname} update just that part. An empty array (emails: []) is rejected — use clearFields. notes sets a single note, so a card storing more than one is rejected rather than collapsed. A card whose kind is anything but individual (a contact group, an org, a location, ...) cannot be updated by this tool.',
+          ' Only the fields you pass are touched; omit a field to leave it alone. emails/phones merge by value: an entry whose address/number matches one already stored keeps everything the simplified output does not show (contexts, pref, and any other stored field), and only what you supply is written over it. Resending an entry exactly as you read it changes nothing, and a stored entry you could not have named is kept as it is: one with an empty address/number (which the default view does not show), or a stored duplicate of an address/number you sent. To remove one, clear the array with clearFields and then write it again. LABELS ARE ADD-AND-OVERRIDE, NOT A CLEAN REWRITE: a label that differs from the one you read is written as this card\'s `label` property, which then wins here — but Fastmail\'s own apps commonly store the label as a `contexts` set instead, and that set is left as it was, so the two can end up disagreeing outside this server. A label cannot currently be removed at all. A single call that BOTH drops a stored entry AND adds one the card does not have is rejected as ambiguous, and the rejection prints the dropped entries in full (up to 50; past that it says how many more and to read them with get_contact verbose:true) so you can resend them losslessly; pass allowEntryReplace:true to go ahead anyway, which rewrites every entry of THAT array from what you supplied and does NOT carry those hidden fields (arrays in the same call that merged cleanly are unaffected). addresses do NOT merge (an address entry has no matchable key) — supplying them replaces the whole set. name merges into the stored structured name: a bare string sets the full name and keeps the given/surname components, and {given}/{surname} update just that part. An empty array (emails: []) or a blank string is rejected — use clearFields. notes sets a single note, so a card storing more than one is rejected rather than collapsed. A card whose kind is anything but individual (a contact group, an org, a location, ...) cannot be updated by this tool.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1266,7 +1266,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] or a blank string is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
               type: ['array', 'string'],
@@ -1277,7 +1277,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] or a blank string is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
               type: ['array', 'string'],
@@ -1288,7 +1288,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] or a blank string is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',

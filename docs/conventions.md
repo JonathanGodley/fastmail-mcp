@@ -182,7 +182,10 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   a fresh literal built from the validated keys). `emails`/`phones` accept a bare value
   string as well as the object form; `addresses` do not, having no single obvious scalar
   reading. A repeated value is rejected naming both positions, because the merge matches
-  entries by that value and a repeat could only surface as a phantom addition.
+  entries by that value and a repeat could only surface as a phantom addition. Unlike
+  `participants`, a blank string reads as the empty list rather than omitted: `[]` is
+  already refused on these arrays, so the blank string meets that refusal instead of passing
+  as a silent no-op.
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
   shared by `update_calendar_event`, `edit_draft` and `update_contact`.
 

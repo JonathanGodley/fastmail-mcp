@@ -1421,8 +1421,8 @@ const CONTACT_NAME_SHAPE = '{ given?, surname?, full? }';
  * is TYPE-CHECKED (an allowlist alone passes `{label: []}`), and the output is a FRESH LITERAL,
  * never a spread, so a new key is a conscious edit here.
  *
- * A blank string reads as "not supplied", never the empty array, which these parameters
- * reject. `allowBareString` is off for `addresses`, which has no single scalar reading.
+ * A blank string reads as the empty array, so it meets the same refusal the tools give `[]`.
+ * `allowBareString` is off for `addresses`, which has no single scalar reading.
  *
  * Duplicates are REJECTED: on `emails`/`phones` a repeat cannot be matched against the stored
  * card twice, and would surface as an unknown addition.
@@ -1442,7 +1442,7 @@ function coerceContactEntries<T extends Record<string, any>>(
   let arr: unknown = value;
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    if (!trimmed) return undefined;
+    if (!trimmed) return [];
     try {
       arr = JSON.parse(trimmed);
     } catch {
