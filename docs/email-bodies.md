@@ -532,22 +532,22 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   field; the text form whitespace-collapses each composed address/subject via
   `normalizeName`, whose class is `\s` **plus an explicit U+0085** — NEL is a mandatory
   line break per UAX #14 but is NOT in ECMAScript `\s` (verified empirically 2026-07-05).
-- **Emission rules:** the caller's note (optional) goes above the block in each format the
-  caller supplied; both supplied → both emitted with the caller's own text (a custom
-  text alternative is never replaced by a derived fallback). Caller supplied neither →
-  html only when the original has quotable html; a text-only original yields a TEXT
-  forward — the "never fabricate HTML from plain text" rule above holds for the tool's
-  own default choice. An attachment-only original gets the header block alone. The
-  reproduced html runs through the same sanitiser floor as reply quotes
-  (script/style/handlers stripped, real http(s) images kept).
-- **Quotability now includes embedded images**, which shifts that default. An original
-  whose body is nothing but `<img src="cid:…">` used to have no quotable html — the
-  sanitiser dropped every image, leaving a visually empty string — so a note-less forward of
-  one fell through to the TEXT branch and reproduced nothing at all. Such a message is
-  quotable when at least one of its references would really embed (resolves to exactly one
-  part, declared an image, carrying a blob), so a note-less forward of it now emits HTML and
-  shows the picture. The flip is deliberate: the default should reproduce the message, and
-  for that message the only faithful reproduction is html.
+- **Placement:** the block goes where the caller writes `{{forward}}`, in each part the
+  caller supplied and in that part's own form; nothing is built for a part the caller did
+  not supply. A forward that places no `{{forward}}` and does not pass `asAttachment: true`
+  is refused, as is a token in one supplied part but not the other. So a forward ships HTML
+  only when the caller supplies an `htmlBody`: a text-only forward of an html original
+  reproduces it as text, any inline images it displayed ride as regular attachments, and the
+  result says so and names `{{forward}}` in `htmlBody` as the fix. An attachment-only
+  original gets the header block alone. The reproduced html runs through the same sanitiser
+  floor as reply quotes (script/style/handlers stripped, real http(s) images kept).
+- **Quotability includes embedded images.** An original whose body is nothing but
+  `<img src="cid:…">` would otherwise have no quotable html, because the sanitiser's collect
+  pass leaves a visually empty string, and an html `{{forward}}` over it would show the
+  header block and nothing below. Such a message is quotable when at least one of its
+  references would really embed (resolves to exactly one part, declared an image, carrying a
+  blob), so the html block shows the picture. The same flag decides whether a text-form
+  forward is told the original ships HTML.
 - **Threading:** no In-Reply-To/References — a forward starts a new conversation
   (mainstream-client convention, confirmed by the official client). Instead the original's
   Message-ID is recorded as `X-Forwarded-Message-Id` (Thunderbird prior art; **Fastmail's
@@ -602,8 +602,8 @@ carries the original unrendered.
   round-trips store/fetch AND the edit recreate exactly. Fastmail validates the value:
   embedded CRLF → rejected (`invalidProperties`); non-ASCII → rejected; embedded `<`/`>` →
   accepted but split into two mangled ids; a 1500-char id → accepted and folded. Hence the
-  pre-vet in `forward-handler.ts` (printable ASCII, no whitespace/angles, ≤998 chars;
-  malformed → treated as absent).
+  pre-vet in `isSettableMessageId` (`draft-email-handler.ts`: printable ASCII, no
+  whitespace/angles, ≤998 chars; malformed → treated as absent).
 - Full-text `Email/query` finds a message by its **bare** Message-ID; the `<bracketed>`
   form finds nothing. The spec `header` FilterCondition also works on Fastmail.
 - Attaching an existing Email's own `blobId` as a `message/rfc822` part stores a
