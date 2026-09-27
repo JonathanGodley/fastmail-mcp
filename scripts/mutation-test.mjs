@@ -88,6 +88,15 @@ export function partition(files, n) {
   return shards.map((s) => s.paths.sort());
 }
 
+/** The Stryker reporters for a parseArgs result, and the tag its report file names carry. */
+export function reportOutputs(args) {
+  const { shard } = args;
+  return {
+    reporters: ['clear-text', 'progress', 'json', ...(shard ? ['html'] : [])],
+    tag: shard ? `-${shard.i}-of-${shard.n}` : args.commit ? '-commit' : '',
+  };
+}
+
 function main() {
   const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -113,7 +122,7 @@ function main() {
     if (mutate.length === 0) fail(`${args.commit} changed no mutable src/ lines.`);
   }
   const { shard } = args;
-  const tag = shard ? `-${shard.i}-of-${shard.n}` : args.commit ? '-commit' : '';
+  const { reporters, tag } = reportOutputs(args);
   if (shard) {
     // Blob sizes at HEAD, not on-disk sizes, so every platform and line-ending setting deals
     // the same shards and each shard's incremental file keeps matching its files.
@@ -147,7 +156,7 @@ function main() {
     cleanTempDir: 'always',
     incremental: Boolean(args.all),
     incrementalFile: `reports/stryker-incremental${tag}.json`,
-    reporters: ['clear-text', 'progress', 'json', ...(shard ? ['html'] : [])],
+    reporters,
     jsonReporter: { fileName: `reports/mutation${tag}.json` },
     htmlReporter: { fileName: `reports/mutation${tag}.html` },
     // Stryker's tsconfig rewriter calls an API TypeScript 7 removed; a missing file skips it.

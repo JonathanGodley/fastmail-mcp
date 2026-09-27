@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  EXCLUDED_TESTS, MUTATE_ALL, TEST_HEAP_MB, diffToRanges, isMutable, parseArgs, partition, testFiles,
+  EXCLUDED_TESTS, MUTATE_ALL, TEST_HEAP_MB, diffToRanges, isMutable, parseArgs, partition, reportOutputs, testFiles,
 } from '../scripts/mutation-test.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -36,6 +36,20 @@ test('parseArgs accepts --all --shard i/n and rejects a bad i/n', () => {
   for (const argv of [['--shard', '1/4'], ['abc', '--shard', '1/4'], ['--all', '--shard'], ['--shard', '1/4', '--all']]) {
     assert.ok('error' in parseArgs(argv), argv.join(' '));
   }
+});
+
+test('every mode writes a json report under its own tag, and only a shard writes html', () => {
+  const commit = reportOutputs({ commit: 'abc123' });
+  assert.ok(commit.reporters.includes('json'), commit.reporters.join());
+  assert.ok(!commit.reporters.includes('html'), commit.reporters.join());
+  assert.equal(commit.tag, '-commit');
+  const all = reportOutputs({ all: true });
+  assert.ok(all.reporters.includes('json'), all.reporters.join());
+  assert.ok(!all.reporters.includes('html'), all.reporters.join());
+  assert.equal(all.tag, '');
+  const shard = reportOutputs({ all: true, shard: { i: 2, n: 4 } });
+  assert.ok(shard.reporters.includes('json') && shard.reporters.includes('html'), shard.reporters.join());
+  assert.equal(shard.tag, '-2-of-4');
 });
 
 test('partition covers every file exactly once, balanced by size, deterministically', () => {
