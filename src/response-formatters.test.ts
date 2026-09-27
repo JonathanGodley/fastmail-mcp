@@ -512,6 +512,70 @@ describe('simplifyContact', () => {
     assert.equal(result.name, 'Lovelace Ada');
   });
 
+  const nameOf = (name: any) => simplifyContact({ id: 'ct-n', name }).name;
+
+  it('skips a missing, non-string or blank component', () => {
+    assert.equal(nameOf({ components: [
+      null,
+      { kind: 'given', value: '  ' },
+      { kind: 'surname', value: 'Lovelace' },
+      { kind: 'given', value: 5 },
+      { kind: 'given', value: 'Ada' },
+    ] }), 'Ada Lovelace');
+  });
+
+  it('places every known kind in conventional order when the name is not ordered', () => {
+    assert.equal(nameOf({ components: [
+      { kind: 'credential', value: 'PhD' },
+      { kind: 'generation', value: 'Jr' },
+      { kind: 'surname2', value: 'Byron' },
+      { kind: 'surname', value: 'Lovelace' },
+      { kind: 'given2', value: 'Augusta' },
+      { kind: 'given', value: 'Ada' },
+      { kind: 'title', value: 'Lady' },
+    ] }), 'Lady Ada Augusta Lovelace Byron Jr PhD');
+  });
+
+  it('puts unknown kinds after the known ones, in their stored order', () => {
+    assert.equal(nameOf({ components: [
+      { kind: 'x-a', value: 'X1' },
+      { kind: 'x-b', value: 'X2' },
+      { kind: 'x-c', value: 'X3' },
+      { kind: 'credential', value: 'PhD' },
+      { kind: 'given', value: 'Ada' },
+    ] }), 'Ada PhD X1 X2 X3');
+  });
+
+  it('drops separators when the name is not ordered', () => {
+    assert.equal(nameOf({ components: [
+      { kind: 'given', value: 'Ada' },
+      { kind: 'separator', value: ', ' },
+      { kind: 'surname', value: 'Lovelace' },
+    ] }), 'Ada Lovelace');
+  });
+
+  it('joins an ordered name with its defaultSeparator', () => {
+    assert.equal(nameOf({ isOrdered: true, defaultSeparator: ', ', components: [
+      { kind: 'surname', value: 'Lovelace' },
+      { kind: 'given', value: 'Ada' },
+    ] }), 'Lovelace, Ada');
+  });
+
+  it('uses an explicit separator in place of the default between two components', () => {
+    assert.equal(nameOf({ isOrdered: true, defaultSeparator: '-', components: [
+      { kind: 'surname', value: 'Lovelace' },
+      { kind: 'separator', value: ', ' },
+      { kind: 'given', value: 'Ada' },
+    ] }), 'Lovelace, Ada');
+  });
+
+  it('trims an ordered name that begins with a whitespace separator', () => {
+    assert.equal(nameOf({ isOrdered: true, components: [
+      { kind: 'separator', value: ' ' },
+      { kind: 'given', value: 'Ada' },
+    ] }), 'Ada');
+  });
+
   it('handles missing name gracefully', () => {
     const result = simplifyContact({ id: 'ct-3' });
     assert.equal(result.name, undefined);

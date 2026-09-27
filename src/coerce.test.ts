@@ -231,9 +231,29 @@ describe('coerceRecipients', () => {
   });
 });
 
+describe('coerceUtcDate refusals', () => {
+  it('refuses a zoned datetime whose time of day is out of range', () => {
+    assert.throws(() => coerceUtcDate('2026-07-20T25:00:00Z', 'after', 'UTC'), /after is not a valid date: "2026-07-20T25:00:00Z"\. Accepted:/);
+  });
+
+  it('says in which zone a date and a zoneless datetime are read', () => {
+    assert.throws(
+      () => coerceUtcDate('20 July 2026', 'after', 'Australia/Sydney'),
+      (err: Error) => {
+        assert.match(err.message, /Accepted: a date such as 2026-07-20 \(read as midnight at the start of that day in /);
+        assert.match(err.message, /A datetime with no Z and no offset, such as 2026-07-20T14:30:00, is read as .+ local time\./);
+        return true;
+      },
+    );
+  });
+});
+
 describe('coerceBool', () => {
   it('names an unreadable non-string type with the right article', () => {
     assert.throws(() => coerceBool({}, 'flag'), /received an object\./);
+    assert.throws(() => coerceBool(() => true, 'flag'), /received a function\./);
+    assert.throws(() => coerceBool([], 'flag'), /received an array\./);
+    assert.throws(() => coerceBool(2, 'flag'), /received 2\./);
   });
 
   it('returns boolean as-is', () => {

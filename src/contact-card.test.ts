@@ -297,6 +297,13 @@ describe('isAmbiguousEntryEdit', () => {
   });
 });
 
+describe('mergeEntryMap over a stored entry the server left null', () => {
+  it('carries the null entry over rather than crashing', () => {
+    const outcome = mergeEntryMap({ e0: null, e1: { address: 'a@example.com' } }, [{ address: 'a@example.com' }], 'address');
+    assert.deepEqual(outcome.map.e1, { address: 'a@example.com' });
+  });
+});
+
 describe('assertUnambiguousEntryEdit', () => {
   it('allows a pure addition and a pure removal', () => {
     assert.doesNotThrow(() => assertUnambiguousEntryEdit('emails', { map: {}, dropped: [], added: ['a@b.example'] }));
@@ -331,6 +338,7 @@ describe('assertUnambiguousEntryEdit', () => {
       (err: Error) => {
         for (let i = 0; i < 8; i++) assert.match(err.message, new RegExp(`"d${i}@b\\.example"`));
         assert.doesNotMatch(err.message, /more/);
+        assert.match(err.message, /"d7@b\.example"\}\. Added: "x"\./);
         return true;
       },
     );

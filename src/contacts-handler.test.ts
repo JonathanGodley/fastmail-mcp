@@ -79,6 +79,7 @@ describe('createContactTool', () => {
     assert.equal(calls.created.length, 1);
     assert.deepEqual(payload(content), { id: 'C1' });
     assert.equal(content.length, 2);
+    assert.deepEqual(content.map((c) => c.type), ['text', 'text']);
     assert.match(content[1].text, /was created/);
     assert.match(content[1].text, /get_contact/);
     assert.match(content[1].text, /duplicate/);
@@ -266,5 +267,15 @@ describe('deleteContactTool', () => {
       throw new InvalidInputError('Contact not found: ghost');
     };
     await assert.rejects(() => deleteContactTool({ contactId: 'ghost' }, client), /Contact not found: ghost/);
+  });
+});
+
+describe('contact tool boolean flags', () => {
+  it('names the parameter when a boolean flag cannot be read', async () => {
+    await assert.rejects(() => createContactTool({ name: 'Ada', raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => createContactTool({ name: 'Ada', verbose: 'yes' }, {} as any), /verbose must be true or false/);
+    await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', verbose: 'yes' }, {} as any), /verbose must be true or false/);
+    await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', allowEntryReplace: 'yes' }, {} as any), /allowEntryReplace must be true or false/);
   });
 });

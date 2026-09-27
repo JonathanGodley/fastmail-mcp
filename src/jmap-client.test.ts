@@ -3138,6 +3138,13 @@ describe('searchEmails', () => {
 
   // The JMAP filter takes a UTCDate; a bare date reaches the server as invalidArguments
   // unless it is expanded first (#70).
+  it('names the bound in a refused search date', async () => {
+    await assert.rejects(
+      () => client.searchEmails({ after: '20 July 2026', limit: 10 }),
+      (err: Error) => { assert.ok(err.message.startsWith('after '), err.message); return true; },
+    );
+  });
+
   it('normalises date-only and offset date bounds into the JMAP UTCDate shape', async () => {
     const makeReq = stubRequests(client, async () => ({
       methodResponses: [

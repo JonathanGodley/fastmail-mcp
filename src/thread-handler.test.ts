@@ -357,3 +357,12 @@ describe('readThread — embedded image parts (#13)', () => {
     assert.deepEqual(emails[0].attachments, []);
   });
 });
+
+describe('get_thread boolean flags', () => {
+  it('names the parameter when a boolean flag cannot be read', async () => {
+    await assert.rejects(() => readThread({ threadId: 't1', raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => readThread({ threadId: 't1', includeDrafts: 'yes' }, {} as any), /includeDrafts must be true or false/);
+    await assert.rejects(() => readThread({ threadId: 't1', includeBodies: 'yes' }, {} as any), /includeBodies must be true or false/);
+    await assert.rejects(() => readThread({ threadId: 't1', stripQuoted: 'yes' }, {} as any), /stripQuoted must be true or false/);
+  });
+});

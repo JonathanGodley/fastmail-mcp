@@ -135,3 +135,12 @@ describe('create_mailbox handler', () => {
     assert.match(content[1].text, /mb-new/);
   });
 });
+
+describe('mailbox tool boolean flags', () => {
+  it('names the parameter when a boolean flag cannot be read', async () => {
+    await assert.rejects(() => listMailboxes({ raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => listMailboxes({ verbose: 'yes' }, {} as any), /verbose must be true or false/);
+    await assert.rejects(() => createMailbox({ name: 'X', raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => createMailbox({ name: 'X', verbose: 'yes' }, {} as any), /verbose must be true or false/);
+  });
+});

@@ -125,7 +125,7 @@ describe('getEmails', () => {
         () => client.getEmails({ mailbox: blank, limit: 5 }),
         (err: Error) => {
           assert.ok(err instanceof InvalidInputError);
-          assert.match(err.message, /^mailbox cannot be blank/);
+          assert.match(err.message, /^mailbox cannot be blank; omit it to read every mailbox\.$/);
           return true;
         },
       );
@@ -1471,14 +1471,14 @@ describe('bulkMarkRead', () => {
   it('reports a notUpdated entry the server left null as a failure, instead of crashing', async () => {
     stubMakeRequest(client, {
       methodResponses: [
-        ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': null } }, 'bulkUpdate'],
+        ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': null, 'e3': { description: 'x' } } }, 'bulkUpdate'],
       ],
     });
     await assert.rejects(
-      () => client.bulkMarkRead(['e1', 'e2']),
+      () => client.bulkMarkRead(['e1', 'e2', 'e3']),
       (err: Error) => {
-        assert.match(err.message, /Failed to mark as read 1 of 2 emails \(1 succeeded\)/);
-        assert.match(err.message, /no error details: e2/);
+        assert.match(err.message, /Failed to mark as read 2 of 3 emails \(1 succeeded\)/);
+        assert.match(err.message, /unknown - the server gave no error details: e2, e3/);
         assert.notEqual(err.name, 'InvalidInputError');
         return true;
       },
@@ -1571,6 +1571,7 @@ describe('bulk set-error formatting', () => {
       (err: Error) => {
         assert.match(err.message, /Failed to move 2 of 2 emails \(0 succeeded\)/);
         assert.match(err.message, /invalidArguments - bad patch: e1, e2/);
+        assert.doesNotMatch(err.message, /that succeeded were written/);
         // a malformed argument is fixed by re-forming the call → InvalidInputError
         assert.equal(err.name, 'InvalidInputError');
         return true;
@@ -3200,7 +3201,7 @@ describe('getMailboxStats resolution', () => {
         () => client.getMailboxStats(blank),
         (err: Error) => {
           assert.ok(err instanceof InvalidInputError);
-          assert.match(err.message, /^mailbox cannot be blank/);
+          assert.match(err.message, /^mailbox cannot be blank; omit it to get the stats of every mailbox\.$/);
           return true;
         },
       );
@@ -4920,7 +4921,7 @@ describe('filterMailboxesByParent', () => {
         () => filterMailboxesByParent(TREE, blank),
         (err: Error) => {
           assert.ok(err instanceof InvalidInputError);
-          assert.match(err.message, /^parent cannot be blank/);
+          assert.match(err.message, /^parent cannot be blank; omit it to list every mailbox\.$/);
           return true;
         },
       );
@@ -5465,6 +5466,7 @@ describe('downloadAttachmentToFile replaced flag', () => {
       const result = await saveInto(root);
       assert.equal(result.replaced, false);
       assert.doesNotMatch(formatSavedAttachment(result), /replaced/);
+      assert.match(formatSavedAttachment(result), / bytes\)$/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -5551,6 +5553,14 @@ describe('getEmailAttachments', () => {
     const { attachments, rawAttachments } = await client.getEmailAttachments('e1');
     assert.deepEqual(rawAttachments, [ATTACHED_FILE]);
     assert.equal(attachments.length - rawAttachments.length, 1);
+  });
+
+  it('reports no attachments for an email whose attachments list is absent', async () => {
+    const client = makeClient();
+    stubEmail(client, { id: 'e1', textBody: [TEXT_PART] });
+    const { attachments, rawAttachments } = await client.getEmailAttachments('e1');
+    assert.deepEqual(rawAttachments, []);
+    assert.deepEqual(attachments, []);
   });
 
   it('withholds nothing when every part is already in the JMAP array', async () => {
@@ -6080,15 +6090,17 @@ describe('download and upload URLs are built with literal substitution', () => {
 // ---------- single-id writes: an id the server acknowledged in neither map ----------
 
 describe('single-id Email/set writes with no reported outcome', () => {
-  const cases: Array<[string, (c: JmapClient) => Promise<void>]> = [
-    ['markEmailRead', (c) => c.markEmailRead('e1')],
-    ['addKeywords', (c) => c.addKeywords('e1', ['$answered'])],
-    ['pinEmail', (c) => c.pinEmail('e1')],
-    ['deleteEmail', (c) => c.deleteEmail('e1')],
-    ['moveEmail', (c) => c.moveEmail('e1', 'mb-archive')],
-    ['addLabels', (c) => c.addLabels('e1', ['inbox'])],
+  const cases: Array<[string, string, (c: JmapClient) => Promise<void>]> = [
+    ['markEmailRead', 'mark email as read', (c) => c.markEmailRead('e1')],
+    ['markEmailRead(false)', 'mark email as unread', (c) => c.markEmailRead('e1', false)],
+    ['addKeywords', '', (c) => c.addKeywords('e1', ['$answered'])],
+    ['pinEmail', 'pin email', (c) => c.pinEmail('e1')],
+    ['pinEmail(false)', 'unpin email', (c) => c.pinEmail('e1', false)],
+    ['deleteEmail', 'delete email', (c) => c.deleteEmail('e1')],
+    ['moveEmail', '', (c) => c.moveEmail('e1', 'mb-archive')],
+    ['addLabels', 'add labels to email', (c) => c.addLabels('e1', ['inbox'])],
   ];
-  for (const [name, run] of cases) {
+  for (const [name, action, run] of cases) {
     it(`${name} refuses to report success when e1 is in neither updated nor notUpdated`, async () => {
       const client = makeClient();
       stubMailboxes(client, LABEL_MAILBOXES);
@@ -6096,11 +6108,18 @@ describe('single-id Email/set writes with no reported outcome', () => {
       await assert.rejects(
         () => run(client),
         (err: Error) => {
-          assert.match(err.message, /neither confirmed nor refused/);
+          assert.match(err.message, /: outcomeUnknown - the server neither confirmed nor refused the change$/);
+          if (action) assert.ok(err.message.startsWith(`Failed to ${action}: `), err.message);
           assert.notEqual(err.name, 'InvalidInputError');
           return true;
         },
       );
     });
   }
+
+  it('reads a set response the server left null as an unknown outcome, not a crash', async () => {
+    const client = makeClient();
+    stubRequests(client, async () => ({ methodResponses: [['Email/set', null, 'set']] }));
+    await assert.rejects(() => client.markEmailRead('e1'), /outcomeUnknown/);
+  });
 });

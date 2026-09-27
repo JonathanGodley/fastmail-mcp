@@ -346,9 +346,41 @@ describe('updateContact', () => {
     });
     await assert.rejects(
       () => client.updateContact('C1', { notes: 'x' }),
-      /contact C1 changed since it was read; nothing was written\. Retry the update_contact call/,
+      /contact C1 changed since it was read; nothing was written\. Retry the update_contact call: it re-reads the contact first\. The contacts state is account-wide on Fastmail, so a change to any contact in between also causes this refusal\.$/,
     );
   });
+
+  it('treats a non-string state as no state, and refuses', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => (
+      { methodResponses: [['ContactCard/get', { state: 42, list: [{ id: 'C1' }] }, 'g']] }
+    ));
+    await assert.rejects(() => client.updateContact('C1', { notes: 'x' }), /no ContactCard state/);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  for (const [label, setResponse, expected] of [
+    ['another method-level error', { methodResponses: [['error', { type: 'forbidden' }, 'u']] }, /JMAP error: forbidden/],
+    ['no response for the write', { methodResponses: [] }, /missing expected method/],
+    ['no methodResponses at all', {}, /missing expected method/],
+    ['an error entry with no body', { methodResponses: [['error']] }, /malformed/],
+  ] as Array<[string, any, RegExp]>) {
+    it(`reports ${label} as itself, not as a changed contact`, async () => {
+      mock.method(client, 'makeRequest', async (req: any) => {
+        if (req.methodCalls[0][0] === 'ContactCard/get') {
+          return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
+        }
+        return setResponse;
+      });
+      await assert.rejects(
+        () => client.updateContact('C1', { notes: 'x' }),
+        (err: Error) => {
+          assert.match(err.message, expected);
+          assert.doesNotMatch(err.message, /changed since it was read/);
+          return true;
+        },
+      );
+    });
+  }
 
   it('throws not-found before attempting the update', async () => {
     const makeReq = stubMakeRequest(client, {
@@ -777,7 +809,12 @@ describe('updateContact merge', () => {
       () => client.updateContact('O1', { name: { full: 'Renamed' } }),
       (err: Error) => {
         assert.equal(err.name, 'InvalidInputError');
-        assert.match(err.message, /kind "org"/);
+        assert.equal(
+          err.message,
+          'Contact O1 is a card of kind "org", not a person card, so update_contact refuses it: ' +
+            'name/emails/phones/addresses/notes describe a person card, this server can create only individual ' +
+            'cards, and group members are not editable here. Edit it in the Fastmail web interface instead.',
+        );
         return true;
       },
     );
@@ -1022,8 +1059,9 @@ describe('deleteContact', () => {
         () => client.deleteContact('K1'),
         (err: Error) => {
           assert.equal(err.name, 'InvalidInputError');
-          assert.match(err.message, new RegExp(`kind "${kind}"`));
+          assert.ok(err.message.startsWith(`Contact K1 is a card of kind "${kind}", not a person card, so delete_contact`), err.message);
           assert.match(err.message, /only individual/);
+          assert.match(err.message, /so it will not destroy one it could never put back, and the deletedCard echo could not rebuild it either\. Delete it/);
           return true;
         },
       );
