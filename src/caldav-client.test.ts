@@ -6430,6 +6430,24 @@ describe('timeZone parameter (#157)', () => {
       assert.ok(written.includes('DTSTART;TZID=Australia/Sydney:20260321T090000'));
     });
 
+    it('keeps the stored leading-slash VTIMEZONE block the untouched DTEND still references (docs/conventions.md, "The VTIMEZONE residual", item 2)', async () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VTIMEZONE', 'TZID:/America/New_York',
+        'BEGIN:STANDARD', 'DTSTART:20251102T020000', 'TZOFFSETFROM:-0400', 'TZOFFSETTO:-0500', 'TZNAME:EST', 'END:STANDARD',
+        'END:VTIMEZONE',
+        'BEGIN:VEVENT', 'UID:slash-block@fm', 'DTSTAMP:20260301T000000Z',
+        'DTSTART;TZID=/America/New_York:20261010T090000', 'DTEND;TZID=/America/New_York:20261010T100000',
+        'SUMMARY:Stored', 'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      const { client, mockDAVClient } = updateClient(data);
+      await client.updateCalendarEvent('slash-block@fm', { start: '2026-10-10T08:00:00', timeZone: 'America/New_York' });
+      const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(written.includes('DTEND;TZID=/America/New_York:20261010T100000'), written);
+      assert.ok(written.includes('TZID:/America/New_York\r\n'), `the block DTEND references was stripped:\n${written}`);
+      assert.ok(written.includes('TZID:America/New_York\r\n'), written);
+    });
+
     // zoneNamesEqual used to compare TZIDs with raw string equality, so a stored TZID that
     // named the same zone through an ICU link/alias spelling — not just a different case —
     // read as a DIFFERENT zone from a caller's re-affirmed spelling. That produced a false
