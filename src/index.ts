@@ -414,8 +414,16 @@ function getTimezone(): string | undefined {
 // THIS zone" instead of leaving a model to infer it from FASTMAIL_TIMEZONE's env-var name.
 // Reads the environment directly rather than through `setDefaultTimezone`'s stored value, so
 // it does not depend on that call having run first — TOOLS is built once at module load,
-// before any request has reached the handler that calls `setDefaultTimezone`.
-const CONFIGURED_TIMEZONE = resolveUsableTimezone(getTimezone());
+// before any request has reached the handler that calls `setDefaultTimezone`. Resolved by the
+// same `resolveConfiguredTimezone` as `runServer()`; where that throws, `runServer()` exits
+// before any client reads a description, and the fallback only keeps this module importable.
+const CONFIGURED_TIMEZONE = (() => {
+  try {
+    return resolveConfiguredTimezone(getTimezone()).zone;
+  } catch {
+    return resolveUsableTimezone(getTimezone());
+  }
+})();
 
 // Appended to every boolean whose handler runs coerceBool. The schema declares
 // `type: ['boolean', 'string']` alongside it, so a validating client can actually send
