@@ -518,6 +518,23 @@ describe('timeZone / endTimeZone (#139)', () => {
     assert.equal(event.timeZone, undefined);
   });
 
+  it('omits timeZone and endTimeZone for a Z-designated value that also carries a TZID', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:utc-tzid@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000Z',
+      'DTEND;TZID=Asia/Tokyo:20260320T093000Z',
+      'SUMMARY:Malformed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.match(event.start, /Z$/, 'start keeps its Z');
+    assert.equal(event.timeZone, undefined, 'a Z start never carries timeZone');
+    assert.equal(event.endTimeZone, undefined, 'a Z end never carries endTimeZone');
+  });
+
   it('omits timeZone for a date-only (all-day) value', () => {
     const data = [
       'BEGIN:VCALENDAR',
