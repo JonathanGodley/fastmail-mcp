@@ -1,5 +1,5 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceAttachments, coerceBool, InvalidInputError } from './coerce.js';
+import { coerceRecipients, coerceStringArrayStrict, coerceAttachments, coerceBool, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs } from './body-format.js';
 import { rejectMissingBodyHash } from './inline-notes.js';
@@ -55,8 +55,8 @@ export async function editDraft(
   const a = args ?? {};
   const { emailId, from, subject, textBody, htmlBody, bodyHash } = a;
   const { to, cc, bcc, replyTo } = coerceRecipients(a);
-  const clearFields = coerceStringArray(a.clearFields);
-  const removeAttachments = coerceStringArray(a.removeAttachments);
+  const clearFields = coerceStringArrayStrict(a.clearFields, 'clearFields');
+  const removeAttachments = coerceStringArrayStrict(a.removeAttachments, 'removeAttachments');
   // coerceBool refuses a value it cannot read (like "garbage"), and an absent value reads as
   // false, which stores the body exactly as written rather than rewriting it unasked.
   //

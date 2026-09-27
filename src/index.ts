@@ -968,7 +968,7 @@ const TOOLS = [
               // to read, which is the point of declaring the string form at all.
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: LENIENT_LIST_DESC.trimStart() + " Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: drop its <img> reference from the body you supply in the same call, or keep the attachment. To remove every attachment, use clearFields:['attachments'] instead.",
+              description: LENIENT_LIST_DESC.trimStart() + " Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: drop its <img> reference from the body you supply in the same call, or keep the attachment. To remove every attachment, use clearFields:['attachments'] instead. A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.",
             },
             clearFields: {
               // The `enum` stays in `items`, not on the property: `items` constrains ARRAY
@@ -976,7 +976,7 @@ const TOOLS = [
               // which raises the same named rejection over the coerced array.
               type: ['array', 'string'],
               items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId'] },
-              description: LENIENT_LIST_DESC.trimStart() + " Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments, forwardedMessageId. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). Clearing textBody or htmlBody requires bodyHash. clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). clearFields:['forwardedMessageId'] de-forwards the draft: it drops the recorded X-Forwarded-Message-Id so send_draft will not mark the original forwarded, and on a forward draft it drops the recorded sourceEmailId with it (that pointer names the instance the marking is about; on a reply draft it is kept). That is metadata, so it works on a body edit and a metadata-only edit alike, and it does NOT touch the body — a forwarded-message block already in the body stays there until you replace the body yourself. The converse holds too: deleting that block from the body does not de-forward the draft, so send_draft still marks the original forwarded until you clear this field.",
+              description: LENIENT_LIST_DESC.trimStart() + " Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments, forwardedMessageId. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). Clearing textBody or htmlBody requires bodyHash. clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). clearFields:['forwardedMessageId'] de-forwards the draft: it drops the recorded X-Forwarded-Message-Id so send_draft will not mark the original forwarded, and on a forward draft it drops the recorded sourceEmailId with it (that pointer names the instance the marking is about; on a reply draft it is kept). That is metadata, so it works on a body edit and a metadata-only edit alike, and it does NOT touch the body — a forwarded-message block already in the body stays there until you replace the body yourself. The converse holds too: deleting that block from the body does not de-forward the draft, so send_draft still marks the original forwarded until you clear this field. A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.",
             },
           },
           required: ['emailId'],
@@ -1506,7 +1506,7 @@ const TOOLS = [
             clearFields: {
               type: ['array', 'string'],
               items: { type: 'string', enum: ['description', 'location', 'transparency'] },
-              description: 'Property names to delete from the event. Allowed: description, location, transparency. Cannot also pass the same field as a value. Clearing transparency deletes the event\'s statement about free/busy. The event still reads as busy — that is what an event saying nothing means — so this changes the record rather than the state: it is how you put an event back to the shape the Fastmail client writes for an ordinary busy event, which carries no such property at all. To mark an event busy in so many words, pass transparency: "busy" instead.' + LENIENT_LIST_DESC,
+              description: 'Property names to delete from the event. Allowed: description, location, transparency. Cannot also pass the same field as a value. Clearing transparency deletes the event\'s statement about free/busy. The event still reads as busy — that is what an event saying nothing means — so this changes the record rather than the state: it is how you put an event back to the shape the Fastmail client writes for an ordinary busy event, which carries no such property at all. To mark an event busy in so many words, pass transparency: "busy" instead. A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC,
             },
           },
           required: ['eventId'],
@@ -2213,9 +2213,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // participants stays undefined ("leave the attendees alone").
         const participants = coerceParticipants((args as any).participants);
         assertICalTextLimits({ title, description, location, participants });
-        // Coerced so a stringified array ('["location"]') passes the Array.isArray test
-        // below instead of being dropped silently. (#54)
-        const clearFields = coerceStringArray((args as any).clearFields);
+        const clearFields = coerceStringArrayStrict((args as any).clearFields, 'clearFields');
         if (eventId == null) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }

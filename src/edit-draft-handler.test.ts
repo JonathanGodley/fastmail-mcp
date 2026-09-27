@@ -64,6 +64,19 @@ describe('editDraft — coercion and delegation', () => {
     assert.equal(bad.calls.update, undefined);
   });
 
+  for (const param of ['clearFields', 'removeAttachments']) {
+    for (const value of [{ cc: true }, 42, false]) {
+      it(`refuses a ${param} of ${JSON.stringify(value)} rather than ignoring it and reporting success`, async () => {
+        const { client, calls } = spyClient();
+        await assert.rejects(
+          editDraft({ emailId: 'd1', subject: 'Hi', [param]: value }, client, undefined, false),
+          (e: any) => e instanceof InvalidInputError && e.message.startsWith(`${param} must be an array of strings`),
+        );
+        assert.equal(calls.update, undefined);
+      });
+    }
+  }
+
   it("still reads '' and [] on a recipient field as the empty list, and still splits a comma string", async () => {
     const { client, calls } = spyClient();
     await editDraft({ emailId: 'd1', cc: '', bcc: [], to: 'a@b.example, c@d.example' }, client, undefined, false);

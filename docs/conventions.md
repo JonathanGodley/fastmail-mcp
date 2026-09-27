@@ -122,6 +122,10 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   reports success. Both are silent, and both look exactly like a call that did what it was
   told.
 
+  `clearFields` on `edit_draft`, `update_contact` and `update_calendar_event`, and
+  `edit_draft`'s `removeAttachments`, fail closed for the `edit_draft` reason: a dropped
+  value reads as "clear nothing, remove nothing", and the edit reports success.
+
   Strictness is per element, and covers the **empty string** as well as the wrong type. That
   is not pedantry: `['']` passes a `typeof entry !== 'string'` check, and the plain coercer's
   `.filter(Boolean)` runs only on the comma-split branch, so without an explicit check a
