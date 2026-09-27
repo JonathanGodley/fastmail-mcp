@@ -539,10 +539,15 @@ const labelMailboxesDesc = (verb: 'add' | 'remove') =>
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
   LENIENT_LIST_DESC;
 
+// $seen is an aggregate over a message's per-mailbox copies, so any change of filing can change
+// the read state a message reports, with no keyword written. Shared by every filing tool.
+const SEEN_AGGREGATE_DESC =
+  'No keyword is written, but that is not the same as the read state being untouched: $seen is reported only when every one of a message\'s per-mailbox copies carries it, so dropping an unread copy (an unread Inbox copy, typically) can flip a message to read.';
+
 // Shared by all four label tools (#133): the namespace, which a caller cannot infer from
 // "label" alone.
 const LABEL_NAMESPACE_DESC =
-  ' Labels here means the Inbox and the account\'s own user labels ONLY. A mailbox with any other JMAP role (archive, trash, junk/Spam, drafts, sent, snoozed, scheduled) is a FOLDER in Fastmail\'s model, not a label — Fastmail\'s label picker does not offer it — so naming one rejects the whole call before anything is written; use move_email or bulk_move to put a message in a folder. The Inbox is the one mailbox in both namespaces: removing the inbox label is exactly what archiving a message is, and adding it is how a message is put back in the Inbox.';
+  ' Labels here means the Inbox and the account\'s own user labels ONLY. A mailbox with any other JMAP role (archive, trash, junk/Spam, drafts, sent, snoozed, scheduled) is a FOLDER in Fastmail\'s model, not a label — Fastmail\'s label picker does not offer it — so naming one rejects the whole call before anything is written; use move_email or bulk_move to put a message in a folder. The Inbox is the one mailbox in both namespaces: removing the inbox label archives a message the way archive_email does, and adding it is how a message is put back in the Inbox.';
 
 // Shared by remove_labels and bulk_remove_labels: where a message lands when its last
 // mailbox is removed, which a caller cannot otherwise predict.
@@ -551,6 +556,7 @@ const LABEL_NAMESPACE_DESC =
 const LABEL_REMOVAL_RESCUE_DESC =
   ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. One case is rejected instead of served: the account has no archive-role mailbox at all, so there is no fallback to reach for. It says so and points at move_email/bulk_move or delete_email/bulk_delete. (Removing Archive itself never reaches that question — Archive is a folder, so the namespace rule above rejects it whatever the message is filed under.)' +
   ' Naming a label the message does not carry changes nothing for that message.' +
+  ' Removing the inbox label archives a message, with the same caveats archive_email states: it acts on exactly the messages named, not their whole conversation (get_thread lists the rest). ' + SEEN_AGGREGATE_DESC +
   ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so. Per-message server failures are reported per message as usual.' +
   ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request.';
 
@@ -1584,7 +1590,7 @@ const TOOLS = [
       },
       {
         name: 'move_email',
-        description: 'Move an email to a different mailbox. ' + membershipReplaceDesc('add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
+        description: 'Move an email to a different mailbox. ' + membershipReplaceDesc('add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1613,7 +1619,7 @@ const TOOLS = [
           'Each entry\'s `mailboxes`/`roles` are the PROJECTED filing for the two branches that wrote, the OBSERVED unchanged filing for notInInbox and refused (which write nothing), and for failed either the filing as OBSERVED BEFORE the write was attempted or, when no write was attempted for it, nothing at all; read roles for "archive" to tell whether a message is in Archive, since the branch name alone will not say. Both fields are ABSENT on a notFound entry (there is no filing to report) and on the failed sub-case where the current filing could not be READ (the server returned no mailboxIds object, or an empty one, which is not a filing a message can have; its filing was never observed, which is why it failed), and `roles` is absent whenever nothing the message is filed in has a role. A `unresolvedMailboxIds` on an entry means a mailbox id could not be resolved to a name, so `mailboxes`/`roles` are incomplete for that message and those raw ids are the remainder — which is also what tells you how to read an absent `roles`: absent with no `unresolvedMailboxIds` means no role mailboxes, absent WITH them means the roles are unknown for the ids listed there. ' +
           'The Archive destination is found by JMAP role, never by folder name, so a folder merely NAMED "archive" is not it, and there is no destination parameter — use move_email to file into anything else. ' +
           'The whole call throws, rather than reporting per message, in four account-wide cases. Three happen BEFORE anything is written, so nothing was archived and the message says so: a read that failed or came back incomplete, an account with no inbox-role mailbox, and an account with no archive-role mailbox when a message actually needed Archive (use move_email instead). The fourth is the write itself failing, which happens AFTER it was dispatched — there the outcome of the batch is unknown and you should re-read the messages rather than assume nothing changed. A per-message problem never throws. ' +
-          'No keyword is written, but that is not the same as the read state being untouched: $seen is reported only when every one of a message\'s per-mailbox copies carries it, so dropping an unread Inbox copy can flip a message to read. ' +
+          SEEN_AGGREGATE_DESC + ' ' +
           'This describes an account in LABELS mode. In folders mode a message has a single membership, so every archive is the move-to-Archive case.',
         inputSchema: {
           type: 'object',
@@ -1801,7 +1807,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_move',
-        description: 'Move multiple emails to a mailbox. ' + membershipReplaceDesc('bulk_add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
+        description: 'Move multiple emails to a mailbox. ' + membershipReplaceDesc('bulk_add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {

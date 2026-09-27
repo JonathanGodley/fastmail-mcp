@@ -582,7 +582,9 @@ the membership it strips.
 (RFC 8620 §5.3) rather than reading the current membership and patching each id away. It states
 the promised contract directly ("replaces all mailbox membership") and has no read/write window in
 which a newly-added mailbox survives the move. Neither writes a keyword: a move changes where a
-message is filed and nothing about its read or flagged state. Marking read is `mark_email_read`.
+message is filed. That does not guarantee the reported read state is unchanged, because `$seen`
+is reported only when every per-mailbox copy carries it, so dropping an unread copy can flip a
+message to read. Marking read is `mark_email_read`.
 This is a deliberate divergence from upstream PR `MadLlama25/fastmail-mcp#67`, whose
 `archive_email` writes `$seen` as part of the move: folding two effects into one verb means a
 caller who wanted only the filing cannot get it, while a caller who wanted both can still make the
