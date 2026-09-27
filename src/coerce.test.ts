@@ -370,6 +370,13 @@ describe('clampLimit', () => {
     assert.equal(clampLimit(-4, 3, 10), 1);
   });
 
+  it('drops a fractional part, since a JMAP limit must be an unsigned integer', () => {
+    assert.equal(clampLimit(2.7, 3, 10), 2);
+    assert.equal(clampLimit('5.5', 3, 10), 5);
+    assert.equal(clampLimit(10.9, 3, 10), 10);
+    assert.equal(clampLimit(0.5, 3, 10), 3);
+  });
+
   it('clamps above the maximum, including a stringified oversize value', () => {
     assert.equal(clampLimit(1000, 3, 10), 10);
     assert.equal(clampLimit('1000', 3, 10), 10);

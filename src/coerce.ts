@@ -930,11 +930,12 @@ function echoPosition(value: unknown): string {
   return text.length > POSITION_ECHO_LIMIT ? `${text.slice(0, POSITION_ECHO_LIMIT)}...` : text;
 }
 
-// Clamp a caller-supplied limit into [1, max]. The `|| fallback` guards NaN, which JMAP
-// serializes as `"limit": null`, an unbounded query. Never throws, unlike the other
-// coercers: a caller who fat-fingers a limit wants results, not an error.
+// Clamp a caller-supplied limit into [1, max], dropping any fractional part (a JMAP limit
+// is an UnsignedInt). The `|| fallback` guards NaN, which JMAP serializes as
+// `"limit": null`, an unbounded query, and a value that truncates to 0. Never throws, unlike
+// the other coercers: a caller who fat-fingers a limit wants results, not an error.
 export function clampLimit(value: unknown, fallback: number, max: number): number {
-  return Math.min(Math.max(Number(value) || fallback, 1), max);
+  return Math.min(Math.max(Math.trunc(Number(value)) || fallback, 1), max);
 }
 
 function acceptedDateFormats(): string {

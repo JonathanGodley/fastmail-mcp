@@ -2452,7 +2452,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const requiredMailboxes = coerceStringArrayStrict((args as any).requiredMailboxes, 'requiredMailboxes');
         const excludeMailboxes = coerceStringArrayStrict((args as any).excludeMailboxes, 'excludeMailboxes');
         const client = initializeClient();
-        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+        const validLimit = clampLimit(limit, 20, 100);
         const result = await client.searchEmails({
           query, from, to, cc, bcc, subject,
           hasAttachment: coerceBool(hasAttachment),

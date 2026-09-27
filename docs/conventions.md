@@ -143,6 +143,10 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   whole parameter reads as *omitted*, never as the empty list, because an empty list
   removes every attendee on update.
 - `coerceBool` — stringified / actual boolean to `boolean` (or `undefined`).
+- `clampLimit` — every tool's `limit`, in the handler: a number or numeric string with any
+  fractional part dropped (a JMAP `limit` is an unsigned integer, so `2.5` would be a server
+  error), clamped to `[1, max]`; a non-numeric value, or one that truncates to 0, takes the
+  tool's default. It never throws.
 - `coerceUtcDate` — a date or datetime to the JMAP `UTCDate` shape (`2026-07-20T00:00:00Z`)
   for the `search_emails` `after` / `before` filters. `YYYY-MM-DD` expands to midnight UTC
   and `YYYY-MM-DDThh:mm:ss` (with `Z`, an offset, or no zone) is converted; **every other
