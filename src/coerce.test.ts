@@ -1415,7 +1415,7 @@ describe('the calendar window refusal names the spellings the parser accepts', (
     } catch (err) {
       message = (err as Error).message;
     }
-    for (const example of ['2026-08-12T14:30Z', '2026-08-12T14:30:00.5Z', '2026-08-12T14:30:00z', '2026-08-12T14:30:00+1000']) {
+    for (const example of ['2026-08-12T14:30:00Z', '2026-08-12T14:30:00+10:00', '2026-08-12T14:30Z', '2026-08-12T14:30:00.5Z', '2026-08-12T14:30:00z', '2026-08-12T14:30:00+1000']) {
       assert.ok(message.includes(example), `the refusal should name ${example}: ${message}`);
       assert.ok(coerceCalendarWindowStart(example, 'startDate', 'UTC'), `${example} should be accepted`);
     }

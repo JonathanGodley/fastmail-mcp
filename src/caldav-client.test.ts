@@ -536,6 +536,20 @@ describe('timeZone / endTimeZone (#139)', () => {
     assert.equal(event.endTimeZone, undefined, 'a Z end never carries endTimeZone');
   });
 
+  it('treats only a TRAILING Z as the UTC designator on a TZID line', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:mid-z@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320TZ083000',
+      'SUMMARY:Malformed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Pacific/Auckland');
+  });
+
   it('omits timeZone for a date-only (all-day) value', () => {
     const data = [
       'BEGIN:VCALENDAR',
@@ -1456,6 +1470,28 @@ describe('CalDAVCalendarClient event lookup', () => {
         },
       );
       assert.equal(fetchCalendarObjects.mock.callCount(), 0);
+    }
+  });
+
+  it('resolves by UID a resource whose url does not parse as a url', async () => {
+    const { client } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], {
+      [PERSONAL_URL]: [{ data: eventIcal('odd-url@fm', 'Odd'), url: 'http://[', etag: '"e"' }],
+    });
+    const { event } = await client.getCalendarEventById('odd-url@fm');
+    assert.equal(event.title, 'Odd');
+  });
+
+  it('names an array eventId as an array, and still calls a null one empty', async () => {
+    const { client } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], onePersonalEvent());
+    await assert.rejects(
+      () => client.getCalendarEventById([] as unknown as string),
+      /eventId must be a string; received array\./,
+    );
+    for (const absent of [null, undefined]) {
+      await assert.rejects(
+        () => client.getCalendarEventById(absent as unknown as string),
+        /eventId cannot be empty; pass an event id or url from list_calendar_events/,
+      );
     }
   });
 
