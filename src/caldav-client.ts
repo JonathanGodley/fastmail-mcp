@@ -2025,9 +2025,7 @@ export const CALENDAR_OPEN_WINDOW_DAYS = 31;
  *
  * RESIDUAL: this bounds what this server parses and shows, never what Cyrus generates or
  * transfers. Cyrus's `expand_cb` has no limit and `CALDAV:max-instances` has no handler, and
- * tsdav's `fetchCalendarObjects` buffers the whole multistatus with no paging. The #155
- * follow-up (`settleAmbiguousRecurrence`) then fetches each single-block row's whole STORED
- * resource a second time, every exception VEVENT included, and the cap does not apply to it.
+ * tsdav's `fetchCalendarObjects` buffers the whole multistatus with no paging.
  */
 export const CALENDAR_MAX_OCCURRENCES_PER_SERIES = 5000;
 
