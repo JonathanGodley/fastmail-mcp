@@ -1168,10 +1168,9 @@ Contributions are welcome. The development rules, including the documentation th
 
 If calendar and contacts functions return "Forbidden" errors, this is likely due to:
 
-1. **Account Plan**: Calendar/contacts API may require business/professional Fastmail plans
-2. **Calendar credentials**: Calendar runs over CalDAV, not the API token. Set `FASTMAIL_CALDAV_USERNAME` (your Fastmail address) and `FASTMAIL_CALDAV_PASSWORD` (a Fastmail app password with calendar (CalDAV) access)
-3. **API Token Scope (contacts)**: Your API token may need contacts permissions enabled; a contacts write that comes back forbidden needs a token with read-write contacts access
-4. **Feature Enablement**: These features may need explicit activation in your account
+1. **Calendar credentials**: Calendar runs over CalDAV, not the API token. Set `FASTMAIL_CALDAV_USERNAME` (your Fastmail address) and `FASTMAIL_CALDAV_PASSWORD` (a Fastmail app password with calendar (CalDAV) access)
+2. **API Token Scope (contacts)**: Your API token may need contacts permissions enabled; a contacts write that comes back forbidden needs a token with read-write contacts access
+3. **Feature Enablement**: These features may need explicit activation in your account
 
 **Solution**: Run `check_function_availability` for step-by-step setup guidance.
 
