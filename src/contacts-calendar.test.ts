@@ -310,20 +310,33 @@ describe('updateContact', () => {
     assert.deepEqual(update, { emails: { e0: { address: 'new@example.com' } } });
   });
 
-  it('passes expectState through as ifInState', async () => {
+  it('writes only if the card state is still the one the merge was read at', async () => {
     const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 'state-42', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { updated: { C1: null } }, 'u']] };
     });
-    await client.updateContact('C1', { notes: 'x', expectState: 'state-42' });
+    await client.updateContact('C1', { notes: 'x' });
     const [setRequest] = findCallArguments(
       makeReq,
       ([req]) => req.methodCalls[0][0] === 'ContactCard/set',
       'issuing ContactCard/set',
     );
     assert.equal(setRequest.methodCalls[0][1].ifInState, 'state-42');
+  });
+
+  it('refuses with a retry hint when the card changed between the read and the write', async () => {
+    mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'ContactCard/get') {
+        return { methodResponses: [['ContactCard/get', { state: 'state-42', list: [{ id: 'C1' }] }, 'g']] };
+      }
+      return { methodResponses: [['error', { type: 'stateMismatch' }, 'u'], ['error', { type: 'stateMismatch' }, 'g2']] };
+    });
+    await assert.rejects(
+      () => client.updateContact('C1', { notes: 'x' }),
+      /contact C1 changed since it was read; nothing was written\. Retry the update_contact call/,
+    );
   });
 
   it('throws not-found before attempting the update', async () => {
@@ -1082,9 +1095,22 @@ describe('deleteContact', () => {
     );
   });
 
-  it('passes expectState through as ifInState', async () => {
-    const makeReq = stubMakeRequest(client, destroyResponse({ id: 'C1' }, { destroyed: ['C1'] }));
-    await client.deleteContact('C1', 'state-7');
+  it('destroys only if the card state is still the one the kind check read', async () => {
+    const response = destroyResponse({ id: 'C1' }, { destroyed: ['C1'] });
+    response.methodResponses[0][1].state = 'state-7';
+    const makeReq = stubMakeRequest(client, response);
+    await client.deleteContact('C1');
     assert.equal(destroyRequest(makeReq).methodCalls[1][1].ifInState, 'state-7');
+  });
+
+  it('refuses with a retry hint when the card changed between the kind check and the destroy', async () => {
+    const response: any = destroyResponse({ id: 'C1' }, {});
+    response.methodResponses[0][1].state = 'state-7';
+    response.methodResponses[1] = ['error', { type: 'stateMismatch' }, 'deleteContact'];
+    stubMakeRequest(client, response);
+    await assert.rejects(
+      () => client.deleteContact('C1'),
+      /contact C1 changed since it was read; nothing was deleted\. Retry the delete_contact call/,
+    );
   });
 });

@@ -31,16 +31,14 @@ export interface ContactsWriteClient {
   }): Promise<string>;
   getContactById(id: string): Promise<any>;
   updateContact(id: string, patch: UpdateContactPatch): Promise<UpdateContactResult>;
-  deleteContact(id: string, expectState?: string): Promise<DeleteContactResult>;
+  deleteContact(id: string): Promise<DeleteContactResult>;
 }
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
 
-// `expectState` is deliberately NOT a parameter of any of these tools, though the client
-// methods accept it (as `ifInState`). No read tool surfaces the JMAP state string, so a
-// caller could only guess (failing every write with a stateMismatch) or omit it. The
-// `previousCard` echo makes a stale-copy overwrite visible instead. To expose it, surface
-// `state` on the contacts reads first, then accept it here.
+// No tool takes a JMAP state string: no read tool surfaces one. The client guards each write
+// with the state of its own pre-write read instead (`fetchCard`), so a stale merge is refused
+// with a retry hint rather than written.
 
 // The pre-edit and pre-destroy echoes are ALWAYS the untransformed JMAP card, whatever
 // `verbose` or `raw` say: the simplified shape folds away the per-entry `contexts` and

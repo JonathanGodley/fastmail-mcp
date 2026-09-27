@@ -31,7 +31,6 @@ export interface UpdateContactPatch {
   notes?: string;
   clearFields?: string[];
   allowEntryReplace?: boolean;
-  expectState?: string;
 }
 
 export interface UpdateContactResult {
@@ -300,14 +299,32 @@ export class ContactsCalendarClient extends JmapClient {
    * and nothing else, which is not enough to merge with, nor to show a caller what a write
    * took off the card.
    *
-   * Returns undefined for an id the account does not hold; callers decide what that means.
+   * `card` is undefined for an id the account does not hold; callers decide what that means.
+   * `state` is the ContactCard state the card was read at. Both writes send it as `ifInState`,
+   * so a card changed between this read and the write is refused rather than overwritten
+   * from a stale merge. Fastmail's state is account-wide, so a change to ANY card in that
+   * window refuses too; a retry re-reads and succeeds.
    */
-  private async fetchCardOrUndefined(accountId: string, id: string): Promise<any | undefined> {
+  private async fetchCard(accountId: string, id: string): Promise<{ card: any | undefined; state?: string }> {
     const response = await this.makeRequest({
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'],
       methodCalls: [['ContactCard/get', { accountId, ids: [id] }, 'card']],
     });
-    return this.getListResult(response, 0)[0];
+    const card = this.getListResult(response, 0)[0];
+    const state = this.getMethodResult(response, 0).state;
+    return { card, state: typeof state === 'string' ? state : undefined };
+  }
+
+  /** Throw the retry refusal when a write's `ifInState` no longer matched (RFC 8620 section 5.3). */
+  private assertStateStillMatched(response: any, index: number, id: string, tool: string, outcome: string): void {
+    const entry = response.methodResponses?.[index];
+    if (entry?.[0] === 'error' && entry[1]?.type === 'stateMismatch') {
+      throw new Error(
+        `The contact ${id} changed since it was read; nothing was ${outcome}. Retry the ${tool} call: ` +
+          `it re-reads the contact first. The contacts state is account-wide on Fastmail, so a change ` +
+          `to any contact in between also causes this refusal.`,
+      );
+    }
   }
 
   /**
@@ -370,7 +387,7 @@ export class ContactsCalendarClient extends JmapClient {
    * An empty array is REJECTED rather than read as "clear" — see the rejection below.
    */
   async updateContact(id: string, patch: UpdateContactPatch): Promise<UpdateContactResult> {
-    const { expectState, clearFields, allowEntryReplace = false, name, emails, phones, addresses, notes } = patch;
+    const { clearFields, allowEntryReplace = false, name, emails, phones, addresses, notes } = patch;
 
     const provided = new Set<string>();
     for (const [field, value] of Object.entries({ name, emails, phones, addresses, notes })) {
@@ -407,7 +424,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     const accountId = await this.contactsAccountId();
 
-    const previousCard = await this.fetchCardOrUndefined(accountId, id);
+    const { card: previousCard, state: readState } = await this.fetchCard(accountId, id);
     if (!previousCard) {
       throw new InvalidInputError(`Contact not found: ${id}`);
     }
@@ -460,11 +477,12 @@ export class ContactsCalendarClient extends JmapClient {
         ['ContactCard/set', {
           accountId,
           update: { [id]: patchObject },
-          ...(expectState && { ifInState: expectState }),
+          ...(readState && { ifInState: readState }),
         }, 'updateContact'],
         ['ContactCard/get', { accountId, ids: [id] }, 'updatedCard'],
       ],
     });
+    this.assertStateStillMatched(response, 0, id, 'update_contact', 'written');
     const result = this.getMethodResult(response, 0);
     if (result.notUpdated?.[id]) {
       this.throwSingleSetError(result.notUpdated[id], 'update contact');
@@ -508,7 +526,7 @@ export class ContactsCalendarClient extends JmapClient {
    * A card of any kind but an individual (a group, an org, ...) is refused outright; see the
    * guard below.
    */
-  async deleteContact(id: string, expectState?: string): Promise<DeleteContactResult> {
+  async deleteContact(id: string): Promise<DeleteContactResult> {
     const accountId = await this.contactsAccountId();
 
     // Any kind but an individual is refused because `create_contact` has no `kind` (or
@@ -523,7 +541,7 @@ export class ContactsCalendarClient extends JmapClient {
     // at ALL fails here, before anything is destroyed, where there is nothing yet to lose by
     // throwing. A card the account simply does not hold reads as undefined and falls through
     // to the destroy, whose own `notFound` is the authoritative answer for a bad id.
-    const doomedCard = await this.fetchCardOrUndefined(accountId, id);
+    const { card: doomedCard, state: readState } = await this.fetchCard(accountId, id);
     const refusedKind = refusedContactKind(doomedCard);
     if (refusedKind) {
       throw new InvalidInputError(contactKindRefusal({
@@ -545,10 +563,11 @@ export class ContactsCalendarClient extends JmapClient {
         ['ContactCard/set', {
           accountId,
           destroy: [id],
-          ...(expectState && { ifInState: expectState }),
+          ...(readState && { ifInState: readState }),
         }, 'deleteContact'],
       ],
     });
+    this.assertStateStillMatched(response, 1, id, 'delete_contact', 'deleted');
 
     const result = this.getMethodResult(response, 1);
     if (result.notDestroyed?.[id]) {
