@@ -268,7 +268,7 @@ export function coerceBool(value: unknown, paramName: string): boolean | undefin
   const received = typeof value === 'string'
     ? `"${describeUntrusted(value)}"`
     : typeof value === 'number' ? String(value)
-    : Array.isArray(value) ? 'an array' : `a ${typeof value}`;
+    : Array.isArray(value) ? 'an array' : `${/^[aeiou]/.test(typeof value) ? 'an' : 'a'} ${typeof value}`;
   throw new InvalidInputError(
     `${paramName} must be true or false ("true"/"false" in any case, or 1/0, are also accepted); received ${received}.`,
   );

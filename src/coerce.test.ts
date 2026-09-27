@@ -232,6 +232,10 @@ describe('coerceRecipients', () => {
 });
 
 describe('coerceBool', () => {
+  it('names an unreadable non-string type with the right article', () => {
+    assert.throws(() => coerceBool({}, 'flag'), /received an object\./);
+  });
+
   it('returns boolean as-is', () => {
     assert.equal(coerceBool(true, 'flag'), true);
     assert.equal(coerceBool(false, 'flag'), false);
