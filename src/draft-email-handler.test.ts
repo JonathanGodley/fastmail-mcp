@@ -2156,9 +2156,6 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
     assert.deepEqual(calls.draft.bcc, ['ada@example.com']);
   });
 
-  // A sender can write a Bcc header into mail they send this account, so a Bcc on a
-  // received message would plant hidden recipients in the reply. Only the account's own
-  // Sent copy carries it; an original whose mailboxes could not be read carries nothing.
   it('carries nothing, and says nothing, from an original that is not in Sent', async () => {
     for (const roles of [['inbox'], ['archive'], undefined]) {
       const { client, calls } = plainClient(selfBccOriginal({ _mailboxRoles: roles }));
@@ -2168,8 +2165,6 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
     }
   });
 
-  // Roles are missing when the mailbox lookup beside the read did not come back. The Bcc is
-  // still not carried, but the caller is told why, since it may be a Sent copy after all.
   it('says so when the Bcc was not carried because the mailbox could not be confirmed', async () => {
     const NOTE = /Bcc list was not carried .*could not be confirmed as Sent/;
     const cases: [any, boolean][] = [
@@ -3187,9 +3182,6 @@ describe('draft_email — hostile fields out of a forwarded message, over the st
 // (`messageShipsHtml`, and buildBodyParts downstream). Both are `!isBlank`. These pins hold
 // them together: a regression that moves one and not the other stores a quote whose images
 // have gone, with nothing in the output saying so.
-//
-// A blank html part counts as not supplied, so the one-part token rule does not refuse it
-// beside a token-bearing text part: the message is the text-only one.
 
 /** A part did not ship when it is absent or blank — buildBodyParts drops both. */
 const isBlankBody = (v: unknown) => v === undefined || (typeof v === 'string' && v.trim() === '');

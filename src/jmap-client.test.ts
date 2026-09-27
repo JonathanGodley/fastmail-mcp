@@ -696,8 +696,6 @@ describe('updateDraft', () => {
     assert.equal(emailObj.subject, 'Updated');
   });
 
-  // A superseded draft sits in Trash with `$draft` kept. Editing it would create the
-  // replacement in Trash too, because the replacement carries the old copy's mailboxIds.
   it('refuses to edit a draft that is in Trash, naming where it is', async () => {
     mock.method(client, 'getMailboxes', async () => [
       DRAFTS_MAILBOX,
@@ -724,7 +722,6 @@ describe('updateDraft', () => {
     assert.equal(makeReq.mock.calls.length, 1);
   });
 
-  // draft_email's mailbox parameter files a draft anywhere on purpose; only Trash is refused.
   it('edits a draft filed in a mailbox that is neither Drafts nor Trash', async () => {
     const parked = { ...EXISTING_DRAFT, mailboxIds: { 'mb-parked': true } };
     const makeReq = mockUpdate(client, parked);
@@ -4084,8 +4081,6 @@ describe('updateDraft wildcard identity', () => {
   });
 });
 
-// An account can hold both `*@example.com` and `ops@example.com`. The exact identity is the
-// one that sends as that address, whichever order the server lists the two in.
 describe('an exact-address identity beats a wildcard listed before it', () => {
   const EXACT = { id: 'id-ops', name: 'Ops Desk', email: 'ops@example.com', mayDelete: true };
   let client: JmapClient;
@@ -4535,7 +4530,6 @@ describe('uploadAttachments', () => {
     }
   });
 
-  // A file read may return fewer bytes than asked for. The upload must be the whole file.
   function fakeHandle(content: Buffer, chunk: number, size = content.length) {
     return {
       handle: {
@@ -5629,8 +5623,6 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
     assert.equal(fetchedIds.includes('orig-1'), false);
   });
 
-  // The same rule the create applies: a stored value that is not a JMAP id (another
-  // client, or a hand-edited header) is treated as absent, never written back.
   it('updateDraft drops a stored header that is not a JMAP id rather than carrying it', async () => {
     for (const stored of ['not a jmap id!', 'orig-1\r\nBcc: x@example.com']) {
       const makeReq = mockSrcUpdate(client, { ...REPLY_QUOTED, [SRC_PROP]: stored });

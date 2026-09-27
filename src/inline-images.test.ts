@@ -873,8 +873,6 @@ describe('collectImgCidRefs', () => {
 });
 
 describe('extractCidRefs', () => {
-  // A punctuation run followed by an identifier character is not trailing, and a trim that
-  // re-scanned the run from every start position took seconds on one hostile body.
   it('runs in linear time on a long punctuation run inside a reference', () => {
     const n = 100_000;
     const started = performance.now();

@@ -208,8 +208,6 @@ const BROKEN_COLLECTION_URL = 'https://caldav.example.invalid/dav/calendars/user
 // their InvalidParams mapping), so they are not re-tested against this module.
 
 describe('extractVEvent', () => {
-  // A trailing-run trim by regex re-scans the run from every start position, so a long
-  // whitespace run followed by text was quadratic. The data is whatever the server holds.
   it('runs in linear time on a long whitespace run inside a line', () => {
     const n = 100_000;
     const started = performance.now();

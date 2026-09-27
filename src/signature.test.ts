@@ -72,8 +72,6 @@ describe('reading the sign-off off an identity', () => {
     assert.equal(sigFor([wild], 'anything@example.com')?.text, 'Wild');
   });
 
-  // The positive criterion: each half is printable and non-space, with no control or format
-  // character and none of the characters that bracket, comment or quote in an address.
   it('refuses control, format and bracketing characters in an address a wildcard identity is asked to verify', () => {
     for (const addr of [
       'a\u0000b@example.com', 'a<b@example.com', 'a>b@example.com', 'a@example.com\u0000',

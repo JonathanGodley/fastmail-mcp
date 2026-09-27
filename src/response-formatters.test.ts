@@ -14,8 +14,6 @@ describe('formatInlineNotes', () => {
     assert.equal(formatInlineNotes([]), '');
   });
 
-  // One line each. The summaries these append to can end in an unquoted recipient list
-  // ("BCC: <addresses>"), so a space join ran the first note straight on from it.
   it('puts each note on a line of its own', () => {
     assert.equal(formatInlineNotes(['One.', 'Two.']), '\nOne.\nTwo.');
   });

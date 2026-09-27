@@ -184,7 +184,6 @@ describe('coerceRecipients', () => {
     });
   });
 
-  // A display name may carry a comma, so the comma form splits only outside "…" and <…>.
   it('keeps a comma inside a quoted display name in one recipient', () => {
     assert.deepEqual(
       coerceRecipients({ to: '"Smith, John" <john@example.com>, ada@example.com' }).to,
@@ -192,8 +191,6 @@ describe('coerceRecipients', () => {
     );
   });
 
-  // The address half must be one addr-spec: one "@" with something either side, and none of
-  // the characters that would make it several addresses or a malformed angle-addr.
   it('refuses a comma-split piece whose address half is not a single addr-spec', () => {
     for (const piece of [
       '@', 'Smith@', '@example.com', 'a@b@example.com', 'x@example.com; y@example.com',
@@ -207,8 +204,6 @@ describe('coerceRecipients', () => {
     }
   });
 
-  // Unquoted, the name's comma still splits, and the half with no address is refused rather
-  // than sent to as if it were one.
   it('refuses a comma-split piece that names no email address, quoting it', () => {
     for (const field of ['to', 'cc', 'bcc', 'replyTo'] as const) {
       assert.throws(
@@ -223,8 +218,6 @@ describe('coerceRecipients', () => {
     );
   });
 
-  // An unbalanced quote or bracket swallows every comma after it, so the recipients behind it
-  // would silently vanish; the whole value is refused instead.
   it('refuses a comma-separated value with a quote or < still open at the end', () => {
     for (const value of [
       '"Smith, John <john@example.com>, bob@example.com',
@@ -239,7 +232,6 @@ describe('coerceRecipients', () => {
     }
   });
 
-  // parseAddress reads up to the last ">", so anything after it would be dropped unseen.
   it('refuses a recipient with text after its closing >, in a string and in an array', () => {
     assert.throws(
       () => coerceRecipients({ cc: 'Bob <bob@example.com> carol@example.com' }),
