@@ -2588,6 +2588,42 @@ describe('sendDraft', () => {
     });
   }
 
+  it('names no locations for a draft filed nowhere', async () => {
+    const filedNowhere = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-archive': false } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [filedNowhere] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.ok(err.message.includes('so it will not be sent. Move it back'), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('skips a null entry in the mailbox list and still names the mailbox', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      null,
+      DRAFTS_MAILBOX,
+      SENT_MAILBOX,
+      { id: 'mb-work', name: 'Work', role: null },
+    ]);
+    const filed = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-work': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [filed] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.ok(err.message.includes('(it is in: "Work"). '), err.message);
+        return true;
+      },
+    );
+  });
+
   it('caps the list of locations and says how many were left out', async () => {
     const extra = Array.from({ length: 35 }, (_, i) => ({ id: `mb-x${i}`, name: `Folder ${i}`, role: null }));
     mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, SENT_MAILBOX, ...extra]);
