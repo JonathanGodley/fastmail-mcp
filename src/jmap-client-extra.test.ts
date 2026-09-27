@@ -3954,6 +3954,22 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     );
   });
 
+  it('says plainly that the rest of the batch was written when an unknown id fails', async () => {
+    // An id the server does not know is not a batch-level rejection: the other messages are
+    // written, and the error must not read as though nothing changed.
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-inbox': true } }, { updated: { e1: null } });
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'typo'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /notFound: typo/);
+        assert.match(err.message, /The 1 that succeeded WERE changed: this is a partial write/);
+        return true;
+      },
+    );
+    const set = makeReq.mock.calls.map((c: any) => c.arguments[0].methodCalls[0]).find((m: any) => m[0] === 'Email/set');
+    assert.deepEqual(Object.keys(set[1].update), ['e1']);
+  });
+
   it('ends the failure list with a period before the trailing note (#120)', async () => {
     // Reuses the rescue-note fixture above: it already produces both a reason-grouped
     // failure list and a trailing note, which is exactly the boundary a run-on sentence

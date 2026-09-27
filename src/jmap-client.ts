@@ -1488,6 +1488,10 @@ export class JmapClient {
       message += ' (Partial list — not every failure is shown. These operations are idempotent, so re-run with the full input set to retry every failure safely.)';
     }
     if (trailingNote) message += ` ${trailingNote}`;
+    // Said outright: an InvalidParams error otherwise reads as a batch that wrote nothing.
+    if (successCount > 0) {
+      message += ` The ${successCount} that succeeded WERE changed: this is a partial write, not a rejection of the batch.`;
+    }
 
     if (failedIds.every(id => JmapClient.isCallerFixableSetError(notUpdated[id].type))) {
       throw new InvalidInputError(message);
