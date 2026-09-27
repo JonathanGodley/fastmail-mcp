@@ -706,7 +706,9 @@ const NAME_COMPONENT_ORDER = ['title', 'given', 'given2', 'surname', 'surname2',
 
 function nameFromComponents(name: any): string {
   if (!Array.isArray(name.components)) return '';
-  const parts = name.components.filter((c: any) => c && typeof c.value === 'string' && c.value.trim() !== '');
+  // A separator's value is often pure whitespace, so only the other kinds drop a blank value.
+  const parts = name.components.filter((c: any) => c && typeof c.value === 'string'
+    && (c.kind === 'separator' || c.value.trim() !== ''));
   if (name.isOrdered === true) {
     const sep = typeof name.defaultSeparator === 'string' ? name.defaultSeparator : ' ';
     let out = '';

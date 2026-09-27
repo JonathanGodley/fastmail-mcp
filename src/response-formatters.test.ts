@@ -500,6 +500,18 @@ describe('simplifyContact', () => {
     assert.equal(result.name, 'Kovacs Eva');
   });
 
+  it('writes an ordered name\'s whitespace separator verbatim', () => {
+    const result = simplifyContact({
+      id: 'ct-7',
+      name: { isOrdered: true, defaultSeparator: '', components: [
+        { kind: 'surname', value: 'Lovelace' },
+        { kind: 'separator', value: ' ' },
+        { kind: 'given', value: 'Ada' },
+      ] },
+    });
+    assert.equal(result.name, 'Lovelace Ada');
+  });
+
   it('handles missing name gracefully', () => {
     const result = simplifyContact({ id: 'ct-3' });
     assert.equal(result.name, undefined);
