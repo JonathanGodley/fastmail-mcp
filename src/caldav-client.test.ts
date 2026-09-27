@@ -1032,8 +1032,6 @@ describe('validateAndFormatICalDate', () => {
     assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00+0200', 'start'), '20260418T080000Z');
   });
 
-  // RFC 5545 §3.3.12: hour 00-23. V8 reads T24:00:00 as next-day midnight, and the floating
-  // form would be written verbatim as T240000.
   it('refuses an hour, minute or second out of range in every form', () => {
     for (const value of [
       '2026-03-20T24:00:00', '2026-03-20T24:00:00Z', '2026-03-20T24:00:00+10:00',
@@ -1454,9 +1452,8 @@ describe('CalDAVCalendarClient event lookup', () => {
     [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url: PERSONAL_URL + 'solo.ics', etag: '"etag-solo"' }],
   });
 
-  // The handler's own guard tests presence only, so a whitespace-only id used to reach the lookup and
-  // come back as "Calendar event not found" — an answer about the account, for a call that never
-  // named an event. Rejected here, in the client, so all three tools inherit it.
+  // Not "Calendar event not found": that answers about the account, for a call that never named
+  // an event.
   it('rejects an eventId that is only whitespace, before any query is built', async () => {
     for (const call of [
       (c: CalDAVCalendarClient) => c.getCalendarEventById('   '),
@@ -1978,8 +1975,9 @@ describe('CalDAVCalendarClient event lookup', () => {
   // with the decoy, and the writes refused with a remedy the caller had already followed.
   //
   // The rule: a match whose OWN url is the href resolved from the caller's string was ADDRESSED
-  // by name, and addressing is not something a UID can imitate. That match leads, and the
-  // lookup is unambiguous for the write tools whatever else carries the string as a UID.
+  // by name, and addressing is not something a UID can imitate. That match leads, and the reads
+  // answer with it. The writes still refuse while another record's UID is the caller's string
+  // itself, since the listing shows that record's id as that string.
   const decoyCarryingAnAddress = (realUrl: string): Record<string, StoredObject[]> => ({
     // Discovered FIRST, so the decoy is collected first under a plain union.
     [WORK_URL]: [{ data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
@@ -2109,8 +2107,8 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal(deleted.url, WORK_URL + 'decoy.ics');
   });
 
-  // But the listing shows the decoy's id AS that url, so a caller who passes it back may mean
-  // the decoy. A write that went to the addressed record would patch or destroy an event the
+  // The listing shows the decoy's id AS the addressed url, so a caller who passes it back may
+  // mean the decoy. A write that went to the addressed record would patch or destroy an event the
   // caller never saw under that id, so the writes refuse and name the handle that reaches each.
   const assertAddressCollision = (realUrl: string, tool: string) => (err: Error) => {
     assert.equal(err.name, 'InvalidInputError', tool);
@@ -4271,7 +4269,7 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
 
-  // RFC 5545 §3.1: a lower-cased payload is read like any other, so its series is refused.
+  // RFC 5545 §3.1: names are case-insensitive.
   it('refuses a lower-cased repeating event as repeating', async () => {
     const lower = [
       'begin:vcalendar', 'version:2.0',
@@ -5859,7 +5857,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   });
 
   // A zoneless value with no timeZone is read in the configured zone, except on an event whose
-  // stored start is itself floating: keeping that floating keeps the event's own frame.
+  // stored start is itself floating.
   describe('a zoneless start/end with no timeZone and no stored TZID', () => {
     before(() => setDefaultTimezone('America/New_York'));
     after(() => setDefaultTimezone(undefined));
@@ -5910,7 +5908,6 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     assert.ok(timedData.includes('DTEND:20260320T080000Z'), timedData);
   });
 
-  // RFC 5545 §3.6.1: a DATE DTSTART takes only a dur-day or dur-week DURATION.
   it('accepts a start change on an event with neither DTEND nor DURATION', async () => {
     const { client, mockDAVClient } = mockClient(stored('bare@fm', 'DTSTART:20260410T090000Z'));
     await client.updateCalendarEvent('bare@fm', { start: '2026-04-11T09:00:00Z' });
@@ -12207,8 +12204,6 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
     ['carries no props at all', url => ({ href: url, status: 200, ok: true })],
     ['carries no calendar-data prop', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"' } })],
     ['carries a calendar-data prop that is not text', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: { nested: 'markup' } } } })],
-    // The payload arrived and holds no event to read a rule off: an empty `<C:calendar-data/>`,
-    // or a VCALENDAR with nothing in it.
     ['carries an empty calendar-data payload', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: '' } } })],
     ['carries a payload with no VEVENT in it', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR' } } })],
   ];
