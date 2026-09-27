@@ -607,11 +607,7 @@ two message-action pickers settle why (#133): the Labels picker offers the Inbox
 own labels and nothing else, while Archive, Trash, Spam, Drafts, Sent, Snoozed and Scheduled
 appear only under "Move to". So a role mailbox is a **folder** in Fastmail's model, with the Inbox
 as the sole exception, and the label tools reject one before writing anything, so what a rescue
-should do for a message in a role folder is a question that cannot arise. The removal tools read
-the messages' current filing alongside the mailbox list, before that check, so a failure to reach
-or read that response reaches the caller as a server error rather than the folder refusal. The one
-exception is a response whose `list` or `notFound` is not an array: that is checked after the
-folder check, so there the folder refusal wins. The test is the
+should do for a message in a role folder is a question that cannot arise. The test is the
 **role**, never a name list, so a user label someone called "Archive" is still a label and a role
 Fastmail adds later is a folder from the day it appears.
 
