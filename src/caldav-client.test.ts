@@ -1948,9 +1948,8 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
   });
 
-  // tsdav drops a fragment from the multiget href, and a server may answer a query with the
-  // resource's own href. The store below models both, so the url that comes back carries
-  // neither; an address is still an address when spelled with either.
+  // The store below models both (see addressComparisonKey), so the url that comes back carries
+  // neither a fragment nor a query; an address is still an address when spelled with either.
   for (const suffix of ['#frag', '?q=1']) {
     it(`counts a url spelled with "${suffix}" as addressing that record`, async () => {
       const realUrl = PERSONAL_URL + 'real.ics';
