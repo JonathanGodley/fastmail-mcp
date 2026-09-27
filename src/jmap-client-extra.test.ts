@@ -3962,7 +3962,7 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
       () => client.bulkRemoveLabels(['e1', 'typo'], ['Receipts']),
       (err: Error) => {
         assert.match(err.message, /notFound: typo/);
-        assert.match(err.message, /The 1 that succeeded WERE changed: this is a partial write/);
+        assert.match(err.message, /The 1 that succeeded were written: this is a partial write/);
         return true;
       },
     );

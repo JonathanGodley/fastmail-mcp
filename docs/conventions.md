@@ -627,7 +627,7 @@ Fastmail adds later is a folder from the day it appears.
 Three conditions are refused rather than written, all raised before the write, so a batch
 containing one of them changes nothing at all. An email id the server does not know is not among
 them: it is left out of the write, the rest of the batch is written, and the failure is reported
-afterwards alongside the count of messages that were changed.
+afterwards alongside the count of messages that were written.
 
 - some mailbox named for adding or removing is a folder rather than a label, per the namespace rule
   above. `add_labels`, `bulk_add_labels`, `remove_labels` and `bulk_remove_labels` share one
