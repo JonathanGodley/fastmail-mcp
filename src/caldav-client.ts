@@ -2,7 +2,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // Caller-fixable input must throw coerce.ts's tagged InvalidInputError, which the CallTool
 // boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
 // docs/conventions.md.
-import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 import { foldICalLine } from './ical-fold.js';
 // A calendar window interprets local dates in the same zone the rest of the server displays,
 // so it reads that stored value rather than re-deriving one from the environment.
@@ -1596,9 +1596,9 @@ function describeFrame(d: DatePropertyFrame): string {
     case 'zoned':
       // A `default` TZID (#157) was filled in by this server; do not word it as the caller's.
       if (d.tzidSource === 'default') {
-        return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}), applied because you named none`;
+        return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}), applied because you named none`;
       }
-      return `a date-time in time zone ${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}`;
+      return `a date-time in time zone ${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}`;
   }
 }
 
@@ -2998,11 +2998,28 @@ function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWrit
 
 function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   switch (info.kind) {
-    case 'zoned': return `zone ${info.zone}`;
+    case 'zoned': return `zone ${info.zone}${etcGmtOffsetNote(info.zone ?? '')}`;
     case 'utc': return 'UTC';
     case 'floating': return 'floating (no zone)';
     case 'allday': return 'all-day (no time component)';
   }
+}
+
+/**
+ * The trailing note a calendar read carries when an event's `timeZone`/`endTimeZone` is a signed
+ * Etc/GMT name, whose sign is the inverse of its offset (`etcGmtOffsetNote`). A note rather than
+ * a field, so both fields stay the zone name a caller can pass back.
+ */
+export function buildEtcGmtZoneNote(events: CalendarEvent[]): string {
+  const zones = new Set<string>();
+  for (const e of events) {
+    for (const zone of [e.timeZone, e.endTimeZone]) {
+      if (zone && etcGmtUtcOffset(zone)) zones.add(zone);
+    }
+  }
+  if (zones.size === 0) return '';
+  const offsets = [...zones].map(z => `${z} is UTC${etcGmtUtcOffset(z)}`);
+  return `\n\nNote: ${offsets.join(' and ')}; an Etc/GMT name carries the POSIX sign, the inverse of the offset.`;
 }
 
 // The sentence create_calendar_event appends, from the written result only (#157).

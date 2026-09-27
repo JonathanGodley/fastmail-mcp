@@ -34,6 +34,7 @@ import {
   CalDAVCalendarClient,
   describeCreateCalendarEventResult,
   describeUpdateCalendarEventResult,
+  buildEtcGmtZoneNote,
   unwrapDisplayName,
   BROKEN_COLLECTION_PATH_ECHO_LIMIT,
   CALENDAR_URL_ECHO_LIMIT,
@@ -7905,6 +7906,47 @@ describe('calendar write result classification, driven from real create/update c
       assert.equal(result.start, undefined);
       assert.equal(result.end, undefined);
     });
+  });
+});
+
+describe('an Etc/GMT zone is shown with its real UTC offset', () => {
+  it('create and update confirmations append the offset', () => {
+    assert.equal(
+      describeCreateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT+10' }, end: { kind: 'zoned', zone: 'Etc/GMT+10' } }),
+      ' Written in zone Etc/GMT+10 (UTC-10:00; the Etc/GMT sign is inverted).',
+    );
+    assert.equal(
+      describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT-5' } }),
+      ' (start zone Etc/GMT-5 (UTC+05:00; the Etc/GMT sign is inverted))',
+    );
+  });
+
+  it('a start/end refusal naming the zone appends the offset', async () => {
+    const data = [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:etc@fm',
+      'DTSTART;TZID=Etc/GMT+10:20260320T083000', 'DTEND;TZID=Etc/GMT+10:20260320T093000',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    await assert.rejects(
+      () => client.updateCalendarEvent('etc@fm', { end: '2026-03-20T20:00:00Z' }),
+      /is a date-time in time zone Etc\/GMT\+10 \(UTC-10:00; the Etc\/GMT sign is inverted\)/,
+    );
+  });
+
+  it('a read carries a trailing note for each Etc/GMT zone its events name, and none otherwise', () => {
+    assert.equal(
+      buildEtcGmtZoneNote([
+        { id: 'a', url: '', title: 'A', timeZone: 'Etc/GMT+10', endTimeZone: 'Etc/GMT-5' },
+        { id: 'b', url: '', title: 'B', timeZone: 'Etc/GMT+10' },
+      ]),
+      '\n\nNote: Etc/GMT+10 is UTC-10:00 and Etc/GMT-5 is UTC+05:00; an Etc/GMT name carries the POSIX sign, the inverse of the offset.',
+    );
+    assert.equal(buildEtcGmtZoneNote([{ id: 'c', url: '', title: 'C', timeZone: 'Australia/Sydney' }]), '');
   });
 });
 

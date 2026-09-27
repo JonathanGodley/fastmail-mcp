@@ -2038,6 +2038,16 @@ error text says "applied because you named none" for a `'default'` source instea
   match, is a shorthand rejection. The comparison against `"UTC"` is case-insensitive
   (`"utc"`/`"Utc"`/`"UTC"` all pass) - it is the rule's one deliberate exception, not an
   oversight the rule forgot to close.
+
+  **`Etc/GMT±N` is accepted, and shown with its real offset.** The offset-shaped denylist
+  (`GMT+10`, `UTC+10`, a leading sign or digit) must not reach these: they are real IANA
+  names, slash-qualified, already ICU-canonical, and the sign comes after the name rather than
+  at its start, so someone may use one on purpose. But their sign is POSIX, the inverse of the
+  offset: `Etc/GMT+10` is UTC-10:00. So wherever this server shows one - a write confirmation,
+  a start/end refusal (`describeFrame`), `describeTimezone`'s configured-zone text, and the tool
+  descriptions' configured zone - `etcGmtOffsetNote` (`src/coerce.ts`) appends the real offset.
+  A read's `timeZone`/`endTimeZone` stays the bare name, since a caller passes it back as
+  `timeZone`; `buildEtcGmtZoneNote` adds a trailing `Note:` line instead.
 - **`timeZone` on an update that touches neither `start` nor `end`** — `timeZone` alone has
   nothing to qualify (there is no designator-less value in the call at all), so this is rejected
   before any patching happens, naming the fix: re-send `start` and/or `end`.

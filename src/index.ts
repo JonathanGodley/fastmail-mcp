@@ -10,10 +10,10 @@ import {
 import { FastmailAuth, FastmailConfig } from './auth.js';
 import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
-import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
+import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
 import { composeDraftEmail } from './draft-email-handler.js';
@@ -374,13 +374,15 @@ function getTimezone(): string | undefined {
 // zone". Reads the environment directly, not `setDefaultTimezone`'s stored value: TOOLS is
 // built at module load, before runServer calls `setDefaultTimezone`. Resolved as runServer
 // resolves it; where that throws, runServer exits before any client reads a description, and
-// the fallback only keeps this module importable.
+// the fallback only keeps this module importable. Shown with its Etc/GMT offset, if any.
 const CONFIGURED_TIMEZONE = (() => {
+  let zone: string;
   try {
-    return resolveConfiguredTimezone(getTimezone()).zone;
+    zone = resolveConfiguredTimezone(getTimezone()).zone;
   } catch {
-    return resolveUsableTimezone(getTimezone());
+    zone = resolveUsableTimezone(getTimezone());
   }
+  return `${zone}${etcGmtOffsetNote(zone)}`;
 })();
 
 // Appended to every boolean whose handler runs coerceBool, alongside a schema type of
@@ -1430,7 +1432,7 @@ const TOOLS = [
               // rejection, which a validating client would otherwise pre-empt with a generic
               // schema-mismatch error.
               type: ['string', 'null'],
-              description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here — this server never creates a floating calendar time). A zoned start/end is always written with a VTIMEZONE definition per zone referenced (RFC 5545 §3.6.5), generated from the runtime's own timezone data. Generating that definition is bounded: an event spanning more than a century, an event starting before year 2 (and, depending on its time zone, one in the first days of year 2 too), or an event ending in year 10000 or later (UTC) — which, depending on its time zone, includes one ending late on 31 December 9999 — is rejected rather than accepted, with the thrown error stating the exact bound.`,
+              description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". An Etc/GMT name (e.g. "Etc/GMT+10") is accepted, but it carries the POSIX sign, the INVERSE of its offset: "Etc/GMT+10" is UTC-10:00, and "Etc/GMT-10" is UTC+10:00. The write confirmation states the real offset beside it. Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here — this server never creates a floating calendar time). A zoned start/end is always written with a VTIMEZONE definition per zone referenced (RFC 5545 §3.6.5), generated from the runtime's own timezone data. Generating that definition is bounded: an event spanning more than a century, an event starting before year 2 (and, depending on its time zone, one in the first days of year 2 too), or an event ending in year 10000 or later (UTC) — which, depending on its time zone, includes one ending late on 31 December 9999 — is rejected rather than accepted, with the thrown error stating the exact bound.`,
             },
             participants: participantsSchemaProperty(
               `Event participants (optional, at most ${MAX_ICAL_PARTICIPANTS}). Automatically adds ORGANIZER from CalDAV username.`,
@@ -1480,7 +1482,7 @@ const TOOLS = [
             timeZone: {
               // 'null' stays a valid schema type, as on create_calendar_event.
               type: ['string', 'null'],
-              description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace. A zoned start/end carries a VTIMEZONE definition per zone referenced (RFC 5545 §3.6.5), recomputed from the runtime\'s own timezone data whenever start or end changes; a call that changes neither leaves the stored block(s) exactly as they were. Recomputing it is bounded: a resulting span longer than a century, a start before year 2 (and, depending on its time zone, one in the first days of year 2 too), or an end in year 10000 or later (UTC) — which, depending on its time zone, includes one ending late on 31 December 9999 — is rejected rather than accepted, with the thrown error stating the exact bound.',
+              description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". An Etc/GMT name (e.g. "Etc/GMT+10") is accepted, but it carries the POSIX sign, the INVERSE of its offset: "Etc/GMT+10" is UTC-10:00, and "Etc/GMT-10" is UTC+10:00. The write confirmation states the real offset beside it. Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace. A zoned start/end carries a VTIMEZONE definition per zone referenced (RFC 5545 §3.6.5), recomputed from the runtime\'s own timezone data whenever start or end changes; a call that changes neither leaves the stored block(s) exactly as they were. Recomputing it is bounded: a resulting span longer than a century, a start before year 2 (and, depending on its time zone, one in the first days of year 2 too), or an end in year 10000 or later (UTC) — which, depending on its time zone, includes one ending late on 31 December 9999 — is rejected rather than accepted, with the thrown error stating the exact bound.',
             },
             participants: participantsSchemaProperty(
               `Replaces ALL existing attendees (at most ${MAX_ICAL_PARTICIPANTS}). Empty array removes all attendees. Omit to preserve existing attendees.`,
@@ -2144,7 +2146,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // The window note and the broken-collection note (#136) ride AFTER the JSON so it
         // stays parseable; each builder owns its wording and separator, and a call can need
         // both.
-        return { content: [{ type: 'text', text: `${formatQueryResult({ items: events, total })}${buildCalendarWindowNote(windowClamp)}${buildBrokenCollectionNote(brokenCollections, 'read')}` }] };
+        return { content: [{ type: 'text', text: `${formatQueryResult({ items: events, total })}${buildCalendarWindowNote(windowClamp)}${buildEtcGmtZoneNote(events)}${buildBrokenCollectionNote(brokenCollections, 'read')}` }] };
       }
 
       case 'get_calendar_event': {
@@ -2161,7 +2163,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // and a branch in this switch has no test harness (#101).
         const body = calendarEventBody(event, otherCopies);
         return {
-          content: [{ type: 'text', text: `${toolJson(body)}${buildAmbiguousEventNote(otherCopies, addressedByUrl)}${buildBrokenCollectionNote(brokenCollections, 'read')}` }],
+          content: [{ type: 'text', text: `${toolJson(body)}${buildAmbiguousEventNote(otherCopies, addressedByUrl)}${buildEtcGmtZoneNote([event])}${buildBrokenCollectionNote(brokenCollections, 'read')}` }],
         };
       }
 
