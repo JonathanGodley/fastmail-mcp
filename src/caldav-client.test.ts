@@ -11843,6 +11843,22 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
     assert.equal(events[0].isRecurring, undefined);
   });
 
+  it('reads a recurrence marker inside a VALARM as the alarm\'s, agreeing with get_calendar_event', async () => {
+    const alarm = ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT15M', 'RRULE:FREQ=WEEKLY',
+      'RDATE:20260401T090000Z', 'RECURRENCE-ID:20260325T090000Z', 'END:VALARM'];
+    const stored = master('a1@fm', '20260325T090000Z', ...alarm);
+    const url = CAL + 'alarm.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('a1@fm', ['BEGIN:VEVENT', 'UID:${UID}', 'DTSTART:20260325T090000Z',
+        'SUMMARY:Weekly standup', ...alarm, 'END:VEVENT'].join('\r\n')) }],
+      async () => [multiGetResponse(url, stored)],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, undefined, 'list_calendar_events');
+    assert.equal(parseCalendarObject({ data: stored, url }, { configuredZone: 'UTC' }).isRecurring, undefined,
+      'get_calendar_event');
+  });
+
   it('reports isRecurring for a master that lists its occurrences as RDATEs instead of stating a rule', async () => {
     const url = CAL + 'rdate.ics';
     const { client } = listingClient(

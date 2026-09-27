@@ -319,8 +319,8 @@ export function extractVEvent(data: string): string | null {
  * Fails CLOSED, since it fronts an irreversible write. Any of four markers is enough: an
  * RRULE; an RDATE (RFC 5545 §3.8.5.2, a series with no rule at all, #162); more than one
  * VEVENT block (one resource is one UID, so a second block is an override); or any
- * RECURRENCE-ID (a series whose master was removed). The last two match the read path's
- * `blockCountProvesSeries`, so the two halves agree on what a series is.
+ * RECURRENCE-ID (a series whose master was removed). The last two are what the read path's
+ * `blockCountProvesSeries` counts, so the two halves agree on what a series is.
  *
  * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. The reads
  * are position-aware (`ownPropertyLines`) and ignore it, so such an event reads as one-off
@@ -1026,12 +1026,40 @@ function hasRecurrenceId(block: string): boolean {
 }
 
 /**
+ * `hasICalProperty` over the block's own lines only (`ownPropertyLines`): a property inside a
+ * nested VALARM is the alarm's.
+ */
+function hasOwnICalProperty(block: string, key: string): boolean {
+  const test = new RegExp(`^${key}[;:]`, 'i');
+  const lines = icalContentLines(block).map(l => l.text);
+  const own = ownPropertyLines(lines);
+  for (let i = 0; i < lines.length; i++) {
+    if (!own[i]) continue;
+    let full = lines[i];
+    for (let j = i + 1; j < lines.length && isFoldedContinuation(lines[j]); j++) full += lines[j].slice(1);
+    if (test.test(full)) return true;
+  }
+  return false;
+}
+
+/**
  * Whether an EXPANDED blob's block list proves the resource is a repeating series. A `false`
  * means "ask", not "one-off": a lone unmarked block may be a series' only in-window instance,
- * which `settleAmbiguousRecurrence` resolves.
+ * which `settleAmbiguousRecurrence` resolves. Position-aware, as the reads are.
  */
 function blockCountProvesSeries(blocks: string[]): boolean {
-  return blocks.length > 1 || blocks.some(hasRecurrenceId);
+  return blocks.length > 1 || blocks.some(b => hasOwnICalProperty(b, 'RECURRENCE-ID'));
+}
+
+/**
+ * Whether a stored resource reads as a repeating series: `isRecurringSeriesResource`, but
+ * position-aware, so the listing and get_calendar_event agree on an event whose only marker
+ * sits in a VALARM.
+ */
+function readsAsRecurringSeries(icalData: string): boolean {
+  const blocks = extractVEventBlocks(icalData);
+  return blockCountProvesSeries(blocks)
+    || blocks.some(b => hasOwnICalProperty(b, 'RRULE') || hasOwnICalProperty(b, 'RDATE'));
 }
 
 /**
@@ -2430,11 +2458,11 @@ async function settleAmbiguousRecurrence(
     if (!entry) continue;
     const ical = readCalendarData(res);
     if (ical === undefined) continue;
-    // No readable VEVENT (an empty payload or VCALENDAR) has not answered: `isRecurringSeriesResource`
+    // No readable VEVENT (an empty payload or VCALENDAR) has not answered: `readsAsRecurringSeries`
     // would return false, a positive "does not repeat".
     if (extractVEventBlocks(ical).length === 0) continue;
     answered.add(url);
-    if (isRecurringSeriesResource(ical)) for (const row of entry.rows) row.isRecurring = true;
+    if (readsAsRecurringSeries(ical)) for (const row of entry.rows) row.isRecurring = true;
   }
 
   if (answered.size < undecided.size) {
