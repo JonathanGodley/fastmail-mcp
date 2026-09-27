@@ -90,8 +90,8 @@ function renderCard(card: any, raw: boolean, verbose: boolean): any {
  * the server-assigned id, uid and prodId.
  */
 export async function createContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
-  const raw = coerceBool(args?.raw) ?? false;
-  const verbose = coerceBool(args?.verbose) ?? false;
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
 
   const id = await client.createContact({
     name: coerceContactName(args?.name),
@@ -122,8 +122,8 @@ export async function createContactTool(args: any, client: ContactsWriteClient):
 
 /** update_contact. Returns `{contact, previousCard}` in every mode. */
 export async function updateContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
-  const raw = coerceBool(args?.raw) ?? false;
-  const verbose = coerceBool(args?.verbose) ?? false;
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
   const contactId = requireContactId(args);
 
   const result = await client.updateContact(contactId, {
@@ -134,7 +134,7 @@ export async function updateContactTool(args: any, client: ContactsWriteClient):
     notes: coerceContactNotes(args?.notes, `to remove the note pass clearFields:['notes'].`),
     // Strict: an ignored clearFields would report a clear that never happened.
     clearFields: coerceStringArrayStrict(args?.clearFields, 'clearFields'),
-    allowEntryReplace: coerceBool(args?.allowEntryReplace) ?? false,
+    allowEntryReplace: coerceBool(args?.allowEntryReplace, 'allowEntryReplace') ?? false,
   });
 
   const envelope: Record<string, any> = {};

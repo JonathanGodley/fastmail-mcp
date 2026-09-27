@@ -251,11 +251,27 @@ export function assertKnownParams(
   );
 }
 
-export function coerceBool(value: unknown): boolean | undefined {
+// A boolean parameter: true, "true" in any case, 1 or "1" read as true; false, "false", 0 or
+// "0" as false; null/undefined as absent. Anything else is REFUSED naming the parameter: read
+// as absent it would silently drop a filter (`isUnread:"yes"`) or keep the default the caller
+// was trying to change (`includeTrash:"1"`).
+export function coerceBool(value: unknown, paramName: string): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
   if (typeof value === 'boolean') return value;
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  return undefined;
+  if (value === 1) return true;
+  if (value === 0) return false;
+  if (typeof value === 'string') {
+    const word = value.trim().toLowerCase();
+    if (word === 'true' || word === '1') return true;
+    if (word === 'false' || word === '0') return false;
+  }
+  const received = typeof value === 'string'
+    ? `"${describeUntrusted(value)}"`
+    : typeof value === 'number' ? String(value)
+    : Array.isArray(value) ? 'an array' : `a ${typeof value}`;
+  throw new InvalidInputError(
+    `${paramName} must be true or false ("true"/"false" in any case, or 1/0, are also accepted); received ${received}.`,
+  );
 }
 
 // JMAP filter conditions take a UTCDate (RFC 8620 §1.4): an RFC 3339 date-time whose

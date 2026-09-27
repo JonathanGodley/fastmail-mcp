@@ -72,9 +72,18 @@ describe('editDraft — coercion and delegation', () => {
     assert.deepEqual(calls.update.updates.to, ['a@b.example', 'c@d.example']);
   });
 
-  it('never reads a stringified expandSignature as true unless it says true', async () => {
+  it('refuses an unreadable expandSignature rather than guessing, and writes nothing', async () => {
     const { client, calls } = spyClient();
-    await editDraft({ emailId: 'd1', subject: 'Hi', expandSignature: 'garbage' }, client, undefined, false);
+    await assert.rejects(
+      () => editDraft({ emailId: 'd1', subject: 'Hi', expandSignature: 'garbage' }, client, undefined, false),
+      /expandSignature must be true or false/,
+    );
+    assert.equal(calls.update, undefined);
+  });
+
+  it('reads a stringified "false" expandSignature as false', async () => {
+    const { client, calls } = spyClient();
+    await editDraft({ emailId: 'd1', subject: 'Hi', expandSignature: 'FALSE' }, client, undefined, false);
     assert.equal(calls.update.updates.expandSignature, false);
   });
 

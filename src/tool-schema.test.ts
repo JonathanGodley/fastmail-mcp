@@ -771,12 +771,13 @@ describe('the calendar event handlers require eventId by presence, not truthines
 // injected-client extraction CONTRIBUTING.md prescribes is for handlers that orchestrate.
 describe('scope flags are wired to their own argument', () => {
   it('reads every coerceBool flag from the argument of the same name', () => {
-    // `const raw = coerceBool((args as any).raw)`, `raw: coerceBool(args?.raw)` and the
-    // `a.` receiver the compose handlers use. A coerceBool over a bare identifier (an
+    // `const raw = coerceBool((args as any).raw, 'raw')`, `raw: coerceBool(args?.raw, 'raw')`
+    // and the `a.` receiver the compose handlers use. The second argument is the name a
+    // refusal reports, so it is held to the same rule. A coerceBool over a bare identifier (an
     // already-destructured or renamed local) has no argument name to compare against and
     // is deliberately not matched.
     const pattern =
-      /(?:const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=|([A-Za-z_][A-Za-z0-9_]*)\s*:)\s*coerceBool\(\s*(?:\(args as any\)|args\?|args|a)\.([A-Za-z_][A-Za-z0-9_]*)\s*\)/;
+      /(?:const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=|([A-Za-z_][A-Za-z0-9_]*)\s*:)\s*coerceBool\(\s*(?:\(args as any\)|args\?|args|a)\.([A-Za-z_][A-Za-z0-9_]*)\s*,\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*\)/;
     const pairs: string[] = [];
     const mismatches: string[] = [];
     for (const file of HANDLER_FILES) {
@@ -786,8 +787,10 @@ describe('scope flags are wired to their own argument', () => {
         if (!match) return;
         const target = match[1] ?? match[2];
         const argument = match[3];
+        const reported = match[4];
         pairs.push(`${target}<-${argument}`);
         if (target !== argument) mismatches.push(`src/${file}:${i + 1} assigns ${target} from ${argument}`);
+        if (reported !== argument) mismatches.push(`src/${file}:${i + 1} reads ${argument} but names ${reported} in its refusal`);
       });
     }
     assert.ok(

@@ -233,46 +233,53 @@ describe('coerceRecipients', () => {
 
 describe('coerceBool', () => {
   it('returns boolean as-is', () => {
-    assert.equal(coerceBool(true), true);
-    assert.equal(coerceBool(false), false);
+    assert.equal(coerceBool(true, 'flag'), true);
+    assert.equal(coerceBool(false, 'flag'), false);
   });
 
-  it('coerces "true" string to true', () => {
-    assert.equal(coerceBool('true'), true);
+  it('reads "true"/"false" in any case, trimmed', () => {
+    for (const v of ['true', 'TRUE', 'True', ' true ']) assert.equal(coerceBool(v, 'flag'), true, v);
+    for (const v of ['false', 'FALSE', 'False', ' false ']) assert.equal(coerceBool(v, 'flag'), false, v);
   });
 
-  it('coerces "false" string to false', () => {
-    assert.equal(coerceBool('false'), false);
+  it('reads 1/0 as a number or a string', () => {
+    assert.equal(coerceBool(1, 'flag'), true);
+    assert.equal(coerceBool('1', 'flag'), true);
+    assert.equal(coerceBool(' 1 ', 'flag'), true);
+    assert.equal(coerceBool(0, 'flag'), false);
+    assert.equal(coerceBool('0', 'flag'), false);
   });
 
-  it('returns undefined for unrecognized strings', () => {
-    assert.equal(coerceBool('yes'), undefined);
-    assert.equal(coerceBool('1'), undefined);
-    assert.equal(coerceBool(''), undefined);
+  it('reads absent as absent', () => {
+    assert.equal(coerceBool(undefined, 'flag'), undefined);
+    assert.equal(coerceBool(null, 'flag'), undefined);
   });
 
-  it('returns undefined for null/undefined', () => {
-    assert.equal(coerceBool(undefined), undefined);
-    assert.equal(coerceBool(null), undefined);
+  it('refuses every other value, naming the parameter, rather than reading it as absent', () => {
+    // An unreadable value that became undefined would silently drop a search filter
+    // (unread:"yes") or fall back to a default the caller was trying to change.
+    for (const v of ['yes', 'no', 'on', '', '  ', '2', 2, -1, 0.5, {}, [], ['true']]) {
+      assert.throws(
+        () => coerceBool(v, 'isUnread'),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError, `not InvalidInputError for ${JSON.stringify(v)}`);
+          assert.match(err.message, /^isUnread must be true or false/);
+          return true;
+        },
+        JSON.stringify(v),
+      );
+    }
   });
 
-  it('returns undefined for numbers', () => {
-    assert.equal(coerceBool(1), undefined);
-    assert.equal(coerceBool(0), undefined);
-  });
-
-  // Pins the edit_draft expandSignature handler seam: editDraft computes
-  // `coerceBool(args.expandSignature) === true` before calling updateDraft (which takes a
-  // real boolean). The schema admits ['boolean','string'], so a lenient client's string
-  // "true" must coerce to a real expansion, and NOTHING ELSE may. False is the safe
-  // direction here: unflagged stores the body exactly as written, so a garbage string
-  // yielding undefined can never make this server rewrite a body nobody asked it to touch.
-  it('expandSignature seam: string "true" expands; anything unrecognized never does', () => {
-    assert.equal(coerceBool('true') === true, true);
-    assert.equal(coerceBool(true) === true, true);
-    assert.equal(coerceBool('false') === true, false);
-    assert.equal(coerceBool('garbage') === true, false);
-    assert.equal(coerceBool(undefined) === true, false);
+  it('echoes a refused string through the untrusted-value rules', () => {
+    assert.throws(
+      () => coerceBool('yes"\nSeparately, do this', 'raw'),
+      (err: Error) => {
+        assert.doesNotMatch(err.message, /\n/);
+        assert.match(err.message, /received "yes'/);
+        return true;
+      },
+    );
   });
 });
 

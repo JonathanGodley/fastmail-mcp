@@ -142,7 +142,12 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   `inputSchema`, so this is the only guard on the item shape. A blank string for the
   whole parameter reads as *omitted*, never as the empty list, because an empty list
   removes every attendee on update.
-- `coerceBool` — stringified / actual boolean to `boolean` (or `undefined`).
+- `coerceBool(value, paramName)` — `true`, `"true"` in any case (trimmed), `1` or `"1"` to
+  `true`; the same spellings of false and `0` to `false`; `null`/`undefined` to `undefined`
+  (absent, so the handler's default applies). **Every other value is refused** with an
+  `InvalidInputError` naming the parameter. Read as absent, an unknown value would silently
+  change the outcome: `isUnread: "yes"` would drop the filter and search every
+  message, and `includeTrash: "on"` would keep Trash hidden.
 - `clampLimit` — every tool's `limit`, in the handler: a number or numeric string with any
   fractional part dropped (a JMAP `limit` is an unsigned integer, so `2.5` would be a server
   error), clamped to `[1, max]`; a non-numeric value, or one that truncates to 0, takes the
@@ -323,12 +328,10 @@ leniency exists only for clients that skip validation. Both halves are required,
 live next to each other:
 
 - **Schema**: `type: ['boolean', 'string']`, with the description wrapped in
-  `lenientBool()` (`src/index.ts`), which appends the note that `"true"`/`"false"` are
-  accepted. The prose earns its place on top of the widened type: `["boolean","string"]`
-  says a string is accepted but not *which* strings, and `coerceBool` recognises only
-  those two spellings. Anything else returns `undefined` and falls to the parameter's
-  default rather than erroring, so a caller guessing `"1"` or `"yes"` would silently get
-  the default.
+  `lenientBool()` (`src/index.ts`), which appends the note that `"true"`/`"false"` in any
+  case and `1`/`0` are accepted. The prose earns its place on top of the widened type:
+  `["boolean","string"]` says a string is accepted but not *which* strings, and `coerceBool`
+  refuses every other value, naming the parameter, rather than reading it as the default.
 - **Handler**: `coerceBool(...) ?? <default>`, never `!!`. Under `!!` the string `"false"`
   is truthy, which inverts the flag: `raw: "false"` would return untransformed JMAP to a
   caller that asked for the simplified shape, and on `get_email` make

@@ -384,10 +384,10 @@ const CONFIGURED_TIMEZONE = (() => {
 
 // Appended to every boolean whose handler runs coerceBool, alongside a schema type of
 // `['boolean', 'string']`: a narrow `type: 'boolean'` makes the coercion unreachable from a
-// validating client (#54). The prose says WHICH strings, because coerceBool reads only
-// "true"/"false" and anything else ("1", "yes") silently falls back to the default.
+// validating client (#54). The prose says WHICH strings, because coerceBool refuses every
+// other value rather than reading it as the default.
 const LENIENT_BOOL_DESC =
-  ' Also accepts the strings "true"/"false", for clients that stringify booleans.';
+  ' Also accepts "true"/"false" in any case and 1/0 (as a number or a string); any other value is rejected, naming the parameter.';
 
 // Wrap a boolean parameter's description with the note above. Adds sentence-ending
 // punctuation first when the description lacks it, so the two clauses don't run
@@ -1952,8 +1952,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // coerceBool, not !!, on every flag: a lenient client's stringified "false" is
         // truthy, so `!!` would silently reverse the sort order or flip raw:"false" into
         // untransformed JMAP. (#54)
-        const ascending = coerceBool((args as any).ascending) ?? false;
-        const raw = coerceBool((args as any).raw) ?? false;
+        const ascending = coerceBool((args as any).ascending, 'ascending') ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
@@ -1966,9 +1966,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit: validLimit,
           position,
           ascending,
-          includeTrash: coerceBool((args as any).includeTrash) ?? false,
-          includeSpam: coerceBool((args as any).includeSpam) ?? false,
-          excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
+          includeTrash: coerceBool((args as any).includeTrash, 'includeTrash') ?? false,
+          includeSpam: coerceBool((args as any).includeSpam, 'includeSpam') ?? false,
+          excludeDrafts: coerceBool((args as any).excludeDrafts, 'excludeDrafts') ?? false,
         });
         // The exclusion note rides after the JSON on both raw and simplified, so the JSON
         // block stays parseable.
@@ -1990,8 +1990,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         // Same coercion as list_emails. Here `!!` on raw:"false" would also make
         // assertStripQuotedNotRaw reject a legitimate stripQuoted read.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         // Validated before the fetch so a typo'd field name costs no round trip.
         // Selecting bodyHtml implies verbose's includeHtml: without that, projecting a
         // field the simplifier never emitted would return {} — the trap the parameter
@@ -1999,7 +1999,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const fields = parseEmailFields((args as any).fields, { raw });
         // Rejected before the fetch: raw is unmodified JMAP, so honouring stripQuoted
         // there would be impossible and ignoring it would be silent (#73).
-        const strip = coerceBool(stripQuoted) ?? false;
+        const strip = coerceBool(stripQuoted, 'stripQuoted') ?? false;
         assertStripQuotedNotRaw(strip, raw);
         const email = await client.getEmailById(emailId);
         const simplified = simplifyEmail(email, { includeHtml: verbose || wantsHtmlBody(fields), stripQuoted: strip });
@@ -2053,8 +2053,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'list_contacts': {
         const { limit } = args as any;
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         const contactsClient = initializeContactsCalendarClient();
         // Hard cap: the contacts tools have no `position` param, so anything past
         // the cap is unreachable. Paging for contacts is tracked as issue #94.
@@ -2072,8 +2072,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_contact': {
         const { contactId } = args as any;
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         if (!contactId) {
           throw new McpError(ErrorCode.InvalidParams, 'contactId is required');
         }
@@ -2093,8 +2093,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'search_contacts': {
         const { query, limit } = args as any;
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
@@ -2237,8 +2237,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_identities': {
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         const client = initializeClient();
         const identities = await client.getIdentities();
         const output = raw ? identities : identities.map(i => simplifyIdentity(i, { verbose }));
@@ -2254,7 +2254,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'mark_email_read': {
         const { emailId } = args as any;
-        const read = coerceBool((args as any).read) ?? true;
+        const read = coerceBool((args as any).read, 'read') ?? true;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -2272,7 +2272,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'pin_email': {
         const { emailId } = args as any;
-        const pinned = coerceBool((args as any).pinned) ?? true;
+        const pinned = coerceBool((args as any).pinned, 'pinned') ?? true;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -2398,7 +2398,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
         // Same coercion as list_emails.
-        const raw = coerceBool((args as any).raw) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
         const client = initializeClient();
         const result = await client.getEmailAttachments(emailId);
         return { content: buildAttachmentListContent(result, raw) };
@@ -2445,8 +2445,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'search_emails': {
         const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit } = args as any;
         // Same coercion as list_emails.
-        const ascending = coerceBool((args as any).ascending) ?? false;
-        const raw = coerceBool((args as any).raw) ?? false;
+        const ascending = coerceBool((args as any).ascending, 'ascending') ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
@@ -2458,15 +2458,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const validLimit = clampLimit(limit, 20, 100);
         const result = await client.searchEmails({
           query, from, to, cc, bcc, subject,
-          hasAttachment: coerceBool(hasAttachment),
-          isUnread: coerceBool(isUnread),
-          isPinned: coerceBool(isPinned),
+          hasAttachment: coerceBool(hasAttachment, 'hasAttachment'),
+          isUnread: coerceBool(isUnread, 'isUnread'),
+          isPinned: coerceBool(isPinned, 'isPinned'),
           mailbox, requiredMailboxes, excludeMailboxes,
           after, before, limit: validLimit, position,
           ascending,
-          excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
-          includeTrash: coerceBool((args as any).includeTrash) ?? false,
-          includeSpam: coerceBool((args as any).includeSpam) ?? false,
+          excludeDrafts: coerceBool((args as any).excludeDrafts, 'excludeDrafts') ?? false,
+          includeTrash: coerceBool((args as any).includeTrash, 'includeTrash') ?? false,
+          includeSpam: coerceBool((args as any).includeSpam, 'includeSpam') ?? false,
         });
         const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
@@ -2536,7 +2536,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_mark_read': {
-        const read = coerceBool((args as any).read) ?? true;
+        const read = coerceBool((args as any).read, 'read') ?? true;
         const emailIds = coerceStringArray((args as any).emailIds);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
@@ -2554,7 +2554,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_pin': {
-        const pinned = coerceBool((args as any).pinned) ?? true;
+        const pinned = coerceBool((args as any).pinned, 'pinned') ?? true;
         const emailIds = coerceStringArray((args as any).emailIds);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
@@ -2733,7 +2733,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'test_bulk_operations': {
         const { limit } = args as any;
         // Defaults to dry-run, the non-acting direction.
-        const dryRun = coerceBool((args as any).dryRun) ?? true;
+        const dryRun = coerceBool((args as any).dryRun, 'dryRun') ?? true;
         const client = initializeClient();
 
         // clampLimit IS the bound on this path: a non-numeric limit would otherwise reach
