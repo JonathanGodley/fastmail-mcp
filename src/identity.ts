@@ -2,12 +2,9 @@ import { isBlank } from './body-format.js';
 
 // Which identity a message sends as, and what sign-off that identity carries (#33).
 //
-// Lives in its own module because two callers need the same answer from opposite sides of
-// the client boundary: JmapClient resolves the identity itself (it is about to write `from`),
-// while the compose handlers resolve it through the injected client so the signature can be
-// handed to the PURE body builders as a plain string. Sharing the selection rule is the
-// point — a signature attached under a different rule than the one that picks `from` would
-// sign a message with someone else's sign-off.
+// Shared by JmapClient (which writes `from`) and the compose handlers (which hand the
+// signature to the pure body builders), because a signature picked under a different rule
+// than the one that picks `from` would sign a message with someone else's sign-off.
 
 /** Match an email address against an identity, supporting wildcard identities (e.g. *@example.com). */
 export function matchesIdentity(identityEmail: string, address: string): boolean {
@@ -63,12 +60,9 @@ export interface ResolvedSignature {
 }
 
 /**
- * Read the sign-off off one identity. Undefined when it has none configured — an identity
- * with a blank signature is signature-less. A caller who placed `{{signature}}` then gets
- * nothing in its place AND is told so: undefined here becomes the `no-signature` cause on
- * the block `signatureBlock` returns (src/reply-quote.ts), which both `draft_email` and
- * `edit_draft` report against the token the caller wrote — one sentence, because in both
- * tools the caller placed the token itself.
+ * Read the sign-off off one identity. Undefined when it has none configured (a blank
+ * signature counts as none); `signatureBlock` in src/reply-quote.ts turns that into its
+ * `no-signature` cause.
  */
 export function signatureOf(identity: any): ResolvedSignature | undefined {
   const html = typeof identity?.htmlSignature === 'string' && !isBlank(identity.htmlSignature)
@@ -79,9 +73,6 @@ export function signatureOf(identity: any): ResolvedSignature | undefined {
   return { ...(html !== undefined && { html }), ...(text !== undefined && { text }) };
 }
 
-// There is deliberately no `resolveSignature(identities, from)` convenience wrapper here.
-// Every caller needs the identity OBJECT as well as its sign-off — the note that reports an
-// empty expansion names the address the message sends as — so draft_email's handler calls
-// selectIdentity and signatureOf separately, and updateDraft's edit path resolves its
-// identity with matchesIdentity before reading the sign-off off it. A wrapper that returned
-// only the signature was used by nothing but its own tests.
+// Deliberately no `resolveSignature(identities, from)` wrapper: every caller needs the
+// identity object as well as its sign-off, because the note that reports an empty expansion
+// names the address the message sends as.

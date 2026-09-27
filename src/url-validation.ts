@@ -1,5 +1,3 @@
-// Validates URLs that will receive the bearer token. Restricts to approved
-// Fastmail origins by default, with an explicit opt-out for self-hosted JMAP.
 import { describeUntrusted } from './coerce.js';
 
 // Fastmail's session discovery hands back region-pinned endpoints, so the
@@ -23,20 +21,9 @@ function isAllowedFastmailHost(hostname: string): boolean {
 }
 
 /**
- * Validate that a URL is acceptable for sending the bearer token to.
- *
- * Default policy:
- *   - Must be HTTPS.
- *   - Hostname must match FASTMAIL_ALLOWED_HOST_PATTERNS: Fastmail's API and
- *     user-content hosts, with or without a regional prefix.
- *
- * When `allowUnsafe=true` (e.g. user opted in via FASTMAIL_ALLOW_UNSAFE_BASE_URL
- * for a self-hosted JMAP server):
- *   - Must still be HTTPS (plain HTTP is never allowed; the token would be sent
- *     in cleartext).
- *   - Any hostname is accepted.
- *
- * Throws on rejection; returns the parsed URL on success.
+ * Validate that a URL is acceptable for sending the bearer token to. HTTPS always;
+ * `allowUnsafe` (FASTMAIL_ALLOW_UNSAFE_BASE_URL, for self-hosted JMAP) lifts only the host
+ * allowlist. Throws on rejection; returns the parsed URL on success.
  */
 export function validateFastmailUrl(input: string, fieldName: string, allowUnsafe = false): URL {
   let parsed: URL;
@@ -52,10 +39,8 @@ export function validateFastmailUrl(input: string, fieldName: string, allowUnsaf
     );
   }
   if (!allowUnsafe && !isAllowedFastmailHost(parsed.hostname)) {
-    // The hostname is not this server's own text: it is parsed either from FASTMAIL_BASE_URL or
-    // from the endpoints the JMAP session response hands back, and the URL parser does not treat
-    // an apostrophe as a forbidden host code point. So it is echoed like every other value of
-    // that kind, inside the double quotes the neutralisation protects (docs/conventions.md).
+    // The hostname comes from FASTMAIL_BASE_URL or the session response, and the URL parser
+    // admits an apostrophe in a host, so it is echoed as untrusted (docs/conventions.md).
     throw new Error(
       `${fieldName} host "${describeUntrusted(parsed.hostname)}" is not in the Fastmail allowlist ` +
       `(api.fastmail.com and www.fastmailusercontent.com, each with an optional ` +
