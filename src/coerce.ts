@@ -99,6 +99,19 @@ export function describeUntrusted(value: unknown): string {
   return describeUntrustedAt(value, DESCRIBE_PART_MAX);
 }
 
+// How many items a refusal lists before it counts the rest.
+const LIST_ECHO_CAP = 30;
+
+/**
+ * Join a capped list and SAY when it was capped: a truncated list with no tail reads as a
+ * complete one. The items arrive already rendered (quoted, described); this only bounds them.
+ */
+export function joinCapped(items: string[], separator = ', '): string {
+  const shown = items.slice(0, LIST_ECHO_CAP);
+  const listed = shown.join(separator);
+  return items.length > shown.length ? `${listed}${separator}…and ${items.length - shown.length} more` : listed;
+}
+
 /**
  * `describeUntrusted` at a bound named by the caller, for a value the 64-code-point default
  * renders useless — the same two steps in the same order, at a width that value can survive.
@@ -223,11 +236,105 @@ export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unkno
   to?: string[]; cc?: string[]; bcc?: string[]; replyTo?: string[];
 } {
   return {
-    to: coerceStringArrayStrict(args.to, 'to'),
-    cc: coerceStringArrayStrict(args.cc, 'cc'),
-    bcc: coerceStringArrayStrict(args.bcc, 'bcc'),
-    replyTo: coerceStringArrayStrict(args.replyTo, 'replyTo'),
+    to: coerceRecipientList(args.to, 'to'),
+    cc: coerceRecipientList(args.cc, 'cc'),
+    bcc: coerceRecipientList(args.bcc, 'bcc'),
+    replyTo: coerceRecipientList(args.replyTo, 'replyTo'),
   };
+}
+
+// The comma form of a recipient list splits only on a comma outside "…" and <…>, since a
+// display name may carry one ("Smith, John" <john@example.com>). An unquoted name's comma
+// still splits, so a piece that names no address is REFUSED rather than sent to: that is
+// what "Smith, John <john@example.com>" becomes, and "Smith" is not a recipient. A quote or
+// "<" left open swallows every comma after it, and parseAddress reads only up to the last
+// ">", so both would drop recipients unseen: each is refused too.
+function coerceRecipientList(value: unknown, paramName: string): string[] | undefined {
+  if (typeof value !== 'string' || isJsonArrayString(value)) {
+    const entries = coerceStringArrayStrict(value, paramName);
+    entries?.forEach((entry, i) => refuseTextAfterAngle(entry, `${paramName}[${i}]`));
+    return entries;
+  }
+  const pieces = splitRecipientList(value.trim(), paramName).map((p) => p.trim()).filter(Boolean);
+  for (const piece of pieces) {
+    refuseTextAfterAngle(piece, paramName);
+    if (!SINGLE_ADDR_SPEC.test(parseAddress(piece).email)) {
+      throw new InvalidInputError(
+        `${paramName} "${describeUntrusted(piece)}" names no email address. A comma separates ` +
+        'recipients unless it is inside double quotes or <…>, so quote a display name that ' +
+        'carries one ("Smith, John" <john@example.com>), or pass an array.',
+      );
+    }
+  }
+  return pieces;
+}
+
+// One "@" with something either side, and nothing that would make the address half several
+// addresses or a malformed angle-addr.
+const SINGLE_ADDR_SPEC = /^[^@\s<>;,]+@[^@\s<>;,]+$/;
+
+function isJsonArrayString(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!(trimmed.startsWith('[') && trimmed.endsWith(']'))) return false;
+  try {
+    return Array.isArray(JSON.parse(trimmed));
+  } catch {
+    return false;
+  }
+}
+
+function refuseTextAfterAngle(entry: string, label: string): void {
+  const trimmed = entry.trim();
+  const close = trimmed.lastIndexOf('>');
+  if (close !== -1 && trimmed.lastIndexOf('<') < close && close < trimmed.length - 1) {
+    throw new InvalidInputError(
+      `${label} "${describeUntrusted(trimmed)}" has text after its closing ">", which would be ` +
+      'dropped. Give each recipient its own entry (or separate them with a comma).',
+    );
+  }
+}
+
+function splitRecipientList(text: string, paramName: string): string[] {
+  const pieces: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let inAngle = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes && ch === '\\' && i + 1 < text.length) {
+      current += ch + text[++i];
+      continue;
+    }
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (!inQuotes && ch === '<') inAngle = true;
+    else if (!inQuotes && ch === '>') inAngle = false;
+    else if (ch === ',' && !inQuotes && !inAngle) {
+      pieces.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (inQuotes || inAngle) {
+    throw new InvalidInputError(
+      `${paramName} has an unclosed ${inQuotes ? 'double quote' : '"<"'}, so the recipients after it ` +
+      'cannot be told apart and none were read. Close it, or pass an array.',
+    );
+  }
+  pieces.push(current);
+  return pieces;
+}
+
+// How many caller keys an unknown-key refusal names; the rest are counted, so a call carrying
+// thousands of keys cannot become the message.
+const UNKNOWN_KEYS_ECHO_CAP = 10;
+
+/** Caller-supplied keys as quoted, neutralised spans, capped at UNKNOWN_KEYS_ECHO_CAP. */
+function quoteCallerKeys(keys: string[]): string {
+  const shown = keys.slice(0, UNKNOWN_KEYS_ECHO_CAP).map((k) => `"${describeUntrusted(k)}"`).join(', ');
+  const rest = keys.length - UNKNOWN_KEYS_ECHO_CAP;
+  return rest > 0 ? `${shown}, …and ${rest} more` : shown;
 }
 
 // Hard-reject any argument key the tool didn't declare in its inputSchema, so a
@@ -247,7 +354,7 @@ export function assertKnownParams(
   if (unknown.length === 0) return;
   throw new McpError(
     ErrorCode.InvalidParams,
-    `Unknown parameter(s): ${unknown.join(', ')}. Valid: ${[...allowedKeys].join(', ')}`,
+    `Unknown parameter(s): ${quoteCallerKeys(unknown)}. Valid: ${[...allowedKeys].join(', ')}`,
   );
 }
 
@@ -985,7 +1092,7 @@ export function validateClearFields(clearFields: string[] | undefined, allowed: 
   if (!clearFields || clearFields.length === 0) return;
   for (const field of clearFields) {
     if (!allowed.has(field)) {
-      throw new InvalidInputError(`Cannot clear "${field}"; clearable fields are: ${[...allowed].join(', ')}`);
+      throw new InvalidInputError(`Cannot clear "${describeUntrusted(field)}"; clearable fields are: ${[...allowed].join(', ')}`);
     }
     if (provided.has(field)) {
       throw new InvalidInputError(`cannot both set and clear ${field}; pass it as a value or in clearFields, not both`);
@@ -1003,7 +1110,8 @@ export function parseAddress(input: string): { name?: string; email: string } {
     const email = trimmed.slice(open + 1, close).trim();
     let name = trimmed.slice(0, open).trim();
     if (name.length >= 2 && name.startsWith('"') && name.endsWith('"')) {
-      name = name.slice(1, -1).trim();
+      // A quoted-string's `\x` is an escaped x (RFC 5322 quoted-pair).
+      name = name.slice(1, -1).replace(/\\(.)/g, '$1').trim();
     }
     return name ? { name, email } : { email };
   }
@@ -1354,7 +1462,7 @@ function coerceContactEntries<T extends Record<string, any>>(
     const unknownKeys = Object.keys(obj).filter((k) => !keys.has(k));
     if (unknownKeys.length > 0) {
       throw new InvalidInputError(
-        `${paramName}[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...keys].join(', ')}`,
+        `${paramName}[${i}] has unknown key(s): ${quoteCallerKeys(unknownKeys)}. Valid: ${[...keys].join(', ')}`,
       );
     }
     if (typeof obj[keyField] !== 'string') {
@@ -1371,7 +1479,7 @@ function coerceContactEntries<T extends Record<string, any>>(
     const firstAt = seen.get(primary);
     if (firstAt !== undefined) {
       throw new InvalidInputError(
-        `${paramName}[${i}] repeats the ${keyField} already given at ${paramName}[${firstAt}]: "${primary}". ` +
+        `${paramName}[${i}] repeats the ${keyField} already given at ${paramName}[${firstAt}]: "${describeUntrusted(primary)}". ` +
           `List each ${keyField} once.`,
       );
     }

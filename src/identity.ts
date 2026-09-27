@@ -6,6 +6,11 @@ import { isBlank } from './body-format.js';
 // signature to the pure body builders), because a signature picked under a different rule
 // than the one that picks `from` would sign a message with someone else's sign-off.
 
+// One "@" between two halves that are each printable and non-space: no control (\p{Cc}) or
+// format (\p{Cf}) character, and none of the characters that separate, quote, bracket or
+// comment in an address.
+const BARE_ADDR_SPEC = /^[^\s\p{Cc}\p{Cf}@,;"<>()\\]+@[^\s\p{Cc}\p{Cf}@,;"<>()\\]+$/u;
+
 /** Match an email address against an identity, supporting wildcard identities (e.g. *@example.com). */
 export function matchesIdentity(identityEmail: string, address: string): boolean {
   const identity = identityEmail.toLowerCase();
@@ -20,7 +25,7 @@ export function matchesIdentity(identityEmail: string, address: string): boolean
     // Note the pattern admits a BARE addr-spec only — a "Name <a@b.example>" form is
     // rejected on purpose, because the display name is supplied separately and is never
     // part of the value matched here. Do not widen it to accept angle-addr shapes.
-    if (!/^[^\s@,;"]+@[^\s@,;"]+$/.test(addr)) return false;
+    if (!BARE_ADDR_SPEC.test(addr)) return false;
     return addr.endsWith(domain);
   }
   return false;
@@ -28,9 +33,8 @@ export function matchesIdentity(identityEmail: string, address: string): boolean
 
 /**
  * The identity a compose call will send as: the one matching an explicit `from`, else the
- * account's default (the identity that cannot be deleted, falling back to the first).
- * Mirrors JmapClient.createDraft's own selection, which is the rule that actually decides
- * the `from` header.
+ * account's default. JmapClient.createDraft picks through the same two helpers below, and
+ * that is the rule that actually decides the `from` header.
  *
  * Returns undefined when `from` names nothing verified. Deliberately NOT an error here:
  * createDraft raises the real "not verified for sending" refusal a moment later, and a
@@ -38,11 +42,25 @@ export function matchesIdentity(identityEmail: string, address: string): boolean
  * an oblique one.
  */
 export function selectIdentity(identities: any[] | undefined | null, from?: string): any | undefined {
-  const list = identities ?? [];
-  if (from) {
-    return list.find((id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, from));
-  }
-  return list.find((id: any) => id?.mayDelete === false) ?? list[0];
+  return from ? identityFor(identities, from) : defaultIdentity(identities);
+}
+
+/**
+ * The identity that verifies `address`. An exact-address identity wins over a wildcard one
+ * whatever order the server lists them in, since its name and signature are the ones set up
+ * for that address. Every site that picks an identity for an address goes through here.
+ */
+export function identityFor(identities: any[] | undefined | null, address: string): any | undefined {
+  const list = (identities ?? []).filter((id: any) => typeof id?.email === 'string');
+  const addr = address.toLowerCase();
+  return list.find((id: any) => id.email.toLowerCase() === addr)
+    ?? list.find((id: any) => matchesIdentity(id.email, address));
+}
+
+/** The account's default identity: the one that cannot be deleted, else the first listed. */
+export function defaultIdentity(identities: any[] | undefined | null): any | undefined {
+  const list = (identities ?? []).filter((id: any) => typeof id?.email === 'string');
+  return list.find((id: any) => id.mayDelete === false) ?? list[0];
 }
 
 /**

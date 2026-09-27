@@ -397,6 +397,16 @@ describe('the refusals a call raises', () => {
     assert.ok(rejectBrokenDraft(['a@b', 'c@d'], ENABLED).includes('("a@b", "c@d")'));
   });
 
+  it('caps the dangling values it lists, and says how many more there are', () => {
+    const many = Array.from({ length: 40 }, (_, i) => `img${i}`);
+    const message = rejectBrokenDraft(many, ENABLED);
+    assert.ok(message.includes('("img0", "img1", "img2" …and 37 more)'), message);
+    assert.equal(message.includes('img3"'), false, message);
+    assert.ok(message.endsWith(
+      'Or add attachments items with cid "img0", "img1", "img2" …and 37 more to supply the missing images.',
+    ), message);
+  });
+
   it('tells a note author that quoted images arrive on their own', () => {
     assert.equal(
       rejectNoteCidRef('logo', ENABLED),

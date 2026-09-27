@@ -57,9 +57,14 @@ export function formatEmailQueryResult(result: QueryResult, options?: { fields?:
 
 // The trashed copy holds the full picture.
 const MAX_ECHOED_RECIPIENTS = 5;
+// A subject or Message-ID is echoed whole up to here and cut with a marker past it; the
+// stored message keeps it whole. Wider than describeUntrusted's 64 so an ordinary one is not cut.
+const SUBJECT_ECHO_LIMIT = 256;
+const MESSAGE_ID_ECHO_LIMIT = 256;
 function formatReplacedRecipients(label: string, addresses?: string[]): string | null {
   if (!addresses?.length) return null;
-  const shown = addresses.slice(0, MAX_ECHOED_RECIPIENTS).join(', ');
+  const shown = addresses.slice(0, MAX_ECHOED_RECIPIENTS)
+    .map((a) => describeUntrustedAt(a, RECIPIENT_ADDRESS_ECHO_LIMIT)).join(', ');
   const extra = addresses.length - MAX_ECHOED_RECIPIENTS;
   return `${label} ${shown}${extra > 0 ? ` (+${extra} more)` : ''}`;
 }
@@ -67,17 +72,19 @@ function formatReplacedRecipients(label: string, addresses?: string[]): string |
 // The fingerprint of the draft an edit replaced (#65).
 function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
   const parts = [
-    replaced.subject ? `subject "${replaced.subject}"` : null,
+    replaced.subject ? `subject "${describeUntrustedAt(replaced.subject, SUBJECT_ECHO_LIMIT)}"` : null,
     formatReplacedRecipients('to', replaced.to),
     formatReplacedRecipients('cc', replaced.cc),
+    formatReplacedRecipients('bcc', replaced.bcc),
+    formatReplacedRecipients('replyTo', replaced.replyTo),
     replaced.htmlBodySize != null ? `htmlBody ${replaced.htmlBodySize} chars` : null,
     replaced.textBodySize != null ? `textBody ${replaced.textBodySize} chars` : null,
   ].filter(Boolean);
   return parts.join(', ');
 }
 
-// ONE LINE EACH, not a space join: the summaries these ride on end in unterminated
-// caller-controlled text (`Subject: ${subject}`), which a space would run the note into.
+// ONE LINE EACH, not a space join: the summaries these ride on can end in an unquoted list
+// of recipients, which a space would run the note into.
 export function formatInlineNotes(notes?: string[]): string {
   return notes?.length ? notes.map((note) => `\n${note}`).join('') : '';
 }
@@ -105,7 +112,7 @@ const echoRecipients = (list: string[]): string =>
 export function formatDraftEmailResult(result: ComposeDraftEmailResult): string {
   const summary = [
     `Draft saved successfully (Email ID: ${result.emailId}, mode: ${result.mode}). Use send_draft to transmit it.`,
-    result.subject ? `Subject: ${result.subject}` : null,
+    result.subject ? `Subject: "${describeUntrustedAt(result.subject, SUBJECT_ECHO_LIMIT)}"` : null,
     result.to?.length ? `To: ${echoRecipients(result.to)}` : null,
     result.cc?.length ? `CC: ${echoRecipients(result.cc)}` : null,
     result.bcc?.length ? `BCC: ${echoRecipients(result.bcc)}` : null,
@@ -158,7 +165,7 @@ export function formatSendDraftResult(result: SendDraftResult): string {
     : km.skipReason === 'lookup-failed'
       ? 'the lookup failed'
       : 'no stored message carries that Message-ID';
-  return `${base} The message this draft ${relation} (Message-ID ${km.messageId}) was not marked ${marking}: ${why}.${receipt}`;
+  return `${base} The message this draft ${relation} (Message-ID "${describeUntrustedAt(km.messageId, MESSAGE_ID_ECHO_LIMIT)}") was not marked ${marking}: ${why}.${receipt}`;
 }
 
 // Exported so the tool descriptions quote the exact emitted string: a drifted paraphrase

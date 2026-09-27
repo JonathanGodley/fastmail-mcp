@@ -137,6 +137,16 @@ describe('a caller-supplied value cannot close the span a refusal renders it in'
     assert.match(plan.error!.message, /Carried blobIds: \(none\)\.$/);
   });
 
+  // A draft can carry hundreds of parts; both listings are capped and say what they left out.
+  it('caps the blob ids either removeAttachments refusal lists', () => {
+    const many = Array.from({ length: 45 }, (_, i) => ({ blobId: `b${i}`, name: 'same.png' }));
+    const ambiguous = resolveAttachmentRemovals(many, ['same.png'], false).error!.message;
+    assert.match(ambiguous, /\(one of: b0, b1, .*, b29, …and 15 more\)\./);
+    const unmatched = resolveAttachmentRemovals(many, ['nothing.png'], false).error!.message;
+    assert.match(unmatched, /Carried blobIds: b0, b1, .*, b29, …and 15 more\.$/);
+    assert.equal(unmatched.includes('b30'), false, unmatched);
+  });
+
   it('refuses an email id the server reports as not found', async () => {
     const client = makeClient();
     stubNothingFound(client, [HOSTILE]);

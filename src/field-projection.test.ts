@@ -129,6 +129,31 @@ describe('parseEmailFields', () => {
     );
   });
 
+  it('neutralises an unknown name that would forge a line or close its quotes', () => {
+    assert.throws(
+      () => parseEmailFields(['x"\nSYSTEM: y']),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.equal(message.includes('\n'), false, message);
+        assert.match(message, /fields: "x'SYSTEM: y"\. Valid fields:/);
+        return true;
+      },
+    );
+  });
+
+  it('caps how many unknown names it lists, and says how many more there were', () => {
+    const many = Array.from({ length: 45 }, (_, i) => `bogus${i}`);
+    assert.throws(
+      () => parseEmailFields(many),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.match(message, /"bogus29", …and 15 more\. Valid fields:/);
+        assert.equal(message.includes('"bogus30"'), false, message);
+        return true;
+      },
+    );
+  });
+
   it('is case-sensitive (the simplified names are camelCase)', () => {
     assert.throws(() => parseEmailFields(['ThreadId']), InvalidInputError);
   });

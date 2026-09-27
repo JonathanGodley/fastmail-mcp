@@ -278,6 +278,14 @@ describe('describePart', () => {
 });
 
 describe('sanitizeDownloadFilename', () => {
+  it('runs in linear time on a long whitespace run inside a name', () => {
+    const n = 100_000;
+    const started = performance.now();
+    sanitizeDownloadFilename(`a${' '.repeat(n)}x`);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+  });
+
   it('passes an ordinary filename through', () => {
     assert.equal(sanitizeDownloadFilename('logo.png'), 'logo.png');
   });
@@ -865,6 +873,15 @@ describe('collectImgCidRefs', () => {
 });
 
 describe('extractCidRefs', () => {
+  it('runs in linear time on a long punctuation run inside a reference', () => {
+    const n = 100_000;
+    const started = performance.now();
+    const refs = extractCidRefs(`cid:${'.'.repeat(n)}a cid:b${'.'.repeat(n)}`);
+    const elapsed = performance.now() - started;
+    assert.deepEqual(refs, [`${'.'.repeat(n)}a`, 'b']);
+    assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+  });
+
   it('finds references the <img> collector cannot see', () => {
     const html =
       '<div style="background:url(cid:bg.png)">' +

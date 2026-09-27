@@ -286,9 +286,11 @@ function assertTokensAcceptable(
 
   // --- 4. A token in one SUPPLIED part but not the other -------------------
   // The caller's slip. A SOURCE that has one form and not the other is a different thing,
-  // reported per part as a note, not refused here.
-  if (parts.length === 2) {
-    const [a, b] = parts as [PartScan, PartScan];
+  // reported per part as a note, not refused here. A blank part counts as not supplied: it
+  // ships nothing (buildBodyParts drops it), so there is nothing for it to disagree with.
+  const nonBlank = parts.filter((p) => !isBlank(p.authored));
+  if (nonBlank.length === 2) {
+    const [a, b] = nonBlank as [PartScan, PartScan];
     for (const name of TOKEN_ORDER) {
       const inA = a.scan.counts[name] > 0;
       const inB = b.scan.counts[name] > 0;
@@ -386,6 +388,11 @@ const POOLED_REMEDY_PLACE_IN_HTML =
 const POOLED_REMEDY_DROP_TOKEN =
   'drop {{forward}} and pass asAttachment: true to forward the original whole, then delete ' +
   'this draft.';
+
+/** A forward whose original has no Message-ID this server can record (see isSettableMessageId). */
+const NOTE_FORWARD_UNMARKABLE =
+  'The original has no usable Message-ID, so send_draft will not mark it forwarded when this ' +
+  'draft is sent; the forward itself is unaffected.';
 
 /** A reply that placed no {{quote}}: a forgotten token would otherwise be silent. */
 const NOTE_REPLY_UNQUOTED =
@@ -810,7 +817,7 @@ export async function composeDraftEmail(
     params.references = [...(original.references || []), originalMessageId];
 
     let subject = subjectOverride ?? (original.subject || '');
-    if (subjectOverride === undefined && !/^Re:/i.test(subject)) subject = `Re: ${subject}`;
+    if (subjectOverride === undefined && matchSubjectPrefix(subject) !== 'reply') subject = `Re: ${subject}`;
     params.subject = subject;
 
     // Reply-To if the original named one, else From, via formatAddress and never
@@ -854,7 +861,7 @@ export async function composeDraftEmail(
       params.subject = subjectOverride;
     } else {
       const orig = original?.subject || '';
-      params.subject = /^fwd?:/i.test(orig.trim()) ? orig : `Fwd: ${orig}`;
+      params.subject = matchSubjectPrefix(orig) === 'forward' ? orig : `Fwd: ${orig}`;
     }
     // Recorded on BOTH forward shapes: send_draft resolves it to mark the original
     // forwarded on transmit, and the attached .eml is not machine-resolvable as provenance.
@@ -1016,6 +1023,7 @@ export async function composeDraftEmail(
       ? [noteSignatureNotPlaced(identity?.email ?? fromAddress)]
       : []),
     ...(mode === 'reply' && !historyPlaced ? [NOTE_REPLY_UNQUOTED] : []),
+    ...(mode === 'forward' && !params.forwardedMessageId ? [NOTE_FORWARD_UNMARKABLE] : []),
     ...(bccCarried ? [NOTE_BCC_CARRIED] : []),
     ...(prefixTyped ? [noteComposeSubjectPrefix(prefixTyped)] : []),
   ];

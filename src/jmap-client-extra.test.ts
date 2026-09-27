@@ -5152,12 +5152,42 @@ describe('findEmailIdsByMessageId', () => {
     assert.equal(typeof query.limit, 'number');
   });
 
+  it('runs in linear time on a long run of > inside the Message-ID', async () => {
+    const client = makeClient();
+    stubLookup(client, []);
+    const n = 100_000;
+    const started = performance.now();
+    await client.findEmailIdsByMessageId(`a${'>'.repeat(n)}x`);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+  });
+
   it('strips angle brackets before querying (the bracketed form matches nothing)', async () => {
     const client = makeClient();
     const makeReq = stubLookup(client, [{ id: 'orig-1', messageId: ['orig@example.com'] }]);
     assert.deepEqual(await client.findEmailIdsByMessageId('<orig@example.com>'), ['orig-1']);
     const query = (callArguments(makeReq)[0] as any).methodCalls[0][1];
     assert.deepEqual(query.filter, { text: 'orig@example.com' });
+  });
+
+  it('strips every leading < and trailing >, and the space inside them, but not a < within', async () => {
+    for (const [given, bare] of [
+      ['<<orig@example.com>>', 'orig@example.com'],
+      ['< orig@example.com >', 'orig@example.com'],
+      ['or<ig@example.com', 'or<ig@example.com'],
+    ]) {
+      const client = makeClient();
+      const makeReq = stubLookup(client, []);
+      await client.findEmailIdsByMessageId(given);
+      assert.deepEqual((callArguments(makeReq)[0] as any).methodCalls[0][1].filter, { text: bare }, given);
+    }
+  });
+
+  it('makes no request for a missing Message-ID', async () => {
+    const client = makeClient();
+    const makeReq = stubLookup(client, []);
+    assert.deepEqual(await client.findEmailIdsByMessageId(undefined as any), []);
+    assert.equal(makeReq.mock.calls.length, 0);
   });
 
   it('returns every id when more than one stored message carries it (the caller decides)', async () => {

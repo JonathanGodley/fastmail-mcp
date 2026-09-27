@@ -9,7 +9,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectIdentity, signatureOf } from './identity.js';
+import { matchesIdentity, selectIdentity, signatureOf } from './identity.js';
 
 // The account's default identity, signed. The html and text forms deliberately DIFFER in
 // wording so a test can tell which one a body got: the html form says "Kind regards", the
@@ -60,9 +60,35 @@ describe('reading the sign-off off an identity', () => {
     assert.equal(selectIdentity([first, SIGNED_IDENTITY]), SIGNED_IDENTITY);
   });
 
+  it('never picks an identity with no email as the default', () => {
+    const broken = { id: 'id-x', mayDelete: false };
+    const usable = { id: 'id-u', email: 'me@example.com', mayDelete: true };
+    assert.equal(selectIdentity([broken, usable]), usable);
+    assert.equal(selectIdentity([{ id: 'id-y' }, usable]), usable);
+  });
+
   it('honours a wildcard identity', () => {
     const wild = { id: 'id-w', email: '*@example.com', mayDelete: true, textSignature: 'Wild' };
     assert.equal(sigFor([wild], 'anything@example.com')?.text, 'Wild');
+  });
+
+  it('refuses control, format and bracketing characters in an address a wildcard identity is asked to verify', () => {
+    for (const addr of [
+      'a\u0000b@example.com', 'a<b@example.com', 'a>b@example.com', 'a@example.com\u0000',
+      'a\u0001b@example.com', 'a\u007fb@example.com', 'a\u202eb@example.com', 'a\u200bb@example.com',
+      'a(c)@example.com', 'a\\b@example.com', 'a@exa\u00admple.com',
+    ]) {
+      assert.equal(matchesIdentity('*@example.com', addr), false, JSON.stringify(addr));
+    }
+    assert.equal(matchesIdentity('*@example.com', 'a.b+c@example.com'), true);
+  });
+
+  it('prefers an exact-address identity to a wildcard listed before it', () => {
+    const wild = { id: 'id-w', email: '*@example.com', mayDelete: true, textSignature: 'Wild' };
+    const exact = { id: 'id-e', email: 'ops@example.com', mayDelete: true, textSignature: 'Ops' };
+    assert.equal(selectIdentity([wild, exact], 'OPS@example.com'), exact);
+    assert.equal(selectIdentity([exact, wild], 'ops@example.com'), exact);
+    assert.equal(selectIdentity([wild, exact], 'other@example.com'), wild);
   });
 
   it('resolves to no signature — not an error — when from names nothing verified', () => {

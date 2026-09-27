@@ -1780,6 +1780,19 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     assert.equal(already.calls.draft.subject, 'Re: Hello');
   });
 
+  // The same prefix set the mode:'new' note reads (subject-prefix.ts): a counter or loose
+  // whitespace is still a reply prefix. A forward prefix is not, so it gains one.
+  it('does not double-prefix a counted or spaced reply prefix', async () => {
+    for (const [orig, want] of [
+      ['Re[2]: Hello', 'Re[2]: Hello'], ['RE : Hello', 'RE : Hello'], [' re: Hello', ' re: Hello'],
+      ['Fwd: Hello', 'Re: Fwd: Hello'],
+    ]) {
+      const { client, calls } = plainClient(makeOriginal({ subject: orig }));
+      await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+      assert.equal(calls.draft.subject, want, orig);
+    }
+  });
+
   it('uses a caller subject verbatim, prefixes nothing, and threads the same way', async () => {
     const { client, calls } = plainClient(makeOriginal({ subject: 'Re: Project update' }));
     const r = await compose(
@@ -2495,7 +2508,7 @@ describe('EMAIL_BODY_PROPERTIES — what a forward needs fetched', () => {
 
 describe("draft_email — mode:'forward' subject, recipients and the recorded source", () => {
   it('does not double-prefix a subject that already says it is a forward', async () => {
-    for (const s of ['Fwd: Hello', 'fw: Hello', 'FWD: Hello', 'FW: Hello']) {
+    for (const s of ['Fwd: Hello', 'fw: Hello', 'FWD: Hello', 'FW: Hello', 'Fwd[2]: Hello', 'FWD : Hello']) {
       const { client, calls } = plainClient(makeOriginal({ subject: s }));
       await compose({ mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'FYI\n{{forward}}' }, client);
       assert.equal(calls.draft.subject, s);
@@ -2568,6 +2581,27 @@ describe("draft_email — mode:'forward' subject, recipients and the recorded so
         calls.draft.forwardedMessageId, undefined, `should omit: ${JSON.stringify(value.slice(0, 40))}`,
       );
     }
+  });
+
+  // send_draft finds the original to mark through the recorded Message-ID; with none recorded
+  // the forward still sends, but the original is never marked, and the caller is told now.
+  it('says the original will not be marked forwarded when it has no usable Message-ID', async () => {
+    const NOTE = /^The original has no usable Message-ID, so send_draft will not mark it forwarded when this draft is sent; the forward itself is unaffected\.$/;
+    for (const messageId of [undefined, ['has space@example.com']]) {
+      for (const asAttachment of [false, true]) {
+        const { client } = plainClient(makeOriginal({ messageId }));
+        const r = await compose(
+          asAttachment
+            ? { mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], asAttachment: true }
+            : { mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'FYI\n{{forward}}' },
+          client,
+        );
+        assert.ok((r.notes ?? []).some((n) => NOTE.test(n)), JSON.stringify({ messageId, asAttachment, notes: r.notes }));
+      }
+    }
+    const { client } = plainClient();
+    const r = await compose({ mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'FYI\n{{forward}}' }, client);
+    assert.equal((r.notes ?? []).some((n) => /no usable Message-ID/.test(n)), false);
   });
 
   it('records both the Message-ID and the source id on an asAttachment forward too', async () => {
@@ -3115,44 +3149,45 @@ describe('draft_email — hostile fields out of a forwarded message, over the st
 // (`messageShipsHtml`, and buildBodyParts downstream). Both are `!isBlank`. These pins hold
 // them together: a regression that moves one and not the other stores a quote whose images
 // have gone, with nothing in the output saying so.
-//
-// A blank html part beside a token-bearing text part cannot reach any of that, because the
-// symmetry rule refuses the call first — so the first test here pins the REFUSAL for those
-// spellings rather than an outcome no caller can produce. That the blank part is dropped
-// downstream anyway is not an exemption from the rule, and the exemption is the plausible
-// regression: it would store a message whose two parts say different things.
 
 /** A part did not ship when it is absent or blank — buildBodyParts drops both. */
 const isBlankBody = (v: unknown) => v === undefined || (typeof v === 'string' && v.trim() === '');
 
 describe('draft_email — a blank html part ships no html, and mints nothing for one', () => {
-  it('refuses a token-bearing text part beside a blank html part, in either spelling', async () => {
+  it('treats a blank html part beside a token-bearing text part as absent, in either spelling', async () => {
     for (const htmlBody of ['', '   ']) {
       const { client, calls } = plainClient(withInlineImage());
-      await assert.rejects(
-        () => compose(
-          { mode: 'reply', originalEmailId: 'o1', htmlBody, textBody: 'r\n{{quote}}' }, client,
-        ),
-        /\{\{quote\}\} is in textBody but not in htmlBody\./,
-        JSON.stringify(htmlBody),
+      const r = await compose(
+        { mode: 'reply', originalEmailId: 'o1', htmlBody, textBody: 'r\n{{quote}}' }, client,
       );
-      assert.equal(calls.draft, undefined);
+      assert.ok(isBlankBody(calls.draft.htmlBody), JSON.stringify(htmlBody));
+      assert.match(calls.draft.textBody, /^r\n/);
+      assert.equal('attachments' in calls.draft, false);
+      assert.deepEqual(r.notes, [
+        '1 image(s) from the quoted message were dropped and are not part of this draft.',
+      ]);
     }
   });
 
-  it('refuses the same shape on a forward, so neither history token gets the exemption', async () => {
+  it('treats a blank html part as absent on a forward too', async () => {
     const { client, calls } = plainClient(withInlineImage());
-    await assert.rejects(
-      () => compose(
-        {
-          mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
-          htmlBody: '   ', textBody: 'note\n{{forward}}',
-        },
-        client,
-      ),
-      /\{\{forward\}\} is in textBody but not in htmlBody\./,
+    await compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        htmlBody: '   ', textBody: 'note\n{{forward}}',
+      },
+      client,
     );
-    assert.equal(calls.draft, undefined);
+    assert.ok(isBlankBody(calls.draft.htmlBody), String(calls.draft.htmlBody));
+    assert.match(calls.draft.textBody, /^note\n/);
+  });
+
+  it('treats a blank text part beside a token-bearing html part as absent', async () => {
+    const { client, calls } = plainClient(withInlineImage());
+    await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: '  ', htmlBody: '<p>r</p>{{quote}}' }, client,
+    );
+    assert.ok((calls.draft.htmlBody as string).startsWith('<p>r</p>'), calls.draft.htmlBody);
   });
 
   it('ships no html part, and no minted image, for a reply that supplies only a text part', async () => {

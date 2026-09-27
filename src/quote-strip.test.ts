@@ -20,6 +20,15 @@ function strip(input: string) {
 }
 
 describe('stripQuotedText — "> " quote runs', () => {
+  it('runs in linear time on a long whitespace run in the kept text', () => {
+    const n = 100_000;
+    const started = performance.now();
+    const r = stripQuotedText(`Hi${' '.repeat(n)}x\n\n> quoted\n`);
+    const elapsed = performance.now() - started;
+    assert.ok(r.quotedBytesStripped > 0);
+    assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+  });
+
   it('removes a trailing quote run and its attribution from a top-posted reply', () => {
     const body = [
       'Confirmed for Thursday.',

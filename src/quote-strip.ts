@@ -1,4 +1,5 @@
 import { InvalidInputError } from './coerce.js';
+import { trimEnd, isWhitespace } from './trim-end.js';
 
 // Plain-text quote stripping for the READ path (#73). Unlike reply-quote.ts, which writes
 // our own quote, the input here is a FOREIGN client's and a match DELETES text, so every
@@ -159,7 +160,7 @@ export function stripQuotedText(text: string): QuoteStripResult {
   while (kept.length > 0 && BLANK_LINE.test(kept[kept.length - 1])) kept.pop();
 
   // Otherwise a CRLF body ends on a lone CR whose LF went with the quote.
-  const stripped = kept.join('\n').replace(/\s+$/, '');
+  const stripped = trimEnd(kept.join('\n'), isWhitespace);
   return { text: stripped, quotedBytesStripped: byteLength(text) - byteLength(stripped) };
 }
 

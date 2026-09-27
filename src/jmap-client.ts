@@ -1,11 +1,11 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, joinCapped, PathAccessError, InvalidInputError } from './coerce.js';
 import { getDefaultTimezone } from './email-formatter.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
-import { matchesIdentity, signatureOf } from './identity.js';
+import { defaultIdentity, identityFor, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
 import {
@@ -34,6 +34,7 @@ import {
 import type { AttachmentAvailability } from './inline-notes.js';
 import { matchSubjectPrefix, noteEditSubjectPrefix } from './subject-prefix.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
+import { trimEnd } from './trim-end.js';
 // unlink is a security control, not a convenience: the exclusive-create download
 // path removes the file it just refused to trust before rewriting it.
 import { writeFile, mkdir, realpath, stat, lstat, open, unlink } from 'fs/promises';
@@ -542,7 +543,7 @@ export function resolveAttachmentRemovals(
         removed,
         survivors,
         error: new PathAccessError(
-          `removeAttachments ref "${describeUntrusted(ref)}" matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${survivors.map((p) => p.blobId).join(', ')}).`,
+          `removeAttachments ref "${describeUntrusted(ref)}" matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${joinCapped(survivors.map((p) => p.blobId))}).`,
         ),
       };
     }
@@ -550,7 +551,7 @@ export function resolveAttachmentRemovals(
       removed,
       survivors,
       error: new PathAccessError(
-        `removeAttachments ref "${describeUntrusted(ref)}" matched no attachment on this draft. Carried blobIds: ${storedParts.map((p) => p.blobId).join(', ') || '(none)'}.`,
+        `removeAttachments ref "${describeUntrusted(ref)}" matched no attachment on this draft. Carried blobIds: ${joinCapped(storedParts.map((p) => p.blobId)) || '(none)'}.`,
       ),
     };
   }
@@ -628,7 +629,7 @@ const REJECT_UNVERIFIED_FROM =
  */
 export function rejectFromAddress(identities: any[], fromAddress: string): string | undefined {
   if (isWildcardIdentityEmail(fromAddress)) return rejectWildcardFromValue(fromAddress);
-  return identities.some((id) => typeof id?.email === 'string' && matchesIdentity(id.email, fromAddress))
+  return identityFor(identities, fromAddress)
     ? undefined
     : REJECT_UNVERIFIED_FROM;
 }
@@ -653,6 +654,8 @@ export interface ReplacedDraftInfo {
   subject?: string;
   to?: string[];
   cc?: string[];
+  bcc?: string[];
+  replyTo?: string[];
   textBodySize?: number;
   htmlBodySize?: number;
 }
@@ -1036,13 +1039,6 @@ function formatMailboxUnwalkable(input: string, id: string): string {
 // The multi-input messages for the label arrays name EVERY failed value in one message, in
 // separate buckets because each calls for a different correction.
 
-// Join a capped list and SAY when it was capped: a truncated list with no tail reads as a
-// complete one.
-function joinCapped(items: string[], separator = ', '): string {
-  const shown = items.slice(0, MAILBOX_LIST_CAP);
-  const listed = shown.join(separator);
-  return items.length > shown.length ? `${listed}${separator}…and ${items.length - shown.length} more` : listed;
-}
 
 function formatMailboxesNotFound(unresolved: string[], mailboxes: any[]): string {
   const listed = joinCapped(unresolved.map(v => `"${describeUntrusted(v)}"`));
@@ -1658,6 +1654,30 @@ export class JmapClient {
     return data as JmapResponse;
   }
 
+  /**
+   * edit_draft refuses a draft filed in Trash. A superseded copy keeps `$draft` there, and the
+   * recreate carries the old copy's mailboxIds, so an edit would write the replacement into
+   * Trash too. A draft filed anywhere else (draft_email's `mailbox`) stays editable. A map
+   * this cannot read, or an account with no trash-role mailbox, is not refused here.
+   */
+  private refuseTrashedDraftEdit(filing: any, mailboxes: any[]): void {
+    const trash = this.findByExactRole(mailboxes, 'trash');
+    if (!trash || !isPlainResponseMap(filing)) return;
+    if (!(Object.prototype.hasOwnProperty.call(filing, trash.id) && filing[trash.id] === true)) return;
+    const filedIn = Object.keys(filing)
+      .filter(id => filing[id] === true)
+      .map(id => {
+        const mailbox = mailboxes.find(mb => mb?.id === id);
+        const name = describeUntrusted(mailbox?.name);
+        if (mailbox && name.trim() !== '') return `"${name}"`;
+        return `${mailbox ? 'unnamed' : 'unknown'} mailbox (id: "${describeUntrusted(id)}")`;
+      });
+    throw new InvalidInputError(
+      `This draft is in Trash, so it will not be edited (it is in: ${joinCapped(filedIn)}). ` +
+      'Move it back to Drafts with move_email and edit it again.',
+    );
+  }
+
   // Find a mailbox by EXACT role (case-insensitive). A USABLE id is part of the match:
   // every caller reads `.id` straight away, and a missing one becomes the literal
   // "undefined" in a silently corrupt write.
@@ -1877,8 +1897,7 @@ export class JmapClient {
   async getDefaultIdentity(): Promise<any> {
     const identities = await this.getIdentities();
     
-    // Find the default identity (usually the one that can't be deleted)
-    return identities.find((id: any) => id.mayDelete === false) || identities[0];
+    return defaultIdentity(identities);
   }
 
   async createDraft(email: {
@@ -1905,7 +1924,7 @@ export class JmapClient {
     }
 
     const identities = await this.getIdentities();
-    if (!identities || identities.length === 0) {
+    if (!defaultIdentity(identities)) {
       throw new Error('No sending identities found');
     }
 
@@ -1921,12 +1940,12 @@ export class JmapClient {
 
     let selectedIdentity;
     if (email.from) {
-      selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedFrom!.email));
+      selectedIdentity = identityFor(identities, parsedFrom!.email);
       if (!selectedIdentity) {
         throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
-      selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
+      selectedIdentity = defaultIdentity(identities);
     }
 
     // With no `from`, the identity's OWN `email` is written, which for a wildcard is the
@@ -2083,6 +2102,7 @@ export class JmapClient {
     if (!existingEmail.keywords?.$draft) {
       throw new InvalidInputError('Cannot edit a non-draft email');
     }
+    this.refuseTrashedDraftEdit(existingEmail.mailboxIds, await this.getMailboxes());
 
     const availability: AttachmentAvailability = {
       attachmentsEnabled: options.attachmentsEnabled !== false,
@@ -2106,7 +2126,7 @@ export class JmapClient {
     }
 
     const identities = await this.getIdentities();
-    if (!identities || identities.length === 0) {
+    if (!defaultIdentity(identities)) {
       throw new Error('No sending identities found');
     }
 
@@ -2119,17 +2139,16 @@ export class JmapClient {
 
     let selectedIdentity;
     if (updates.from) {
-      selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedUpdateFrom!.email));
+      selectedIdentity = identityFor(identities, parsedUpdateFrom!.email);
       if (!selectedIdentity) {
         throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
       const existingFrom = existingEmail.from?.[0]?.email;
       if (existingFrom) {
-        selectedIdentity = identities.find(id => matchesIdentity(id.email, existingFrom))
-          || identities.find(id => id.mayDelete === false) || identities[0];
+        selectedIdentity = identityFor(identities, existingFrom) ?? defaultIdentity(identities);
       } else {
-        selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
+        selectedIdentity = defaultIdentity(identities);
       }
     }
 
@@ -2191,10 +2210,11 @@ export class JmapClient {
     // off the part UNION: which list holds the .eml is a MIME-shape accident.
     const emlAttached = storedParts.some((p: any) => classifyPartType(p?.type) === 'message/rfc822');
     // The source instance rides with the forward marking: dropped when a FORWARD draft is
-    // de-forwarded, kept on a reply draft.
+    // de-forwarded, kept on a reply draft. Vetted as the create vets it (isSettableSourceId).
     const storedSourceId = existingEmail[SOURCE_ID_HEADER];
+    const trimmedSourceId = typeof storedSourceId === 'string' ? storedSourceId.trim() : undefined;
     const carriedSourceId: string | undefined =
-      typeof storedSourceId === 'string' && storedSourceId.trim() !== '' ? storedSourceId.trim() : undefined;
+      isSettableSourceId(trimmedSourceId) ? trimmedSourceId : undefined;
 
     // How the notes name the carried block, from the HEADERS ALONE, never the body's markup.
     const keepNoun = !isReply && carriedForwardHeader.length > 0 && !emlAttached
@@ -2226,7 +2246,7 @@ export class JmapClient {
     const writtenFromAddress: string | undefined =
       parsedUpdateFrom?.email || existingEmail.from?.[0]?.email || selectedIdentity.email;
     const signingIdentity = writtenFromAddress
-      ? identities.find((id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, writtenFromAddress))
+      ? identityFor(identities, writtenFromAddress)
       : undefined;
     // The display name written alongside that address: the caller's own in THIS edit's
     // `from` (#161), else the name the stored draft carries against that address, else the
@@ -2649,11 +2669,15 @@ export class JmapClient {
       (addrs || []).map((a: any) => a?.email).filter((e: any): e is string => typeof e === 'string' && e !== '');
     const replacedTo = addressList(existingEmail.to);
     const replacedCc = addressList(existingEmail.cc);
+    const replacedBcc = addressList(existingEmail.bcc);
+    const replacedReplyTo = addressList(existingEmail.replyTo);
     const replacedDraft: ReplacedDraftInfo = {
       id: emailId,
       ...(existingEmail.subject && { subject: existingEmail.subject }),
       ...(replacedTo.length && { to: replacedTo }),
       ...(replacedCc.length && { cc: replacedCc }),
+      ...(replacedBcc.length && { bcc: replacedBcc }),
+      ...(replacedReplyTo.length && { replyTo: replacedReplyTo }),
       ...(existingTextValue !== undefined && { textBodySize: existingTextValue.length }),
       ...(existingHtmlValue !== undefined && { htmlBodySize: existingHtmlValue.length }),
     };
@@ -2959,7 +2983,7 @@ export class JmapClient {
     }
 
     const identities = await this.getIdentities();
-    const selectedIdentity = identities.find(id => matchesIdentity(id.email, fromEmail));
+    const selectedIdentity = identityFor(identities, fromEmail);
     if (!selectedIdentity) {
       throw new InvalidInputError('From address on draft does not match any sending identity. Edit the draft to set a from address matching one of your verified identities before sending.');
     }
@@ -3100,7 +3124,7 @@ export class JmapClient {
    * No Trash/Spam exclusion: this answers "which message is this".
    */
   async findEmailIdsByMessageId(messageId: string): Promise<string[]> {
-    const bare = String(messageId ?? '').trim().replace(/^<+/, '').replace(/>+$/, '').trim();
+    const bare = trimEnd(String(messageId ?? '').trim().replace(/^<+/, ''), (ch) => ch === '>').trim();
     if (!bare) return [];
 
     const session = await this.getSession();
@@ -4247,7 +4271,7 @@ export class JmapClient {
     // failure still can; Fastmail garbage-collects them). Entries stay in SPEC ORDER: the
     // compose paths map parts back onto specs by position.
     const inlineCids = options.inlineCids;
-    type PreparedFile = { kind: 'file'; handle: FileHandle; size: number; contentType: string; name: string; cid?: string };
+    type PreparedFile = { kind: 'file'; handle: FileHandle; size: number; contentType: string; name: string; file: string; cid?: string };
     type PreparedRef = { kind: 'ref'; blobId: string; type: string; name: string; cid?: string };
     const prepared: (PreparedFile | PreparedRef)[] = [];
     try {
@@ -4322,7 +4346,7 @@ export class JmapClient {
         const contentType = callerType ?? guessContentType(path);
         const { handle, size } = await JmapClient.safeReadPath(path, attachDir);
         // Push BEFORE the size checks so the finally closes this handle even if a cap throws.
-        prepared.push({ kind: 'file', handle, size, contentType, name: spec.name ?? basename(path), cid: spec.cid });
+        prepared.push({ kind: 'file', handle, size, contentType, name: spec.name ?? basename(path), file: basename(path), cid: spec.cid });
         if (size > JmapClient.MAX_ATTACHMENT_BYTES) {
           throw new PathAccessError(
             // basename is still caller text, so it is echoed like the rest.
@@ -4351,11 +4375,23 @@ export class JmapClient {
           continue;
         }
         // Bounded read, never read-then-check, which would buffer an oversize file first.
+        // A read may return fewer bytes than asked, so loop. A file whose length is no longer
+        // the size taken at the stat (it shrank, or grew) is refused rather than uploaded cut.
+        const changed = (found: string) => new PathAccessError(
+          `The attachment "${echoPath(o.file)}" ${found} than the ${o.size} bytes it had when checked; ` +
+          'it changed while being read. Nothing was uploaded for it. Try again once the file is complete.'
+        );
         const buffer = Buffer.alloc(o.size);
-        const { bytesRead } = await o.handle.read(buffer, 0, o.size, 0);
-        const data = bytesRead === o.size ? buffer : buffer.subarray(0, bytesRead);
+        let filled = 0;
+        while (filled < o.size) {
+          const { bytesRead } = await o.handle.read(buffer, filled, o.size - filled, filled);
+          if (bytesRead === 0) throw changed(`could be read for only ${filled} bytes, fewer`);
+          filled += bytesRead;
+        }
+        const { bytesRead: beyond } = await o.handle.read(Buffer.alloc(1), 0, 1, o.size);
+        if (beyond > 0) throw changed('is now longer');
 
-        const uploaded = await this.uploadBlob(data, o.contentType);
+        const uploaded = await this.uploadBlob(buffer, o.contentType);
         parts.push({
           blobId: uploaded.blobId,
           type: uploaded.type,

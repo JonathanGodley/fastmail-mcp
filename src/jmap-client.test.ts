@@ -628,7 +628,13 @@ describe('updateDraft', () => {
   });
 
   it('when the mailbox lookup throws: surfaces the orphan + reason, does NOT throw', async () => {
-    mock.method(client, 'getMailboxes', async () => { throw new Error('network down'); });
+    // The first lookup is the Drafts gate before anything is written; the one after the
+    // create is the one that fails here.
+    let lookups = 0;
+    mock.method(client, 'getMailboxes', async () => {
+      if (lookups++ === 0) return MAILBOXES_WITH_TRASH;
+      throw new Error('network down');
+    });
     stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
@@ -649,7 +655,7 @@ describe('updateDraft', () => {
   // ---- echo-back of the replaced draft (staleness detection, #65) ----
 
   it('echoes back what the replaced draft contained', async () => {
-    mockUpdate(client, RICH_DRAFT);
+    mockUpdate(client, { ...RICH_DRAFT, bcc: [{ email: 'dan@example.com' }] });
 
     const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
     assert.deepEqual(result.replacedDraft, {
@@ -657,6 +663,8 @@ describe('updateDraft', () => {
       subject: 'Old Subject',              // the PRE-edit subject, not the new one
       to: ['bob@example.com'],
       cc: ['carol@example.com'],
+      bcc: ['dan@example.com'],
+      replyTo: ['reply@example.com'],
       textBodySize: 'The text'.length,
       htmlBodySize: '<p>The html</p>'.length,
     });
@@ -687,6 +695,76 @@ describe('updateDraft', () => {
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.to, [{ email: 'bob@example.com' }]);
     assert.equal(emailObj.subject, 'Updated');
+  });
+
+  it('refuses to edit a draft that is in Trash, naming where it is', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      DRAFTS_MAILBOX,
+      { id: 'mb-trash', name: 'Trash "old"\nX', role: 'trash' },
+    ]);
+    const trashed = { ...EXISTING_DRAFT, mailboxIds: { 'mb-trash': true } };
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [trashed] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /is in Trash, so it will not be edited/);
+        // Through describeUntrusted: the name's own quote cannot close the quoted span.
+        assert.match(err.message, /\(it is in: "Trash 'old'X"\)/);
+        assert.equal(err.message.includes('\n'), false, err.message);
+        assert.match(err.message, /Move it back to Drafts with move_email/);
+        return true;
+      },
+    );
+    // Nothing was written: the only request was the draft read.
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  it('lists every mailbox a trashed draft is filed in, naming the unnamed and the unknown by id', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      null,
+      DRAFTS_MAILBOX,
+      { id: 'mb-trash', name: 'Trash', role: 'trash' },
+      { id: 'mb-blank', name: '' },
+      { id: 'mb-space', name: '  ' },
+    ]);
+    const trashed = {
+      ...EXISTING_DRAFT,
+      mailboxIds: { 'mb-trash': true, 'mb-blank': true, 'mb-space': true, 'mb-gone': true, 'mb-drafts': false },
+    };
+    stubRequests(client, async () => ({ methodResponses: [['Email/get', { list: [trashed] }, 'getEmail']] }));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError, err.message);
+        assert.ok(err.message.includes(
+          '(it is in: "Trash", unnamed mailbox (id: "mb-blank"), unnamed mailbox (id: "mb-space"), ' +
+          'unknown mailbox (id: "mb-gone")).',
+        ), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('edits a draft whose mailboxIds carry the Trash id with a value other than true', async () => {
+    mockUpdate(client, { ...EXISTING_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-trash': false } });
+    assert.equal((await client.updateDraft('draft-1', { subject: 'X' })).id, 'draft-2');
+  });
+
+  it('edits a draft filed in a mailbox that is neither Drafts nor Trash', async () => {
+    const parked = { ...EXISTING_DRAFT, mailboxIds: { 'mb-parked': true } };
+    const makeReq = mockUpdate(client, parked);
+    assert.equal((await client.updateDraft('draft-1', { subject: 'X' })).id, 'draft-2');
+    assert.deepEqual(callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft.mailboxIds, { 'mb-parked': true });
+  });
+
+  it('edits a draft that is in Drafts alongside another mailbox', async () => {
+    const alsoLabelled = { ...EXISTING_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-archive': true } };
+    mockUpdate(client, alsoLabelled);
+    assert.equal((await client.updateDraft('draft-1', { subject: 'X' })).id, 'draft-2');
   });
 
   it('rejects non-draft email', async () => {
@@ -4065,6 +4143,72 @@ describe('updateDraft wildcard identity', () => {
   });
 });
 
+describe('an exact-address identity beats a wildcard listed before it', () => {
+  const EXACT = { id: 'id-ops', name: 'Ops Desk', email: 'ops@example.com', mayDelete: true };
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getIdentities', async () => [WILDCARD_IDENTITY, EXACT]);
+    mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, SENT_MAILBOX]);
+  });
+
+  it('createDraft refuses rather than writing a from with no address when no identity has one', async () => {
+    mock.method(client, 'getIdentities', async () => [{ id: 'id-x', name: 'No Address', mayDelete: false }]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-x' } } }, 'createDraft']],
+    }));
+    await assert.rejects(() => client.createDraft({ subject: 'Hi' }), /No sending identities found/);
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('updateDraft refuses when no identity has an address, even for a draft that has a from', async () => {
+    mock.method(client, 'getIdentities', async () => [{ id: 'id-x', name: 'No Address', mayDelete: false }]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [{ ...EXISTING_DRAFT, from: [{ email: 'ops@example.com' }] }] }, 'getEmail']],
+    }));
+    await assert.rejects(() => client.updateDraft('draft-1', { subject: 'Changed' }), /No sending identities found/);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  it('createDraft writes the exact identity\'s name', async () => {
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-x' } } }, 'createDraft']],
+    }));
+    await client.createDraft({ subject: 'Hi', from: 'ops@example.com' });
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Ops Desk', email: 'ops@example.com' }]);
+  });
+
+  for (const updates of [{ subject: 'Changed' }, { from: 'ops@example.com' }]) {
+    it(`updateDraft writes the exact identity's name: ${Object.keys(updates)[0]}`, async () => {
+      const existing = { ...EXISTING_DRAFT, from: [{ email: 'ops@example.com' }] };
+      const makeReq = stubRequests(client, async (req: any) => {
+        if (req.methodCalls[0][0] === 'Email/get') {
+          return { methodResponses: [['Email/get', { list: [existing] }, 'getEmail']] };
+        }
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+      });
+      await client.updateDraft('draft-1', updates);
+      const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
+      assert.deepEqual(emailObj.from, [{ name: 'Ops Desk', email: 'ops@example.com' }]);
+    });
+  }
+
+  it('sendDraft submits under the exact identity', async () => {
+    const draft = { ...SENDABLE_DRAFT, from: [{ email: 'ops@example.com' }] };
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+    await client.sendDraft('draft-1');
+    const submitCall = callArguments(makeReq, 1)[0];
+    assert.equal(submitCall.methodCalls[0][1].create.submission.identityId, EXACT.id);
+  });
+});
+
 // ---------- updateDraft display-name resolution (#152) ----------
 //
 // The name the stored draft already carries against the address being written wins over
@@ -4455,6 +4599,66 @@ describe('uploadAttachments', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  function fakeHandle(content: Buffer, chunk: number, size = content.length) {
+    return {
+      handle: {
+        read: async (buf: Buffer, off: number, len: number, pos: number) => {
+          // FileHandle.read refuses a length that runs past the end of the buffer.
+          if (off + len > buf.length) throw new RangeError(`length ${len} at offset ${off} exceeds ${buf.length}`);
+          const n = Math.max(0, Math.min(chunk, len, content.length - pos));
+          content.copy(buf, off, pos, pos + n);
+          return { bytesRead: n, buffer: buf };
+        },
+        close: async () => {},
+      } as any,
+      size,
+    };
+  }
+
+  it('keeps reading a local file until every byte is in, across short reads', async (t) => {
+    const client = clientWithUpload();
+    const content = Buffer.from('0123456789');
+    t.mock.method(JmapClient, 'safeReadPath', async () => fakeHandle(content, 3));
+    let uploaded: Buffer | undefined;
+    t.mock.method(client, 'uploadBlob', async (data: Buffer, ct: string) => {
+      uploaded = Buffer.from(data);
+      return { blobId: 'blob-1', type: ct, size: data.length };
+    });
+    await client.uploadAttachments([{ path: 'f.txt' }], 'unused-root', false);
+    assert.deepEqual(uploaded, content);
+  });
+
+  it('refuses, naming the file, when the file ends before its stated size', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(JmapClient, 'safeReadPath', async () => fakeHandle(Buffer.from('0123'), 3, 10));
+    let uploads = 0;
+    t.mock.method(client, 'uploadBlob', async () => { uploads++; return { blobId: 'x', type: 'text/plain', size: 1 }; });
+    await assert.rejects(
+      () => client.uploadAttachments([{ path: 'short.txt' }], 'unused-root', false),
+      (err: Error) => {
+        assert.match(err.message, /"short\.txt"/);
+        assert.match(err.message, /only 4 bytes, fewer than the 10 bytes/);
+        return true;
+      },
+    );
+    assert.equal(uploads, 0);
+  });
+
+  it('refuses, naming the file, when the file grew past its stated size', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(JmapClient, 'safeReadPath', async () => fakeHandle(Buffer.from('0123456789'), 3, 4));
+    let uploads = 0;
+    t.mock.method(client, 'uploadBlob', async () => { uploads++; return { blobId: 'x', type: 'text/plain', size: 1 }; });
+    await assert.rejects(
+      () => client.uploadAttachments([{ path: 'grown.txt' }], 'unused-root', false),
+      (err: Error) => {
+        assert.match(err.message, /"grown\.txt" is now longer than the 4 bytes it had when checked; it changed while being read/);
+        return true;
+      },
+    );
+    assert.equal(uploads, 0);
   });
 
   it('uploads multiple files and returns a part per file (two-pass, in order)', async (t) => {
@@ -5489,6 +5693,21 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
       .filter(([m]: any) => m === 'Email/get')
       .flatMap(([, p]: any) => p.ids ?? []);
     assert.equal(fetchedIds.includes('orig-1'), false);
+  });
+
+  it('updateDraft drops a stored header that is not a JMAP id rather than carrying it', async () => {
+    for (const stored of ['not a jmap id!', 'orig-1\r\nBcc: x@example.com']) {
+      const makeReq = mockSrcUpdate(client, { ...REPLY_QUOTED, [SRC_PROP]: stored });
+      await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
+      assert.equal(draftFromCall(makeReq)[SRC_PROP], undefined, JSON.stringify(stored));
+      makeReq.mock.restore();
+    }
+  });
+
+  it('updateDraft carries a stored header with surrounding whitespace, trimmed', async () => {
+    const makeReq = mockSrcUpdate(client, { ...REPLY_QUOTED, [SRC_PROP]: '  orig-1 \t' });
+    await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
+    assert.equal(draftFromCall(makeReq)[SRC_PROP], 'orig-1');
   });
 
   it('a draft that never had the header stays without it', async () => {
