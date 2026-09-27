@@ -732,6 +732,17 @@ describe('archive_email is wired to the strict string-array coercer', () => {
   });
 });
 
+// A caller may address the event by its resource url; the confirmation reports the event's
+// UID, which updateCalendarEvent returns, not the caller's own argument.
+describe('update_calendar_event echoes the resolved event id', () => {
+  it('reports result.eventId, not the eventId argument', () => {
+    const body = collectCaseBodies().get('update_calendar_event');
+    assert.ok(body, 'could not find the update_calendar_event case in src/index.ts');
+    const code = body.join('\n');
+    assert.match(code, /Calendar event updated\. Event ID: \$\{result\.eventId\}/);
+  });
+});
+
 // Each scope/status flag has to be read from the argument of the SAME name. The handlers
 // read them positionally into an options object
 // (`includeTrash: coerceBool((args as any).includeTrash)`), where swapping two names is a

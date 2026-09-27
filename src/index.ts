@@ -2209,7 +2209,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const fields = { title, description, start, end, location, participants, clearFields, timeZone, transparency };
         const result = await davClient.updateCalendarEvent(eventId, fields);
-        return { content: [{ type: 'text', text: `Calendar event updated. Event ID: ${eventId}${describeUpdateCalendarEventResult(result)}${buildBrokenCollectionNote(result.brokenCollections, 'write')}` }] };
+        return { content: [{ type: 'text', text: `Calendar event updated. Event ID: ${result.eventId}${describeUpdateCalendarEventResult(result)}${buildBrokenCollectionNote(result.brokenCollections, 'write')}` }] };
       }
 
       case 'delete_calendar_event': {

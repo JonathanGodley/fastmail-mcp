@@ -3014,6 +3014,15 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.equal(result.eventId, 'padded-uid');
   });
 
+  it('returns the stored UID when the event was addressed by its url', async () => {
+    const objects = [{ data: makeRichIcal('by-url@fm'), url: '/cal/personal/by-url.ics' }];
+    const { client } = createMockedPatchClient(objects);
+
+    const result = await client.updateCalendarEvent('/cal/personal/by-url.ics', { title: 'New Title' });
+
+    assert.equal(result.eventId, 'by-url@fm');
+  });
+
   it('preserves unknown properties when updating title only', async () => {
     const ical = makeRichIcal('evt1@fm');
     const objects = [{ data: ical, url: '/cal/evt1.ics' }];
