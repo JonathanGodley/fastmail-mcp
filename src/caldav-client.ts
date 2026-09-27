@@ -3331,7 +3331,7 @@ export class CalDAVCalendarClient {
    * be url-shaped, and dispatching would make that event unfindable by its own id.
    */
   private async findCalendarObjectByUID(eventId: string): Promise<CalendarObjectLookup> {
-    // Here, not in the handler, whose guard is falsy-only; all three tools inherit it.
+    // Here, not in the handler, whose guard tests presence only; all three tools inherit it.
     if (eventId != null && typeof eventId !== 'string') {
       throw new InvalidInputError(
         `eventId must be a string; received ${Array.isArray(eventId) ? 'array' : typeof eventId}. `

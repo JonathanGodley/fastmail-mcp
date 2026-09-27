@@ -2147,7 +2147,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_calendar_event': {
         const { eventId } = args as any;
-        if (!eventId) {
+        if (eventId == null) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
         const davClient = initializeCalDAVClient();
@@ -2193,7 +2193,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Coerced so a stringified array ('["location"]') passes the Array.isArray test
         // below instead of being dropped silently. (#54)
         const clearFields = coerceStringArray((args as any).clearFields);
-        if (!eventId) {
+        if (eventId == null) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
         const hasClearFields = Array.isArray(clearFields) && clearFields.length > 0;
@@ -2214,7 +2214,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'delete_calendar_event': {
         const { eventId } = args as any;
-        if (!eventId) {
+        if (eventId == null) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
         const davClient = initializeCalDAVClient();

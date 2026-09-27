@@ -744,6 +744,19 @@ describe('update_calendar_event echoes the resolved event id', () => {
   });
 });
 
+// A falsy guard would refuse `eventId: 0` or `false` as "required" before the client's
+// type refusal could name the real problem; only an absent id is "required".
+describe('the calendar event handlers require eventId by presence, not truthiness', () => {
+  for (const tool of ['get_calendar_event', 'update_calendar_event', 'delete_calendar_event']) {
+    it(tool, () => {
+      const body = collectCaseBodies().get(tool);
+      assert.ok(body, `could not find the ${tool} case in src/index.ts`);
+      const code = body.join('\n');
+      assert.match(code, /if \(eventId == null\) \{/, `${tool} must guard eventId with == null`);
+    });
+  }
+});
+
 // Each scope/status flag has to be read from the argument of the SAME name. The handlers
 // read them positionally into an options object
 // (`includeTrash: coerceBool((args as any).includeTrash)`), where swapping two names is a

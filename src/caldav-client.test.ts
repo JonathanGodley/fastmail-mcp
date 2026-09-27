@@ -1406,7 +1406,7 @@ describe('CalDAVCalendarClient event lookup', () => {
     [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url: PERSONAL_URL + 'solo.ics', etag: '"etag-solo"' }],
   });
 
-  // The handler's own guard is falsy-only, so a whitespace-only id used to reach the lookup and
+  // The handler's own guard tests presence only, so a whitespace-only id used to reach the lookup and
   // come back as "Calendar event not found" — an answer about the account, for a call that never
   // named an event. Rejected here, in the client, so all three tools inherit it.
   it('rejects an eventId that is only whitespace, before any query is built', async () => {
