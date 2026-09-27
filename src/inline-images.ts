@@ -529,8 +529,15 @@ function decodeHtmlEntitiesOnce(value: string): string {
 // None of the terminators can appear in an identifier this server would recreate.
 const BROAD_CID_REF = /cid:([^\s"'<>()[\]{}\\]+)/gi;
 
-// From the END only, so an identifier containing a colon or comma keeps it.
-const TRAILING_SENTENCE_PUNCTUATION = /[.,;:!?]+$/;
+// From the END only, so an identifier containing a colon or comma keeps it. A walk back
+// from the end rather than /[.,;:!?]+$/, which re-scans a punctuation run from every start
+// position and is quadratic on one that is followed by an identifier character.
+const SENTENCE_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?']);
+function trimTrailingSentencePunctuation(s: string): string {
+  let end = s.length;
+  while (end > 0 && SENTENCE_PUNCTUATION.has(s[end - 1])) end--;
+  return s.slice(0, end);
+}
 
 /**
  * Every `cid:`-looking reference anywhere in some html, not only on an `<img>` (a CSS
@@ -543,7 +550,7 @@ export function extractCidRefs(html: string | null | undefined): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const match of decoded.matchAll(BROAD_CID_REF)) {
-    const raw = match[1].replace(TRAILING_SENTENCE_PUNCTUATION, '');
+    const raw = trimTrailingSentencePunctuation(match[1]);
     if (!raw) continue;
     const key = decodeCidSrc(raw);
     if (seen.has(key)) continue;

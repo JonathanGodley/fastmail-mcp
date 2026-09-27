@@ -865,6 +865,17 @@ describe('collectImgCidRefs', () => {
 });
 
 describe('extractCidRefs', () => {
+  // A punctuation run followed by an identifier character is not trailing, and a trim that
+  // re-scanned the run from every start position took seconds on one hostile body.
+  it('runs in linear time on a long punctuation run inside a reference', () => {
+    const n = 100_000;
+    const started = performance.now();
+    const refs = extractCidRefs(`cid:${'.'.repeat(n)}a cid:b${'.'.repeat(n)}`);
+    const elapsed = performance.now() - started;
+    assert.deepEqual(refs, [`${'.'.repeat(n)}a`, 'b']);
+    assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+  });
+
   it('finds references the <img> collector cannot see', () => {
     const html =
       '<div style="background:url(cid:bg.png)">' +
