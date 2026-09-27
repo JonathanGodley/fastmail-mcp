@@ -250,7 +250,8 @@ function assertTokensAcceptable(
       if (site.name === 'signature' || site.name === history) continue;
       throw bad(
         `{{${site.name}}} does not apply to mode:'${mode}'` +
-        (history ? `; use {{${history}}} instead.` : ' (a new message has no history to place).'),
+        (history ? `; use {{${history}}} instead. ` : ' (a new message has no history to place). ') +
+        ESCAPE_HINT,
       );
     }
   }

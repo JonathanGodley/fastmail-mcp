@@ -290,6 +290,16 @@ describe('draft_email — token refusals, decided before anything is built', () 
     );
   });
 
+  it('says how to write the braces as text when refusing a wrong-mode token', async () => {
+    // A {{quote}} in a new message may be prose about the syntax rather than a slip.
+    const { client } = spyClient();
+    const message = await messageFrom(() => compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'type {{quote}} to quote' }, client,
+    ));
+    assert.match(message, /does not apply to mode:'new'/);
+    assert.match(message, /To write braces as text, escape them/);
+  });
+
   it('refuses {{forward}} alongside asAttachment: the original already rides whole', async () => {
     const { client } = spyClient();
     await assert.rejects(
