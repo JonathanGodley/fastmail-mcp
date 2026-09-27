@@ -15,63 +15,49 @@
 //   2. The handler reads the value through coerceBool, not `!!`. Under `!!`, the string
 //      "false" is truthy — the parameter silently inverts.
 //
-// This asserts against src/index.ts and the handler modules as TEXT rather than by
-// spawning the built server and reading tools/list. tools/list would prove what is
-// actually shipped, which is the stronger claim — the array-side guard (#98,
-// src/built-server.test.ts's `array-side schema drift guard`) takes exactly that route — but
-// a text scan needs no server spawn and no built dist/ at all, so it stays the cheaper check
-// for a convention this size. tsc does not rewrite string literals, so the source and the
-// shipped schema cannot disagree on these, and the source check can never go stale.
-// (scripts/mcp-harness.mjs grew a list() for the on-demand check against a freshly built
-// server; `node scripts/mcp-harness.mjs --list`.)
+// This asserts against src/index.ts and the handler modules as TEXT: that needs no server
+// spawn and no build, and tsc does not rewrite string literals, so the source and the
+// shipped schema cannot disagree on these. The array-side guard (#98, in
+// src/built-server.test.ts) reads tools/list instead; for an on-demand check against a built
+// server, `node scripts/mcp-harness.mjs --list`.
 //
 // Recovery notes name only parameters the emitting tool has.
 //
-// The Trash/Spam exclusion note ends with a runnable recovery — "set includeTrash:true
-// (or mailbox:"trash") to include them" — and a note is worth having only if the caller
-// reading it can act on it. Naming a parameter the tool does not declare is worse than
-// saying nothing: the retry is rejected outright by the unknown-parameter guard, and the
+// The Trash/Spam exclusion note ends with a runnable recovery - "set includeTrash:true
+// (or mailbox:"trash") to include them". Naming a parameter the tool does not declare is
+// worse than saying nothing: the retry is rejected by the unknown-parameter guard, and the
 // caller is left believing the withheld messages are unreachable.
 //
-// Nothing else enforces the pair. The note text is built from the roles that were actually
-// excluded, so it is the same string on every tool that emits it, while the parameters are
-// declared per tool — a tool can start emitting notes without declaring the flags they
-// prescribe, and both halves still look correct in isolation. So
-// the assertion is derived from both sides at once: which tools emit a note is read out of
-// the handlers, and which parameters a note names is read out of the real emitter's output
-// rather than a copy of its wording.
+// Nothing else enforces the pair. The note text is the same string on every tool that emits
+// it, while the parameters are declared per tool, so both halves can look correct in
+// isolation. The assertion is derived from both sides at once: which tools emit a note is
+// read out of the handlers, and which parameters a note names is read out of the real
+// emitter's output rather than a copy of its wording.
 //
 // Compact result payloads (#40).
 //
-// Every JSON result item goes out through one of two seams in coerce.ts — toolJson, or
-// redactedJson where the values may carry credentials. Neither takes an indent argument, so
-// the seams themselves cannot pretty-print, and TypeScript rejects a second argument to
-// either. What nothing else catches is a new handler reaching past them for a bare
-// JSON.stringify with an indent, which is how every site came to be indented in the first
-// place: the cost is invisible at the call site and only shows up in the response. The
-// number of sites is deliberately not written down here - it moves whenever a handler is
-// refactored or a renderer is shared, and the scan below is what pins it.
+// Every JSON result item goes out through one of two seams in coerce.ts - toolJson, or
+// redactedJson where the values may carry credentials. Neither takes an indent argument, and
+// TypeScript rejects a second argument to either. What nothing else catches is a new handler
+// reaching past them for a bare JSON.stringify with an indent: the cost is invisible at the
+// call site and only shows up in the response. The number of sites is deliberately not
+// written down here - it moves whenever a handler is refactored, and the scan below pins it.
 //
 // So the scan finds JSON.stringify CALL SITES — every shipped .ts under src/, recursively,
 // with comments and string/template/regex literals blanked first so only real syntax is left
 // — and asserts two things about each: that it passes no third argument (an indent, whatever
 // the replacer looks like), and that it is one of the listed non-payload uses.
 //
-// What that second half actually buys, stated exactly, because the loose version of the
-// sentence ("the seam is what redacts") is FALSE and would invite waving a real gap through
-// later. toolJson is a bare JSON.stringify with no replacer, and it is nearly every seam call
-// site, so routing a payload through it adds no redaction whatsoever. What the second half
-// buys is that serialisation stays in ONE place: neither seam accepts an indent, so keeping
-// every payload on them makes "no payload can be pretty-printed" a property of two function
-// signatures rather than of a text scan that has to keep finding every call site forever. It
-// also keeps the choice between the two seams visible when a new handler is reviewed.
+// What that second half buys is NOT redaction ("the seam is what redacts" is false):
+// toolJson is a bare JSON.stringify with no replacer, and it is nearly every seam call site.
+// It buys serialisation in ONE place: neither seam accepts an indent, so "no payload can be
+// pretty-printed" becomes a property of two function signatures rather than of a text scan
+// that has to keep finding every call site forever.
 //
-// Where redaction does and does not run, since this scan cannot tell you and the file should
-// not imply otherwise: redactedJson is the only serialiser that redacts, and it has one call
-// site (the bulk-operations result in index.ts). Success payloads on every other path are not
-// redacted, and were not before the compaction either. The ERROR path is covered independently
-// of both seams - every error reply is redacted centrally in index.ts's CallTool catch - so a
-// bearer token in a server error description is caught there, not here.
+// Where redaction does run: redactedJson is the only serialiser that redacts, and it has one
+// call site (the bulk-operations result in index.ts). Success payloads on every other path
+// are not redacted. Every error reply is redacted centrally in index.ts's CallTool catch, so
+// a bearer token in a server error description is caught there, not here.
 //
 // It is not a small cost. Indentation is bytes the reader pays for that nothing parses, and
 // it scales with the number of JSON tokens rather than with the content, so it varies with a
@@ -164,18 +150,14 @@ describe('lenient-boolean convention', () => {
         // keeps `!!raw.hasAttachment` (a property read off a JMAP object that happens to
         // be called `raw`) from matching.
         //
-        // THIS IS NARROWER THAN IT LOOKS, AND THE GAP IS NOT ABOUT ANY ONE FILE. Only the
-        // bare name and the `args`-shaped receivers above are matched, so a handler that
-        // aliases its arguments reads green whatever it does with them: a `!!a.someFlag`
-        // sitting behind a `const a = args ?? {}` is invisible here. The reads that were in
-        // that blind spot have been moved onto `args?.` at their own sites, each with a
-        // comment saying why, but nothing stops the next handler from aliasing again.
-        // Adding a file to HANDLER_FILES therefore buys less than it appears to.
-        // Do not widen the pattern to any `!!<identifier>.<name>` to close it: that is
-        // exactly what re-admits the `raw.hasAttachment` false positive, and exempting
-        // `raw` by name would make this a list of blessed identifiers rather than a rule.
-        // The fix is to derive what to look FOR from the schema instead of guessing at the
-        // shape of the read — new machinery, not a longer regex.
+        // THIS IS NARROWER THAN IT LOOKS. Only the bare name and the `args`-shaped receivers
+        // above are matched, so a handler that aliases its arguments reads green whatever it
+        // does with them: a `!!a.someFlag` behind a `const a = args ?? {}` is invisible here,
+        // and adding a file to HANDLER_FILES buys less than it appears to.
+        // Do not widen the pattern to any `!!<identifier>.<name>` to close it: that re-admits
+        // the `raw.hasAttachment` false positive, and exempting `raw` by name would make this
+        // a list of blessed identifiers rather than a rule. The fix is to derive what to look
+        // FOR from the schema: new machinery, not a longer regex.
         const patterns = [
           new RegExp(`!!\\s*${name}\\b(?![.\\[])`),
           new RegExp(`!!\\s*\\(\\s*args\\s+as\\s+any\\s*\\)\\.${name}\\b`),
@@ -202,13 +184,12 @@ describe('lenient-boolean convention', () => {
 // tools, so a value that cannot be read as a list is a refusal naming the parameter rather
 // than a silent undefined. A caller learns that from the description or nowhere: every one
 // of these eight parameters also carries LENIENT_LIST_DESC, which lists the SHAPES accepted
-// and would otherwise read as a promise that anything else is quietly ignored — which is
-// precisely the behaviour that was wrong. The failure this guards is the cheap one: a ninth
-// recipient parameter, or a re-worded description, that keeps the lenient sentence and drops
-// the strict one, leaving the surface describing the old behaviour with nothing to catch it.
+// and would otherwise read as a promise that anything else is quietly ignored. The failure
+// this guards is a ninth recipient parameter, or a re-worded description, that keeps the
+// lenient sentence and drops the strict one.
 //
 // The set is ENUMERATED rather than sampled: four fields on draft_email and four on
-// edit_draft, and the assertion names which site is missing it.
+// edit_draft.
 function collectRecipientParamDescriptions(): { withStrict: string[]; missing: string[] } {
   const lines = readLines('index.ts');
   const withStrict: string[] = [];
@@ -259,9 +240,9 @@ describe('the recipient lists document their fail-closed reading', () => {
   it('says both halves of the rule: a value refused by name, an entry refused by index', () => {
     // Read off the constant itself, so re-wording it cannot quietly drop one half while the
     // eight call sites above still look correct.
-    // Read line by line rather than with a multiline regex over the file: this repo's
-    // checkout carries CRLF endings, so a pattern spelling its line breaks as `\n` matches
-    // nothing here and the guard passes vacuously on the machine that wrote it.
+    // Read line by line rather than with a multiline regex over the file: in a CRLF
+    // checkout a pattern spelling its line breaks as `\n` matches nothing, and the guard
+    // passes vacuously.
     const lines = readLines('index.ts');
     const start = lines.findIndex((l) => l.startsWith('const RECIPIENT_LIST_STRICT_DESC ='));
     let declaration = '';
@@ -276,20 +257,15 @@ describe('the recipient lists document their fail-closed reading', () => {
     // Deliberately NOT pinned: what an empty whole value MEANS. This string is appended to
     // all eight parameters and the answer differs between them (a reply's defaults still
     // run; every edit_draft recipient field refuses an empty value outright), so a shared
-    // sentence can only say that the coercion reads it — never what it does. Pinning the
-    // wording here is what let an untrue shared promise stand.
+    // sentence can only say that the coercion reads it, never what it does.
   });
 });
 
-// timeZone accepts null as a real, deliberately-rejected input (create_calendar_event and
-// update_calendar_event, #157) — not absence. Omitting timeZone is what absence means, and
-// that is already handled by the parameter being optional; `null` is a caller explicitly
-// asking to force a floating write, which validateCallerTimezone rejects with a tailored
-// message ("there is no way to force a floating write through this parameter"). The schema
-// has to say `type: ['string', 'null']` for that message to ever be reached: a narrowing edit
-// back to `type: 'string'` makes a validating client reject `timeZone: null` with a generic
-// type-mismatch error before this server's own handler ever runs — the same failure mode the
-// lenient-boolean guard above exists for, one type union over.
+// timeZone accepts null as a real, deliberately-rejected input (#157), not as absence:
+// `null` is a caller asking to force a floating write, which validateCallerTimezone rejects
+// with a tailored message. The schema has to say `type: ['string', 'null']` for that message
+// to be reached: narrowed to `type: 'string'`, a validating client rejects `timeZone: null`
+// with a generic type-mismatch error first, the lenient-boolean failure one union over.
 function collectTimeZoneNullableParams(): { nullable: string[]; narrow: string[] } {
   const lines = readLines('index.ts');
   const nullable: string[] = [];
@@ -372,10 +348,9 @@ function collectToolParams(): Map<string, Set<string>> {
   return params;
 }
 
-// The `required` array each tool declares, keyed by tool name, read off the TOOLS literal
-// the same way collectToolParams reads `properties` above. Every tool writes its required
-// list on one line (`required: ['emailId', 'mailboxes'],`), so this does not need the
-// brace-tracking collectToolParams does for the multi-line `properties` block.
+// The `required` array each tool declares, keyed by tool name. Every tool writes its
+// required list on one line (`required: ['emailId', 'mailboxes'],`), so no brace-tracking
+// is needed.
 function collectRequiredParams(): Map<string, Set<string>> {
   const lines = readLines('index.ts');
   const start = lines.findIndex((l) => l.trim() === 'const TOOLS = [');
@@ -470,20 +445,12 @@ describe('recovery notes name only parameters the tool has', () => {
     // set. And it is the only thing that notices a note emitter this scan can no longer
     // see: attribution is positional (see collectCaseBodies), so moving a handler into an
     // injected-client module removes it from `emitters` and the subset assertion below
-    // would then hold vacuously for it. Raise this number with each emitter added; do not
-    // lower it to make a failure go away without checking which of the two it is.
+    // would then hold vacuously for it. Raise this number with each emitter added; lower it
+    // only for an emitter that is deleted outright (as #92 did), never to make a failure go
+    // away without checking which of the two it is.
     //
-    // This floor WAS lowered, from 3 to 2, when #92 deleted get_recent_emails — one of the
-    // three emitters (list_emails, get_recent_emails, search_emails). That is the case the
-    // warning above exists to let through: the scan still matches (list_emails and
-    // search_emails still turn up in `emitters`) and no emitter moved into an
-    // injected-client module — the tool that emitted is simply gone. Check which of the two
-    // applies before ever lowering this number again.
-    //
-    // The subset assertion is not carried by the floor, and neither carries the other. The
-    // failure it detects is a tool that emits the note while missing a flag the note
-    // prescribes: hold `emitters` fixed, delete includeTrash from one of those tools'
-    // schemas, and `missing` is non-empty.
+    // The subset assertion is not carried by the floor: hold `emitters` fixed, delete
+    // includeTrash from one of those tools' schemas, and `missing` is non-empty.
     assert.ok(
       emitters.length >= 2,
       `found only ${emitters.length} tools appending buildExclusionNote; either the handler ` +
@@ -517,9 +484,8 @@ describe('recovery notes name only parameters the tool has', () => {
 });
 
 // A tool's README reference entry: the indented lines under its `- **<name>**: …` bullet, up
-// to the next unindented list item. Same structural contract readme-inventory.test.ts pins for
-// the entry LINE itself (see the comment at the top of that file); this reads the detail
-// bullets beneath it, which is where the `- Parameters: …` line lives.
+// to the next unindented list item. The entry LINE follows the structural contract at the top
+// of readme-inventory.test.ts; the `- Parameters: …` line sits in the bullets beneath it.
 function collectReadmeToolEntries(): Map<string, string> {
   const lines = readFileSync(join(SRC_DIR, '..', 'README.md'), 'utf8')
     .split('\n').map((l) => l.replace(/\r$/, ''));
@@ -546,16 +512,13 @@ function collectReadmeToolEntries(): Map<string, string> {
 
 // README documents every parameter, not just every tool.
 //
-// readme-inventory.test.ts asserts set equality on tool NAMES, which is what catches a tool
-// shipping with no entry at all. It says nothing about the entry's contents, so a parameter
-// added to an existing tool — the far commoner change — was held by diligence alone: the
-// entry still exists, the guard still passes, and the parameter is invisible to anyone
-// reading the docs instead of the schema.
+// readme-inventory.test.ts asserts set equality on tool NAMES; it says nothing about an
+// entry's contents, so a parameter added to an existing tool (the far commoner change) would
+// pass it while invisible to anyone reading the docs instead of the schema.
 //
-// Matched on the backticked name anywhere in the entry, deliberately loosely. The point is
-// that the parameter is MENTIONED; whether its description is any good is not something a
-// text scan can judge, and a stricter shape (a position in the `- Parameters:` line, a
-// required/optional tag) would make ordinary prose edits fail for no gain.
+// Matched on the backticked name anywhere in the entry, deliberately loosely: the point is
+// that the parameter is MENTIONED, and a stricter shape (a position in the `- Parameters:`
+// line, a required/optional tag) would make ordinary prose edits fail for no gain.
 describe('README documents every tool parameter', () => {
   it('mentions each declared parameter in the tool entry that has it', () => {
     const params = collectToolParams();
@@ -636,14 +599,11 @@ function collectClamps(): Map<string, { fallback: number; max: number }> {
 
 // The limit bound belongs to the handler, not to the JMAP client (#29). getEmails passes
 // `limit` to JMAP exactly as given — it carries no clamp of its own — so every caller must
-// clamp BEFORE calling in. That is a property of the call sites, so it is asserted at the
-// call sites: today the list_emails handler and test_bulk_operations (#92 deleted the
-// third caller, get_recent_emails, along with its own handler).
+// clamp BEFORE calling in, so it is asserted at the call sites.
 //
-// The failure being guarded is quiet and expensive: an unclamped non-numeric limit reaches
-// JMAP as `"limit": null`, which is not a small page but no bound at all — a whole-mailbox
-// metadata dump. Nothing else notices it. The client-level tests deliberately assert the
-// unclamped passthrough, so they would stay green through exactly this regression.
+// An unclamped non-numeric limit reaches JMAP as `"limit": null`, which is no bound at all:
+// a whole-mailbox metadata dump. The client-level tests deliberately assert the unclamped
+// passthrough, so they would stay green through exactly this regression.
 describe('the limit bound is owned by the handlers', () => {
   it('clamps in every handler that calls getEmails', () => {
     // Every call site, across the files that read tool arguments — not index.ts alone. A
@@ -682,11 +642,9 @@ describe('the limit bound is owned by the handlers', () => {
     );
   });
 
-  // The clamp is where the tool's real limit default and cap live, so it is where they are
-  // asserted. The schema is the other half of the same contract — it is what a client reads
-  // and materialises — and the two are written in different files with nothing tying them
-  // together. A clamp that disagrees with the number beside it in the schema advertises one
-  // default and applies another.
+  // The clamp holds the tool's real limit default and cap; the schema is what a client
+  // reads. Nothing else ties the two together, so a mismatch advertises one default and
+  // applies another.
   it('clamps to the default and cap each tool advertises', () => {
     const clamps = collectClamps();
     const schemas = collectLimitSchemas();
@@ -712,29 +670,13 @@ describe('the limit bound is owned by the handlers', () => {
   });
 });
 
-// Each scope/status flag has to be read from the argument of the SAME name. The handlers
-// read them positionally into an options object
-// (`includeTrash: coerceBool((args as any).includeTrash)`), where swapping two names is a
-// one-character edit that type-checks, runs, and silently inverts which folder is hidden.
+// Handler wiring in the untestable CallTool switch. archive_email's contract says `notFound`
+// means the server did not know the id; the LENIENT coerceStringArray maps every element
+// through String(), so `emailIds: [null]` would reach Email/get as the literal id "null" and
+// come back in that bucket, reporting a message the caller never asked about.
 //
-// This covers the wiring only. The DEFAULT each flag falls back to, and the append of the
-// exclusion note itself, are still uncovered: they sit in the CallTool switch, which
-// CONTRIBUTING.md records as having no test harness. That residual is accepted here rather than
-// tracked — the extractable part of these handlers is a destructure-and-delegate, and the
-// injected-client extraction the Testing section prescribes is for handlers that
-// orchestrate. What made the residual worth narrowing at all is that the mis-wire above is
-// both the likeliest edit and the one whose symptom (mail quietly missing from a result)
-// looks like an empty mailbox rather than like a bug.
-// The same class of untestable handler wiring, for a different coercer. archive_email's
-// contract says `notFound` means the server did not know the id; the LENIENT
-// coerceStringArray maps every element through String(), so `emailIds: [null]` would reach
-// Email/get as the literal id "null" and come back in that bucket. A caller reading the
-// report would be told the server does not have a message it was never asked about, and the
-// type error would be invisible.
-//
-// Nothing else catches the swap. coerceStringArrayStrict's own rejection is unit-tested in
-// coerce.test.ts, but that pins the COERCER, not which coercer the handler calls — swap the
-// call here for the lenient one and every existing test still passes.
+// coerce.test.ts pins the strict COERCER's rejection, not which coercer the handler calls:
+// swap the call here for the lenient one and every other test still passes.
 describe('archive_email is wired to the strict string-array coercer', () => {
   it('reads emailIds through coerceStringArrayStrict', () => {
     const lines = readLines('index.ts');
@@ -762,10 +704,9 @@ describe('archive_email is wired to the strict string-array coercer', () => {
 
   it('serialises counts alongside results, which both descriptions promise', () => {
     // The tool description and the README both tell a caller the counts sum to the number
-    // of distinct ids they passed. That invariant is uncheckable from the prose alone,
-    // because a bucket with no entries produces no line — so `counts` has to be in the JSON
-    // item. Serialising `result.results` on its own satisfies every other test in the repo
-    // while quietly making both descriptions wrong.
+    // of distinct ids they passed. A bucket with no entries produces no line, so `counts`
+    // has to be in the JSON item; serialising `result.results` alone passes every other
+    // test in the repo.
     const lines = readLines('index.ts');
     const start = lines.findIndex((l) => l.includes("case 'archive_email':"));
     const end = lines.findIndex((l, i) => i > start && /^\s*case '/.test(l));
@@ -791,6 +732,15 @@ describe('archive_email is wired to the strict string-array coercer', () => {
   });
 });
 
+// Each scope/status flag has to be read from the argument of the SAME name. The handlers
+// read them positionally into an options object
+// (`includeTrash: coerceBool((args as any).includeTrash)`), where swapping two names is a
+// one-character edit that type-checks, runs, and silently inverts which folder is hidden.
+//
+// This covers the wiring only. The DEFAULT each flag falls back to, and the append of the
+// exclusion note, sit in the CallTool switch, which has no test harness. That residual is
+// accepted rather than tracked: these handlers only destructure and delegate, and the
+// injected-client extraction CONTRIBUTING.md prescribes is for handlers that orchestrate.
 describe('scope flags are wired to their own argument', () => {
   it('reads every coerceBool flag from the argument of the same name', () => {
     // `const raw = coerceBool((args as any).raw)`, `raw: coerceBool(args?.raw)` and the
@@ -825,17 +775,12 @@ describe('scope flags are wired to their own argument', () => {
   });
 });
 
-// Directories under src/ that hold no shipped code. Named, not inferred: the previous
-// version of this scan was flat, so EVERY subdirectory was skipped by accident and a
-// src/<subdir>/handler.ts would have gone unscanned forever. Listing the exclusion by name
-// means a new subdirectory is scanned by default and dropping one is a deliberate edit.
+// Directories under src/ that hold no shipped code. Named, not inferred, so a new
+// subdirectory is scanned by default and excluding one is a deliberate edit.
 const NON_SHIPPED_DIRS = new Set(['testing']);
 
 // Every shipped source file, recursively: any handler or formatter can serialise a payload,
-// wherever it lives. Read as text out of src/ rather than imported from dist/, for the same
-// reason as the scans above: a text scan needs no build and no server spawn, and tsc does not
-// rewrite a JSON.stringify call site, so the source read is accurate whether or not dist/ has
-// been rebuilt since. Paths come back relative to src/ ('coerce.ts', 'sub/thing.ts').
+// wherever it lives. Paths come back relative to src/ ('coerce.ts', 'sub/thing.ts').
 function collectSourceFiles(dir: string = SRC_DIR, prefix = ''): string[] {
   return readdirSync(dir, { withFileTypes: true })
     .flatMap((entry) => {
@@ -866,14 +811,12 @@ const BARE_REFERENCE = new RegExp(String.raw`\bJSON\s*\??\.\s*stringify\b(?!\s*\
 // Blank every comment and every string / template / regex literal in `source`, preserving
 // both length and newlines so offsets and line numbers still match the original text.
 //
-// The line-by-line regex this replaced could only see a call written on one line in one
-// shape, and dropped comments by testing for a leading `//`. Blanking first is what lets the
-// scan below count a call's arguments by walking brackets instead: after this pass, every
-// comma, quote and paren left in the text is syntax, so a comma inside a string, a comment
-// or a regex cannot be mistaken for an argument separator - and a JSON.stringify quoted in
-// prose cannot be mistaken for a call. Text inside a `${}` interpolation is deliberately
-// left intact, because real call sites live there (contact-card.ts builds its dropped-value
-// sentence that way).
+// Blanking first lets the scan below count a call's arguments by walking brackets: after
+// this pass every comma, quote and paren left in the text is syntax, so a comma inside a
+// string, a comment or a regex cannot be mistaken for an argument separator, and a
+// JSON.stringify quoted in prose cannot be mistaken for a call. Text inside a `${}`
+// interpolation is deliberately left intact, because real call sites live there
+// (contact-card.ts builds its dropped-value sentence that way).
 function blankLiterals(source: string): string {
   const out = [...source];
   const blankAt = (i: number) => {
@@ -901,13 +844,12 @@ function blankLiterals(source: string): string {
   // a number, `)`, `]` or a closing backtick it is division. `}` counts as a statement end,
   // so a regex may open after it.
   //
-  // The single character in front of the `/` does not settle it, and reading only that
-  // character got both directions wrong: `a++ / b` ends in `+` yet is division, and
-  // `return /re/` ends in an identifier character yet is a regex. Misreading a division as a
-  // regex is the dangerous one, because blanking it swallows every character up to the next
-  // `/` on the line - a real call site can vanish, and the scan then passes by finding
-  // nothing, which is the exact rot this whole guard exists to avoid. So look at the whole
-  // preceding TOKEN, and see the second defence at the blanking site below.
+  // The single character in front of the `/` does not settle it: `a++ / b` ends in `+` yet
+  // is division, and `return /re/` ends in an identifier character yet is a regex.
+  // Misreading a division as a regex is the dangerous one, because blanking it swallows
+  // everything up to the next `/` on the line, a real call site can vanish, and the scan
+  // passes by finding nothing. So look at the whole preceding TOKEN, and see the second
+  // defence at the blanking site below.
   const REGEX_MAY_FOLLOW_KEYWORD = new Set([
     'await', 'case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'of', 'return',
     'throw', 'typeof', 'void', 'yield',
@@ -950,18 +892,14 @@ function blankLiterals(source: string): string {
     if (ch === '"' || ch === "'") {
       i++;
       // Bounded at a newline, because a `'`/`"` literal cannot contain a raw one: an odd
-      // quote that is NOT opening a string - the apostrophe in a comment the comment scan
+      // quote that is NOT opening a string - an apostrophe in a comment the comment scan
       // never saw, or one inside a regex this walk left unblanked - would otherwise open a
       // scan that runs to the next quote ANYWHERE in the file and blanks every line between,
-      // deleting real call sites and leaving the scan to pass by finding nothing. That is the
-      // same silence the regex/division test below defends against, arriving from the other
-      // side, and stopping at the newline costs nothing: it leaves every real literal in this
-      // codebase blanked exactly as before.
-      // The escape branch is bounded at the newline TOO. It blanks the escaped character as
+      // deleting real call sites so the scan passes by finding nothing.
+      // The escape branch is bounded at the newline TOO: it blanks the escaped character as
       // well as the backslash, and `blankAt` refuses to blank a newline but still advances
-      // past it - so a `\`-newline line continuation carried the scan onto the next line in
-      // string mode and blanked the real call sites there, which is the exact silence the
-      // bound above exists to close, arriving through the one branch that could skip it.
+      // past it, so a `\`-newline line continuation would carry the scan onto the next line
+      // in string mode.
       while (i < source.length && source[i] !== ch && source[i] !== '\n') {
         if (source[i] === '\\' && source[i + 1] !== '\n') blankAt(i++);
         blankAt(i++);
@@ -1013,10 +951,8 @@ function blankLiterals(source: string): string {
       // anything else where the character in front is genuinely ambiguous. Blanking it would
       // delete the very call site this scan exists to find, and delete it silently. Treat it
       // as division. Being wrong that way leaves a regex unblanked, which the argument walk
-      // survives - but only because the string scan above stops at a newline: an unblanked
-      // regex containing an odd `'` or `"` would otherwise open a string scan that ran past
-      // the end of the line and blanked whole call sites, so this direction was silent too
-      // until that bound was added. Being wrong the other way is silent unconditionally.
+      // survives only because the string scan above stops at a newline. Being wrong the
+      // other way is silent unconditionally.
       if (j < source.length && source[j] === '/' && !new RegExp(CALL_START).test(source.slice(i + 1, j))) {
         for (let k = i + 1; k < j; k++) blankAt(k);
         i = j + 1;
@@ -1087,9 +1023,7 @@ function findStringifyAliases(source: string): number[] {
 // count, so ADDING one to an already-listed file still has to be justified here. The count
 // catches an addition and not a substitution: swapping contact-card.ts's prose-quoting call
 // for a payload serialisation leaves the count at 2 and passes. Everything else has to go
-// through toolJson / redactedJson, which is what keeps serialisation on two signatures that
-// cannot take an indent - see the header for what routing through a seam does and does not
-// buy, since toolJson itself redacts nothing.
+// through toolJson / redactedJson (see the header for what that does and does not buy).
 const NON_PAYLOAD_STRINGIFY: Record<string, { count: number; why: string }> = {
   'coerce.ts': { count: 2, why: 'the seams themselves - toolJson and redactedJson' },
   'contact-card.ts': { count: 2, why: 'quotes a dropped/added value into a prose sentence' },
@@ -1182,10 +1116,9 @@ describe('result payloads are serialised compact', () => {
 });
 
 describe('the compact-serialisation scan sees the forms that used to escape it', () => {
-  // The scan this pins replaced a line-by-line regex that only matched a `null`/`undefined`
-  // replacer on a single line. Each offender case below is a real way that scan could be
-  // defeated while shipping a pretty-printed payload; each allowed case is a form that must
-  // NOT be reported, so the guard cannot be "fixed" into firing on prose.
+  // Each offender case below is a real way a scan could be defeated while shipping a
+  // pretty-printed payload; each allowed case is a form that must NOT be reported, so the
+  // guard cannot be "fixed" into firing on prose.
   const offenders: [string, string][] = [
     ['a null replacer with an indent', 'const s = JSON.stringify(v, null, 2);'],
     ['no spaces at all', 'const s=JSON.stringify(v,null,2);'],
@@ -1198,37 +1131,30 @@ describe('the compact-serialisation scan sees the forms that used to escape it',
     ['an object argument whose own commas are nested', 'const s = JSON.stringify({ a: 1, b: [2, 3] }, null, 2);'],
     ['a call inside a template interpolation', 'const s = `x ${JSON.stringify(v, null, 2)} y`;'],
     ['a call after a regex literal containing a quote and a paren', 'const re = /["(]/g;\nconst s = JSON.stringify(v, null, 2);'],
-    // The three below were found by running the scan against them rather than by reading it,
-    // and each was invisible to BOTH assertions - not merely miscounted. That is the shape of
-    // hole worth pinning: the guard reported nothing and looked healthy.
+    // Each case below is invisible to BOTH assertions if the scan gets it wrong, not merely
+    // miscounted: the guard reports nothing and looks healthy.
     ['an optional call, which reaches the same function', 'const s = JSON?.stringify(v, null, 2);'],
     [
-      // A `/` after `a++` is division, but the character in front of it is `+`, which reads
-      // like an operator. Scanning to the next `/` on the line blanked the call in between.
+      // A `/` after `a++` is division, though the character in front of it is `+`.
       'a call on a line whose earlier division could be misread as a regex',
       'const r = a++ / b; const s = JSON.stringify(v, null, 2) / c;',
     ],
     [
-      // A `/` after `return` opens a regex, but the character in front of it is a letter, so
-      // the regex was read as division and left unblanked - and its `"` then opened a string
-      // scan that ate the real call on the next line.
+      // A `/` after `return` opens a regex, though the character in front of it is a letter;
+      // read as division, its `"` opens a string scan that eats the call on the next line.
       'a call after a regex that follows a keyword rather than an operator',
       'function f() { return /["(]/g; }\nconst s = JSON.stringify(v, null, 2);',
     ],
     [
-      // The same silence from the other direction, and the one the token test CANNOT settle:
-      // after `)` a `/` really is division far more often than not, so a regex written there
-      // is deliberately left unblanked - and the `"` inside it then opened a string scan that
-      // ran past the end of the line and blanked every call below it. Bounding that scan at a
-      // newline is what makes "left unblanked" survivable.
+      // The case the token test CANNOT settle: after `)` a `/` is usually division, so a
+      // regex there is deliberately left unblanked, and only the newline bound on the string
+      // scan stops its `"` from blanking every call below it.
       'a call below an unblanked regex whose quote would otherwise swallow the rest of the file',
       'for (const a of b) /["(]/.test(a);\nconst s = JSON.stringify(v, null, 2);\nconst t = toolJson(w);',
     ],
     [
-      // …and the one branch that could step over that newline anyway. The escape handling
-      // inside the string scan blanks the backslash and then blanks-and-advances again,
-      // landing on the next line still in string mode, so a single trailing backslash was
-      // enough to resume the scan below and blank the real call sites there.
+      // The escape branch of the string scan, which could step over that newline bound: a
+      // single trailing backslash would carry the scan onto the next line in string mode.
       'a call below a line whose trailing backslash would otherwise carry the string scan onto it',
       "const doc = 'x \\\nconst s = JSON.stringify(v, null, 2);\nconst t = toolJson(w);",
     ],
@@ -1269,8 +1195,8 @@ describe('the compact-serialisation scan sees the forms that used to escape it',
     assert.equal(findStringifyCalls(source)[0].line, 3);
   });
 
-  // The third hole. An alias is a reference, so it is not a call site and the argument walk
-  // will never see the indent - the reference itself has to be the thing reported.
+  // An alias is a reference, not a call site, so the argument walk never sees the indent;
+  // the reference itself has to be the thing reported.
   it('reports an aliased JSON.stringify, which no argument count can see', () => {
     const source = 'const j = JSON.stringify;\nconst s = j(v, null, 2);';
     assert.deepEqual(findStringifyCalls(source), []);
@@ -1297,9 +1223,8 @@ describe('the compact-serialisation scan sees the forms that used to escape it',
 
 describe('the compact-serialisation scan reaches every shipped file', () => {
   it('descends into subdirectories and excludes src/testing by name', () => {
-    // Built in a temp tree rather than asserted against src/ itself, because src/ happens to
-    // have no shipped subdirectory today - which is exactly how the flat readdirSync that
-    // preceded this looked correct while skipping every subdirectory there could ever be.
+    // Built in a temp tree because src/ has no shipped subdirectory today, so asserting
+    // against src/ itself would pass for a flat scan that skips every subdirectory.
     const root = mkdtempSync(join(tmpdir(), 'srcscan-'));
     try {
       mkdirSync(join(root, 'sub'));
@@ -1323,15 +1248,10 @@ describe('the compact-serialisation scan reaches every shipped file', () => {
   });
 });
 
-// The label tools' array parameter is `mailboxes`, not `mailboxIds` (#91): the old name
-// promised bare ids while the matcher behind it always accepted id/role/name/path, so the
-// surface lied about what it took. This pins the rename on all four label tools at once -
-// the SCHEMA half AND the HANDLER half - so a revert of either, or a copy-pasted new label
-// tool that keeps the old name, fails here rather than only showing up as a caller's
-// unknown-parameter error (a schema-only revert) or a 100%-rejection bug (a handler-only
-// revert: the schema would advertise `mailboxes` while the handler still read the
-// caller's `mailboxIds`, so every correct call would be rejected as if the required array
-// were missing).
+// The label tools' array parameter is `mailboxes`, not `mailboxIds` (#91), pinned on all
+// four label tools in both the SCHEMA and the HANDLER half. A handler-only revert would
+// advertise `mailboxes` while reading `mailboxIds`, rejecting every correct call as if the
+// required array were missing.
 describe('label tools take mailboxes, not mailboxIds (#91)', () => {
   it('declares mailboxes (required) and never mailboxIds on every label tool', () => {
     const params = collectToolParams();
@@ -1370,10 +1290,8 @@ describe('label tools take mailboxes, not mailboxIds (#91)', () => {
   });
 });
 
-// get_recent_emails was deleted (#92): list_emails already covered the same query, and a
-// small `limit` (e.g. 10) on list_emails now covers the quick "what's new" look it existed
-// for. This pins the deletion so a revert, or a copy-pasted tool that reintroduces the
-// name, fails here rather than only showing up as README/schema drift elsewhere.
+// get_recent_emails was deleted (#92); list_emails with a small `limit` covers it. Pinned so
+// a revert, or a copy-pasted tool that reintroduces the name, fails here.
 describe('get_recent_emails is gone (#92)', () => {
   it('is absent from the TOOLS literal', () => {
     const params = collectToolParams();
@@ -1386,11 +1304,9 @@ describe('get_recent_emails is gone (#92)', () => {
 });
 
 // The handler half of the transparency wiring (#194). built-server.test.ts proves the
-// parameter is ADVERTISED over a real tools/list; this proves the CallTool switch actually
-// reads it and hands it on. The two failure modes are opposite and neither is visible to the
-// caldav-client tests, which call the client methods directly: a schema with no handler
-// silently ignores a value the caller sent, and a handler with no schema is unreachable
-// through a validating client.
+// parameter is ADVERTISED; this proves the CallTool switch reads it and hands it on. A
+// schema with no handler silently ignores a value the caller sent, and the caldav-client
+// tests, which call the client directly, cannot see that.
 describe('the calendar write handlers read transparency and pass it on (#194)', () => {
   const CALENDAR_WRITE_TOOLS = ['create_calendar_event', 'update_calendar_event'];
 
@@ -1433,12 +1349,10 @@ describe('the calendar write handlers read transparency and pass it on (#194)', 
 // duplicated id collapses to one write while the reported count still claims every
 // submitted id changed.
 //
-// Pinned by ENUMERATING every `case 'bulk_…':` handler, not by banning the old inline
+// Pinned by ENUMERATING every `case 'bulk_…':` handler, not by banning the inline
 // `emailIds.length` string: a seventh bulk tool that aliased the length to a local, or
-// inlined `new Set(emailIds).size` and skipped the formatter, would ship the exact #185
-// defect while reading green against a ban on one string. See the lenient-boolean guard's
-// own documented alias blind spot above for the same shape of gap - the fix there is not a
-// wider regex either, it is a scan built to actually derive what to look for.
+// inlined `new Set(emailIds).size` and skipped the formatter, would ship the #185 defect
+// while reading green against a ban on one string.
 describe('bulk email tools return their success text via a shared formatter (#185)', () => {
   it('every case whose name starts with bulk_ calls formatBulkEmailResult or formatLabelRemoval', () => {
     const bodies = collectCaseBodies();

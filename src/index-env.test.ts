@@ -5,18 +5,14 @@
 // server, and which rejects an unsubstituted "${...}" placeholder rather than passing the
 // literal through. A module that reads process.env directly gets none of that: it sees one
 // spelling, so a DXT install silently fails to configure the setting, and a placeholder is
-// taken as a real value. That is exactly how the CalDAV ORGANIZER display name behaved
-// before it was moved into the constructor config — nothing complained, because nothing
-// was checking.
+// taken as a real value.
 //
-// This reads the sources as TEXT rather than importing them, for the same reason the
-// lenient-boolean guard does: a text scan needs no build and no server spawn, and tsc does
-// not rewrite a `process.env` read into a different shape, so the source read is accurate
-// whether or not dist/ is current.
+// The sources are read as TEXT: that needs no build, and tsc does not rewrite a
+// `process.env` read into a different shape, so the read is accurate whether or not dist/
+// is current.
 //
-// Test files are deliberately out of scope — a test may legitimately set or stub
-// process.env for a fixture, and spawning-the-server tests copy the whole environment.
-// The convention constrains the shipped server, not its harnesses.
+// Test files are deliberately out of scope: a test may set or stub process.env for a
+// fixture, and the server-spawning tests copy the whole environment.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -141,16 +137,13 @@ describe('env-resolution convention', () => {
   });
 
   it('resolves the CalDAV settings and the blob-attach opt-in under all four configuration spellings', () => {
-    // The four-name list is what carries a DXT user_config key through to the server. The
-    // CalDAV credentials and display name each resolved fewer names than that, so a DXT
-    // install configured CalDAV and got calendar tools that reported themselves
-    // unavailable with nothing to explain why.
+    // The four-name list is what carries a DXT user_config key through to the server, so
+    // every declared manifest key needs all four. Missing one, a DXT install's answer never
+    // arrives; for CalDAV, the calendar tools then report themselves unavailable with
+    // nothing to say why.
     const source = readFileSync(join(SRC_DIR, 'index.ts'), 'utf8');
-    // allow_blob_attach rides along here rather than in its own test: it is a declared
-    // manifest.json user_config key like the three CalDAV settings, so the same four-name
-    // resolution is what carries a DXT host's answer through to the server, whichever
-    // spelling that host uses. (The base-URL kill switch is deliberately NOT in this list —
-    // it resolves one name on purpose, and is not in the manifest either; see getAuthConfig.)
+    // The base-URL kill switch is deliberately NOT in this list: it resolves one name on
+    // purpose and is not in the manifest; see getAuthConfig.
     for (const setting of ['caldav_username', 'caldav_password', 'caldav_display_name', 'allow_blob_attach']) {
       const upper = setting.toUpperCase();
       for (const name of [
@@ -167,15 +160,13 @@ describe('env-resolution convention', () => {
 
 // Drift guards over the broken-collection disclosure's two halves in src/index.ts (#136).
 //
-// Read as TEXT for the same reason as everything above: index.ts runs `server.connect()` at
-// load, so a unit test cannot import it, and the CallTool switch has no harness at all. These
-// two facts are therefore checkable nowhere else — and both are the kind that stay correct by
-// accident until someone edits the file beside them.
+// Read as TEXT because index.ts runs `server.connect()` at load, so a unit test cannot
+// import it, and the CallTool switch has no harness: these facts are checkable nowhere else.
 describe('broken-collection disclosure in the tool surface', () => {
   // Which consequence sentence each calendar handler's note must carry. The three differ in
-  // what they claim was checked, and a swap is invisible: the note still prints, still names
-  // the path, and quietly tells a caller either that an availability answer is complete when
-  // it is not, or that a copy of their event was looked for when nothing looked.
+  // what they claim was checked, and a swap is invisible: the note still prints and names
+  // the path, but tells a caller an availability answer is complete when it is not, or that
+  // a copy of their event was looked for when nothing looked.
   const CONTEXT_BY_TOOL: Record<string, 'read' | 'create' | 'write'> = {
     list_calendars: 'read',
     list_calendar_events: 'read',
