@@ -483,7 +483,9 @@ server cannot recreate") because it governs delete paths not yet written.
 **The override is scoped to the field that was actually ambiguous**, not to the call.
 `allowEntryReplace` is checked per entry array, after that array's own merge has run — so a
 call editing `emails` ambiguously and `phones` cleanly whole-replaces `emails` only, and
-`phones` still merges. A call-wide flag would quietly strip `contexts`/`pref` off an array
+`phones` still merges. On an array that merges cleanly the flag changes nothing, so a stored
+entry the caller could not have named (an empty value, or a stored duplicate) is still kept.
+A call-wide flag would quietly strip `contexts`/`pref` off an array
 the caller never had a problem with, which is the exact loss the merge exists to prevent.
 
 **A merge that writes a value back unchanged must write nothing.** Resolving a label from
