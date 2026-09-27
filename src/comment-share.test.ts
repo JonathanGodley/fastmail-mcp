@@ -69,10 +69,7 @@ after(() => {
 });
 
 // Clears staged and untracked leftovers before every case, so a case that
-// throws mid-test (or the one before it) can't corrupt one that runs after it.
-// This is a no-op on real commits - reset --hard only discards what HEAD
-// doesn't already have - so a case that deliberately commits (below) still
-// hands its commit on to the next one.
+// throws mid-test can't corrupt the next. Commits survive it.
 beforeEach(() => {
   git(['reset', '--hard', 'HEAD']);
   git(['clean', '-fdx']);
@@ -88,9 +85,8 @@ test('--staged reports a change far above the file\'s own density, exit 0', () =
 });
 
 test('a commit is measured against its first parent', () => {
-  // beforeEach wipes uncommitted state, so this makes its own staged change
-  // to commit rather than relying on the previous case's; the resulting
-  // commit is real HEAD history, so it does carry forward to later cases.
+  // beforeEach wipes uncommitted state, so this stages its own change; the
+  // commit does carry forward to later cases.
   appendFileSync(join(work, 'a.ts'), block(25, 5));
   git(['add', 'a.ts']);
   git(['commit', '-m', 'over the bar']);
@@ -138,9 +134,9 @@ test('no arguments prints usage and still exits 0', () => {
 });
 
 test('a pure trim (removes more comment than it adds) stays silent', () => {
-  // 60 old comment lines replaced with 25 new ones, code untouched. Added
-  // comment alone (25, no added code) is exactly what used to fire on its
-  // own; net comment is negative, so this must never fire.
+  // 60 old comment lines replaced with 25 new ones, code untouched. The added
+  // comment alone would be over the bar; net comment is negative, so this must
+  // never fire.
   writeFileSync(join(work, 'trim.ts'), labelled(60, 'old').concat(code(20)).join('\n') + '\n');
   git(['add', 'trim.ts']);
   git(['commit', '-m', 'trim baseline']);

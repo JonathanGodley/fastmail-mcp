@@ -32,7 +32,6 @@ if (!USERNAME || !PASSWORD) {
 const AUTH = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
 const ROOT = 'https://caldav.fastmail.com/dav/';
 
-// Redact the account name and any email-shaped string in everything printed.
 const redact = s => String(s)
   .split(USERNAME).join('<account>')
   .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>');
@@ -62,14 +61,10 @@ const unescapeXml = s => s
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
   .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&');
 
-// XML text that may carry CDATA sections. Cyrus wraps calendar-data and display names in them,
-// so a plain unescape leaves the `<![CDATA[` … `]]>` markers sitting in the printed bytes.
-//
-// The unwrap has to be POSITIONAL. Inside a section the text is literal (no entities); outside
-// it, the ordinary escaping applies. So each section's contents are spliced back in exactly
-// where it sat and only the text around it is unescaped. Returning just the sections' contents
-// would silently drop the non-CDATA text of a mixed payload, and unescaping the whole string
-// would corrupt a literal `&amp;` that the CDATA existed to protect.
+// XML text that may carry CDATA sections (Cyrus wraps calendar-data and display names in them).
+// The unwrap is POSITIONAL: section contents are literal and spliced back where they sat, and
+// only the text around them is unescaped. Returning only the sections would drop mixed text;
+// unescaping everything would corrupt a literal `&amp;` inside a section.
 const decodeXmlText = s => {
   let out = '';
   let i = 0;
@@ -98,21 +93,17 @@ const queryXml = (s, e) =>
   `<c:time-range start="${davInstant(s)}" end="${davInstant(e)}"/>` +
   `</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
 
-// SUMMARY substrings to match: CLI arguments, or the 22 Aug 2026 reference set.
 const WANTED = process.argv.slice(2).length ? process.argv.slice(2) : ['A timed event where you'];
 
-// Window: 30 days back to 120 days ahead, so freshly authored events are in range.
 const DAY = 24 * 60 * 60 * 1000;
 const windowStart = new Date(Date.now() - 30 * DAY).toISOString();
 const windowEnd = new Date(Date.now() + 120 * DAY).toISOString();
 
-// Discover calendar home.
 const rootPf = await dav('PROPFIND', ROOT, { body: PROPFIND(['d:current-user-principal']), headers: { Depth: '0' } });
 const principal = el(el(rootPf.text, 'current-user-principal') ?? '', 'href');
 const prinPf = await dav('PROPFIND', abs(principal.trim()), { body: PROPFIND(['c:calendar-home-set']), headers: { Depth: '0' } });
 const home = abs(el(el(prinPf.text, 'calendar-home-set') ?? '', 'href').trim());
 
-// Enumerate collections with displaynames.
 const homePf = await dav('PROPFIND', home, {
   body: PROPFIND(['d:displayname', 'd:resourcetype']),
   headers: { Depth: '1' },
@@ -129,7 +120,6 @@ for (const c of collections) console.log(`  - ${redact(c.name)}  ${redact(c.url)
 console.log(`Window: ${windowStart} .. ${windowEnd}`);
 console.log(`Matching SUMMARY substrings: ${WANTED.map(w => JSON.stringify(w)).join(', ')}`);
 
-// Query each collection and keep events whose SUMMARY matches.
 const found = [];
 for (const c of collections) {
   const res = await dav('REPORT', c.url, { body: queryXml(windowStart, windowEnd), headers: { Depth: '1' } });

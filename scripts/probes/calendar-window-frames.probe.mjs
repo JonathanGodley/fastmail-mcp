@@ -1,11 +1,9 @@
 // What this probe settles
 // -----------------------
-// #162 records two MISSING-EVENT bugs in the calendar read path that were derived from the
-// Cyrus source and from RFC 4791, and never observed. Both say the server never returns a
-// resource the caller should have seen, so no client-side change can fix either one; both
-// therefore decide whether the request window this server sends has to be widened before it
-// goes over the wire. A decision that changes what goes on the wire deserves an observation
-// rather than a derivation, and this probe is that observation.
+// #162 records two MISSING-EVENT bugs in the calendar read path, derived from the Cyrus source
+// and RFC 4791. Both say the server never returns a resource the caller should have seen, so
+// they decide whether the request window has to be widened before it goes over the wire. This
+// probe observes them.
 //
 //   Bug 1 - a sub-day window loses all-day events. Cyrus matches a date-only (VALUE=DATE)
 //   value on its UTC day and never shifts it into a collection timezone. A caller in a +10
@@ -55,24 +53,17 @@
 // the platform still behaves as measured here and FAIL means it has changed - at which point
 // the redesign resting on these facts needs re-deciding, not the probe re-tuned.
 //
-// WHY RAW CALDAV, AND WHY RAW PUT. This measures the platform, not our parsing, so it talks
-// HTTP directly and builds the same XML tsdav builds for `fetchCalendarObjects` with
-// `timeRange` + `expand` (a calendar-query REPORT at Depth 1, asking for d:getetag and a
-// c:calendar-data carrying c:expand, filtered VCALENDAR > VEVENT > c:time-range, with both
-// ranges written as the same UTC basic-format instants). Raw PUT is not a shortcut either:
-// this server's own create path always writes a TZID since #157, so it cannot author the
-// floating fixture at all. If Fastmail rejects or rewrites the floating PUT, that is itself
-// the answer to bug 2 and is reported as such rather than worked around.
+// WHY RAW CALDAV, AND WHY RAW PUT. This measures the platform, not our parsing, so it sends the
+// same XML tsdav builds for `fetchCalendarObjects` with `timeRange` + `expand`. This server's
+// own create path always writes a TZID (#157), so it cannot author the floating fixture. A
+// rejected or rewritten floating PUT is itself the answer to bug 2 and is reported as such.
 //
-// FIXTURES AND CLEANUP. Three synthetic events (an all-day, a floating timed, and a
-// TZID-stamped control that acts as the discriminator proving the windows are aimed where
-// this probe says they are) are written into a temporary calendar created by MKCALENDAR, far
-// out in June 2027 so nothing real shares the window. None carries an ATTENDEE or ORGANIZER:
-// a participant would make the server send real iTIP mail (see the README). The finally block
-// deletes the whole temporary collection, which removes every fixture atomically; if
-// MKCALENDAR is unavailable the probe falls back to an existing calendar and deletes each
-// resource it PUT, individually, in the same finally. Each run mints its own collection name,
-// so a re-run never needs a manual delete first.
+// FIXTURES AND CLEANUP. Three synthetic events (all-day, floating timed, and a TZID control
+// that proves the windows are aimed where this probe says) go into a temporary calendar created
+// by MKCALENDAR, in June 2027 so nothing real shares the window. None carries an ATTENDEE or
+// ORGANIZER: a participant would make the server send real iTIP mail (see the README). The
+// finally block deletes the whole collection; if MKCALENDAR is unavailable the probe falls back
+// to an existing calendar and deletes each resource it PUT.
 //
 // Run: python scripts/probes/run-probe.py calendar-window-frames.probe.mjs
 
@@ -90,23 +81,17 @@ if (!USERNAME || !PASSWORD) {
 const ROOT = 'https://caldav.fastmail.com/dav/';
 const AUTH = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
 
-// Every CalDAV href on this server embeds the account's own address. Nothing printed by this
-// probe is allowed to carry it: probe output gets pasted into issues.
+// Every CalDAV href embeds the account's own address, and probe output gets pasted into issues.
 const redact = s => String(s).split(USERNAME).join('<account>');
 
-// The zone the derivation in #162 is written against, and the zone this deployment runs in.
-// Hard-coded rather than read from the environment because the fixture's VTIMEZONE has to
-// match it, and because the windows below are only a discriminating test in a zone whose
-// offset is far enough from UTC to separate the frames.
+// Hard-coded: the fixture's VTIMEZONE has to match it, and the windows only discriminate in a
+// zone whose offset is far enough from UTC to separate the frames.
 const ZONE = 'Australia/Sydney';
 // June, deliberately: Sydney is on standard time (+10:00) with no DST transition anywhere
 // near, so the offsets below are stable and the arithmetic in this header is checkable by eye.
 const DAY = { y: 2027, mo: 6, d: 16 };
 
-// ---------------------------------------------------------------------------
-// Wall clock -> instant, in ZONE. Two passes: sample the offset at the naive guess, then
-// re-check at the instant that lands on. Enough for a date nowhere near a transition.
-// ---------------------------------------------------------------------------
+// Wall clock -> instant, in ZONE. Two passes: enough for a date nowhere near a transition.
 function offsetMsAt(zone, utcMs) {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', {
@@ -131,10 +116,7 @@ const utcIso = (y, mo, d, h, mi = 0) =>
 // tsdav's spelling of a time-range bound: UTC basic format, seconds precision.
 const davInstant = iso => `${new Date(iso).toISOString().slice(0, 19).replace(/[-:.]/g, '')}Z`;
 
-// ---------------------------------------------------------------------------
-// Minimal HTTP + XML plumbing. Regex parsing is enough for a probe against one known server;
-// every matcher tolerates any namespace prefix because Cyrus picks its own.
-// ---------------------------------------------------------------------------
+// Every XML matcher tolerates any namespace prefix because Cyrus picks its own.
 async function dav(method, url, { body, headers = {} } = {}) {
   const res = await fetch(url, {
     method,
@@ -181,9 +163,6 @@ const calendarQueryXml = (startIso, endIso, expand) =>
   `<c:time-range start="${davInstant(startIso)}" end="${davInstant(endIso)}"/>` +
   `</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
 const STAMP = Date.now();
 const uid = kind => `probe-162-${kind}-${STAMP}@probe.invalid`;
 
@@ -251,9 +230,6 @@ const FIXTURES = [
   },
 ];
 
-// ---------------------------------------------------------------------------
-// Windows. Each names the caller-side question it stands for.
-// ---------------------------------------------------------------------------
 const WINDOWS = {
   subDay: {
     label: `sub-day: local ${DAY.y}-${pad(DAY.mo)}-${pad(DAY.d)} 00:00..10:00 in ${ZONE}`,
@@ -290,7 +266,6 @@ const WINDOWS = {
   },
 };
 
-// ---------------------------------------------------------------------------
 const { check, failures } = makeChecker();
 
 let tempCalendarUrl = null;     // set only when MKCALENDAR succeeded
@@ -456,9 +431,8 @@ try {
     const expanded = await query(calendarUrl, win, true);
     const plain = await query(calendarUrl, win, false);
     results[key] = { expanded, plain };
-    // Two different things, and this probe found they can disagree: `matched` is the resource
-    // being named in the multistatus at all (the server's time-range filter said yes), `events`
-    // is a VEVENT actually arriving for it.
+    // These can disagree: `matched` is the resource named in the multistatus at all (the
+    // time-range filter said yes), `events` is a VEVENT actually arriving for it.
     const ev = r => FIXTURES.filter(f => r.seen.has(f.kind)).map(f => f.kind).join(', ') || '(none)';
     const hr = r => FIXTURES.filter(f => r.hrefs.has(f.kind)).map(f => f.kind).join(', ') || '(none)';
     console.log(`  ${key}`);
@@ -540,9 +514,7 @@ try {
   if (alldayData) {
     const lines = dtLines(alldayData);
     console.log(`  all-day, expanded:  ${lines.join(' | ')}`);
-    // Settles the libical question left open in #162's second comment: the recurrence-walk /
-    // expansion path does NOT shift a date value into any zone, so a date-only value is
-    // UTC-framed everywhere and the deviation from RFC 4791 section 9.9 is total.
+    // The libical question from #162's second comment; see the header.
     check(
       'expansion leaves a date-only value as a DATE, unshifted and un-Z-stamped',
       lines.some(l => /^DTSTART;VALUE=DATE:\d{8}$/.test(l)),

@@ -2,30 +2,19 @@
 /**
  * Find interpolations rendered inside a single-quoted span with no echo helper.
  *
- * WHAT UNKNOWN THIS SETTLES
- *
- * `docs/conventions.md` states one rule for untrusted values in prose: redact, then
- * neutralise, sanitising the VALUE and never the finished sentence. The drift guard that
- * enforces part of it lives in `src/coerce.test.ts` under `echo-quoting convention`, and it
- * catches a helper rendered inside `'…'` — a value that IS routed through an echo helper but
- * quoted the wrong way round.
- *
- * It cannot be extended to the class this script finds: a value quoted with NO helper at all.
- * The reason is recorded in `docs/conventions.md` and is not a gap in the guard — whether a
- * value is untrusted is a property of where it CAME FROM, so nothing lexical separates
- * `'${name}'` (caller-authored, needs the helper) from `'${mode}'` (a server-side enum, does
- * not). A test that failed on every match would need a per-site suppression list, which is the
- * shape a rule takes when the rule is wrong.
- *
- * So this stays a hand-run inventory rather than a test: it prints the candidates, and a human
- * decides each one by tracing the value to its origin. A non-empty list is NOT a defect list.
+ * The drift guard in `src/coerce.test.ts` (`echo-quoting convention`) catches an echo helper
+ * quoted the wrong way round. It cannot catch a value quoted with NO helper, because whether a
+ * value is untrusted depends on where it came from: nothing lexical separates `'${name}'`
+ * (caller-authored) from `'${mode}'` (a server-side enum); see `docs/conventions.md`. So this is
+ * a hand-run inventory, not a test: a human traces each candidate to its origin. A non-empty
+ * list is NOT a defect list.
  *
  * USAGE
  *
  *   node scripts/find-raw-interpolations.mjs [dir]     # defaults to ./src
  *
- * Prints `file:line  '${expr}'` per candidate, then a count. Always exits 0: there is no
- * threshold that means "wrong", so an exit code would be inventing a verdict it cannot reach.
+ * Prints `file:line  '${expr}'` per candidate, then a count. Always exits 0: no count means
+ * "wrong".
  *
  * SCOPE AND LIMITS
  *
@@ -56,7 +45,6 @@ const walk = (dir) => {
   return out;
 };
 
-// A raw interpolation sitting inside a single-quoted span: '${ ... }' with no echo helper.
 const RAW = /'\$\{([^}]*)\}'/g;
 
 let found = 0;

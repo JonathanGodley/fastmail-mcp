@@ -16,7 +16,7 @@
 // count `//`, `/*` and `*` lines; hash families (.py, .sh, .ps1, ...) count `#`
 // lines. Markdown and JSON are not measured. Judged on the NET change (added
 // minus removed): an edit that removes at least as much comment as it adds is
-// never over the bar, so a trim never fires, however much it adds. Otherwise
+// never over the bar, so a trim never fires. Otherwise
 // the bar applies to the net figures: at least 20 net comment lines (fewer is
 // one doc comment, never the problem), and either no net code, or a ratio at
 // least twice the file's own before the change, that baseline floored at 0.25
@@ -127,7 +127,6 @@ function scope(args) {
         }
         return addedLines(gitOrNull(['diff', '--no-color', '--no-ext-diff', '-U0', 'HEAD', '--', f]) ?? '');
       },
-      // An untracked file has no prior version, so it has no removed lines.
       removed: (f) => (untrackedSet.has(f) ? [] : removedLines(gitOrNull(['diff', '--no-color', '--no-ext-diff', '-U0', 'HEAD', '--', f]) ?? '')),
       before: (f) => (untrackedSet.has(f) ? null : gitOrNull(['show', 'HEAD:' + f])),
     };
@@ -146,10 +145,6 @@ function scope(args) {
   return null;
 }
 
-/**
- * Judged on the NET change: an edit that removes at least as much comment as
- * it adds (net comment <= 0) is never over the bar, whatever it adds.
- */
 function verdict(net, base) {
   let baseRatio = null;
   let baseLabel = 'new file, no baseline';

@@ -2,15 +2,12 @@
 // every artifact it makes is a draft it trashes on exit. It settles what only a real
 // account can answer about {{signature}} - that the identity's CONFIGURED sign-off is what
 // lands, and that it lands ONCE, at write, so a body read back carries no token to expand
-// again. Everything else here is the surface around that: the escape ships bare braces,
-// the four compose refusals fire before anything is stored, and edit_draft's bodyHash gate
-// refuses a body edit with no hash and with a stale one, then hands back the hash the NEXT
-// edit needs. The unit suite covers all of that against a mock; what it cannot cover is a
-// signature this server did not invent and a hash taken over bytes a real server stored.
+// again. The surrounding checks (escape, compose refusals, the bodyHash gate) are covered
+// by the unit suite against a mock; here they run against a signature this server did not
+// invent and a hash taken over bytes a real server stored.
 //
-// Recipients are addressed into invalid.example (RFC 2606 reserves it and it publishes no
-// MX), so nothing here is deliverable even by accident. No send_draft call, no identity
-// address in a To line, no calendar participant.
+// Recipients are in invalid.example (RFC 2606 reserved, no MX), so nothing is deliverable
+// even by accident.
 import { createClient } from '../mcp-harness.mjs';
 import { makeChecker, text, jsonOf, idOf } from './probelib.mjs';
 
@@ -33,10 +30,8 @@ const { check, failures } = makeChecker();
 const trash = [];
 const keep = r => { const id = idOf(text(r)); if (id) trash.push(id); return id; };
 
-// BOTH bodies and the hash in one read. The default get_email omits bodyHtml whenever a
-// text part exists (it reports bodyHtmlSize instead), and a hash is issued only to a read
-// that showed the caller every stored byte it covers - so this projection is what makes
-// the html assertions and the edits below possible at all.
+// BOTH bodies and the hash in one read: the default get_email omits bodyHtml whenever a
+// text part exists, and a hash is issued only to a read that showed every stored byte.
 const readDraft = async id => {
   const r = await c.call('get_email', { emailId: id, fields: ['bodyText', 'bodyHtml', 'bodyHash'] });
   if (r.isError) throw new Error(`read of ${id} failed: ${text(r).slice(0, 200)}`);
@@ -59,9 +54,8 @@ const mustRefuse = async (label, tool, args, re) => {
 
 try {
   // ---- 0. The identity this probe composes as, and the sign-off it carries -------------
-  // `from` is passed explicitly on every compose below so the identity the server signs
-  // with is the one read here. Without it the server picks the account default and every
-  // expectation would be about an identity the probe never looked at.
+  // `from` is passed explicitly on every compose below so the server signs with the
+  // identity read here, not the account default.
   let r = await c.call('list_identities', {});
   check('identities: readable', !r.isError, text(r).slice(0, 200));
   const identities = jsonOf(text(r));
@@ -137,11 +131,8 @@ try {
     /\{\{signature\}\} is in htmlBody but not in textBody/);
 
   // ---- 4. The bodyHash gate on edit_draft ---------------------------------------------
-  // The detail is conditional, like the cleanup check at the end: `check` prints `extra` on a
-  // PASS as well as a FAIL, so a fixed fallback about a MISSING hash would print beside PASS
-  // and read as the check contradicting itself. Nothing is printed on the pass - the hash is
-  // a digest rather than content, but an empty detail keeps this probe's output free of
-  // account data by construction rather than by an argument about what a digest reveals.
+  // `check` prints `extra` on a PASS too, so the detail is empty on a pass: a fallback about
+  // a MISSING hash would contradict the PASS, and nothing account-derived is printed.
   const issuedHash = typeof stored.hash === 'string' && stored.hash.length > 0;
   check('bodyHash: the read that shows every stored byte issues one', issuedHash,
     issuedHash ? '' : (stored.withheld ?? '(neither a hash nor a withheld reason came back)'));
@@ -192,9 +183,8 @@ try {
       words(flagged.html).includes(SIG_WORDS), `looking for "${SIG_WORDS.slice(0, 60)}" in ${words(flagged.html).slice(0, 200)}`);
   }
 } finally {
-  // Every artifact is a draft this probe created; an edit already moved each superseded
-  // copy to Trash, so a repeat delete is a no-op. The failures are COUNTED rather than
-  // swallowed: a cleanup nobody checks is one that can stop working unnoticed.
+  // An edit already moved each superseded copy to Trash, so a repeat delete is a no-op.
+  // Failures are counted, not swallowed.
   let undeleted = 0;
   for (const id of trash) {
     try { const r = await c.call('delete_email', { emailId: id }); if (r.isError) undeleted++; } catch { undeleted++; }

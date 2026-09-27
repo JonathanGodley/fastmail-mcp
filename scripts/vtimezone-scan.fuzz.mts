@@ -12,23 +12,14 @@
 // appear in no timezone grammar, so the invariant has no legitimate exception. A refusal
 // (InvalidInputError) is an acceptable outcome; any other throw is not.
 //
-// Each iteration builds a WELL-FORMED calendar (1-3 VTIMEZONE blocks, one VEVENT carrying both
-// sentinel lines, an optional VALARM) and applies 0-2 random mutations: a case flip, a dropped
-// BEGIN/END boundary, an inserted BEGIN/END line, a moved line, a trailing space, or an RFC 5545
-// §3.1 fold at a random column (which lands both harmless mid-property folds and folds inside the
-// word BEGIN). Purely random line sequences are no use here: they are almost never accepted, so
-// the side under test goes unexercised. The sentinel lines themselves are never mutated or
-// moved, because moving one INTO a timezone block would make its removal correct; any
-// disappearance is therefore the scan getting a boundary wrong. Each payload is run through the
-// sweep alone and through `regenerateVTimezones` followed by the sweep. The PRNG is seeded, so a
-// given iteration count always generates the same payloads.
-//
-// Needs no credentials and touches no network: it imports the source functions directly and
-// runs them in-process.
+// Each iteration mutates a WELL-FORMED calendar (0-2 random mutations): purely random line
+// sequences are almost never accepted, so the side under test would go unexercised. The sentinel
+// lines are never mutated or moved, because moving one INTO a timezone block would make its
+// removal correct; any disappearance is therefore the scan getting a boundary wrong. The PRNG is
+// seeded, so a given iteration count always generates the same payloads. No credentials, no
+// network.
 //
 // Run: npx tsx scripts/vtimezone-scan.fuzz.mts [iterations]   (default 200000)
-// Prints the accepted/refused/unexpected counts and the first three failing inputs, and exits
-// non-zero on any invariant violation or unexpected throw.
 
 import { removeOrphanedVTimezones, regenerateVTimezones } from '../src/caldav-client.js';
 

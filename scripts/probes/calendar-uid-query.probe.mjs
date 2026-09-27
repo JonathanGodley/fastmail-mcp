@@ -9,31 +9,21 @@
 //   `text-match match-type="equals"`, and does it HONOR `equals` rather than
 //   quietly applying CalDAV's default `contains` semantics?
 //
-// The two halves matter for different reasons. Acceptance decides whether the targeted query
-// works at all: a server that rejects the filter, or that ignores `prop-filter` and returns
-// the whole collection, leaves the fix with nothing to stand on. Honoring `equals` decides
-// whether the answer can be TRUSTED: a server matching more loosely than asked returns every
-// resource whose UID merely CONTAINS the one asked for, which reads back as several "copies"
-// of the event. Two destructive tools rest on that ambiguity count, so a loose match does not
-// merely degrade the lookup — it manufactures duplicates that were never there. That is why
-// the substring query below, which must return nothing, is the load-bearing check here rather
-// than a nicety.
+// Acceptance decides whether the targeted query works at all. Honoring `equals` decides
+// whether the answer can be TRUSTED: a looser match returns every resource whose UID merely
+// CONTAINS the one asked for, which reads back as several "copies" of the event, and two
+// destructive tools refuse on that ambiguity count. So the substring query below, which must
+// return nothing, is the load-bearing check.
 //
-// The probe is READ-ONLY: it creates, updates and deletes nothing. It queries for an event
-// that already exists in the account, so it needs no fixture, and a calendar probe that
-// writes is not a safe default (see the README — an event with participants makes the server
-// send real iTIP invitations).
+// READ-ONLY: it queries an event that already exists (see the README on why calendar probes
+// that write are not a safe default).
 //
-// OUTPUT IS COUNTS AND PASS/FAIL ONLY. No collection URL, UID, title or any other value read
-// from the account is ever printed, so a run can be quoted verbatim into a public issue or
-// commit message. Anything that could carry such a value (a server error string) is redacted
-// before it reaches the log.
+// OUTPUT IS COUNTS AND PASS/FAIL ONLY, with server error strings redacted, so a run can be
+// quoted verbatim into a public issue.
 //
 // Run: python scripts/probes/run-probe.py calendar-uid-query.probe.mjs
 
 import { DAVClient } from 'tsdav';
-// The shared PASS/FAIL harness — check(label, ok, extra), label first. Taken from probelib so
-// the calendar probes cannot disagree about the argument order.
 import { makeChecker } from './probelib.mjs';
 
 const USERNAME = process.env.FASTMAIL_CALDAV_USERNAME;
@@ -45,22 +35,17 @@ if (!USERNAME || !PASSWORD) {
   process.exit(1);
 }
 
-// Appended to a real UID to build one that cannot exist. Kept to characters that need no XML
-// or iCalendar escaping, so the check measures the server's matching rather than our
-// serialisation.
+// Appended to a real UID to build one that cannot exist. No characters needing XML or
+// iCalendar escaping, so the check measures the server's matching, not our serialisation.
 const IMPOSSIBLE_SUFFIX = 'zzz-no-such-uid-137';
 
 const { check, failures } = makeChecker();
 
 // Every account-derived string that must never reach the log, filled in as they are read.
-// `redact` is applied to anything whose content this probe does not control — server error
-// text in particular, which echoes the request back on some failures.
+// Server error text echoes the request back on some failures.
 const secrets = [];
-// Beyond the exact-substring pass over `secrets` (absolute calendar urls/displayName, the uid,
-// the substring, the impossible uid, and every discovered href/path pushed below), a server
-// error can echo the account username on its own, or a path-form url the substring pass would
-// miss because only the ABSOLUTE form was pushed. Both extra passes match the sibling probes'
-// own redaction (calendar-window-frames.probe.mjs, client-authored-events.probe.mjs).
+// The extra passes catch the username on its own and any address-shaped string the exact
+// pass over `secrets` misses.
 const redact = s => {
   const substringPass = secrets
     .filter(Boolean)
@@ -82,9 +67,8 @@ function uidsIn(data) {
     .filter(v => v !== undefined && v !== '');
 }
 
-// tsdav forwards `filters` verbatim into the calendar-query REPORT body (xml-js compact form:
-// `_attributes` for attributes, `_text` for character data; unprefixed element names take the
-// `c:` CalDAV namespace). These two shapes are therefore exactly the XML the server sees.
+// tsdav forwards `filters` verbatim into the REPORT body (xml-js compact form), so these two
+// shapes are exactly the XML the server sees.
 const VEVENT_ONLY = [{
   'comp-filter': {
     _attributes: { name: 'VCALENDAR' },
@@ -99,11 +83,8 @@ const uidEquals = value => [{
       _attributes: { name: 'VEVENT' },
       'prop-filter': {
         _attributes: { name: 'UID' },
-        // No `collation`, so the server's RFC 4791 default (i;ascii-casemap) applies — which is
-        // ASCII case-INSENSITIVE, so `equals` under it may still match a case-variant UID. Step 5
-        // below measures whether that reaches equals matching; it is not a gate here, because the
-        // narrowing this probe exists to confirm is match-type itself (CalDAV's own text-match
-        // has contains semantics by default, and `equals` is the attribute under test).
+        // No `collation`, so RFC 4791's default (i;ascii-casemap, case-INSENSITIVE) applies.
+        // Step 5 measures that without gating on it: match-type is what is under test.
         'text-match': { _attributes: { 'match-type': 'equals' }, _text: value },
       },
     },
@@ -119,16 +100,12 @@ const client = new DAVClient({
 
 /**
  * Run one UID-filtered `calendar-query` and report only its resource count. Returns the
- * matched hrefs, or null when the server refused the filter — which is itself a FAIL, since
- * the fix proposed for #137 has no fallback path to take.
+ * matched hrefs, or null when the server refused the filter (a FAIL: the #137 fix has no
+ * fallback).
  *
- * Uses `calendarQuery` alone, NOT `fetchCalendarObjects({ filters })`: under tsdav that helper
- * issues TWO requests — a filtered calendar-query for etags, then an unfiltered multiget by
- * href — so its object count measures the multiget succeeding, not the filter. A throw from
- * the multiget half would then misreport as "the server refused the filtered query" when the
- * filter itself was fine. `calendarQuery`'s own row count is what this probe means by "the
- * filtered query's resource count"; fetching the matched resource's body is done separately
- * (step 2 only), with its own distinct failure mode.
+ * Uses `calendarQuery` alone, NOT `fetchCalendarObjects({ filters })`: that helper follows the
+ * filtered query with an unfiltered multiget, so its count and its failures measure the
+ * multiget, not the filter.
  */
 async function uidQuery(calendar, value, label) {
   try {
@@ -152,10 +129,7 @@ async function uidQuery(calendar, value, label) {
 console.log('\nUID-targeted calendar-query, match-type="equals" (#137)');
 console.log('Counts and PASS/FAIL only — no account value is printed.\n');
 
-// The whole run is wrapped so any unguarded rejection (login, discovery, a multiget) lands as
-// one FAIL line — redacted — rather than a raw stack, per the pattern in
-// calendar-rdate-expand.probe.mjs. The summary print and exit below always run, whether the
-// try completes or is caught.
+// Wrapped so an unguarded rejection lands as one redacted FAIL line rather than a raw stack.
 try {
   await client.login();
   const calendars = await client.fetchCalendars();
@@ -165,13 +139,9 @@ try {
     secrets.push(cal.url, cal.displayName, new URL(cal.url, 'https://caldav.fastmail.com/').pathname);
   }
 
-  // ------------------------------------------------------------------------------------
-  // Step 1: find an event that already exists. Discovery asks for etags only and then fetches
-  // a matching resource by URL, rather than pulling every object in the collection: the probe
-  // needs one UID, and a whole-calendar fetch on a real account is a lot of traffic for it.
-  // Up to 10 hrefs per calendar are tried before moving on, so one unparseable resource does
-  // not skip a calendar that holds a usable one further down the listing.
-  // ------------------------------------------------------------------------------------
+  // Step 1: find an event that already exists. Etags only, then one resource by URL: a
+  // whole-calendar fetch is a lot of traffic for one UID. Up to 10 hrefs per calendar, so one
+  // unparseable resource does not skip a calendar.
 
   let target = null;
   let scanned = 0;
@@ -229,10 +199,6 @@ try {
   const impossible = `${uid}${IMPOSSIBLE_SUFFIX}`;
   secrets.push(substring, impossible);
 
-  // ------------------------------------------------------------------------------------
-  // Step 2: the exact UID. The happy path the fix proposed for #137 rests on.
-  // ------------------------------------------------------------------------------------
-
   console.log('\n=== Step 2: query the exact UID ===');
   const exactHrefs = await uidQuery(calendar, uid, 'exact UID');
   if (exactHrefs) {
@@ -242,8 +208,7 @@ try {
       try {
         matched = await client.fetchCalendarObjects({ calendar, objectUrls: exactHrefs });
       } catch (err) {
-        // The filtered query above already succeeded — a throw here is the matched resource
-        // failing to fetch, a distinct failure from a refused filter, and must read as one.
+        // The filter already succeeded: this is a distinct failure, and must read as one.
         check('step 2: the matched resource could not be fetched', false, redact(err?.message ?? String(err)).slice(0, 300));
       }
       if (matched) {
@@ -262,12 +227,7 @@ try {
     }
   }
 
-  // ------------------------------------------------------------------------------------
-  // Step 3: a STRICT substring of that UID. THE LOAD-BEARING CHECK. A server treating
-  // match-type="equals" as CalDAV's default `contains` returns the target here; anything that
-  // comes back is a resource the caller did not ask for, and counting them is how a targeted
-  // lookup manufactures the ambiguity two destructive tools would refuse on.
-  // ------------------------------------------------------------------------------------
+  // Step 3: a STRICT substring of that UID. THE LOAD-BEARING CHECK (see the header).
 
   console.log('\n=== Step 3: query a strict substring of that UID ===');
   const substringUsable = substring.length > 0 && substring !== uid;
@@ -281,10 +241,8 @@ try {
     );
   }
 
-  // ------------------------------------------------------------------------------------
-  // Step 4: a UID that cannot exist. Guards against a server that ignores the prop-filter and
-  // answers every query with the whole collection — which step 2 alone would read as a pass.
-  // ------------------------------------------------------------------------------------
+  // Step 4 guards against a server that ignores the prop-filter and returns the whole
+  // collection, which step 2 alone would read as a pass.
 
   console.log('\n=== Step 4: query a UID that cannot exist ===');
   const absent = await uidQuery(calendar, impossible, 'nonexistent UID');
@@ -294,13 +252,8 @@ try {
     `count=${absent === null ? 'n/a' : absent.length}`,
   );
 
-  // ------------------------------------------------------------------------------------
-  // Step 5: a case-variant of the UID. MEASUREMENT, NOT A GATE — the default collation
-  // (i;ascii-casemap) is case-insensitive, so either count is a legitimate answer and the
-  // consumer's own client-side exact-equality filter handles both. This only records which
-  // way the server actually answers, so a refusal of the query itself is the only failure
-  // mode (handled by uidQuery's own check, reusing the same label pattern as the other steps).
-  // ------------------------------------------------------------------------------------
+  // Step 5: MEASUREMENT, NOT A GATE. Either count is legitimate: the consumer's client-side
+  // exact-equality filter handles both. Only a refused query fails.
 
   console.log('\n=== Step 5: query a case-variant of the UID (measurement, not a gate) ===');
   const upper = uid.toUpperCase();
