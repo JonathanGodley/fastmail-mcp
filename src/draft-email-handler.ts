@@ -407,6 +407,11 @@ const NOTE_BCC_CARRIED =
   "The original's Bcc list was carried into this reply — pass bcc to replace it, or to or " +
   'cc to reply to fewer people and turn the carry off.';
 
+/** A reply whose original has a Bcc list and mailboxes that could not all be resolved. */
+const NOTE_BCC_UNCONFIRMED =
+  "The original's Bcc list was not carried into this reply, because the original's mailbox " +
+  'could not be confirmed as Sent. Pass bcc if you meant to include it.';
+
 /** An image the block minted that no part of the expanded body ends up referencing. */
 function noteMintedDropped(names: (string | null | undefined)[], total: number): string {
   const listed = describePartNames(names, total);
@@ -527,24 +532,30 @@ function replyAllCc(
  * ONLY FROM AN ORIGINAL IN A SENT-ROLE MAILBOX; anything else carries nothing. A sender can
  * write a Bcc header into mail they send this account, and carrying it would put recipients
  * of their choosing, unseen, on the reply. The roles are the ones getEmailById attaches
- * (attachMailboxInfo), so an original whose mailboxes could not be resolved carries nothing.
+ * (attachMailboxInfo), so an original whose mailboxes could not be resolved carries nothing;
+ * `unconfirmed` then says so, since such an original may be a Sent copy after all.
  *
  * formatAddress and a case-folded ADDRESS dedupe, as in replyAllCc (#31).
  */
-function replyBcc(original: any): string[] {
+function replyBcc(original: any): { bcc: string[]; unconfirmed: boolean } {
   const roles: unknown = original?._mailboxRoles;
   const inSent = Array.isArray(roles)
     && roles.some((r) => typeof r === 'string' && r.toLowerCase() === 'sent');
-  if (!inSent) return [];
+  const entries = addressList(original.bcc);
+  if (!inSent) {
+    const unresolved: unknown = original?._unresolvedMailboxIds;
+    const rolesUnknown = !Array.isArray(roles) || (Array.isArray(unresolved) && unresolved.length > 0);
+    return { bcc: [], unconfirmed: entries.length > 0 && rolesUnknown };
+  }
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const entry of addressList(original.bcc)) {
+  for (const entry of entries) {
     const key = entry.email.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(formatAddress(entry));
   }
-  return out;
+  return { bcc: out, unconfirmed: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +808,7 @@ export async function composeDraftEmail(
 
   let fillerBody: true | undefined;
   let bccCarried = false;
+  let bccUnconfirmed = false;
   params.textBody = expandedText;
   params.htmlBody = expandedHtml;
 
@@ -847,11 +859,12 @@ export async function composeDraftEmail(
         // additive rather than narrowing, so it displaces only this carry; an EMPTY one is no
         // bcc and displaces nothing, as with an empty `cc`.
         if (!bcc?.length) {
-          const carriedBcc = replyBcc(original);
-          if (carriedBcc.length) {
-            params.bcc = carriedBcc;
+          const carried = replyBcc(original);
+          if (carried.bcc.length) {
+            params.bcc = carried.bcc;
             bccCarried = true;
           }
+          bccUnconfirmed = carried.unconfirmed;
         }
       }
     }
@@ -1029,6 +1042,7 @@ export async function composeDraftEmail(
     ...(mode === 'reply' && !historyPlaced ? [NOTE_REPLY_UNQUOTED] : []),
     ...(mode === 'forward' && !params.forwardedMessageId ? [NOTE_FORWARD_UNMARKABLE] : []),
     ...(bccCarried ? [NOTE_BCC_CARRIED] : []),
+    ...(bccUnconfirmed ? [NOTE_BCC_UNCONFIRMED] : []),
     ...(prefixTyped ? [noteComposeSubjectPrefix(prefixTyped)] : []),
   ];
 
