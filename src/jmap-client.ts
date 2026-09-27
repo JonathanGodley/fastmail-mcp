@@ -537,7 +537,7 @@ export function resolveAttachmentRemovals(
         removed,
         survivors,
         error: new PathAccessError(
-          `removeAttachments ref "${describeUntrusted(ref)}" matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${survivors.map((p) => p.blobId).join(', ')}).`,
+          `removeAttachments ref "${describeUntrusted(ref)}" matches ${nameMatches.length} attachments by name; pass the blobId instead (one of: ${joinCapped(survivors.map((p) => p.blobId))}).`,
         ),
       };
     }
@@ -545,7 +545,7 @@ export function resolveAttachmentRemovals(
       removed,
       survivors,
       error: new PathAccessError(
-        `removeAttachments ref "${describeUntrusted(ref)}" matched no attachment on this draft. Carried blobIds: ${storedParts.map((p) => p.blobId).join(', ') || '(none)'}.`,
+        `removeAttachments ref "${describeUntrusted(ref)}" matched no attachment on this draft. Carried blobIds: ${joinCapped(storedParts.map((p) => p.blobId)) || '(none)'}.`,
       ),
     };
   }
