@@ -1708,7 +1708,7 @@ const TOOLS = [
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them. By default this tool fetches no attachment parts. ' + COMPACT_ATTACHMENT_DESC + ' Under includeBodies each message gains its attachment entries too. ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + FIELDS_TOOL_DESC,
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists (not under raw=true, whose output stays pure JSON, so there drafts are hidden silently unless you pass includeDrafts). A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them. By default this tool fetches no attachment parts. ' + COMPACT_ATTACHMENT_DESC + ' Under includeBodies each message gains its attachment entries too. ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + FIELDS_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1718,7 +1718,7 @@ const TOOLS = [
             },
             includeDrafts: {
               type: ['boolean', 'string'],
-              description: lenientBool('Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.'),
+              description: lenientBool('Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden, except under raw). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.'),
             },
             includeBodies: {
               type: ['boolean', 'string'],
