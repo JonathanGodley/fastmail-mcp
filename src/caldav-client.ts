@@ -313,9 +313,10 @@ export function extractVEvent(data: string): string | null {
  * RECURRENCE-ID (a series whose master was removed). The last two match the read path's
  * `blockCountProvesSeries`, so the two halves agree on what a series is.
  *
- * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. That payload
- * is malformed and refusing it is the fail-closed direction; do not make the read
- * position-aware without deciding what the write path does with such a resource.
+ * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. The reads
+ * are position-aware (`ownPropertyLines`) and ignore it, so such an event reads as one-off
+ * while update/delete refuse it as repeating. The split is deliberate: the payload is
+ * malformed, and refusing an irreversible write is the fail-closed direction.
  */
 export function isRecurringSeriesResource(icalData: string | null | undefined): boolean {
   const blocks = extractVEventBlocks(icalData || '');
