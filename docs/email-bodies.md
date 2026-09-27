@@ -414,8 +414,14 @@ message without the flag.
 
 *Under-strip (quoted history survives; `quotedBytesStripped` is 0):*
 
-- **HTML-only quoting is out of reach.** Outlook's `<div>` nesting, or any quote flattened
-  from HTML without `>` prefixes, has no text-level boundary. Deriving text from HTML in
+- **History flattened without `>` prefixes survives.** The sender's own plain-text part
+  carries the quoted history as an `On <date>, <name> wrote:` line followed by flush-left
+  text, with no `>` lines; a message written in Front has a text part like this. With no `>`
+  prefixes the quote has no end delimiter, so the only available cut runs to the end of the
+  message and would delete a reply written below or between the quoted lines. Such a message
+  is returned whole with `quotedBytesStripped` 0, or loses only what a deeper recognised
+  marker such as `-----Original Message-----` removes.
+- **A message with no plain-text part is not stripped.** Deriving text from HTML in
   order to strip it was rejected: `get_email` returns what
   the message *is*, and swapping a verbatim `bodyHtml` for a lossy derived-then-cut plain
   text would be a bigger change to the read contract than the token saving is worth.

@@ -263,13 +263,14 @@ export function buildBrokenCollectionNote(
  * `describeEventCopies`, shared with the write tools' thrown refusal.
  *
  * TWO NOTES, because the caller's next call differs. A bare UID names every copy equally, so
- * the note names the write tools' refusal and what to pass instead. A url ADDRESSED one record
- * that other records merely carry as UID text, so the writes act on it and naming a refusal
- * would send the caller hunting for a url they already passed.
+ * the note names the write tools' refusal and what to pass instead. A url ADDRESSED one record,
+ * so the note must not send the caller hunting for a url they already passed: the writes act on
+ * it, unless `addressCollision`, where they refuse as `addressCollisionError` does.
  */
 export function buildAmbiguousEventNote(
   otherCopies?: CalendarEventCopy[],
   addressedByUrl?: boolean,
+  addressCollision?: { addressedUid: string | undefined },
 ): string {
   if (!otherCopies || otherCopies.length === 0) return '';
   const total = otherCopies.length + 1;
@@ -281,8 +282,16 @@ export function buildAmbiguousEventNote(
       `\n\nNote: this event id is a resource url, and ${others} in this account ${othersCarry} `
       + `that same text as a UID — ${total} records answer to it in all: `
       + `${describeEventCopies(otherCopies)}. The event above is the record AT that url, not one `
-      + 'picked from the set, and update_calendar_event and delete_calendar_event act on that '
-      + 'same record when given this id. To reach one of the others, pass its own `url`.'
+      + (addressCollision
+        ? 'picked from the set. Because the listing shows another record under this same id, '
+          + 'update_calendar_event and delete_calendar_event REFUSE this id. '
+          + (addressCollision.addressedUid
+            ? 'Pass the event\'s own `id` (its UID) to act on the event above'
+            : 'No event id reaches the event above alone through this server; change it in the '
+              + 'Fastmail web interface')
+          + ', or pass its own `url` to act on one of the others.'
+        : 'picked from the set, and update_calendar_event and delete_calendar_event act on that '
+          + 'same record when given this id. To reach one of the others, pass its own `url`.')
     );
   }
   return (

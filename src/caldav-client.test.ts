@@ -34,6 +34,7 @@ import {
   CalDAVCalendarClient,
   describeCreateCalendarEventResult,
   describeUpdateCalendarEventResult,
+  buildEtcGmtZoneNote,
   unwrapDisplayName,
   BROKEN_COLLECTION_PATH_ECHO_LIMIT,
   CALENDAR_URL_ECHO_LIMIT,
@@ -1019,6 +1020,22 @@ describe('validateAndFormatICalDate', () => {
     assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00', 'start'), '20260418T100000');
   });
 
+  it('accepts a colon-less offset', () => {
+    assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00+0200', 'start'), '20260418T080000Z');
+  });
+
+  // RFC 5545 §3.3.12: hour 00-23. V8 reads T24:00:00 as next-day midnight, and the floating
+  // form would be written verbatim as T240000.
+  it('refuses an hour, minute or second out of range in every form', () => {
+    for (const value of [
+      '2026-03-20T24:00:00', '2026-03-20T24:00:00Z', '2026-03-20T24:00:00+10:00',
+      '2026-03-20T10:60:00', '2026-03-20T10:00:60', '2026-03-20T99:00:00',
+    ]) {
+      assert.throws(() => validateAndFormatICalDate(value, 'start'), /start has a time out of range/, value);
+    }
+    assert.equal(validateAndFormatICalDate('2026-03-20T23:59:59', 'start'), '20260320T235959');
+  });
+
   it('rejects CRLF injection attempt', () => {
     assert.throws(
       () => validateAndFormatICalDate('2026-04-18T10:00:00Z\r\nATTENDEE:mailto:attacker@example.com', 'start'),
@@ -1806,7 +1823,7 @@ describe('CalDAVCalendarClient event lookup', () => {
           // hunting for an override flag, the same failure the repeating refusal met.
           assert.match(
             err.message,
-            /Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly one record, whatever else spells it as a UID, and this tool accepts it wherever it accepts an id\./,
+            /Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly one record, and this tool accepts it wherever it accepts an id\./,
             tool,
           );
           assert.match(err.message, /get_calendar_event still works on this id/, tool);
@@ -1977,20 +1994,130 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(otherCopies, [{ calendar: 'Work', url: WORK_URL + 'decoy.ics' }]);
   });
 
-  it('updates and deletes the addressed record rather than refusing it as ambiguous', async () => {
+  it('tells the read whether the writes would refuse the addressed id, and whether its UID reaches it', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
+    const decoy = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    assert.deepEqual((await decoy.client.getCalendarEventById(realUrl)).addressCollision, { addressedUid: 'real@fm' });
+    const self = makeLookupClient(decoyCalendars, selfUrlDuplicated());
+    const read = await self.client.getCalendarEventById(SELF_URL);
+    assert.equal(read.addressedByUrl, true);
+    assert.deepEqual(read.addressCollision, { addressedUid: undefined });
+  });
 
-    const up = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
-    await up.client.updateCalendarEvent(realUrl, { title: 'Renamed' });
-    const upCalls = up.mockDAVClient.updateCalendarObject.mock.calls.map(c => c.arguments);
-    assert.equal(upCalls.length, 1);
-    assert.equal((upCalls[0][0].calendarObject as { url: string }).url, realUrl);
+  // A record whose UID is its own url, and a copy elsewhere carrying the same UID: both rows list
+  // the id `.../self.ics`, so a caller acting on the Copy row's id must not reach self.ics.
+  const SELF_URL = PERSONAL_URL + 'self.ics';
+  const selfUrlDuplicated = (): Record<string, StoredObject[]> => ({
+    [WORK_URL]: [{ data: eventIcal(SELF_URL, 'Copy'), url: WORK_URL + 'copy.ics', etag: '"e-copy"' }],
+    [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e-self"' }],
+  });
 
-    const del = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
-    await del.client.deleteCalendarEvent(realUrl);
-    const delCalls = del.mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
-    assert.equal(delCalls.length, 1);
-    assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
+  // No id reaches the addressed record alone: its UID is missing, is this url, or is shared.
+  const assertUnreachableCollision = (tool: string) => (err: Error) => {
+    assert.equal(err.name, 'InvalidInputError', tool);
+    assert.match(err.message, /is the url of one record and the UID of another/, tool);
+    assert.match(err.message, /no event id reaches that record alone through this server; change it in the Fastmail web interface/, tool);
+    assert.doesNotMatch(err.message, /pass its own UID/, tool);
+    return true;
+  };
+
+  it('refuses a url that is its own record\'s UID when another record carries that UID too', async () => {
+    for (const [tool, call] of [
+      ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent(SELF_URL, { title: 'X' })],
+      ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent(SELF_URL)],
+    ] as Array<[string, (c: CalDAVCalendarClient) => Promise<unknown>]>) {
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, selfUrlDuplicated());
+      await assert.rejects(() => call(client), assertUnreachableCollision(tool));
+      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
+    }
+  });
+
+  it('does not offer the addressed record\'s UID when another record carries that UID too', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const stored = decoyCarryingAnAddress(realUrl);
+    stored[WORK_URL].push({ data: eventIcal('real@fm', 'Duplicate'), url: WORK_URL + 'dup.ics', etag: '"e-dup"' });
+    const { client } = makeLookupClient(decoyCalendars, stored);
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
+  });
+
+  it('does not offer a UID the addressed record does not have', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const stored = decoyCarryingAnAddress(realUrl);
+    stored[PERSONAL_URL] = [{ data: eventIcal('real@fm', 'Real').replace('UID:real@fm\r\n', ''), url: realUrl, etag: '"e-real"' }];
+    const { client } = makeLookupClient(decoyCalendars, stored);
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
+  });
+
+  it('names the addressed record by its calendar and url in the collision refusal', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), (err: Error) => {
+      assert.ok(err.message.includes(`The record at that url is "Personal" ("${realUrl}");`), err.message);
+      return true;
+    });
+  });
+
+  it('reports no url collision on a plain duplicate UID', async () => {
+    const { client } = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [{ data: eventIcal('dup@fm', 'A'), url: WORK_URL + 'a.ics', etag: '"ea"' }],
+      [PERSONAL_URL]: [{ data: eventIcal('dup@fm', 'B'), url: PERSONAL_URL + 'b.ics', etag: '"eb"' }],
+    });
+    assert.equal((await client.getCalendarEventById('dup@fm')).addressCollision, undefined);
+  });
+
+  it('reports the url of the resource a delete removed, beside its UID', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    const deleted = await client.deleteCalendarEvent(WORK_URL + 'decoy.ics');
+    assert.equal(deleted.eventId, realUrl);
+    assert.equal(deleted.url, WORK_URL + 'decoy.ics');
+  });
+
+  // But the listing shows the decoy's id AS that url, so a caller who passes it back may mean
+  // the decoy. A write that went to the addressed record would patch or destroy an event the
+  // caller never saw under that id, so the writes refuse and name the handle that reaches each.
+  const assertAddressCollision = (realUrl: string, tool: string) => (err: Error) => {
+    assert.equal(err.name, 'InvalidInputError', tool);
+    assert.match(err.message, /is the url of one record and the UID of another/, tool);
+    assert.match(err.message, new RegExp(`will not ${tool} either`), tool);
+    for (const span of [realUrl, WORK_URL + 'decoy.ics', '"real@fm"']) {
+      assert.ok(err.message.includes(span), `${tool} refusal omitted ${span}`);
+    }
+    return true;
+  };
+
+  it('refuses to update or delete when the url addresses one record and is the UID of another', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    for (const [tool, call] of [
+      ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent(realUrl, { title: 'Renamed' })],
+      ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent(realUrl)],
+    ] as Array<[string, (c: CalDAVCalendarClient) => Promise<unknown>]>) {
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+      await assert.rejects(() => call(client), assertAddressCollision(realUrl, tool));
+      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
+    }
+  });
+
+  it('returns the deleted record\'s own UID when it was addressed by url', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
+    });
+    const deleted = await client.deleteCalendarEvent(realUrl);
+    assert.equal(deleted.eventId, 'real@fm');
+  });
+
+  it('reaches the addressed record by its own UID and the other by its url', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    for (const [id, target] of [['real@fm', realUrl], [WORK_URL + 'decoy.ics', WORK_URL + 'decoy.ics']]) {
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+      await client.deleteCalendarEvent(id);
+      const delCalls = mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
+      assert.equal(delCalls.length, 1, id);
+      assert.equal((delCalls[0][0].calendarObject as { url: string }).url, target, id);
+    }
   });
 
   // The store below models tsdav and the server (see addressComparisonKey), so the url that comes back carries
@@ -1999,7 +2126,8 @@ describe('CalDAVCalendarClient event lookup', () => {
     it(`counts a url spelled with "${suffix}" as addressing that record`, async () => {
       const realUrl = PERSONAL_URL + 'real.ics';
       const spelled = realUrl + suffix;
-      // A decoy whose UID is the caller's exact string, so only addressing can break the tie.
+      // A decoy whose UID is the caller's exact string: only an addressed record draws the
+      // collision refusal rather than the plain "names 2 records" one.
       const stored: Record<string, StoredObject[]> = {
         [WORK_URL]: [{ data: eventIcal(spelled, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
         [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
@@ -2012,10 +2140,11 @@ describe('CalDAVCalendarClient event lookup', () => {
         return store({ ...params, objectUrls: objectUrls.map(u => u.replace(/[?#].*$/, '')) } as FetchObjectsParams);
       });
 
-      await client.deleteCalendarEvent(spelled);
-      const delCalls = mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
-      assert.equal(delCalls.length, 1);
-      assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
+      await assert.rejects(() => client.deleteCalendarEvent(spelled), (err: Error) => {
+        assert.doesNotMatch(err.message, /names 2 records/);
+        return assertAddressCollision(realUrl, 'delete')(err);
+      });
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
     });
   }
 
@@ -2363,6 +2492,65 @@ describe('parseAllICalProperties', () => {
     const results = parseAllICalProperties(vevent, 'ATTENDEE');
     assert.equal(results.length, 1);
     assert.equal(results[0], 'ATTENDEE:bar');
+  });
+});
+
+describe('a VALARM\'s properties are its own, not the event\'s', () => {
+  // An email alarm (RFC 5545 §3.6.6) carries DESCRIPTION, SUMMARY, ATTENDEE and DURATION; with
+  // RFC 9074 it may carry a UID too.
+  const alarm = [
+    'BEGIN:VALARM',
+    'UID:alarm-uid@fm',
+    'ACTION:EMAIL',
+    'TRIGGER:-PT15M',
+    'REPEAT:3',
+    'DURATION:PT5M',
+    'SUMMARY:Alarm subject',
+    'DESCRIPTION:This is an event reminder',
+    'ATTENDEE:mailto:someone@example.com',
+    'END:VALARM',
+  ];
+  const vevent = ['BEGIN:VEVENT', 'DTSTART;VALUE=DATE:20261010', ...alarm, 'END:VEVENT'].join('\r\n');
+  const data = ['BEGIN:VCALENDAR', vevent, 'END:VCALENDAR'].join('\r\n');
+
+  it('parseICalValue skips a VALARM\'s lines', () => {
+    for (const key of ['DESCRIPTION', 'SUMMARY', 'DURATION', 'UID']) {
+      assert.equal(parseICalValue(vevent, key), undefined, key);
+    }
+    assert.equal(parseICalValue(vevent, 'DTSTART'), '20261010');
+  });
+
+  it('parseAllICalProperties skips a VALARM\'s lines', () => {
+    assert.deepEqual(parseAllICalProperties(vevent, 'ATTENDEE'), []);
+  });
+
+  it('finds the block\'s own lines behind a leading blank line', () => {
+    assert.equal(parseICalValue('\r\nBEGIN:VEVENT\r\nSUMMARY:Own\r\nEND:VEVENT', 'SUMMARY'), 'Own');
+  });
+
+  it('skips a VALARM in a block of bare properties', () => {
+    assert.equal(parseICalValue('SUMMARY:s\nBEGIN:VALARM\nDESCRIPTION:alarm\nEND:VALARM', 'DESCRIPTION'), undefined);
+  });
+
+  it('recognises component markers in any case (RFC 5545 §3.1)', () => {
+    const lower = vevent.replace('BEGIN:VALARM', 'begin:valarm').replace('END:VALARM', 'End:VAlarm');
+    assert.equal(parseICalValue(lower, 'DESCRIPTION'), undefined);
+    assert.deepEqual(parseAllICalProperties(lower, 'ATTENDEE'), []);
+  });
+
+  it('still reads the event\'s own property that follows a VALARM', () => {
+    const after = ['BEGIN:VEVENT', 'DTSTART;VALUE=DATE:20261010', ...alarm, 'ATTENDEE:mailto:guest@example.com', 'END:VEVENT'].join('\n');
+    assert.deepEqual(parseAllICalProperties(after, 'ATTENDEE'), ['ATTENDEE:mailto:guest@example.com']);
+  });
+
+  it('parseCalendarObject reads no description, title, end, id or participant from the alarm', () => {
+    const event = parseCalendarObject({ data, url: '/cal/alarm.ics' }, { includeParticipants: true, configuredZone: 'UTC' });
+    assert.equal(event.description, undefined);
+    assert.equal(event.title, 'Untitled');
+    assert.equal(event.start, '2026-10-10');
+    assert.equal(event.end, undefined, 'the alarm\'s DURATION is not the event\'s');
+    assert.equal(event.id, '/cal/alarm.ics');
+    assert.equal(event.participants, undefined);
   });
 });
 
@@ -5148,6 +5336,36 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     }
   });
 
+  it('refuses a non-string or blank title, and a non-string description or location, before any network call', async () => {
+    const base = { calendarId: 'Personal', title: 'T', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' };
+    for (const [label, patch, message] of [
+      ['numeric title', { title: 5 }, /title must be a string; received number/],
+      ['whitespace-only title', { title: '   ' }, /title cannot be empty; pass the event title/],
+      ['array description', { description: ['x'] }, /description must be a string; received array/],
+      ['numeric description', { description: 5 }, /description must be a string; received number/],
+      ['object location', { location: {} }, /location must be a string; received object/],
+    ] as Array<[string, Record<string, unknown>, RegExp]>) {
+      const { client, mockDAVClient } = createMockedCreateClient();
+      await assert.rejects(
+        () => client.createCalendarEvent({ ...base, ...patch } as Parameters<CalDAVCalendarClient['createCalendarEvent']>[0]),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError', label);
+          assert.match(err.message, message, label);
+          return true;
+        },
+      );
+      assert.equal(mockDAVClient.fetchCalendars.mock.callCount(), 0, label);
+      assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0, label);
+    }
+  });
+
+  it('writes the title trimmed, as update does', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await client.createCalendarEvent({ calendarId: 'Personal', title: '  Standup  ', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' });
+    const written = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+    assert.ok(written.includes('\r\nSUMMARY:Standup\r\n'), written);
+  });
+
   it('rejects a day its month does not have instead of rolling it into the next one', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await assert.rejects(
@@ -5525,6 +5743,89 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(written.includes('DTSTART:20260325T083000Z'));
     assert.ok(written.includes('DURATION:PT1H'));
+  });
+
+  // A zoneless value with no timeZone is read in the configured zone, except on an event whose
+  // stored start is itself floating: keeping that floating keeps the event's own frame.
+  describe('a zoneless start/end with no timeZone and no stored TZID', () => {
+    before(() => setDefaultTimezone('America/New_York'));
+    after(() => setDefaultTimezone(undefined));
+
+    it('stays floating on an event whose stored start is floating', async () => {
+      const { client, mockDAVClient } = mockClient(FLOATING_EVENT);
+      await client.updateCalendarEvent('flt@fm', { start: '2026-03-21T08:30:00', end: '2026-03-21T09:30:00' });
+      const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(data.includes('\r\nDTSTART:20260321T083000\r\n'), data);
+      assert.ok(data.includes('\r\nDTEND:20260321T093000\r\n'), data);
+    });
+
+    for (const [label, ical, uid] of [
+      ['UTC', UTC_EVENT, 'utc@fm'],
+      ['date-only', stored('day@fm', 'DTSTART;VALUE=DATE:20260320', 'DTEND;VALUE=DATE:20260321'), 'day@fm'],
+    ] as const) {
+      it(`is written in the configured zone, never floating, on a ${label} event`, async () => {
+        const { client, mockDAVClient } = mockClient(ical);
+        const result = await client.updateCalendarEvent(uid, { start: '2026-03-21T08:30:00', end: '2026-03-21T09:30:00' });
+        const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+        assert.ok(data.includes('DTSTART;TZID=America/New_York:20260321T083000'), data);
+        assert.ok(data.includes('DTEND;TZID=America/New_York:20260321T093000'), data);
+        assert.deepEqual(result.start, { kind: 'zoned', zone: 'America/New_York' });
+      });
+    }
+  });
+
+  it('refuses a non-string title by its type, as create does', async () => {
+    const { client, mockDAVClient } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', { title: 5 as unknown as string }),
+      /title must be a string; received number/,
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  it('trims surrounding whitespace from a date-only or datetime start and end, as create does', async () => {
+    const allDay = mockClient(stored('pad1@fm', 'DTSTART;VALUE=DATE:20260320', 'DTEND;VALUE=DATE:20260321'));
+    await allDay.client.updateCalendarEvent('pad1@fm', { start: ' 2026-04-10 ', end: '  2026-04-11 ' });
+    const allDayData = callArguments(allDay.mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.ok(allDayData.includes('DTSTART;VALUE=DATE:20260410'), allDayData);
+    assert.ok(allDayData.includes('DTEND;VALUE=DATE:20260411'), allDayData);
+
+    const timed = mockClient(UTC_EVENT);
+    await timed.client.updateCalendarEvent('utc@fm', { start: ' 2026-03-20T07:00:00Z ', end: ' 2026-03-20T08:00:00Z' });
+    const timedData = callArguments(timed.mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.ok(timedData.includes('DTSTART:20260320T070000Z'), timedData);
+    assert.ok(timedData.includes('DTEND:20260320T080000Z'), timedData);
+  });
+
+  // RFC 5545 §3.6.1: a DATE DTSTART takes only a dur-day or dur-week DURATION.
+  it('accepts a start change on an event with neither DTEND nor DURATION', async () => {
+    const { client, mockDAVClient } = mockClient(stored('bare@fm', 'DTSTART:20260410T090000Z'));
+    await client.updateCalendarEvent('bare@fm', { start: '2026-04-11T09:00:00Z' });
+    assert.ok(callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data.includes('DTSTART:20260411T090000Z'));
+  });
+
+  it('refuses a date-only start beside a stored DURATION that has a time part', async () => {
+    const { client, mockDAVClient } = mockClient(stored('dur4@fm', 'DTSTART:20260410T090000Z', 'DURATION:PT1H'));
+    await assert.rejects(
+      () => client.updateCalendarEvent('dur4@fm', { start: '2026-04-10' }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /start "2026-04-10" is a date-only \(all-day\) value but the stored DURATION "PT1H" has a time part/);
+        assert.match(err.message, /Pass start with a time, or pass end as well, which replaces the DURATION\.$/);
+        return true;
+      },
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  it('accepts a date-only start beside a day-only DURATION, and a date-only start with a new end', async () => {
+    const days = mockClient(stored('dur5@fm', 'DTSTART;VALUE=DATE:20260410', 'DURATION:P1D'));
+    await days.client.updateCalendarEvent('dur5@fm', { start: '2026-04-12' });
+    assert.ok(callArguments(days.mockDAVClient.updateCalendarObject)[0].calendarObject.data.includes('DURATION:P1D'));
+
+    const withEnd = mockClient(stored('dur6@fm', 'DTSTART:20260410T090000Z', 'DURATION:PT1H'));
+    await withEnd.client.updateCalendarEvent('dur6@fm', { start: '2026-04-10', end: '2026-04-11' });
+    assert.ok(!callArguments(withEnd.mockDAVClient.updateCalendarObject)[0].calendarObject.data.includes('DURATION'));
   });
 
   it('does not block a non-time edit on an event whose stored dates are already inconsistent', async () => {
@@ -7752,6 +8053,68 @@ describe('calendar write result classification, driven from real create/update c
       assert.equal(result.start, undefined);
       assert.equal(result.end, undefined);
     });
+  });
+});
+
+describe('an Etc/GMT zone is shown with its real UTC offset', () => {
+  it('create and update confirmations append the offset', () => {
+    assert.equal(
+      describeCreateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT+10' }, end: { kind: 'zoned', zone: 'Etc/GMT+10' } }),
+      ' Written in zone Etc/GMT+10 (UTC-10:00; the Etc/GMT sign is inverted).',
+    );
+    assert.equal(
+      describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT-5' } }),
+      ' (start zone Etc/GMT-5 (UTC+05:00; the Etc/GMT sign is inverted))',
+    );
+  });
+
+  it('a start/end refusal naming the zone appends the offset', async () => {
+    const data = [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:etc@fm',
+      'DTSTART;TZID=Etc/GMT+10:20260320T083000', 'DTEND;TZID=Etc/GMT+10:20260320T093000',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    await assert.rejects(
+      () => client.updateCalendarEvent('etc@fm', { end: '2026-03-20T20:00:00Z' }),
+      /is a date-time in time zone Etc\/GMT\+10 \(UTC-10:00; the Etc\/GMT sign is inverted\)/,
+    );
+  });
+
+  it('the stranded-zone refusal appends the offset to both zones', async () => {
+    const data = [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:strand@fm',
+      'DTSTART;TZID=Etc/GMT-5:20260320T083000', 'DTEND;TZID=Etc/GMT-5:20260320T093000',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    await assert.rejects(
+      () => client.updateCalendarEvent('strand@fm', { start: '2026-04-01T09:00:00', timeZone: 'Etc/GMT+10' }),
+      (err: Error) => {
+        assert.ok(err.message.includes("'Etc/GMT+10' (UTC-10:00; the Etc/GMT sign is inverted)"), err.message);
+        assert.ok(err.message.includes('"Etc/GMT-5" (UTC+05:00; the Etc/GMT sign is inverted)'), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('a read carries a trailing note for each Etc/GMT zone its events name, and none otherwise', () => {
+    assert.equal(
+      buildEtcGmtZoneNote([
+        { id: 'a', url: '', title: 'A', timeZone: 'Etc/GMT+10', endTimeZone: 'Etc/GMT-5' },
+        { id: 'b', url: '', title: 'B', timeZone: 'Etc/GMT+10' },
+      ]),
+      '\n\nNote: Etc/GMT+10 is UTC-10:00 and Etc/GMT-5 is UTC+05:00; an Etc/GMT name carries the POSIX sign, the inverse of the offset.',
+    );
+    assert.equal(buildEtcGmtZoneNote([{ id: 'c', url: '', title: 'C', timeZone: 'Australia/Sydney' }]), '');
   });
 });
 

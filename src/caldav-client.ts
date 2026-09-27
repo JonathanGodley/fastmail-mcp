@@ -2,7 +2,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // Caller-fixable input must throw coerce.ts's tagged InvalidInputError, which the CallTool
 // boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
 // docs/conventions.md.
-import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
 import { trimEnd } from './trim-end.js';
 import { foldICalLine } from './ical-fold.js';
 // A calendar window interprets local dates in the same zone the rest of the server displays,
@@ -140,11 +140,16 @@ export interface CalendarEventResult {
    * note must not tell the caller to pick a url. See `CalendarObjectLookup`.
    */
   addressedByUrl?: boolean;
+  /** Set when the writes would refuse the addressed id (`CalendarObjectLookup.collision`). */
+  addressCollision?: { addressedUid: string | undefined };
   brokenCollections?: BrokenCollections;
 }
 
-/** What `deleteCalendarEvent` returns. Only the disclosure: a delete has nothing else to say. */
 export interface DeleteCalendarEventResult {
+  /** The deleted record's own UID, as update reports it, whichever form of id was passed. */
+  eventId: string;
+  /** The resource actually deleted: a UID can spell another record's url. */
+  url: string;
   brokenCollections?: BrokenCollections;
 }
 
@@ -308,9 +313,10 @@ export function extractVEvent(data: string): string | null {
  * RECURRENCE-ID (a series whose master was removed). The last two match the read path's
  * `blockCountProvesSeries`, so the two halves agree on what a series is.
  *
- * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. That payload
- * is malformed and refusing it is the fail-closed direction; do not make the read
- * position-aware without deciding what the write path does with such a resource.
+ * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. The reads
+ * are position-aware (`ownPropertyLines`) and ignore it, so such an event reads as one-off
+ * while update/delete refuse it as repeating. The split is deliberate: the payload is
+ * malformed, and refusing an irreversible write is the fail-closed direction.
  */
 export function isRecurringSeriesResource(icalData: string | null | undefined): boolean {
   const blocks = extractVEventBlocks(icalData || '');
@@ -418,6 +424,26 @@ export function extractTzidParam(line: string): string | undefined {
 }
 
 /**
+ * Which content lines start a property of the block itself: not a folded continuation, not a
+ * BEGIN:/END: marker, and not inside a nested component. A VALARM's DESCRIPTION, ATTENDEE,
+ * DURATION or UID is the alarm's; read as the event's, an update writes the alarm's recipient
+ * back as a real ATTENDEE. The block may open with its own BEGIN: line or be bare properties.
+ */
+function ownPropertyLines(lines: string[]): boolean[] {
+  let depth = 0;
+  let base: number | undefined;
+  return lines.map((text) => {
+    // Upper-cased: RFC 5545 §3.1 names are case-insensitive, as hasICalProperty reads them.
+    const marker = structuralLine(text)?.toUpperCase();
+    if (marker === undefined) return false;
+    if (base === undefined && marker !== '') base = marker.startsWith('BEGIN:') ? 1 : 0;
+    if (marker.startsWith('BEGIN:')) { depth++; return false; }
+    if (marker.startsWith('END:')) { depth--; return false; }
+    return depth <= (base ?? 0);
+  });
+}
+
+/**
  * The first matching property's value in a VEVENT block, unfolded. Whole content lines only
  * (see the line-model comment above): this read decides which record a destroy resolves to.
  *
@@ -428,10 +454,11 @@ export function extractTzidParam(line: string): string | undefined {
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   const lines = icalContentLines(vevent).map(l => l.text);
+  const own = ownPropertyLines(lines);
   const test = new RegExp(`^${key}[;:]`);
 
   for (let i = 0; i < lines.length; i++) {
-    if (isFoldedContinuation(lines[i])) continue;
+    if (!own[i]) continue;
     const line = lines[i].replace(/\r$/, '');
     if (!test.test(line)) continue;
 
@@ -460,11 +487,12 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
  */
 export function parseAllICalProperties(vevent: string, key: string): string[] {
   const lines = icalContentLines(vevent).map(l => l.text);
+  const own = ownPropertyLines(lines);
   const regex = new RegExp(`^${key}[;:]`);
   const results: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    if (isFoldedContinuation(lines[i])) continue;
+    if (!own[i]) continue;
     const line = lines[i].replace(/\r$/, '');
     if (!regex.test(line)) continue;
 
@@ -1244,7 +1272,7 @@ export function escapeICalText(value: string): string {
  *   - YYYY-MM-DD                       (date-only)
  *   - YYYY-MM-DDTHH:MM:SS              (floating local)
  *   - YYYY-MM-DDTHH:MM:SSZ             (UTC)
- *   - YYYY-MM-DDTHH:MM:SS+HH:MM        (with offset, normalized to UTC)
+ *   - YYYY-MM-DDTHH:MM:SS+HH:MM        (with offset, normalized to UTC; +HHMM also parses)
  * Returns the ICS form (`YYYYMMDD`, or a datetime with `Z` for instants).
  *
  * The ONLY thing that turns a caller-supplied start/end into an iCal value;
@@ -1265,7 +1293,7 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
     assertRealCalendarDate(trimmed, trimmed, fieldName);
     return trimmed.replace(/-/g, '');
   }
-  // Offset forms: +/-HH:MM, +/-HHMM, +/-HH.
+  // The pattern admits any 2-4 digit offset; V8 then parses only +/-HH:MM and +/-HHMM.
   const dtMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(Z|[+-]\d{2}:?\d{0,2})?$/.exec(trimmed);
   if (!dtMatch) {
     // The only rejection here quoting an unconstrained value (U+2028 passes the control guard),
@@ -1275,6 +1303,12 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
   const [, datePart, timePart, tz] = dtMatch;
   // The date part alone: an offset legitimately moves the UTC date.
   assertRealCalendarDate(datePart, trimmed, fieldName);
+  // RFC 5545 §3.3.12 hours run 00-23. V8 reads T24:00:00 as next-day midnight, and the floating
+  // form would be written verbatim; a leap second (60) has no instant to normalise to.
+  const [hh, mm, ss] = timePart.split(':').map(Number);
+  if (hh > 23 || mm > 59 || ss > 59) {
+    throw new InvalidInputError(`${fieldName} has a time out of range; hours run 00-23 and minutes and seconds 00-59 (got: ${trimmed.slice(0, 60)})`);
+  }
   const isoForParse = `${datePart}T${timePart}${tz || ''}`;
   const d = new Date(isoForParse);
   if (Number.isNaN(d.getTime())) {
@@ -1440,8 +1474,8 @@ interface FormattedDateProperty {
  * the input, so the two cannot disagree about what the caller wrote.
  *
  * `create_calendar_event` passes the configured zone as `defaultZone`; `update_calendar_event`
- * passes none, so update stays inherit-then-floating and never defaults. That split is
- * deliberate (docs/conventions.md).
+ * passes it too, except on an event whose stored start is floating, which stays floating
+ * (docs/conventions.md).
  *
  * Exported so `tzidSource` is unit-testable: consumers only distinguish 'default' (#157, #102).
  */
@@ -1568,9 +1602,9 @@ function describeFrame(d: DatePropertyFrame): string {
     case 'zoned':
       // A `default` TZID (#157) was filled in by this server; do not word it as the caller's.
       if (d.tzidSource === 'default') {
-        return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}), applied because you named none`;
+        return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}), applied because you named none`;
       }
-      return `a date-time in time zone ${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}`;
+      return `a date-time in time zone ${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}`;
   }
 }
 
@@ -2303,12 +2337,17 @@ interface CalendarObjectMatch {
  *
  * `addressed` means the caller's string was the resource url of `matches[0]`, not merely a UID.
  * It DECIDES AMBIGUITY: an invitation sender can mint a decoy whose UID is another event's url,
- * but addressing cannot be imitated, so an addressed record is the one the writes act on. At
- * most one copy can be addressed.
+ * but addressing cannot be imitated, so an addressed record is the one the reads answer with.
+ * At most one copy can be addressed.
+ *
+ * `collision` is set when another match's UID is the string: the listing shows that record's id
+ * as this url, so the writes refuse rather than act on the addressed one. `addressedUid` is the
+ * addressed record's UID only where that UID reaches it alone; otherwise no id does.
  */
 interface CalendarObjectLookup {
   matches: CalendarObjectMatch[];
   addressed: boolean;
+  collision?: { addressedUid: string | undefined };
   brokenCollections: BrokenCollections;
 }
 
@@ -2439,6 +2478,11 @@ function readCalendarData(res: DAVResponse): string | undefined {
  * The resolved copies as a caller sees them (#101). `object.url` is safe here because
  * `isResolvedCalendarObject` admitted only matches that carry one.
  */
+/** A resource's own UID, trimmed as the lookup compares it; undefined when it has none. */
+function ownUid(obj: DAVCalendarObject): string | undefined {
+  return parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim();
+}
+
 function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
   return matches.map(m => ({ calendar: m.calendarLabel, url: m.object.url }));
 }
@@ -2820,7 +2864,8 @@ export function describeEventCopies(copies: CalendarEventCopy[]): string {
  * RAISED BEFORE THE REPEATING-SERIES REFUSAL, so the caller learns a second record exists.
  *
  * ACCEPTED: an invitation sender can mint a duplicate UID to freeze writes, which is why the
- * url, which ADDRESSES one record and cannot be made ambiguous, is the offered way out. Word it
+ * url, which ADDRESSES one record, is the offered way out; where another record's UID spells
+ * that url, `addressCollisionError` names the addressed record's UID instead. Word it
  * "addresses", not "names": the copies listed beside it may all name the url-shaped id.
  */
 export function ambiguousEventIdError(
@@ -2835,10 +2880,33 @@ export function ambiguousEventIdError(
     + `in this account, and this server will not ${action} one of them without being told which. `
     + `The copies are: ${describeEventCopies(copies)}. `
     + 'Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly '
-    + 'one record, whatever else spells it as a UID, and this tool accepts it wherever it '
-    + 'accepts an id. '
+    + 'one record, and this tool accepts it wherever it accepts an id. '
     + 'get_calendar_event still works on this id: it returns the first copy and lists the others.'
     // The count is account-wide; an unsearched collection may hold another copy (#136).
+    + describeBrokenCollections(broken),
+  );
+}
+
+/**
+ * The refusal update and delete raise on `CalendarObjectLookup.collision`. The url cannot be the
+ * way out here, so each record is named with the handle that reaches it alone, if any.
+ */
+export function addressCollisionError(
+  eventId: string,
+  action: 'update' | 'delete',
+  copies: CalendarEventCopy[],
+  addressedUid: string | undefined,
+  broken?: BrokenCollections,
+): InvalidInputError {
+  const [addressed, ...others] = copies;
+  const reach = addressedUid
+    ? `pass its own UID "${echoCallerText(addressedUid, CALENDAR_UID_ECHO_LIMIT)}" as eventId to act on it`
+    : 'no event id reaches that record alone through this server; change it in the Fastmail web interface';
+  return new InvalidInputError(
+    `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" is the url of one record and the UID of `
+    + `another, and this server will not ${action} either without being told which. `
+    + `The record at that url is ${describeEventCopies([addressed])}; ${reach}. `
+    + `Other records it names: ${describeEventCopies(others)}; pass the url of the one you mean as eventId.`
     + describeBrokenCollections(broken),
   );
 }
@@ -2939,11 +3007,35 @@ function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWrit
 
 function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   switch (info.kind) {
-    case 'zoned': return `zone ${info.zone}`;
+    case 'zoned': return `zone ${info.zone}${etcGmtOffsetNote(info.zone ?? '')}`;
     case 'utc': return 'UTC';
     case 'floating': return 'floating (no zone)';
     case 'allday': return 'all-day (no time component)';
   }
+}
+
+/** Refuse a present, non-string text field by its type; escapeICalText throws a TypeError on one. */
+function assertTextType(name: string, value: unknown): void {
+  if (value != null && typeof value !== 'string') {
+    throw new InvalidInputError(`${name} must be a string; received ${Array.isArray(value) ? 'array' : typeof value}.`);
+  }
+}
+
+/**
+ * The trailing note a calendar read carries when an event's `timeZone`/`endTimeZone` is a signed
+ * Etc/GMT name, whose sign is the inverse of its offset (`etcGmtOffsetNote`). A note rather than
+ * a field, so both fields stay the zone name a caller can pass back.
+ */
+export function buildEtcGmtZoneNote(events: CalendarEvent[]): string {
+  const zones = new Set<string>();
+  for (const e of events) {
+    for (const zone of [e.timeZone, e.endTimeZone]) {
+      if (zone && etcGmtUtcOffset(zone)) zones.add(zone);
+    }
+  }
+  if (zones.size === 0) return '';
+  const offsets = [...zones].map(z => `${z} is UTC${etcGmtUtcOffset(z)}`);
+  return `\n\nNote: ${offsets.join(' and ')}; an Etc/GMT name carries the POSIX sign, the inverse of the offset.`;
 }
 
 // The sentence create_calendar_event appends, from the written result only (#157).
@@ -3007,8 +3099,8 @@ function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start'
     // Quoted differently on purpose: `callerZone` is ICU's canonical spelling (server text), the
     // stored tzid is invitation-authored, so it is echoed inside DOUBLE quotes (#190).
     throw new InvalidInputError(
-      `timeZone would rewrite ${updatedSide} into '${callerZone}' while the stored ${strandedLabel} stays ` +
-      `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}" untouched — silently producing a two-zone event. ` +
+      `timeZone would rewrite ${updatedSide} into '${callerZone}'${etcGmtOffsetNote(callerZone)} while the stored ${strandedLabel} stays ` +
+      `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(desc.tzid)} untouched — silently producing a two-zone event. ` +
       `Pass BOTH start and end alongside timeZone (re-send the ${strandedLabel} you are not otherwise ` +
       `moving, unchanged, to keep its wall clock), or omit timeZone.`
     );
@@ -3376,21 +3468,22 @@ export class CalDAVCalendarClient {
     const addressedHrefs = new Set(urlTargets.map(t => addressComparisonKey(t.objectUrl)));
 
     // No early exit: a UID is unique per collection, not per account (#101).
-    for (const calendar of selectable) {
-      const objects = await client.fetchCalendarObjects({
-        calendar,
-        filters: uidEqualsFilter(wanted),
-        urlFilter: calendarResourceUrlFilter(calendar.url),
-      });
-      for (const obj of objects) {
-        const vevent = extractVEvent(obj.data || '');
-        if (!vevent) continue;
-        const uid = parseICalValue(vevent, 'UID')?.trim();
-        // LOAD-BEARING: the server matches case-insensitively; see `uidEqualsFilter`.
-        if (uid !== wanted) continue;
-        collect(calendar, obj);
+    const uidHolders = async (uid: string) => {
+      const holders: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }> = [];
+      for (const calendar of selectable) {
+        const objects = await client.fetchCalendarObjects({
+          calendar,
+          filters: uidEqualsFilter(uid),
+          urlFilter: calendarResourceUrlFilter(calendar.url),
+        });
+        for (const obj of objects) {
+          // LOAD-BEARING: the server matches case-insensitively; see `uidEqualsFilter`.
+          if (ownUid(obj) === uid) holders.push({ calendar, obj });
+        }
       }
-    }
+      return holders;
+    };
+    for (const { calendar, obj } of await uidHolders(wanted)) collect(calendar, obj);
 
     // The URL form; see resolveEventUrlTargets.
     for (const { calendar, objectUrl } of urlTargets) {
@@ -3417,11 +3510,23 @@ export class CalDAVCalendarClient {
     const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 
-    return { matches, addressed: addressedIndex !== -1, brokenCollections };
+    let collision: CalendarObjectLookup['collision'];
+    if (addressedIndex !== -1 && matches.slice(1).some(m => ownUid(m.object) === wanted)) {
+      // Offer the addressed record's UID only where it reaches that record alone: not absent,
+      // not this same string, and not held by any other resolved record.
+      const uid = ownUid(matches[0].object);
+      const addressedKey = addressComparisonKey(matches[0].object.url);
+      const reachesAlone = uid !== undefined && uid !== '' && uid !== wanted
+        && !(await uidHolders(uid)).some(h => isResolvedCalendarObject(h.obj)
+          && addressComparisonKey(h.obj.url) !== addressedKey);
+      collision = { addressedUid: reachesAlone ? uid : undefined };
+    }
+
+    return { matches, addressed: addressedIndex !== -1, collision, brokenCollections };
   }
 
   async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
-    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, collision, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
@@ -3433,6 +3538,7 @@ export class CalDAVCalendarClient {
       // the tool that hands over each copy's url. Disclosed even when a copy was addressed.
       otherCopies: matches.length > 1 ? matchesToCopies(matches.slice(1)) : undefined,
       addressedByUrl: addressed,
+      addressCollision: collision,
       brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }
@@ -3454,6 +3560,12 @@ export class CalDAVCalendarClient {
     /** Free/busy (#194); overrides the all-day default. See the TRANSP block below. */
     transparency?: string;
   }): Promise<CreateCalendarEventResult> {
+    // Before discovery, and by update's rules.
+    assertTextType('title', event.title);
+    const title = requireNonEmpty(event.title, 'title', 'pass the event title');
+    assertTextType('description', event.description);
+    assertTextType('location', event.location);
+
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
@@ -3516,7 +3628,7 @@ export class CalDAVCalendarClient {
       `LAST-MODIFIED:${now}`,
       startLine,
       endLine,
-      foldICalLine(`SUMMARY:${escapeICalText(event.title)}`),
+      foldICalLine(`SUMMARY:${escapeICalText(title)}`),
     ];
 
     // ALL-DAY IS WRITTEN FREE, TIMED IS LEFT BUSY: the Fastmail client's defaults (#195,
@@ -3584,8 +3696,8 @@ export class CalDAVCalendarClient {
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
     clearFields?: string[];
-    // Explicit zone for a designator-less start/end (#157). Unlike create, update NEVER defaults
-    // an omitted zone: the stored TZID, or floating, is preserved.
+    // Explicit zone for a designator-less start/end (#157). Omitted: the stored TZID, else
+    // floating on a floating event, else the configured zone.
     timeZone?: string | null;
     /**
      * Free/busy (#194). Omitted leaves the stored value alone; exclusive with
@@ -3598,7 +3710,7 @@ export class CalDAVCalendarClient {
     // every write while one collection is unhealthy is NOT the safe default here: it guards only
     // a duplicate UID whose other copy sits in the broken collection, and this path writes once,
     // to the one resource it resolved.
-    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, collision, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
@@ -3608,6 +3720,9 @@ export class CalDAVCalendarClient {
     // (#101). `addressed` keeps the url escape hatch open.
     if (!addressed && matches.length > 1) {
       throw ambiguousEventIdError(eventId, 'update', matchesToCopies(matches), brokenCollections);
+    }
+    if (collision) {
+      throw addressCollisionError(eventId, 'update', matchesToCopies(matches), collision.addressedUid, brokenCollections);
     }
 
     // UNREACHABLE DEFENCE (#137): `isResolvedCalendarObject` already requires a VEVENT. A plain
@@ -3624,11 +3739,16 @@ export class CalDAVCalendarClient {
 
     const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+    // Trimmed as validateAndFormatICalDate trims, or a padded value it accepts is refused here.
+    const isoShaped = (value: string) => {
+      const trimmed = String(value).trim();
+      return datePattern.test(trimmed) || dateTimePattern.test(trimmed);
+    };
     // Unvalidated by definition, so echoed.
-    if (fields.start !== undefined && !datePattern.test(fields.start) && !dateTimePattern.test(fields.start)) {
+    if (fields.start !== undefined && !isoShaped(fields.start)) {
       throw new InvalidInputError(`Invalid start date format: "${echoCallerText(fields.start)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
-    if (fields.end !== undefined && !datePattern.test(fields.end) && !dateTimePattern.test(fields.end)) {
+    if (fields.end !== undefined && !isoShaped(fields.end)) {
       throw new InvalidInputError(`Invalid end date format: "${echoCallerText(fields.end)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
 
@@ -3688,6 +3808,7 @@ export class CalDAVCalendarClient {
     let timeChanged = false;
 
     if (fields.title !== undefined) {
+      assertTextType('title', fields.title);
       const title = requireNonEmpty(fields.title, 'title');
       data = replaceICalProperty(data, 'SUMMARY', fold(`SUMMARY:${escapeICalText(title)}`));
     }
@@ -3697,16 +3818,21 @@ export class CalDAVCalendarClient {
       data = replaceICalProperty(data, 'DESCRIPTION', fold(`DESCRIPTION:${escapeICalText(description)}`));
     }
 
+    // Floating only on a floating event: keeping it floating keeps the event's own frame.
+    const storedStartLine = parseAllICalProperties(originalVevent, 'DTSTART')[0];
+    const defaultZone = storedStartLine && describeDateProperty(storedStartLine).frame === 'floating'
+      ? undefined
+      : resolveUsableTimezone(getDefaultTimezone());
+
     if (fields.start !== undefined) {
-      // No defaultZone: update never defaults an omitted zone, only create does.
-      newStartFormatted = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding, callerZone);
+      newStartFormatted = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding, callerZone, defaultZone);
       newStartLine = newStartFormatted.line;
       data = replaceICalProperty(data, 'DTSTART', newStartLine);
       timeChanged = true;
     }
 
     if (fields.end !== undefined) {
-      newEndFormatted = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding, callerZone);
+      newEndFormatted = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding, callerZone, defaultZone);
       newEndLine = newEndFormatted.line;
       data = replaceICalProperty(data, 'DTEND', newEndLine);
       // DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1).
@@ -3735,12 +3861,23 @@ export class CalDAVCalendarClient {
     if (fields.start !== undefined || fields.end !== undefined) {
       const startLine = newStartLine ?? parseAllICalProperties(originalVevent, 'DTSTART')[0];
       const endLine = newEndLine ?? parseAllICalProperties(originalVevent, 'DTEND')[0];
-      // A DURATION-based event has no stored DTEND to compare.
       if (startLine && endLine) {
         validateDateConsistency(
           describeDateProperty(startLine, newStartLine ? fields.start : undefined, newStartFormatted?.tzidSource),
           describeDateProperty(endLine, newEndLine ? fields.end : undefined, newEndFormatted?.tzidSource)
         );
+      } else if (newStartLine && !newEndLine) {
+        // A kept DURATION stands in for DTEND: a DATE DTSTART takes only a dur-day or dur-week
+        // one (RFC 5545 §3.6.1).
+        const duration = parseICalValue(originalVevent, 'DURATION')?.trim();
+        const start = describeDateProperty(newStartLine, fields.start);
+        if (duration && start.frame === 'date' && duration.includes('T')) {
+          throw new InvalidInputError(
+            `A date-only DTSTART takes only a whole-day DURATION per RFC 5545 §3.6.1 — start "${echoCallerText(start.display)}" `
+            + `is ${describeFrame(start)} but the stored DURATION "${echoCallerText(duration)}" has a time part. `
+            + 'Pass start with a time, or pass end as well, which replaces the DURATION.',
+          );
+        }
       }
     }
 
@@ -3809,7 +3946,7 @@ export class CalDAVCalendarClient {
   async deleteCalendarEvent(eventId: string): Promise<DeleteCalendarEventResult> {
     const client = await this.getClient();
     // Proceeds on the copy it found, as update does (#136).
-    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, collision, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
@@ -3818,6 +3955,9 @@ export class CalDAVCalendarClient {
     // Same rule and order as update's; see ambiguousEventIdError (#101).
     if (!addressed && matches.length > 1) {
       throw ambiguousEventIdError(eventId, 'delete', matchesToCopies(matches), brokenCollections);
+    }
+    if (collision) {
+      throw addressCollisionError(eventId, 'delete', matchesToCopies(matches), collision.addressedUid, brokenCollections);
     }
 
     // Keyed on the resolved RESOURCE, not the argument's shape, so passing a row's url cannot
@@ -3828,6 +3968,7 @@ export class CalDAVCalendarClient {
 
     const deleteResp = await client.deleteCalendarObject({ calendarObject: obj });
     assertDavOk(deleteResp, 'delete calendar event');
-    return { brokenCollections: asBrokenCollectionsField(brokenCollections) };
+    const uid = ownUid(obj) || eventId;
+    return { eventId: uid, url: obj.url, brokenCollections: asBrokenCollectionsField(brokenCollections) };
   }
 }
