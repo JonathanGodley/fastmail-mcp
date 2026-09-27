@@ -406,14 +406,19 @@ function noteMintedDropped(names: (string | null | undefined)[], total: number):
 
 /**
  * The forward counterpart: an image the forwarded block displayed that the expanded body no
- * longer references rides as a regular attachment rather than being lost.
+ * longer references rides as a regular attachment, or is left out when
+ * includeOriginalAttachments is false. Either way the placement cause is named.
  */
-function noteForwardUnreferenced(names: (string | null | undefined)[], total: number): string {
+function noteForwardUnreferenced(
+  names: (string | null | undefined)[], total: number, carried: boolean,
+): string {
   const listed = describePartNames(names, total);
   return (
     `${total} image(s) the forwarded original displayed ${listed ? `(${listed}) ` : ''}` +
-    'ride as regular attachments: after expansion no body written by this call references ' +
-    'them. A token placed inside a comment or an attribute is the usual cause.'
+    (carried ? 'ride as regular attachments' : 'were left out') +
+    ': after expansion no body written by this call references them' +
+    (carried ? '' : ', and includeOriginalAttachments is false') +
+    '. A token placed inside a comment or an attribute is the usual cause.'
   );
 }
 
@@ -842,7 +847,8 @@ export async function composeDraftEmail(
   // the result names it: a token placed inside a comment or an attribute expands there, so
   // the block is in the body but its image references are not live. Decided here, before
   // anything is recorded as embedded, so a dropped image is never also reported as embedded,
-  // and a forward carries it as an attachment instead of losing it.
+  // and a forward treats it like any image it cannot embed: carried as an attachment, or
+  // left out when includeOriginalAttachments is false.
   const liveRefs = new Set(
     expandedHtml ? extractLiveCidRefs(expandedHtml) : [],
   );
@@ -863,6 +869,7 @@ export async function composeDraftEmail(
   const carried: AttachmentPart[] = [];
   const pooled: CidPart[] = [];
   const droppedCarried: CidPart[] = [];
+  const droppedExcluded: CidPart[] = [];
   const attachedFiles: CidPart[] = [];
   const notIncluded: CidPart[] = [];
 
@@ -893,7 +900,7 @@ export async function composeDraftEmail(
     for (const entry of forwardSourceParts) {
       if (embedded.has(entry.part)) continue;
       if (!includeOriginalAttachments) {
-        notIncluded.push(entry.part);
+        (droppedSources.has(entry.part) ? droppedExcluded : notIncluded).push(entry.part);
         continue;
       }
       const part: AttachmentPart = { blobId: entry.part.blobId!, type: entry.part.type! };
@@ -972,7 +979,10 @@ export async function composeDraftEmail(
       ? [noteMintedDropped(droppedMinted.map((p) => p.name), droppedMinted.length)]
       : []),
     ...(droppedCarried.length > 0
-      ? [noteForwardUnreferenced(droppedCarried.map((p) => p.name), droppedCarried.length)]
+      ? [noteForwardUnreferenced(droppedCarried.map((p) => p.name), droppedCarried.length, true)]
+      : []),
+    ...(droppedExcluded.length > 0
+      ? [noteForwardUnreferenced(droppedExcluded.map((p) => p.name), droppedExcluded.length, false)]
       : []),
     ...await reportAuthoredInlineImages({
       uploaded,

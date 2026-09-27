@@ -541,6 +541,22 @@ describe('draft_email — the authored-image plan reads PRE-expansion, the closu
       JSON.stringify(r.notes),
     );
   });
+
+  it('names the placement cause when includeOriginalAttachments:false leaves an undisplayed image behind', async () => {
+    const { client, calls } = spyClient(withInlineImage());
+    const r = await compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        htmlBody: '<p>hi</p><!-- {{forward}} -->', includeOriginalAttachments: false,
+      },
+      client,
+    );
+    assert.equal((calls.draft.attachments ?? []).length, 0);
+    const about = r.notes!.filter((n) => /pic\.png|image/.test(n));
+    assert.equal(about.length, 1, JSON.stringify(r.notes));
+    assert.match(about[0], /inside a comment or an attribute/);
+    assert.match(about[0], /includeOriginalAttachments is false/);
+  });
 });
 
 // ---------------------------------------------------------------------------
