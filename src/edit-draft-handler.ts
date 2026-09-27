@@ -76,9 +76,10 @@ export async function editDraft(
   assertBodyInputs(a);
 
   const specs = coerceAttachments(a.attachments);
-  // updateDraft owns the refusal order, but its hash checks run after the upload. The
-  // presence check needs no network, so a call that would upload runs it here: otherwise the
-  // likeliest refusal leaves the uploaded blobs orphaned. Staleness needs the stored draft.
+  // updateDraft owns the refusal order (its body-shape guards first, because they name what
+  // the caller must fix), but it runs after the upload. The hash presence check needs no
+  // network, so a call that would upload runs it here, or the likeliest refusal leaves the
+  // uploaded blobs orphaned. Staleness needs the stored draft.
   const touchesBody = textBody !== undefined || htmlBody !== undefined
     || (clearFields ?? []).some((f) => f === 'textBody' || f === 'htmlBody');
   if (specs?.length && touchesBody && (typeof bodyHash !== 'string' || bodyHash.trim() === '')) {
@@ -101,8 +102,6 @@ export async function editDraft(
     attachments,
     removeAttachments,
     expandSignature,
-    // Validated by updateDraft, behind the body-shape guards, which name the shape the caller
-    // has to fix before a stale-read complaint is any use to it.
     bodyHash,
   }, {
     attachmentsEnabled: !!attachDir || allowBlobAttach,
