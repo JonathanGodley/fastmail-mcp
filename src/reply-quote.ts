@@ -320,7 +320,7 @@ export function buildQuoteBlocks(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Forward support (draft_email's mode:'forward' + edit_draft's forward guard)
+// Forward support (draft_email's mode:'forward')
 // ---------------------------------------------------------------------------
 
 // Matches the Fastmail client's own forward block (probed live 2026-07-05), including its
