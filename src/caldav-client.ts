@@ -433,8 +433,9 @@ function ownPropertyLines(lines: string[]): boolean[] {
   let depth = 0;
   let base: number | undefined;
   return lines.map((text) => {
-    const marker = structuralLine(text);
-    if (marker === null) return false;
+    // Upper-cased: RFC 5545 §3.1 names are case-insensitive, as hasICalProperty reads them.
+    const marker = structuralLine(text)?.toUpperCase();
+    if (marker === undefined) return false;
     if (base === undefined && marker !== '') base = marker.startsWith('BEGIN:') ? 1 : 0;
     if (marker.startsWith('BEGIN:')) { depth++; return false; }
     if (marker.startsWith('END:')) { depth--; return false; }

@@ -2500,6 +2500,12 @@ describe('a VALARM\'s properties are its own, not the event\'s', () => {
     assert.deepEqual(parseAllICalProperties(vevent, 'ATTENDEE'), []);
   });
 
+  it('recognises component markers in any case (RFC 5545 §3.1)', () => {
+    const lower = vevent.replace('BEGIN:VALARM', 'begin:valarm').replace('END:VALARM', 'End:VAlarm');
+    assert.equal(parseICalValue(lower, 'DESCRIPTION'), undefined);
+    assert.deepEqual(parseAllICalProperties(lower, 'ATTENDEE'), []);
+  });
+
   it('still reads the event\'s own property that follows a VALARM', () => {
     const after = ['BEGIN:VEVENT', 'DTSTART;VALUE=DATE:20261010', ...alarm, 'ATTENDEE:mailto:guest@example.com', 'END:VEVENT'].join('\n');
     assert.deepEqual(parseAllICalProperties(after, 'ATTENDEE'), ['ATTENDEE:mailto:guest@example.com']);
