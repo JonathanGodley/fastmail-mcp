@@ -208,6 +208,16 @@ const BROKEN_COLLECTION_URL = 'https://caldav.example.invalid/dav/calendars/user
 // their InvalidParams mapping), so they are not re-tested against this module.
 
 describe('extractVEvent', () => {
+  // A trailing-run trim by regex re-scans the run from every start position, so a long
+  // whitespace run followed by text was quadratic. The data is whatever the server holds.
+  it('runs in linear time on a long whitespace run inside a line', () => {
+    const n = 100_000;
+    const started = performance.now();
+    extractVEvent(`BEGIN:VCALENDAR\r\nBEGIN:VEVENT${' '.repeat(n)}x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+  });
+
   it('extracts VEVENT block from iCalendar data', () => {
     const ical = [
       'BEGIN:VCALENDAR',

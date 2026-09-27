@@ -33,6 +33,7 @@ import {
 import type { AttachmentAvailability } from './inline-notes.js';
 import { matchSubjectPrefix, noteEditSubjectPrefix } from './subject-prefix.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
+import { trimEnd } from './trim-end.js';
 // unlink is a security control, not a convenience: the exclusive-create download
 // path removes the file it just refused to trust before rewriting it.
 import { writeFile, mkdir, realpath, stat, lstat, open, unlink } from 'fs/promises';
@@ -3083,7 +3084,7 @@ export class JmapClient {
    * No Trash/Spam exclusion: this answers "which message is this".
    */
   async findEmailIdsByMessageId(messageId: string): Promise<string[]> {
-    const bare = String(messageId ?? '').trim().replace(/^<+/, '').replace(/>+$/, '').trim();
+    const bare = trimEnd(String(messageId ?? '').trim().replace(/^<+/, ''), (ch) => ch === '>').trim();
     if (!bare) return [];
 
     const session = await this.getSession();

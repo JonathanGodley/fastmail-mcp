@@ -2,6 +2,7 @@
 // helpers take an injectable mint so their callers' tests stay deterministic.
 import sanitizeHtml from 'sanitize-html';
 import { randomBytes } from 'node:crypto';
+import { trimEnd, isWhitespace } from './trim-end.js';
 
 /**
  * A part of an email, paired with where the server routed it.
@@ -169,13 +170,15 @@ const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])[ .]*$/i;
 // draft_email's sanitizeEmlFilename is similar and deliberately NOT folded into this: its
 // ".eml" suffix neutralizes a device name, and its fallback differs.
 function sanitizeFilenameChars(value: string | null | undefined): string {
-  const stripped = (value ?? '')
-    .replace(/[\p{Cc}\p{Cf}]/gu, '')
-    .replace(/[/\\:]/g, '_')
-    // TOGETHER, in one pass: trimming afterwards would let a leading space shield the dot,
-    // so " .hidden" would survive as ".hidden".
-    .replace(/^[\s.]+/u, '')
-    .replace(/\s+$/u, '');
+  const stripped = trimEnd(
+    (value ?? '')
+      .replace(/[\p{Cc}\p{Cf}]/gu, '')
+      .replace(/[/\\:]/g, '_')
+      // TOGETHER, in one pass: trimming afterwards would let a leading space shield the dot,
+      // so " .hidden" would survive as ".hidden".
+      .replace(/^[\s.]+/u, ''),
+    isWhitespace,
+  );
   return [...stripped].slice(0, 80).join('').trim();
 }
 
@@ -529,15 +532,8 @@ function decodeHtmlEntitiesOnce(value: string): string {
 // None of the terminators can appear in an identifier this server would recreate.
 const BROAD_CID_REF = /cid:([^\s"'<>()[\]{}\\]+)/gi;
 
-// From the END only, so an identifier containing a colon or comma keeps it. A walk back
-// from the end rather than /[.,;:!?]+$/, which re-scans a punctuation run from every start
-// position and is quadratic on one that is followed by an identifier character.
+// From the END only, so an identifier containing a colon or comma keeps it.
 const SENTENCE_PUNCTUATION = new Set(['.', ',', ';', ':', '!', '?']);
-function trimTrailingSentencePunctuation(s: string): string {
-  let end = s.length;
-  while (end > 0 && SENTENCE_PUNCTUATION.has(s[end - 1])) end--;
-  return s.slice(0, end);
-}
 
 /**
  * Every `cid:`-looking reference anywhere in some html, not only on an `<img>` (a CSS
@@ -550,7 +546,7 @@ export function extractCidRefs(html: string | null | undefined): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const match of decoded.matchAll(BROAD_CID_REF)) {
-    const raw = trimTrailingSentencePunctuation(match[1]);
+    const raw = trimEnd(match[1], (ch) => SENTENCE_PUNCTUATION.has(ch));
     if (!raw) continue;
     const key = decodeCidSrc(raw);
     if (seen.has(key)) continue;

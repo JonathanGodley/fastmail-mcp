@@ -3,6 +3,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
 // docs/conventions.md.
 import { InvalidInputError, describeUntrustedAt, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { trimEnd } from './trim-end.js';
 import { foldICalLine } from './ical-fold.js';
 // A calendar window interprets local dates in the same zone the rest of the server displays,
 // so it reads that stored value rather than re-deriving one from the environment.
@@ -272,7 +273,7 @@ function unfoldedICalLines(block: string): string[] {
  */
 function structuralLine(text: string): string | null {
   if (isFoldedContinuation(text)) return null;
-  return text.replace(/[\r\t ]+$/, '');
+  return trimEnd(text, (ch) => ch === '\r' || ch === '\t' || ch === ' ');
 }
 
 /** Every VEVENT block in a payload, as verbatim substrings of it. */

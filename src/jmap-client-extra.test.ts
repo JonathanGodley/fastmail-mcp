@@ -5070,6 +5070,16 @@ describe('findEmailIdsByMessageId', () => {
     assert.equal(typeof query.limit, 'number');
   });
 
+  it('runs in linear time on a long run of > inside the Message-ID', async () => {
+    const client = makeClient();
+    stubLookup(client, []);
+    const n = 100_000;
+    const started = performance.now();
+    await client.findEmailIdsByMessageId(`a${'>'.repeat(n)}x`);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
+  });
+
   it('strips angle brackets before querying (the bracketed form matches nothing)', async () => {
     const client = makeClient();
     const makeReq = stubLookup(client, [{ id: 'orig-1', messageId: ['orig@example.com'] }]);
