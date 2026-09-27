@@ -20,7 +20,7 @@ export function matchesIdentity(identityEmail: string, address: string): boolean
     // Note the pattern admits a BARE addr-spec only — a "Name <a@b.example>" form is
     // rejected on purpose, because the display name is supplied separately and is never
     // part of the value matched here. Do not widen it to accept angle-addr shapes.
-    if (!/^[^\s@,;"]+@[^\s@,;"]+$/.test(addr)) return false;
+    if (!/^[^\s@,;"<>\0]+@[^\s@,;"<>\0]+$/.test(addr)) return false;
     return addr.endsWith(domain);
   }
   return false;

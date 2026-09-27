@@ -9,7 +9,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectIdentity, signatureOf } from './identity.js';
+import { matchesIdentity, selectIdentity, signatureOf } from './identity.js';
 
 // The account's default identity, signed. The html and text forms deliberately DIFFER in
 // wording so a test can tell which one a body got: the html form says "Kind regards", the
@@ -63,6 +63,13 @@ describe('reading the sign-off off an identity', () => {
   it('honours a wildcard identity', () => {
     const wild = { id: 'id-w', email: '*@example.com', mayDelete: true, textSignature: 'Wild' };
     assert.equal(sigFor([wild], 'anything@example.com')?.text, 'Wild');
+  });
+
+  it('refuses NUL and angle brackets in an address a wildcard identity is asked to verify', () => {
+    for (const addr of ['a\u0000b@example.com', 'a<b@example.com', 'a>b@example.com', 'a@example.com\u0000']) {
+      assert.equal(matchesIdentity('*@example.com', addr), false, JSON.stringify(addr));
+    }
+    assert.equal(matchesIdentity('*@example.com', 'a.b+c@example.com'), true);
   });
 
   it('prefers an exact-address identity to a wildcard listed before it', () => {
