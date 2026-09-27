@@ -399,8 +399,8 @@ export function findValueBoundary(line: string): number {
  * `TZID=Europe/Paris` (no property name): segment 0 would then match.
  *
  * Returns `undefined`, never `''`, for an empty `TZID=`, so callers' no-TZID fallback fires.
- * A repeated TZID (malformed per RFC 5545 §3.2): the first wins. Case-sensitive on `TZID`;
- * RFC 5545 §3.1 conformance is #57/#111.
+ * A repeated TZID (malformed per RFC 5545 §3.2): the first wins. `TZID` matches in any case
+ * (RFC 5545 §3.1).
  */
 export function extractTzidParam(line: string): string | undefined {
   const boundary = findValueBoundary(line);
@@ -421,7 +421,7 @@ export function extractTzidParam(line: string): string | undefined {
   segments.push(params.slice(segStart));
 
   for (const segment of segments) {
-    if (segment.startsWith('TZID=')) {
+    if (segment.slice(0, 5).toUpperCase() === 'TZID=') {
       const value = segment.slice('TZID='.length);
       return value === '' ? undefined : value;
     }
@@ -452,15 +452,14 @@ function ownPropertyLines(lines: string[]): boolean[] {
  * The first matching property's value in a VEVENT block, unfolded. Whole content lines only
  * (see the line-model comment above): this read decides which record a destroy resolves to.
  *
- * CASE-SENSITIVE on the property name, deliberately, unlike `hasICalProperty`, although
- * component markers are read in any case (`markerLine`). A lower-cased property therefore
- * reads as absent, which is not fail-closed; only `extractVTimezoneBlocks` guards its one such
- * shape, and the rest is the RFC conformance audit (#57, #111).
+ * The property name matches in any case (RFC 5545 §3.1), as component markers do
+ * (`markerLine`) and as every write helper matches it, so a read and the write it feeds agree
+ * on which line is the property.
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   const lines = icalContentLines(vevent).map(l => l.text);
   const own = ownPropertyLines(lines);
-  const test = new RegExp(`^${key}[;:]`);
+  const test = new RegExp(`^${key}[;:]`, 'i');
 
   for (let i = 0; i < lines.length; i++) {
     if (!own[i]) continue;
@@ -493,7 +492,7 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
 export function parseAllICalProperties(vevent: string, key: string): string[] {
   const lines = icalContentLines(vevent).map(l => l.text);
   const own = ownPropertyLines(lines);
-  const regex = new RegExp(`^${key}[;:]`);
+  const regex = new RegExp(`^${key}[;:]`, 'i');
   const results: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -659,7 +658,7 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
   }
   if (veventEnd === -1) throw new Error('replaceICalProperty: END:VEVENT not found');
 
-  const propRegex = new RegExp(`^${key}[;:]`);
+  const propRegex = new RegExp(`^${key}[;:]`, 'i');
   let foundIdx = -1;
   let foundEndIdx = -1;
   let nestDepth = 0;
@@ -731,7 +730,7 @@ export function removeAllICalProperties(icalData: string, key: string): string {
   }
   if (veventEnd === -1) throw new Error('removeAllICalProperties: END:VEVENT not found');
 
-  const propRegex = new RegExp(`^${key}[;:]`);
+  const propRegex = new RegExp(`^${key}[;:]`, 'i');
   const toRemove: Array<[number, number]> = [];
   let nestDepth = 0;
 

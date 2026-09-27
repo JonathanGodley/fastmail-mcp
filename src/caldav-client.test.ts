@@ -4225,12 +4225,8 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
 
-  // Only hasICalProperty was made case-insensitive; the structural scan and parseICalValue
-  // were not, and this is why that is safe rather than half a fix. A payload whose STRUCTURAL
-  // keywords are lower-cased yields no VEVENT blocks, so findCalendarObjectByUID skips the
-  // object before it reads a single value: the event is invisible to every tool rather than
-  // reachable through a mis-read. Fail-closed, and pinned so the reasoning stays checkable.
-  it('cannot reach an event whose BEGIN:VEVENT is lower-cased at all', async () => {
+  // RFC 5545 §3.1: a lower-cased payload is read like any other, so its series is refused.
+  it('refuses a lower-cased repeating event as repeating', async () => {
     const lower = [
       'begin:vcalendar', 'version:2.0',
       'begin:vevent',
@@ -4241,16 +4237,14 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
       'end:vcalendar',
     ].join('\r\n');
     const { client, mockDAVClient } = createMockedRecurringClient(lower, '/cal/low.ics');
-    for (const eventId of ['low@fm', '/cal/low.ics']) {
-      await assert.rejects(
-        () => client.deleteCalendarEvent(eventId),
-        (err: unknown) => {
-          assert.ok(isInvalidInput(err), `expected InvalidInputError, got ${err}`);
-          assert.match((err as Error).message, /not found/);
-          return true;
-        },
-      );
-    }
+    await assert.rejects(
+      () => client.deleteCalendarEvent('low@fm'),
+      (err: unknown) => {
+        assert.ok(isInvalidInput(err), `expected InvalidInputError, got ${err}`);
+        assert.match((err as Error).message, /repeating event/);
+        return true;
+      },
+    );
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
 
@@ -12234,5 +12228,44 @@ describe('calendar-object fetches filter hrefs by emptiness and the collection i
     assert.ok(multiget, 'tsdav issued no multiget for the .ICS resource');
     assert.ok(multiget!.includes(href), `the multiget did not address the .ICS resource: ${multiget}`);
     assert.deepEqual(objects.map(o => o.url), [COLLECTION + 'stored.ICS']);
+  });
+});
+
+// RFC 5545 §3.1: property names are case-insensitive, so a lower-cased payload is edited, not
+// duplicated beside.
+describe('a wholly lower-cased stored event is updated in place', () => {
+  const url = '/cal/personal/lower.ics';
+  const lower = [
+    'begin:vcalendar', 'begin:vevent', 'uid:x1', 'dtstart:20260410T090000Z', 'dtend:20260410T100000Z',
+    'summary:Meet', 'organizer:mailto:o@example.com', 'attendee:mailto:a@example.com',
+    'end:vevent', 'end:vcalendar',
+  ].join('\r\n');
+
+  function lowerClient() {
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: lower, url, etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  it('replaces the start and end and removes every attendee', async () => {
+    const { client, mockDAVClient } = lowerClient();
+    await client.updateCalendarEvent(url, {
+      start: '2026-04-11T09:00:00Z', end: '2026-04-11T10:00:00Z', participants: [],
+    });
+    const written: string = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.equal(written.match(/^dtstart[;:]/gim)?.length, 1, written);
+    assert.equal(written.match(/^dtend[;:]/gim)?.length, 1, written);
+    assert.match(written, /^DTSTART:20260411T090000Z/m);
+    assert.equal(/^attendee[;:]/im.test(written), false, written);
+  });
+
+  it('reads the stored UID and start', () => {
+    const event = parseCalendarObject({ data: lower, url }, { configuredZone: 'UTC' });
+    assert.equal(event.id, 'x1');
+    assert.equal(event.start, '2026-04-10T09:00:00Z');
   });
 });
