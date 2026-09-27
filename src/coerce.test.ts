@@ -2153,7 +2153,10 @@ describe('echo-quoting convention', () => {
   // Every helper that neutralises a value for prose. A new one belongs here the day it is
   // written: this list is the guard's SUBJECT, not an exemption list — the thing it scans for,
   // so leaving a helper off it silently narrows the scan rather than excusing a site.
-  const ECHO_HELPERS = ['echoCallerText', 'describeUntrusted', 'describePart', 'echoPath'];
+  const ECHO_HELPERS = [
+    'echoCallerText', 'describeUntrusted', 'describeUntrustedAt', 'describePart', 'echoPath',
+    'echoRecipients',
+  ];
 
   // Recursive, so the claim the helpers' doc comments make — a bad render fails this guard
   // anywhere under src/ — is true of every source file rather than of the top level only.
