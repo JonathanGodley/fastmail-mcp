@@ -291,7 +291,6 @@ describe('draft_email — token refusals, decided before anything is built', () 
   });
 
   it('says how to write the braces as text when refusing a wrong-mode token', async () => {
-    // A {{quote}} in a new message may be prose about the syntax rather than a slip.
     const { client } = spyClient();
     const message = await messageFrom(() => compose(
       { mode: 'new', to: ['sam@example.com'], textBody: 'type {{quote}} to quote' }, client,

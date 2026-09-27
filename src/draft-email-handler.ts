@@ -764,7 +764,6 @@ export async function composeDraftEmail(
     );
   }
 
-  // A sign-off displaying an image no part carries is refused before anything is uploaded.
   // Tested on the EXPANDED html, so a token the markup hides displays nothing to refuse, and
   // an attachments item supplying the identifier resolves the reference like any other.
   const suppliedCids = new Set((specs ?? []).map((s) => s.cid).filter((c) => !!c));
