@@ -557,7 +557,7 @@ const LABEL_REMOVAL_RESCUE_DESC =
   ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. One case is rejected instead of served: the account has no archive-role mailbox at all, so there is no fallback to reach for. It says so and points at move_email/bulk_move or delete_email/bulk_delete. (Removing Archive itself never reaches that question — Archive is a folder, so the namespace rule above rejects it whatever the message is filed under.)' +
   ' Naming a label the message does not carry changes nothing for that message.' +
   ' Removing the inbox label archives a message, with the same caveats archive_email states: it acts on exactly the messages named, not their whole conversation (get_thread lists the rest). ' + SEEN_AGGREGATE_DESC +
-  ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so. An email id the server does not know is NOT one of those: it is reported after the write as a notFound failure, and the other messages in the call ARE changed. Per-message server failures are reported the same way, and the error says how many messages were changed.' +
+  ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so.' +
   ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request.';
 
 // The simplified location + status fields, shared by every read tool. The rare
@@ -1054,11 +1054,11 @@ const TOOLS = [
             },
             after: {
               type: 'string',
-              description: 'Only emails received at or after this time. Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset such as "2026-07-20T14:30:00+01:00") - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it includes the whole of that local day; a datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without a start bound.',
+              description: `Only emails received at or after this time. Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset such as "2026-07-20T14:30:00+01:00") - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (${CONFIGURED_TIMEZONE}; FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it includes the whole of that local day; a datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without a start bound.`,
             },
             before: {
               type: 'string',
-              description: 'Only emails received before this time (exclusive). Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset) - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it excludes that whole local day; pass the following date to include it. A datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without an end bound.',
+              description: `Only emails received before this time (exclusive). Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset) - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (${CONFIGURED_TIMEZONE}; FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it excludes that whole local day; pass the following date to include it. A datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without an end bound.`,
             },
             limit: {
               type: ['number', 'string'],
@@ -1584,7 +1584,7 @@ const TOOLS = [
       },
       {
         name: 'delete_email',
-        description: 'Delete an email (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC,
+        description: 'Delete an email (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC + ' ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1834,7 +1834,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_delete',
-        description: 'Delete multiple emails (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC,
+        description: 'Delete multiple emails (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC + ' ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
