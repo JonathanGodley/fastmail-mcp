@@ -716,6 +716,25 @@ describe('an unusable FASTMAIL_TIMEZONE refuses to start the built server', () =
     const { stderr, exited } = await spawnAndCaptureStartupLine(envWithTimezone(undefined));
     assert.match(stderr, /running on stdio/, `server did not report starting; exited early: ${exited}; stderr: ${stderr}`);
   });
+
+  it('advertises in the calendar tool descriptions the zone it runs with, for a leading-slash configured zone', async () => {
+    // Chosen to differ from the host zone, which is what a description that ignored the
+    // configured value would fall back to.
+    const host = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const zone = host === 'Pacific/Auckland' ? 'America/New_York' : 'Pacific/Auckland';
+    const env = envWithTimezone(`/${zone}`);
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+    const client = createClient({ env });
+    try {
+      await client.init();
+      const result: any = await client.list();
+      const create = result.tools.find((t: any) => t.name === 'create_calendar_event');
+      const described = String(create.inputSchema.properties.timeZone.description);
+      assert.ok(described.includes(`configured zone (${zone})`), `expected ${zone} in: ${described.slice(0, 200)}`);
+    } finally {
+      client.close();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

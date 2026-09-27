@@ -2336,8 +2336,12 @@ CalDAV expansion has no cap of its own (`expand_cb` returns 1 unconditionally, a
 `CALDAV:max-instances` has no handler), and tsdav's `fetchCalendarObjects` has no limit or
 paging option and buffers the whole multistatus response before returning it. So the server
 still generates every occurrence and still sends every byte; the cap decides what this server
-parses into events and shows. That is a real limit, and it is the reason the window bound above
-matters more than this one - the window is the only thing that shrinks the request.
+parses into events and shows. The listing then makes a second transfer the cap does not reach:
+the follow-up multiget that settles `isRecurring` (#155) fetches the whole stored resource, every
+exception VEVENT included, for each row that came back as a resource's only block, which on an
+ordinary calendar is nearly every one-off event too. That is a real limit, and it is the reason
+the window bound above matters more than this one - the window is the only thing that shrinks
+either request.
 
 ### Free/busy crosses four tools with one vocabulary and one rule
 

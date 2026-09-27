@@ -1740,13 +1740,15 @@ function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: n
 }
 
 /**
- * Remove any existing VTIMEZONE block(s) for `tzid`, so a stale one never sits beside the
- * replacement `regenerateVTimezones` inserts.
+ * Remove any existing VTIMEZONE block(s) spelled exactly `tzid`, so a stale one never sits
+ * beside the replacement `regenerateVTimezones` inserts. Exact, not by zone identity: a
+ * same-zone block under another spelling ('/America/New_York') may still be referenced by a
+ * TZID nothing regenerates, and `removeOrphanedVTimezones` drops it once it is not.
  */
 function stripVTimezoneBlockFor(icalData: string, tzid: string): string {
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
-  const toRemove = extractVTimezoneBlocks(lines).filter(b => zoneNamesEqual(b.tzid, tzid));
+  const toRemove = extractVTimezoneBlocks(lines).filter(b => b.tzid === tzid);
   for (let i = toRemove.length - 1; i >= 0; i--) {
     lines.splice(toRemove[i].start, toRemove[i].end - toRemove[i].start + 1);
   }
@@ -1846,8 +1848,6 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
   const spanMinMs = Math.min(...instants);
   const spanMaxMs = Math.max(...instants);
 
-  // Strip ALL first, then insert: `stripVTimezoneBlockFor` matches by zone identity, so
-  // interleaving would strip the block just inserted for an alias spelling (#166).
   let result = icalData;
   for (const tzid of zoneTzids) {
     result = stripVTimezoneBlockFor(result, tzid);
