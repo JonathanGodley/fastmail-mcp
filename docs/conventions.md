@@ -1439,8 +1439,9 @@ unknown-parameter guard — an instruction the caller cannot act on is worse tha
 This is carried by *which renderer the handler picks*, not by a flag at every call site:
 `formatRawEmailQueryResult` (paged) versus `formatQueryResult` (not), because a forgotten
 flag would silently drop a promised signal while a wrong function name is visible in the
-handler. Paginating the contacts and calendar protocol paths is tracked on
-[#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51).
+handler. Paginating the contacts listings is tracked on
+[#94](https://github.com/JonathanGodley/fastmail-mcp/issues/94), and the calendar listing on
+[#169](https://github.com/JonathanGodley/fastmail-mcp/issues/169).
 
 **The CalDAV calendar listing joins the same discipline, over a different protocol.**
 `list_calendar_events` does not go through JMAP at all, so nothing hands it a server-computed
