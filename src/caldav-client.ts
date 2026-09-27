@@ -3804,12 +3804,23 @@ export class CalDAVCalendarClient {
     if (fields.start !== undefined || fields.end !== undefined) {
       const startLine = newStartLine ?? parseAllICalProperties(originalVevent, 'DTSTART')[0];
       const endLine = newEndLine ?? parseAllICalProperties(originalVevent, 'DTEND')[0];
-      // A DURATION-based event has no stored DTEND to compare.
       if (startLine && endLine) {
         validateDateConsistency(
           describeDateProperty(startLine, newStartLine ? fields.start : undefined, newStartFormatted?.tzidSource),
           describeDateProperty(endLine, newEndLine ? fields.end : undefined, newEndFormatted?.tzidSource)
         );
+      } else if (newStartLine && !newEndLine) {
+        // A kept DURATION stands in for DTEND: a DATE DTSTART takes only a dur-day or dur-week
+        // one (RFC 5545 §3.6.1).
+        const duration = parseICalValue(originalVevent, 'DURATION')?.trim();
+        const start = describeDateProperty(newStartLine, fields.start);
+        if (duration && start.frame === 'date' && duration.includes('T')) {
+          throw new InvalidInputError(
+            `A date-only DTSTART takes only a whole-day DURATION per RFC 5545 §3.6.1 — start "${echoCallerText(start.display)}" `
+            + `is ${describeFrame(start)} but the stored DURATION "${echoCallerText(duration)}" has a time part. `
+            + 'Pass start with a time, or pass end as well, which replaces the DURATION.',
+          );
+        }
       }
     }
 

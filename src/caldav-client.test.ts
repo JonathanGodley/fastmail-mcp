@@ -5617,6 +5617,30 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     assert.ok(written.includes('DURATION:PT1H'));
   });
 
+  // RFC 5545 §3.6.1: a DATE DTSTART takes only a dur-day or dur-week DURATION.
+  it('refuses a date-only start beside a stored DURATION that has a time part', async () => {
+    const { client, mockDAVClient } = mockClient(stored('dur4@fm', 'DTSTART:20260410T090000Z', 'DURATION:PT1H'));
+    await assert.rejects(
+      () => client.updateCalendarEvent('dur4@fm', { start: '2026-04-10' }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /start "2026-04-10" is a date-only \(all-day\) value but the stored DURATION "PT1H" has a time part/);
+        return true;
+      },
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+  });
+
+  it('accepts a date-only start beside a day-only DURATION, and a date-only start with a new end', async () => {
+    const days = mockClient(stored('dur5@fm', 'DTSTART;VALUE=DATE:20260410', 'DURATION:P1D'));
+    await days.client.updateCalendarEvent('dur5@fm', { start: '2026-04-12' });
+    assert.ok(callArguments(days.mockDAVClient.updateCalendarObject)[0].calendarObject.data.includes('DURATION:P1D'));
+
+    const withEnd = mockClient(stored('dur6@fm', 'DTSTART:20260410T090000Z', 'DURATION:PT1H'));
+    await withEnd.client.updateCalendarEvent('dur6@fm', { start: '2026-04-10', end: '2026-04-11' });
+    assert.ok(!callArguments(withEnd.mockDAVClient.updateCalendarObject)[0].calendarObject.data.includes('DURATION'));
+  });
+
   it('does not block a non-time edit on an event whose stored dates are already inconsistent', async () => {
     // The check exists to stop us WRITING a broken pair, not to hold a title
     // edit hostage to an inconsistency a third-party client left behind.
