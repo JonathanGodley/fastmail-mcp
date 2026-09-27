@@ -1586,10 +1586,13 @@ describe('canonicalZoneName', () => {
   });
 
   it('caches by exact input string — a second call with a different-case alias resolves independently', () => {
-    // Not a correctness assertion on the cache's internals (there is nothing to observe from
-    // outside it); this just exercises the same input twice, which is the path the cache is for.
+    // 'nZ' is a spelling no other test uses, so the cache cannot already hold it.
     assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
+    const afterFirst = zoneCanonicalizationCacheSize();
     assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
+    assert.equal(zoneCanonicalizationCacheSize(), afterFirst, 'a repeat of the same spelling added a key');
+    assert.equal(canonicalZoneName('nZ'), 'Pacific/Auckland');
+    assert.equal(zoneCanonicalizationCacheSize(), afterFirst + 1, 'the different-case alias did not get its own key');
   });
 
   // A stored TZID reaches this on every listing, and an invitation's sender chooses it.
