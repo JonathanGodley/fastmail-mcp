@@ -647,8 +647,6 @@ describe('updateContact merge', () => {
   });
 
   it('keeps a hidden entry when allowEntryReplace is set on a clean merge', async () => {
-    // The flag acts only on an ambiguous array; the descriptions say so, and point at
-    // clearFields for removing an entry the view does not show.
     const card = storedCard();
     card.emails.blank = { '@type': 'EmailAddress', address: '' };
     card.emails.dup = { '@type': 'EmailAddress', address: 'ada@example.com' };

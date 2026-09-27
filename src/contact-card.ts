@@ -30,8 +30,7 @@ export function resolveEntryLabel(entry: any): string | undefined {
 /**
  * The default read shape of an emails/phones map: a HYBRID list. An unlabelled entry emits
  * as a BARE STRING, the common case, to save tokens; a labelled one as `{address, label}`.
- * An entry with no value is skipped, still reachable through `verbose` and `raw`; the merge
- * keeps such an entry for the same reason (see `hasEntryValue`).
+ * An entry with no value is skipped, still reachable through `verbose` and `raw`.
  */
 export function simplifyEntryMap(
   map: any,

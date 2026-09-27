@@ -57,8 +57,7 @@ export function formatEmailQueryResult(result: QueryResult, options?: { fields?:
 
 // The trashed copy holds the full picture.
 const MAX_ECHOED_RECIPIENTS = 5;
-// A subject or Message-ID is echoed whole up to here and cut with a marker past it; the
-// stored message keeps it whole. Wider than describeUntrusted's 64 so an ordinary one is not cut.
+// Wider than describeUntrusted's 64, so an ordinary subject or Message-ID is echoed whole.
 const SUBJECT_ECHO_LIMIT = 256;
 const MESSAGE_ID_ECHO_LIMIT = 256;
 function formatReplacedRecipients(label: string, addresses?: string[]): string | null {
@@ -509,17 +508,17 @@ function locationPhrase(group: ArchiveEmailResult[]): string {
   return parts.join('; plus ');
 }
 
-/**
- * The archive_email result text: counts first, one explanation per outcome present; the
- * per-message specifics ride in the JSON. removedFromInbox splits into two lines because
- * "Archive was not added" reads as false for a message already in Archive.
- */
 /** download_attachment's result line when it saved to a path. */
 export function formatSavedAttachment(result: { savedPath: string; bytesWritten: number; replaced?: boolean }): string {
   const replaced = result.replaced ? '; this replaced an existing file at that path' : '';
   return `Saved to: ${result.savedPath} (${result.bytesWritten} bytes${replaced})`;
 }
 
+/**
+ * The archive_email result text: counts first, one explanation per outcome present; the
+ * per-message specifics ride in the JSON. removedFromInbox splits into two lines because
+ * "Archive was not added" reads as false for a message already in Archive.
+ */
 export function formatArchiveResult(result: ArchiveResult): string {
   const { results, counts } = result;
   const total = results.length;

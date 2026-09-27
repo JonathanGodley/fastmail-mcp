@@ -619,9 +619,10 @@ should do for a message in a role folder is a question that cannot arise. The te
 Fastmail adds later is a folder from the day it appears.
 
 Three conditions are refused rather than written, all raised before the write, so a batch
-containing one of them changes nothing at all. An email id the server does not know is not among
-them: it is left out of the write, the rest of the batch is written, and the failure is reported
-afterwards alongside the count of messages that were written.
+containing one of them changes nothing at all. An email id the server does not know, or a
+per-message failure at the server, is not among them: an unknown id is left out of the write, the
+rest of the batch is written, and the failure is reported afterwards alongside the count of
+messages that were written.
 
 - some mailbox named for adding or removing is a folder rather than a label, per the namespace rule
   above. `add_labels`, `bulk_add_labels`, `remove_labels` and `bulk_remove_labels` share one
@@ -637,8 +638,7 @@ the patch's null-then-true ordering, which lets a rescue win a key collision wit
 not needed here: removed ids and kept ids cannot overlap.
 
 One of the three is a per-message condition aborting a whole batch, which is the opposite of the split
-`archive_email` draws. An unknown email id or a per-message failure at the server does not abort:
-as above, the rest of the batch is written and the error reports the failures and the count written.
+`archive_email` draws.
 
 The two forms lose different races, and that is what decides it. Whole-value strips a mailbox added
 between our read and our write; the patch form resurrects one removed in that window. For a move,
