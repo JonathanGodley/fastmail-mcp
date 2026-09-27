@@ -501,8 +501,9 @@ export function noteTokenEmpty(token: string, part: string, cause: BlockUnavaila
 /**
  * A body edit arrived with no proof that the caller read the body it replaces.
  *
- * The sentence explains WHY rather than just naming the parameter: the reason is the whole
- * of the rule.
+ * The sentence explains WHY rather than just naming the parameter: this tool stores what it
+ * is handed and preserves nothing, so the hash is all that stands between a stale read and a
+ * silent overwrite.
  */
 export function rejectMissingBodyHash(): string {
   return (
