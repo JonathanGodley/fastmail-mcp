@@ -2723,7 +2723,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             enablementGuide: calendarAvailable ? null : {
               steps: [
                 '1. Log into Fastmail web interface',
-                '2. Go to Settings → Privacy & Security → Connected Apps & API tokens',
+                '2. Go to Settings → Privacy & Security, and in the "Connected apps & API tokens" section click "Manage app passwords and access"',
                 '3. Create an app password with calendar (CalDAV) access',
                 '4. Set FASTMAIL_CALDAV_USERNAME (your Fastmail address) and FASTMAIL_CALDAV_PASSWORD (that app password), then restart the server'
               ],

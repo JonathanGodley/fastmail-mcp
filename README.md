@@ -1082,7 +1082,7 @@ However, Fastmail fully supports **CalDAV** for calendar access via `caldav.fast
 ### Setup
 
 1. Create an app-specific password on Fastmail:
-   - Go to **Settings → Privacy & Security → Manage app passwords**
+   - Go to **Settings → Privacy & Security**, and in the **Connected apps & API tokens** section click **Manage app passwords and access**
    - Create a new app password (you can name it "CalDAV MCP" or similar)
 
 2. Set the following environment variables:
