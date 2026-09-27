@@ -879,11 +879,11 @@ const TOOLS = [
             },
             asAttachment: {
               type: ['boolean', 'string'],
-              description: lenientBool('mode:\'forward\' only: attach the original whole as a .eml file instead of reproducing it inline (default false). Lossless — the original arrives byte for byte, headers and all. {{forward}} is refused alongside it, because the original is already carried whole and there is no block to place; a forward with neither {{forward}} nor asAttachment is refused, since it would forward nothing while still carrying the original\'s attachments. With no body of your own, a short filler note is written so the draft is readable.'),
+              description: lenientBool('mode:\'forward\' only: attach the original whole as a .eml file instead of reproducing it inline (default false). Lossless — the original arrives byte for byte, headers and all. {{forward}} is refused alongside it, because the original is already carried whole and there is no block to place; a forward with neither {{forward}} nor asAttachment is refused, since it would forward nothing while still carrying the original\'s attachments. With no body of your own, a short filler note is written so the draft is readable. It supersedes includeOriginalAttachments: the original\'s attachments ride inside the .eml whatever that flag says. NOTE: the raw message carries its full transport headers (Received chain, authentication results) and — when forwarding a message from Sent — any Bcc recipients (see docs/security-model.md), which an inline forward would not expose.'),
             },
             includeOriginalAttachments: {
               type: ['boolean', 'string'],
-              description: lenientBool('mode:\'forward\' only: carry the original\'s regular attachments (default true). Images the forwarded block DISPLAYS are carried regardless, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it.'),
+              description: lenientBool('mode:\'forward\' only: carry the original\'s regular attachments (default true). Ignored with asAttachment, where they ride inside the .eml. Images the forwarded block DISPLAYS are carried regardless, because they are body content rather than attached files — a forward without them would reproduce a message with holes in it.'),
             },
             attachments: attachmentsSchemaProperty(false, "NEW attachments to add (on mode:'forward' the original's own attachments are carried automatically — see includeOriginalAttachments). "),
           },

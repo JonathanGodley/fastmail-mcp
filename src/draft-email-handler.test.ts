@@ -820,6 +820,22 @@ describe("draft_email — mode:'forward' with asAttachment", () => {
     assert.equal(calls.draft.textBody, 'see attached');
     assert.equal(r.tokens, undefined); // no token written at all, so no receipt
   });
+
+  it('attaches only the .eml whatever includeOriginalAttachments says', async () => {
+    // The original's files ride inside the .eml, so the flag has nothing left to govern.
+    const pdf = { partId: '5', blobId: 'blob-pdf', type: 'application/pdf', name: 'r.pdf', disposition: 'attachment' };
+    for (const includeOriginalAttachments of [true, false]) {
+      const { client, calls } = spyClient(makeOriginal({ attachments: [pdf] }));
+      await compose(
+        {
+          mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], asAttachment: true,
+          includeOriginalAttachments,
+        },
+        client,
+      );
+      assert.deepEqual(calls.draft.attachments.map((p: any) => p.blobId), ['blob-orig']);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
