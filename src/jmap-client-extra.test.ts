@@ -5,7 +5,7 @@ import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { buildExclusionNote, simplifyMailbox } from './response-formatters.js';
+import { buildExclusionNote, simplifyMailbox, formatSavedAttachment } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
 import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -115,6 +115,29 @@ describe('getEmails', () => {
 
   beforeEach(() => {
     client = makeClient();
+  });
+
+  it('refuses a blank mailbox before any query, rather than listing the whole account', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    for (const blank of ['', '   ']) {
+      await assert.rejects(
+        () => client.getEmails({ mailbox: blank, limit: 5 }),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /^mailbox cannot be blank; omit it to read every mailbox\.$/);
+          return true;
+        },
+      );
+    }
+    assert.equal(makeReq.mock.callCount(), 0);
+  });
+
+  it('refuses a blank mailbox on search too', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    await assert.rejects(() => client.searchEmails({ mailbox: ' ', limit: 5 }), /mailbox cannot be blank/);
+    assert.equal(makeReq.mock.callCount(), 0);
   });
 
   it('returns emails scoped to an explicit mailbox (no exclusion, no count query)', async () => {
@@ -1445,6 +1468,23 @@ describe('bulkMarkRead', () => {
     );
   });
 
+  it('reports a notUpdated entry the server left null as a failure, instead of crashing', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': null, 'e3': { description: 'x' } } }, 'bulkUpdate'],
+      ],
+    });
+    await assert.rejects(
+      () => client.bulkMarkRead(['e1', 'e2', 'e3']),
+      (err: Error) => {
+        assert.match(err.message, /Failed to mark as read 2 of 3 emails \(1 succeeded\)/);
+        assert.match(err.message, /unknown - the server gave no error details: e2, e3/);
+        assert.notEqual(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+
   it('names the action as "unread" (not "read") when a mark-as-unread call partially fails', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -1531,6 +1571,7 @@ describe('bulk set-error formatting', () => {
       (err: Error) => {
         assert.match(err.message, /Failed to move 2 of 2 emails \(0 succeeded\)/);
         assert.match(err.message, /invalidArguments - bad patch: e1, e2/);
+        assert.doesNotMatch(err.message, /that succeeded were written/);
         // a malformed argument is fixed by re-forming the call → InvalidInputError
         assert.equal(err.name, 'InvalidInputError');
         return true;
@@ -3153,6 +3194,20 @@ describe('getMailboxStats resolution', () => {
     );
   });
 
+  it('refuses a blank mailbox rather than returning every mailbox', async () => {
+    mock.method(client, 'getMailboxes', async () => DEFAULT_MAILBOXES);
+    for (const blank of ['', '  ']) {
+      await assert.rejects(
+        () => client.getMailboxStats(blank),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /^mailbox cannot be blank; omit it to get the stats of every mailbox\.$/);
+          return true;
+        },
+      );
+    }
+  });
+
   it('returns all mailboxes when no argument is given', async () => {
     mock.method(client, 'getMailboxes', async () => DEFAULT_MAILBOXES);
     const stats = await client.getMailboxStats();
@@ -3898,6 +3953,20 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
         return true;
       },
     );
+  });
+
+  it('says plainly that the rest of the batch was written when an unknown id fails', async () => {
+    const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-inbox': true } }, { updated: { e1: null } });
+    await assert.rejects(
+      () => client.bulkRemoveLabels(['e1', 'typo'], ['Receipts']),
+      (err: Error) => {
+        assert.match(err.message, /notFound: typo/);
+        assert.match(err.message, /The 1 that succeeded were written: this is a partial write/);
+        return true;
+      },
+    );
+    const set = makeReq.mock.calls.map((c: any) => c.arguments[0].methodCalls[0]).find((m: any) => m[0] === 'Email/set');
+    assert.deepEqual(Object.keys(set[1].update), ['e1']);
   });
 
   it('ends the failure list with a period before the trailing note (#120)', async () => {
@@ -4843,7 +4912,20 @@ describe('filterMailboxesByParent', () => {
 
   it('returns the whole list when no parent is given', () => {
     assert.equal(filterMailboxesByParent(TREE).length, 4);
-    assert.equal(filterMailboxesByParent(TREE, '   ').length, 4);
+    assert.equal(filterMailboxesByParent(TREE, null as any).length, 4);
+  });
+
+  it('refuses a blank parent rather than reading it as no filter', () => {
+    for (const blank of ['', '   ']) {
+      assert.throws(
+        () => filterMailboxesByParent(TREE, blank),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /^parent cannot be blank; omit it to list every mailbox\.$/);
+          return true;
+        },
+      );
+    }
   });
 
   it('narrows to DIRECT children only, by any accepted parent form', () => {
@@ -5383,6 +5465,44 @@ describe('downloadAttachmentToFile write flags', () => {
     }
   });
 });
+describe('downloadAttachmentToFile replaced flag', () => {
+  async function saveInto(root: string) {
+    const client = makeClient();
+    mock.method(client, 'fetchAttachmentBuffer', async () => ({
+      buffer: Buffer.from('NEW BYTES'),
+      url: 'https://www.fastmailusercontent.com/jmap/download/acct/blob/report.txt',
+      name: 'report.txt',
+      type: 'text/plain',
+      blobId: 'blob-1',
+    }));
+    return client.downloadAttachmentToFile('e1', 'a1', 'report.txt', root);
+  }
+
+  it('reports that an existing file at the path was replaced', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-replace-'));
+    try {
+      await fsWriteFile(join(root, 'report.txt'), 'OLD BYTES');
+      const result = await saveInto(root);
+      assert.equal(result.replaced, true);
+      assert.match(formatSavedAttachment(result), /replaced an existing file/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports no replacement for a new file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-replace-'));
+    try {
+      const result = await saveInto(root);
+      assert.equal(result.replaced, false);
+      assert.doesNotMatch(formatSavedAttachment(result), /replaced/);
+      assert.match(formatSavedAttachment(result), / bytes\)$/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ---------- attachment reads: the part listing and the download forms (#13) ----------
 
 // A Fastmail-shaped host is required, not cosmetic: the built URL is re-validated
@@ -5465,6 +5585,14 @@ describe('getEmailAttachments', () => {
     assert.equal(attachments.length - rawAttachments.length, 1);
   });
 
+  it('reports no attachments for an email whose attachments list is absent', async () => {
+    const client = makeClient();
+    stubEmail(client, { id: 'e1', textBody: [TEXT_PART] });
+    const { attachments, rawAttachments } = await client.getEmailAttachments('e1');
+    assert.deepEqual(rawAttachments, []);
+    assert.deepEqual(attachments, []);
+  });
+
   it('withholds nothing when every part is already in the JMAP array', async () => {
     const client = makeClient();
     stubEmail(client, { id: 'e1', attachments: [ATTACHED_FILE], textBody: [TEXT_PART] });
@@ -5472,11 +5600,17 @@ describe('getEmailAttachments', () => {
     assert.equal(attachments.length, rawAttachments.length);
   });
 
-  it('returns empty lists for a message that is not found', async () => {
+  it('refuses an emailId that matches no message, rather than reporting no attachments', async () => {
     const client = makeClient();
     stubEmail(client, null);
-    const result = await client.getEmailAttachments('missing');
-    assert.deepEqual(result, { attachments: [], rawAttachments: [], omittedFromRaw: 0 });
+    await assert.rejects(
+      () => client.getEmailAttachments('missing'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Email not found/);
+        return true;
+      },
+    );
   });
 });
 
@@ -5980,5 +6114,42 @@ describe('download and upload URLs are built with literal substitution', () => {
       () => client.downloadAttachment('e1', '4'),
       /not in the Fastmail allowlist/,
     );
+  });
+});
+
+// ---------- single-id writes: an id the server acknowledged in neither map ----------
+
+describe('single-id Email/set writes with no reported outcome', () => {
+  const cases: Array<[string, string, (c: JmapClient) => Promise<void>]> = [
+    ['markEmailRead', 'mark email as read', (c) => c.markEmailRead('e1')],
+    ['markEmailRead(false)', 'mark email as unread', (c) => c.markEmailRead('e1', false)],
+    ['addKeywords', '', (c) => c.addKeywords('e1', ['$answered'])],
+    ['pinEmail', 'pin email', (c) => c.pinEmail('e1')],
+    ['pinEmail(false)', 'unpin email', (c) => c.pinEmail('e1', false)],
+    ['deleteEmail', 'delete email', (c) => c.deleteEmail('e1')],
+    ['moveEmail', '', (c) => c.moveEmail('e1', 'mb-archive')],
+    ['addLabels', 'add labels to email', (c) => c.addLabels('e1', ['inbox'])],
+  ];
+  for (const [name, action, run] of cases) {
+    it(`${name} refuses to report success when e1 is in neither updated nor notUpdated`, async () => {
+      const client = makeClient();
+      stubMailboxes(client, LABEL_MAILBOXES);
+      stubRequests(client, async () => ({ methodResponses: [['Email/set', { updated: {} }, 'set']] }));
+      await assert.rejects(
+        () => run(client),
+        (err: Error) => {
+          assert.match(err.message, /: outcomeUnknown - the server neither confirmed nor refused the change$/);
+          if (action) assert.ok(err.message.startsWith(`Failed to ${action}: `), err.message);
+          assert.notEqual(err.name, 'InvalidInputError');
+          return true;
+        },
+      );
+    });
+  }
+
+  it('reads a set response the server left null as an unknown outcome, not a crash', async () => {
+    const client = makeClient();
+    stubRequests(client, async () => ({ methodResponses: [['Email/set', null, 'set']] }));
+    await assert.rejects(() => client.markEmailRead('e1'), /outcomeUnknown/);
   });
 });

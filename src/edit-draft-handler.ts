@@ -57,14 +57,14 @@ export async function editDraft(
   const { to, cc, bcc, replyTo } = coerceRecipients(a);
   const clearFields = coerceStringArray(a.clearFields);
   const removeAttachments = coerceStringArray(a.removeAttachments);
-  // `=== true` fails closed: a non-bool like "garbage" reads as false, which stores the
-  // body exactly as written rather than rewriting it unasked.
+  // coerceBool refuses a value it cannot read (like "garbage"), and an absent value reads as
+  // false, which stores the body exactly as written rather than rewriting it unasked.
   //
   // READ OFF `args?.` RATHER THAN THE `a` ALIAS, and leave it that way. The lenient-boolean
   // guard in tool-schema.test.ts matches `!!expandSignature` and `!!args?.expandSignature`
   // but not `!!a.expandSignature`, so tidying this back to the alias would put any future
   // bare-`!!` read of it outside the only check that looks for one.
-  const expandSignature = coerceBool(args?.expandSignature) === true;
+  const expandSignature = coerceBool(args?.expandSignature, 'expandSignature') === true;
   if (!emailId) {
     throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
   }

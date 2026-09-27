@@ -3520,3 +3520,10 @@ describe("draft_email — a reply or forward prefix typed into a mode:'new' subj
     assert.equal(notesOf(rep).includes(REPLY_NOTE), false);
   });
 });
+
+describe('draft_email boolean flags', () => {
+  it('names the parameter when a boolean flag cannot be read', async () => {
+    await assert.rejects(() => composeDraftEmail({ mode: 'forward', asAttachment: 'yes' }, {} as any, undefined, false), /asAttachment must be true or false/);
+    await assert.rejects(() => composeDraftEmail({ mode: 'forward', includeOriginalAttachments: 'yes' }, {} as any, undefined, false), /includeOriginalAttachments must be true or false/);
+  });
+});

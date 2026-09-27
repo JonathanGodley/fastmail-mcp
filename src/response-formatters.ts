@@ -516,6 +516,12 @@ function locationPhrase(group: ArchiveEmailResult[]): string {
  * per-message specifics ride in the JSON. removedFromInbox splits into two lines because
  * "Archive was not added" reads as false for a message already in Archive.
  */
+/** download_attachment's result line when it saved to a path. */
+export function formatSavedAttachment(result: { savedPath: string; bytesWritten: number; replaced?: boolean }): string {
+  const replaced = result.replaced ? '; this replaced an existing file at that path' : '';
+  return `Saved to: ${result.savedPath} (${result.bytesWritten} bytes${replaced})`;
+}
+
 export function formatArchiveResult(result: ArchiveResult): string {
   const { results, counts } = result;
   const total = results.length;
@@ -710,6 +716,39 @@ export function simplifyIdentity(raw: any, options?: { verbose?: boolean }): any
   return result;
 }
 
+// RFC 9553 section 2.2.1.2: an ordered name is rendered in array order with its own
+// separators; otherwise the components are placed in conventional Western order.
+const NAME_COMPONENT_ORDER = ['title', 'given', 'given2', 'surname', 'surname2', 'generation', 'credential'];
+
+function nameFromComponents(name: any): string {
+  if (!Array.isArray(name.components)) return '';
+  // A separator's value is often pure whitespace, so only the other kinds drop a blank value.
+  const parts = name.components.filter((c: any) => c && typeof c.value === 'string'
+    && (c.kind === 'separator' || c.value.trim() !== ''));
+  if (name.isOrdered === true) {
+    const sep = typeof name.defaultSeparator === 'string' ? name.defaultSeparator : ' ';
+    let out = '';
+    let pendingSep = false;
+    for (const c of parts) {
+      if (c.kind === 'separator') { out += c.value; pendingSep = false; continue; }
+      if (pendingSep) out += sep;
+      out += c.value;
+      pendingSep = true;
+    }
+    return out.trim();
+  }
+  const rank = (kind: string) => {
+    const i = NAME_COMPONENT_ORDER.indexOf(kind);
+    return i === -1 ? NAME_COMPONENT_ORDER.length : i;
+  };
+  return parts
+    .filter((c: any) => c.kind !== 'separator')
+    .map((c: any, i: number) => ({ c, i }))
+    .sort((a: any, b: any) => rank(a.c.kind) - rank(b.c.kind) || a.i - b.i)
+    .map(({ c }: any) => c.value)
+    .join(' ');
+}
+
 export function simplifyContact(raw: any, options?: { verbose?: boolean }): any {
   const result: any = { id: raw.id };
 
@@ -717,9 +756,11 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
   const kind = nonDefaultContactKind(raw);
   if (kind) result.kind = kind;
 
-  // Name - could be in name.full, name.given+surname, or other forms
   if (raw.name) {
-    result.name = raw.name.full || [raw.name.given, raw.name.surname].filter(Boolean).join(' ') || undefined;
+    result.name = raw.name.full
+      || nameFromComponents(raw.name)
+      || [raw.name.given, raw.name.surname].filter(Boolean).join(' ')
+      || undefined;
   }
 
   // The opaque Id-map keys are dropped either way. Verbose keeps each entry whole, which is

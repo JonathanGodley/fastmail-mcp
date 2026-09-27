@@ -105,7 +105,10 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   PRESENCE, so `''` and `'   '` both raise the shared not-found error; a bare
   `if (calendarId)` truthiness test would let `''` through to query **every** calendar in the
   account. A narrowing argument's failure mode is always this shape: the caller reads a wider
-  answer as though it were the narrow one it asked for.
+  answer as though it were the narrow one it asked for. The mailbox scopes follow the same rule:
+  `mailbox` on `list_emails`, `search_emails` and `get_mailbox_stats`, and `parent` on
+  `list_mailboxes`, read an absent value as every mailbox and refuse a blank one, naming the
+  parameter (`scopingMailboxGiven`, `src/jmap-client.ts`).
 
   The four recipient fields — `to` / `cc` / `bcc` / `replyTo` on **both** `draft_email` and
   `edit_draft`, fanned out by `coerceRecipients` — are the widest user of it, and the
@@ -146,10 +149,20 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   `inputSchema`, so this is the only guard on the item shape. A blank string for the
   whole parameter reads as *omitted*, never as the empty list, because an empty list
   removes every attendee on update.
-- `coerceBool` — stringified / actual boolean to `boolean` (or `undefined`).
+- `coerceBool(value, paramName)` — `true`, `"true"` in any case (trimmed), `1` or `"1"` to
+  `true`; the same spellings of false and `0` to `false`; `null`/`undefined` to `undefined`
+  (absent, so the handler's default applies). **Every other value is refused** with an
+  `InvalidInputError` naming the parameter. Read as absent, an unknown value would silently
+  change the outcome: `isUnread: "yes"` would drop the filter and search every
+  message, and `includeTrash: "on"` would keep Trash hidden.
+- `clampLimit` — every tool's `limit`, in the handler: a number or numeric string with any
+  fractional part dropped (a JMAP `limit` is an unsigned integer, so `2.5` would be a server
+  error), clamped to `[1, max]`; a non-numeric value, or one that truncates to 0, takes the
+  tool's default. It never throws.
 - `coerceUtcDate` — a date or datetime to the JMAP `UTCDate` shape (`2026-07-20T00:00:00Z`)
-  for the `search_emails` `after` / `before` filters. `YYYY-MM-DD` expands to midnight UTC
-  and `YYYY-MM-DDThh:mm:ss` (with `Z`, an offset, or no zone) is converted; **every other
+  for the `search_emails` `after` / `before` filters. `YYYY-MM-DD` expands to midnight at the
+  start of that day in the **configured zone**, a `YYYY-MM-DDThh:mm:ss` with no zone is read in
+  that zone, and one with `Z` or an offset is taken as written; **every other
   shape is a loud reject** naming the parameter, because the mail server's own rejection
   (`invalidArguments`) names no argument at all. This is the deliberate exception to the
   lenient-coercion rule above: `new Date()`'s fallback parser accepts `2026/07/20` and
@@ -331,12 +344,10 @@ leniency exists only for clients that skip validation. Both halves are required,
 live next to each other:
 
 - **Schema**: `type: ['boolean', 'string']`, with the description wrapped in
-  `lenientBool()` (`src/index.ts`), which appends the note that `"true"`/`"false"` are
-  accepted. The prose earns its place on top of the widened type: `["boolean","string"]`
-  says a string is accepted but not *which* strings, and `coerceBool` recognises only
-  those two spellings. Anything else returns `undefined` and falls to the parameter's
-  default rather than erroring, so a caller guessing `"1"` or `"yes"` would silently get
-  the default.
+  `lenientBool()` (`src/index.ts`), which appends the note that `"true"`/`"false"` in any
+  case and `1`/`0` are accepted. The prose earns its place on top of the widened type:
+  `["boolean","string"]` says a string is accepted but not *which* strings, and `coerceBool`
+  refuses every other value, naming the parameter, rather than reading it as the default.
 - **Handler**: `coerceBool(...) ?? <default>`, never `!!`. Under `!!` the string `"false"`
   is truthy, which inverts the flag: `raw: "false"` would return untransformed JMAP to a
   caller that asked for the simplified shape, and on `get_email` make
@@ -462,9 +473,9 @@ by what the tool can actually write back, not by what the echo contains.
 **Where that bound turns into a refusal.** An echo that cannot rebuild a *field* is a
 documented limit; a destroy aimed at a record the create surface cannot produce **at all** is
 refused outright, because there the echo is worth nothing. That is why `delete_contact` rejects
-a contact GROUP: `create_contact` has no `kind` and no `members` parameter, so a group destroyed
-here is gone for good, `deletedCard` included. `update_contact` refuses the same card kind, and
-both raise it through one shared message. The test is the record KIND, not its fields; the
+every card whose kind is not `individual` (a group, an org, ...): `create_contact` has no `kind`
+and no `members` parameter, so such a card destroyed here is gone for good, `deletedCard`
+included. `update_contact` refuses the same kinds, and both raise it through one shared message. The test is the record KIND, not its fields; the
 general rule and its granularity are in `CONTRIBUTING.md` ("A destroy must not remove what the
 server cannot recreate") because it governs delete paths not yet written.
 
@@ -594,7 +605,9 @@ the membership it strips.
 (RFC 8620 §5.3) rather than reading the current membership and patching each id away. It states
 the promised contract directly ("replaces all mailbox membership") and has no read/write window in
 which a newly-added mailbox survives the move. Neither writes a keyword: a move changes where a
-message is filed and nothing about its read or flagged state. Marking read is `mark_email_read`.
+message is filed. That does not guarantee the reported read state is unchanged, because `$seen`
+is reported only when every per-mailbox copy carries it, so dropping an unread copy can flip a
+message to read. Marking read is `mark_email_read`.
 This is a deliberate divergence from upstream PR `MadLlama25/fastmail-mcp#67`, whose
 `archive_email` writes `$seen` as part of the move: folding two effects into one verb means a
 caller who wanted only the filing cannot get it, while a caller who wanted both can still make the
@@ -624,7 +637,9 @@ should do for a message in a role folder is a question that cannot arise. The te
 Fastmail adds later is a folder from the day it appears.
 
 Three conditions are refused rather than written, all raised before the write, so a batch
-containing one unservable message changes nothing at all:
+containing one of them changes nothing at all. An email id the server does not know is not among
+them: it is left out of the write, the rest of the batch is written, and the failure is reported
+afterwards alongside the count of messages that were written.
 
 - some mailbox named for adding or removing is a folder rather than a label, per the namespace rule
   above. `add_labels`, `bulk_add_labels`, `remove_labels` and `bulk_remove_labels` share one
@@ -866,7 +881,7 @@ format and control-character rejects, the participant-address rejects, a `calend
 `eventId` that resolves to nothing, and the repeating-event refusal that
 `update_calendar_event` / `delete_calendar_event` raise (see below). `src/contacts-calendar.ts` follows it too — its
 input rejects (a contact with neither name nor address, an update naming no field, an
-empty entry array, an ambiguous entry edit, an update aimed at a contact group) and its
+empty entry array, an ambiguous entry edit, an update aimed at a card that is not an individual) and its
 not-found rejects are `InvalidInputError`, and its create/update/delete set-errors route
 through the same `throwSingleSetError` classifier the mail writes use. That classifier puts
 a `forbidden` on the operational side, so a contacts token issued read-only surfaces as an
@@ -2167,23 +2182,23 @@ Three divergences meet here, and each is right for its own question:
 
 | | date-only value means | why |
 | --- | --- | --- |
-| `search_emails` `before`/`after` (`coerceUtcDate`) | midnight **UTC** | compares against `receivedAt`, a JMAP UTCDate — an instant, not a day |
+| `search_emails` `before`/`after` (`coerceUtcDate`) | **local** midnight at the start of that day, for both bounds | "mail after the 12th" names the asker's own day, the same one the calendar reads; `before` is exclusive, so it stops at the start of that day |
 | `list_calendar_events` `startDate`/`endDate` | the whole **local** day | "what is on the 12th?" asks about the asker's own day |
 | `create_calendar_event` `end` | exclusive at the **start** of that day | RFC 5545 DTEND, one edge of a single event |
 
-The two coercions share `classifyDateValue`, so they reject an identical set of bad values with
-identical wording and diverge only on what an accepted value resolves to. Do not "unify" them
-back into one function: the shared half already is one function, and the half that differs is
-the answer to a different question.
+All three read a zoneless value in the configured zone, and the email bounds and the calendar
+window share one resolver (`resolveWindowBound`), so they reject an identical set of bad values
+and read an accepted one identically; they differ only in the calendar end's day offset and in
+the accepted-formats sentence each rejection carries.
 
 **The shared half does not cover the TIME components.**
-`classifyDateValue` never reads the hour and minute out; `coerceUtcDate` gets its range check
-for free from `new Date()` refusing `25:00:00`, and the calendar pair reads the components
-itself with a shape-only pattern and hands them to `Date.UTC`, which **rolls** rather than
-refusing: `2026-08-12T99:99:99` would silently become a window starting three and a half days
+`classifyDateValue` never reads the hour and minute out; `resolveWindowBound` reads the
+components itself with a shape-only pattern and hands them to `Date.UTC`, which **rolls** rather
+than refusing: `2026-08-12T99:99:99` would silently become a window starting three and a half days
 later, while `create_calendar_event` refused the same value on a write.
 `isWallClockInRange` keeps the parity, except that `24:00:00` is deliberately allowed on the
-window, because the ECMAScript date format allows it and the UTC coercion takes it; the window
+window, because the ECMAScript date format allows it and a value carrying `Z` or an offset,
+parsed by `new Date()`, takes it; the window
 reads it as midnight starting the next day. The writes refuse it (`validateAndFormatICalDate`),
 because RFC 5545 §3.3.12 has no hour 24 and the floating form would be written verbatim. When you add a value the two
 sides read differently, check the divergence rather than assuming the shared function covers

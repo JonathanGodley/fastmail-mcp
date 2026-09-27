@@ -5,7 +5,7 @@ import {
   buildEntryMap,
   contactCardKind,
   isAmbiguousEntryEdit,
-  isContactGroupCard,
+  refusedContactKind,
   nonDefaultContactKind,
   mergeContactName,
   mergeContactNotes,
@@ -190,6 +190,30 @@ describe('mergeEntryMap', () => {
     assert.deepEqual(outcome.dropped, [{ key: 'short1', entry: stored.short1 }]);
   });
 
+  it('keeps an entry with no value, which the default view never shows, when the list is resent', () => {
+    // simplifyEntryMap skips such an entry, so a caller resending exactly what it read cannot
+    // name it; merging must not read its absence as a delete.
+    const card = {
+      k1: { address: 'a@example.com' },
+      k2: { address: '', label: 'old' },
+      k3: { pref: 1 },
+    };
+    const outcome = mergeEntryMap(card, [{ address: 'a@example.com' }], 'address');
+    assert.deepEqual(outcome.map, card);
+    assert.deepEqual(outcome.dropped, []);
+  });
+
+  it('keeps a stored duplicate when the list is resent, since the input cannot repeat a value', () => {
+    const card = {
+      k1: { address: 'a@example.com', pref: 1 },
+      k2: { address: 'a@example.com', label: 'work' },
+      k3: { address: 'b@example.com' },
+    };
+    const outcome = mergeEntryMap(card, [{ address: 'a@example.com' }, { address: 'b@example.com' }], 'address');
+    assert.deepEqual(outcome.map, card);
+    assert.deepEqual(outcome.dropped, []);
+  });
+
   it('leaves a matched entry untouched when nothing but its value was supplied', () => {
     const outcome = mergeEntryMap(stored, [{ address: 'b@example.com' }], 'address');
     assert.deepEqual(outcome.map.short1, { address: 'b@example.com', pref: 2 });
@@ -273,6 +297,13 @@ describe('isAmbiguousEntryEdit', () => {
   });
 });
 
+describe('mergeEntryMap over a stored entry the server left null', () => {
+  it('carries the null entry over rather than crashing', () => {
+    const outcome = mergeEntryMap({ e0: null, e1: { address: 'a@example.com' } }, [{ address: 'a@example.com' }], 'address');
+    assert.deepEqual(outcome.map.e1, { address: 'a@example.com' });
+  });
+});
+
 describe('assertUnambiguousEntryEdit', () => {
   it('allows a pure addition and a pure removal', () => {
     assert.doesNotThrow(() => assertUnambiguousEntryEdit('emails', { map: {}, dropped: [], added: ['a@b.example'] }));
@@ -300,11 +331,30 @@ describe('assertUnambiguousEntryEdit', () => {
     );
   });
 
-  it('caps the echoed entries and says the list is partial', () => {
+  it('echoes every dropped entry of an ordinary card, so the resend can be lossless', () => {
     const dropped = Array.from({ length: 8 }, (_, i) => ({ key: `k${i}`, entry: { address: `d${i}@b.example` } }));
     assert.throws(
-      () => assertUnambiguousEntryEdit('phones', { map: {}, dropped, added: ['x'] }),
-      /…and 3 more/,
+      () => assertUnambiguousEntryEdit('emails', { map: {}, dropped, added: ['x'] }),
+      (err: Error) => {
+        for (let i = 0; i < 8; i++) assert.match(err.message, new RegExp(`"d${i}@b\\.example"`));
+        assert.doesNotMatch(err.message, /more/);
+        assert.match(err.message, /"d7@b\.example"\}\. Added: "x"\./);
+        return true;
+      },
+    );
+  });
+
+  it('caps the echo at 50 entries and says how to read the rest', () => {
+    const dropped = Array.from({ length: 53 }, (_, i) => ({ key: `k${i}`, entry: { address: `d${i}@b.example` } }));
+    assert.throws(
+      () => assertUnambiguousEntryEdit('emails', { map: {}, dropped, added: ['x'] }),
+      (err: Error) => {
+        assert.match(err.message, /d49@b\.example/);
+        assert.doesNotMatch(err.message, /d50@b\.example/);
+        assert.match(err.message, /…and 3 more/);
+        assert.match(err.message, /get_contact with verbose:true/);
+        return true;
+      },
     );
   });
 });
@@ -351,31 +401,25 @@ describe('nonDefaultContactKind', () => {
   });
 });
 
-describe('isContactGroupCard', () => {
-  it('recognises a group', () => {
-    assert.equal(isContactGroupCard({ kind: 'group' }), true);
+describe('refusedContactKind', () => {
+  it('refuses every kind create_contact cannot produce', () => {
+    // create_contact has no kind parameter, so it makes individuals only.
+    for (const kind of ['group', 'org', 'location', 'device', 'application', 'x-custom']) {
+      assert.equal(refusedContactKind({ kind }), kind);
+    }
   });
 
-  it('does not treat other non-person kinds as groups', () => {
-    // Only a group is refused by the write tools: it is the one kind whose whole content is a
-    // members list this server has no surface for. An org card is an ordinary card that
-    // update_contact and delete_contact can still handle.
-    for (const kind of ['org', 'location', 'device', 'application', 'individual']) {
-      assert.equal(isContactGroupCard({ kind }), false, kind);
-    }
-    assert.equal(isContactGroupCard({}), false);
-    assert.equal(isContactGroupCard(undefined), false);
+  it('allows an individual, and a card with no kind, which reads as one', () => {
+    assert.equal(refusedContactKind({ kind: 'individual' }), undefined);
+    assert.equal(refusedContactKind({}), undefined);
+    assert.equal(refusedContactKind(undefined), undefined);
   });
 
   it('agrees with the kind the read surface surfaces', () => {
-    // The read shows a value and the write refuses on one: the same card must not read as a
-    // group in one place and not the other.
-    const group = { id: 'G1', kind: 'group' };
-    assert.equal(isContactGroupCard(group), true);
-    assert.equal(nonDefaultContactKind(group), 'group');
-
-    const person = { id: 'C1', kind: 'individual' };
-    assert.equal(isContactGroupCard(person), false);
-    assert.equal(nonDefaultContactKind(person), undefined);
+    // The read shows a value and the write refuses on one: the same card must not read as
+    // refusable in one place and not the other.
+    for (const card of [{ id: 'G1', kind: 'group' }, { id: 'C1', kind: 'individual' }, { id: 'O1', kind: 'org' }]) {
+      assert.equal(refusedContactKind(card), nonDefaultContactKind(card));
+    }
   });
 });

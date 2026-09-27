@@ -1,6 +1,7 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, joinCapped, PathAccessError, InvalidInputError } from './coerce.js';
+import { getDefaultTimezone } from './email-formatter.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
@@ -291,6 +292,10 @@ export interface SourceReferences {
 // The JMAP header form used to SET and GET the recorded source instance. It is NOT
 // stripped on send (EmailSubmission transmits the stored bytes verbatim); the decision is
 // recorded in docs/security-model.md.
+// The not-found refusal of the two attachment tools, which take the same emailId.
+const ATTACHMENT_EMAIL_NOT_FOUND =
+  'Email not found: that emailId matches no message. Pass an id from list_emails, search_emails or get_thread.';
+
 export const SOURCE_ID_HEADER = 'header:X-Fastmail-MCP-Source-Id:asText';
 
 // Anything that is not an RFC 8620 id is treated as absent rather than risking a
@@ -1254,13 +1259,25 @@ export function resolveMailbox(mailboxes: any[], input: string): any {
   throw new InvalidInputError(formatMailboxNotFound(raw, mailboxes || []));
 }
 
-// Narrow a mailbox list to the DIRECT children of one parent. A blank parent means no
-// filter. A pure operation rather than a getMailboxes option, because list_mailboxes needs
-// the WHOLE tree for paths before narrowing.
+/**
+ * Whether a mailbox argument that SCOPES a read was supplied. Absent (undefined/null) means
+ * every mailbox; a blank value is refused, naming the parameter, because reading it as absent
+ * would silently widen the read to the whole account.
+ */
+function scopingMailboxGiven(input: unknown, paramName: string, omitMeans: string): boolean {
+  if (input === undefined || input === null) return false;
+  if (String(input).trim() === '') {
+    throw new InvalidInputError(`${paramName} cannot be blank; omit it to ${omitMeans}.`);
+  }
+  return true;
+}
+
+// Narrow a mailbox list to the DIRECT children of one parent. A pure operation rather than a
+// getMailboxes option, because list_mailboxes needs the WHOLE tree for paths before narrowing.
 export function filterMailboxesByParent(mailboxes: any[], parent?: string): any[] {
   const list = mailboxes || [];
-  if (parent === undefined || parent === null || String(parent).trim() === '') return list;
-  const parentId = resolveMailbox(list, parent).id;
+  if (!scopingMailboxGiven(parent, 'parent', 'list every mailbox')) return list;
+  const parentId = resolveMailbox(list, parent!).id;
   return list.filter(mb => mb && mb.parentId === parentId);
 }
 
@@ -1416,7 +1433,7 @@ export class JmapClient {
    * subclass that does not: an unaccounted id must not vanish from the sentence.
    */
   protected throwBulkSetError(
-    notUpdated: Record<string, { type: string; description?: string }>,
+    rawNotUpdated: Record<string, { type: string; description?: string } | null>,
     total: number,
     successCount: number,
     action: string,
@@ -1424,6 +1441,15 @@ export class JmapClient {
     trailingNote?: string,
   ): never {
     const MAX_REASONS = 5;
+
+    // A server can list an id with a null (or non-object) SetError; it is still a failure,
+    // and one no caller can fix, so it takes a type outside CALLER_FIXABLE_SET_ERROR_TYPES.
+    const notUpdated: Record<string, { type: string; description?: string }> = {};
+    for (const [id, entry] of Object.entries(rawNotUpdated)) {
+      notUpdated[id] = entry && typeof entry === 'object' && typeof entry.type === 'string'
+        ? entry
+        : { type: 'unknown', description: 'the server gave no error details' };
+    }
 
     const failedIds = Object.keys(notUpdated);
     const failCount = failedIds.length;
@@ -1458,6 +1484,10 @@ export class JmapClient {
       message += ' (Partial list — not every failure is shown. These operations are idempotent, so re-run with the full input set to retry every failure safely.)';
     }
     if (trailingNote) message += ` ${trailingNote}`;
+    // Said outright: an InvalidParams error otherwise reads as a batch that wrote nothing.
+    if (successCount > 0) {
+      message += ` The ${successCount} that succeeded were written: this is a partial write, not a rejection of the batch.`;
+    }
 
     if (failedIds.every(id => JmapClient.isCallerFixableSetError(notUpdated[id].type))) {
       throw new InvalidInputError(message);
@@ -1667,17 +1697,34 @@ export class JmapClient {
   // 2. KEY PRESENCE is the refusal, not truthiness: a null value is still a refusal, hence
   //    the `?? {}`.
   // 3. isPlainResponseMap: an array-shaped map would answer for the id "0".
+  /**
+   * Throw unless a single-id Email/set confirmed `id` in `updated`: a SetError is classified
+   * by throwSingleSetError, and an id in NEITHER map is a failure, as the bulk tools count it
+   * (withUnaccountedFailures), never a silent success.
+   */
+  private assertSingleUpdated(result: any, id: string, action: string): void {
+    const setError = this.setErrorFor(result?.notUpdated, id);
+    if (setError) this.throwSingleSetError(setError, action);
+    const updated = isPlainResponseMap(result?.updated) ? result.updated : {};
+    if (!Object.prototype.hasOwnProperty.call(updated, id)) {
+      this.throwSingleSetError(
+        { type: 'outcomeUnknown', description: 'the server neither confirmed nor refused the change' },
+        action,
+      );
+    }
+  }
+
   private setErrorFor(notUpdated: any, id: string): any | undefined {
     if (!isPlainResponseMap(notUpdated)) return undefined;
     return Object.prototype.hasOwnProperty.call(notUpdated, id) ? (notUpdated[id] ?? {}) : undefined;
   }
 
-  // Resolve an optional mailbox input to an id; blank means no filter. Pass `mailboxes` to
-  // avoid a second fetch.
+  // Resolve an optional mailbox input to an id; absent means no filter, blank is refused. Pass
+  // `mailboxes` to avoid a second fetch.
   private async resolveMailboxId(input?: string, mailboxes?: any[]): Promise<string | undefined> {
-    if (input === undefined || input === null || String(input).trim() === '') return undefined;
+    if (!scopingMailboxGiven(input, 'mailbox', 'read every mailbox')) return undefined;
     const list = mailboxes ?? await this.getMailboxes();
-    return resolveMailbox(list, input).id;
+    return resolveMailbox(list, input!).id;
   }
 
   // Fetch the account's mailboxes, whole and unprojected. Narrowing to one parent is
@@ -3146,10 +3193,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, `mark email as ${read ? 'read' : 'unread'}`);
-    }
+    this.assertSingleUpdated(result, emailId, `mark email as ${read ? 'read' : 'unread'}`);
   }
 
   // Additively set keyword flags without clobbering the others, for the reply path's
@@ -3177,10 +3221,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'add keywords to email');
-    }
+    this.assertSingleUpdated(result, emailId, 'add keywords to email');
   }
 
   async pinEmail(emailId: string, pinned: boolean = true): Promise<void> {
@@ -3204,10 +3245,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, `${pinned ? 'pin' : 'unpin'} email`);
-    }
+    this.assertSingleUpdated(result, emailId, `${pinned ? 'pin' : 'unpin'} email`);
   }
 
   async deleteEmail(emailId: string): Promise<void> {
@@ -3240,10 +3278,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
     
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'delete email');
-    }
+    this.assertSingleUpdated(result, emailId, 'delete email');
   }
 
   async moveEmail(emailId: string, target: string): Promise<void> {
@@ -3270,10 +3305,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'move email');
-    }
+    this.assertSingleUpdated(result, emailId, 'move email');
   }
 
   /**
@@ -3604,10 +3636,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'add labels to email');
-    }
+    this.assertSingleUpdated(result, emailId, 'add labels to email');
   }
 
   /** Caller-supplied email ids rendered into prose, capped and made safe. */
@@ -3910,8 +3939,9 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     const email = this.getListResult(response, 0)[0];
+    if (!email) throw new InvalidInputError(ATTACHMENT_EMAIL_NOT_FOUND);
     const attachments = buildUnionParts(email).map((u) => u.part);
-    const rawAttachments = email?.attachments || [];
+    const rawAttachments = email.attachments || [];
     // buildUnionParts yields the server's own part objects, so identity is an exact
     // membership test for "this part is not in the JMAP attachments array".
     const inRaw = new Set<any>(rawAttachments);
@@ -3951,12 +3981,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const email = this.getListResult(response, 0)[0];
 
-    if (!email) {
-      throw new InvalidInputError(
-        'Email not found: that emailId matches no message. ' +
-        'Pass an id from list_emails, search_emails or get_thread.'
-      );
-    }
+    if (!email) throw new InvalidInputError(ATTACHMENT_EMAIL_NOT_FOUND);
 
     const parts = buildUnionParts(email).map((u) => u.part);
     const resolved = resolveAttachmentRef(parts, attachmentId);
@@ -4403,7 +4428,7 @@ export class JmapClient {
     return { buffer: Buffer.from(await response.arrayBuffer()), url, ...info };
   }
 
-  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, downloadDir?: string): Promise<{ url: string; bytesWritten: number; savedPath: string }> {
+  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, downloadDir?: string): Promise<{ url: string; bytesWritten: number; savedPath: string; replaced: boolean }> {
     // Checked before the slow fetch, so a bad path fails fast.
     await JmapClient.safeWritePath(savePath, downloadDir);
     const { buffer, url } = await this.fetchAttachmentBuffer(emailId, attachmentId);
@@ -4413,6 +4438,7 @@ export class JmapClient {
     // unlink just created.
     const safePath = await JmapClient.safeWritePath(savePath, downloadDir);
     await mkdir(dirname(safePath), { recursive: true });
+    let replaced = false;
     try {
       await writeFile(safePath, buffer, { flag: 'wx' });
     } catch (e: any) {
@@ -4420,9 +4446,10 @@ export class JmapClient {
       await JmapClient.safeWritePath(savePath, downloadDir); // refuses a symlink at the target
       await unlink(safePath);
       await writeFile(safePath, buffer, { flag: 'wx' });
+      replaced = true;
     }
 
-    return { url, bytesWritten: buffer.length, savedPath: safePath };
+    return { url, bytesWritten: buffer.length, savedPath: safePath, replaced };
   }
 
   // Shared engine for searchEmails + getEmails: the filter, the default Trash/Spam
@@ -4559,8 +4586,10 @@ export class JmapClient {
     includeSpam?: boolean;
   }): Promise<QueryResult> {
     // Before any network work, so a bad value fails naming its argument (#70).
-    const after = coerceUtcDate(filters.after, 'after');
-    const before = coerceUtcDate(filters.before, 'before');
+    // Read in the configured zone, the one the calendar window and the rendered `date` use.
+    const zone = getDefaultTimezone();
+    const after = coerceUtcDate(filters.after, 'after', zone);
+    const before = coerceUtcDate(filters.before, 'before', zone);
 
     const mailboxes = await this.getMailboxes();
     const resolvedMailboxId = await this.resolveMailboxId(filters.mailbox, mailboxes);
@@ -4722,10 +4751,10 @@ export class JmapClient {
       unreadThreads: mb.unreadThreads || 0,
     });
 
-    if (mailbox !== undefined && String(mailbox).trim() !== '') {
+    if (scopingMailboxGiven(mailbox, 'mailbox', 'get the stats of every mailbox')) {
       // A real id absent from the fetched list throws: accepted residual
       // (docs/security-model.md).
-      const mb = resolveMailbox(mailboxes, mailbox);
+      const mb = resolveMailbox(mailboxes, mailbox!);
       return toStats(mb);
     }
     return mailboxes.map(toStats);

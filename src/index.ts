@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
@@ -22,6 +22,7 @@ import { editDraft } from './edit-draft-handler.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
+import { runBulkReadTest } from './bulk-test-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
 import { createContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
 import createDebug from 'debug';
@@ -389,10 +390,10 @@ const CONFIGURED_TIMEZONE = (() => {
 
 // Appended to every boolean whose handler runs coerceBool, alongside a schema type of
 // `['boolean', 'string']`: a narrow `type: 'boolean'` makes the coercion unreachable from a
-// validating client (#54). The prose says WHICH strings, because coerceBool reads only
-// "true"/"false" and anything else ("1", "yes") silently falls back to the default.
+// validating client (#54). The prose says WHICH strings, because coerceBool refuses every
+// other value rather than reading it as the default.
 const LENIENT_BOOL_DESC =
-  ' Also accepts the strings "true"/"false", for clients that stringify booleans.';
+  ' Also accepts "true"/"false" in any case and 1/0 (as a number or a string); any other value is rejected, naming the parameter.';
 
 // Wrap a boolean parameter's description with the note above. Adds sentence-ending
 // punctuation first when the description lacks it, so the two clauses don't run
@@ -461,7 +462,7 @@ const MAILBOX_REF_FORMS =
 // Anything specific to the multi-mailbox arrays belongs in SEARCH_MAILBOX_PARAM_DESC.
 const MAILBOX_PARAM_DESC =
   'Mailbox to scope to. ' + MAILBOX_REF_FORMS +
-  ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion.';
+  ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion. A blank value is rejected rather than read as every mailbox; omit the parameter for that.';
 
 // search_emails' `mailbox`, which is the one-element case of requiredMailboxes.
 const SEARCH_MAILBOX_PARAM_DESC =
@@ -497,10 +498,10 @@ const DRAFT_MAILBOX_PARAM_DESC =
   'draft you are parking, not one you are about to send. ' + MAILBOX_REF_FORMS;
 
 const STATS_MAILBOX_PARAM_DESC =
-  'Mailbox to report on (optional, defaults to all mailboxes). ' + MAILBOX_REF_FORMS;
+  'Mailbox to report on (optional, defaults to all mailboxes; a blank value is rejected, so omit it for all). ' + MAILBOX_REF_FORMS;
 
 const LIST_PARENT_PARAM_DESC =
-  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox. ' + MAILBOX_REF_FORMS;
+  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox; a blank value is rejected rather than read as every mailbox. ' + MAILBOX_REF_FORMS;
 
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
@@ -544,10 +545,14 @@ const labelMailboxesDesc = (verb: 'add' | 'remove') =>
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
   LENIENT_LIST_DESC;
 
+// Shared by every tool that changes a message's filing, delete included.
+const SEEN_AGGREGATE_DESC =
+  'No keyword is written, but that is not the same as the read state being untouched: $seen is reported only when every one of a message\'s per-mailbox copies carries it, so dropping an unread copy (an unread Inbox copy, typically) can flip a message to read.';
+
 // Shared by all four label tools (#133): the namespace, which a caller cannot infer from
 // "label" alone.
 const LABEL_NAMESPACE_DESC =
-  ' Labels here means the Inbox and the account\'s own user labels ONLY. A mailbox with any other JMAP role (archive, trash, junk/Spam, drafts, sent, snoozed, scheduled) is a FOLDER in Fastmail\'s model, not a label — Fastmail\'s label picker does not offer it — so naming one rejects the whole call before anything is written; use move_email or bulk_move to put a message in a folder. The Inbox is the one mailbox in both namespaces: removing the inbox label is exactly what archiving a message is, and adding it is how a message is put back in the Inbox.';
+  ' Labels here means the Inbox and the account\'s own user labels ONLY. A mailbox with any other JMAP role (archive, trash, junk/Spam, drafts, sent, snoozed, scheduled) is a FOLDER in Fastmail\'s model, not a label — Fastmail\'s label picker does not offer it — so naming one rejects the whole call before anything is written; use move_email or bulk_move to put a message in a folder. The Inbox is the one mailbox in both namespaces: removing the inbox label archives a message the way archive_email does, and adding it is how a message is put back in the Inbox.';
 
 // Shared by remove_labels and bulk_remove_labels: where a message lands when its last
 // mailbox is removed, which a caller cannot otherwise predict.
@@ -556,7 +561,8 @@ const LABEL_NAMESPACE_DESC =
 const LABEL_REMOVAL_RESCUE_DESC =
   ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. One case is rejected instead of served: the account has no archive-role mailbox at all, so there is no fallback to reach for. It says so and points at move_email/bulk_move or delete_email/bulk_delete. (Removing Archive itself never reaches that question — Archive is a folder, so the namespace rule above rejects it whatever the message is filed under.)' +
   ' Naming a label the message does not carry changes nothing for that message.' +
-  ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so. Per-message server failures are reported per message as usual.' +
+  ' Removing the inbox label archives a message, with the same caveats archive_email states: it acts on exactly the messages named, not their whole conversation (get_thread lists the rest). ' + SEEN_AGGREGATE_DESC +
+  ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so.' +
   ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request.';
 
 // The simplified location + status fields, shared by every read tool. The rare
@@ -698,6 +704,12 @@ const CONTACT_ECHO_DESC =
   'organizations, nicknames, URLs, anniversaries, group membership, uid and per-entry ' +
   'contexts/pref would have to be restored in a Fastmail client.';
 
+const CONTACT_STATE_GUARD_DESC =
+  ' The write goes through only if the address book is unchanged since the tool read the card; ' +
+  'otherwise it is refused with "changed since it was read" and nothing is written. Fastmail ' +
+  'tracks that state per account, not per card, so a change to ANY contact in between also ' +
+  'refuses; retrying the same call re-reads and succeeds. If the read reports no state, the write is refused rather than sent unguarded.';
+
 // The tool catalog, at module scope so the CallTool handler can derive each tool's
 // declared parameter set for the unknown-parameter guard (#11).
 const TOOLS = [
@@ -793,7 +805,7 @@ const TOOLS = [
       },
       {
         name: 'get_email',
-        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + MINTED_CID_NONDURABILITY + ' READING A DRAFT ALSO RETURNS bodyHash, the token edit_draft requires before it will write or clear that draft\'s body. This is the only READ that issues one — a successful body edit also hands back the hash for your next edit of the same draft, so a run of edits does not need a read between each pair. When a hash cannot be issued the read returns bodyHashWithheld saying why — never silence. Two of the reasons name the read that would issue one, because the response simply did not show the whole stored body: a read that did not return every body part the draft carries, or stripQuoted:true (which returns a shortened body). The first includes a DEFAULT read of a draft with both a text and an HTML part, since the default returns bodyText alone; read it with fields:["bodyText","bodyHtml","bodyHash"] or verbose:true. The other three say to recreate the draft instead, because a hash for it could never be spent: a part the server returned truncated or with an encoding problem, a body part no read returns at all (one whose declared type does not match the body list it sits in), and a body that puts two parts of the same text type in one list — a layout edit_draft refuses every edit of, so the token would have nothing to buy. raw:true returns neither field, and get_thread never issues one, so read the draft here before editing it. ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit. A projection that names a body field, or bodyHash itself, brings bodyHash/bodyHashWithheld along unasked, so a projected body never arrives with the token silently missing. It is the withheld reason that arrives when the projection is too narrow to prove you saw the whole body — a draft this server wrote stores a plain-text fallback alongside its HTML, so fields:["bodyHtml"] on one of those withholds and names fields:["bodyText","bodyHtml","bodyHash"] as the read to make instead.',
+        description: 'Get a specific email by ID. Returns simplified format with plain text body (HTML omitted, bodyHtmlSize hint provided; a message with no plain-text body returns its HTML as bodyHtml instead, even without verbose). Only use verbose=true if you specifically need the HTML body — it can be very large for marketing emails. Use raw=true for original JMAP response. Set stripQuoted=true to drop quoted reply history from bodyText when reading a message deep in a long thread (the quoted tail is duplicated from earlier messages). The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + MINTED_CID_NONDURABILITY + ' READING A DRAFT ALSO RETURNS bodyHash, the token edit_draft requires before it will write or clear that draft\'s body. This is the only READ that issues one — a successful body edit also hands back the hash for your next edit of the same draft, so a run of edits does not need a read between each pair. When a hash cannot be issued the read returns bodyHashWithheld saying why — never silence. Two of the reasons name the read that would issue one, because the response simply did not show the whole stored body: a read that did not return every body part the draft carries, or stripQuoted:true (which returns a shortened body). The first includes a DEFAULT read of a draft with both a text and an HTML part, since the default returns bodyText alone; read it with fields:["bodyText","bodyHtml","bodyHash"] or verbose:true. The other three say to recreate the draft instead, because a hash for it could never be spent: a part the server returned truncated or with an encoding problem, a body part no read returns at all (one whose declared type does not match the body list it sits in), and a body that puts two parts of the same text type in one list — a layout edit_draft refuses every edit of, so the token would have nothing to buy. raw:true returns neither field, and get_thread never issues one, so read the draft here before editing it. ' + FIELDS_TOOL_DESC + ' On this tool fields:["bodyHtml"] returns the HTML body ALONE (no verbose needed, no metadata, no plain-text copy) — the way to read a large HTML draft without the rest of the message pushing the response past the output limit. A projection that names a body field, or bodyHash itself, brings bodyHash/bodyHashWithheld along unasked, so a projected body never arrives with the token silently missing. It is the withheld reason that arrives when the projection is too narrow to prove you saw the whole body — a draft this server wrote stores a plain-text fallback alongside its HTML, so fields:["bodyHtml"] on one of those withholds and names fields:["bodyText","bodyHtml","bodyHash"] as the read to make instead.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1047,11 +1059,11 @@ const TOOLS = [
             },
             after: {
               type: 'string',
-              description: 'Only emails received at or after this time. Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset such as "2026-07-20T14:30:00+01:00") - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means 00:00:00 UTC on that date, so it includes the whole of that day. An empty string is rejected; omit the parameter to search without a start bound.',
+              description: `Only emails received at or after this time. Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset such as "2026-07-20T14:30:00+01:00") - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (${CONFIGURED_TIMEZONE}; FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it includes the whole of that local day; a datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without a start bound.`,
             },
             before: {
               type: 'string',
-              description: 'Only emails received before this time (exclusive). Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset) - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means 00:00:00 UTC on that date, so it excludes that whole day; pass the following date to include it. An empty string is rejected; omit the parameter to search without an end bound.',
+              description: `Only emails received before this time (exclusive). Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset) - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (${CONFIGURED_TIMEZONE}; FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it excludes that whole local day; pass the following date to include it. A datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without an end bound.`,
             },
             limit: {
               type: ['number', 'string'],
@@ -1156,7 +1168,7 @@ const TOOLS = [
       },
       {
         name: 'create_contact',
-        description: 'Create a contact in the address book. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape get_contact returns (verbose/raw apply). Every entry array accepts both a bare string and an object: emails ["a@b.example"] or [{address, label}], phones ["+1…"] or [{number, label}]; addresses take objects only. An empty array is rejected in every one of them — omit the field instead, the same rule update_contact applies. An unknown per-item key, or a key of the wrong type, is rejected naming its position (e.g. emails[2]).',
+        description: 'Create a contact in the address book. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape get_contact returns (verbose/raw apply); if only that read-back fails, the contact still exists and the result is its id with a note saying so - do not create it again. Every entry array accepts both a bare string and an object: emails ["a@b.example"] or [{address, label}], phones ["+1…"] or [{number, label}]; addresses take objects only. An empty array is rejected in every one of them — omit the field instead, the same rule update_contact applies. An unknown per-item key, or a key of the wrong type, is rejected naming its position (e.g. emails[2]).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1226,7 +1238,8 @@ const TOOLS = [
         description:
           'Update a contact, MERGING per entry rather than overwriting the card. Returns {contact, previousCard}: the updated card (verbose/raw apply to it) and the card exactly as it stood before the write. ' +
           CONTACT_ECHO_DESC +
-          ' Only the fields you pass are touched; omit a field to leave it alone. emails/phones merge by value: an entry whose address/number matches one already stored keeps everything the simplified output does not show (contexts, pref, and any other stored field), and only what you supply is written over it. Resending an entry exactly as you read it changes nothing. LABELS ARE ADD-AND-OVERRIDE, NOT A CLEAN REWRITE: a label that differs from the one you read is written as this card\'s `label` property, which then wins here — but Fastmail\'s own apps commonly store the label as a `contexts` set instead, and that set is left as it was, so the two can end up disagreeing outside this server. A label cannot currently be removed at all. A single call that BOTH drops a stored entry AND adds one the card does not have is rejected as ambiguous, and the rejection prints the dropped entries in full so you can resend them losslessly; pass allowEntryReplace:true to go ahead anyway, which rewrites every entry of THAT array from what you supplied and does NOT carry those hidden fields (arrays in the same call that merged cleanly are unaffected). addresses do NOT merge (an address entry has no matchable key) — supplying them replaces the whole set. name merges into the stored structured name: a bare string sets the full name and keeps the given/surname components, and {given}/{surname} update just that part. An empty array (emails: []) is rejected — use clearFields. notes sets a single note, so a card storing more than one is rejected rather than collapsed. A contact GROUP cannot be updated by this tool.',
+          CONTACT_STATE_GUARD_DESC +
+          ' Only the fields you pass are touched; omit a field to leave it alone. emails/phones merge by value: an entry whose address/number matches one already stored keeps everything the simplified output does not show (contexts, pref, and any other stored field), and only what you supply is written over it. Resending an entry exactly as you read it changes nothing, and a stored entry you could not have named is kept as it is: one with an empty address/number (which the default view does not show), or a stored duplicate of an address/number you sent. LABELS ARE ADD-AND-OVERRIDE, NOT A CLEAN REWRITE: a label that differs from the one you read is written as this card\'s `label` property, which then wins here — but Fastmail\'s own apps commonly store the label as a `contexts` set instead, and that set is left as it was, so the two can end up disagreeing outside this server. A label cannot currently be removed at all. A single call that BOTH drops a stored entry AND adds one the card does not have is rejected as ambiguous, and the rejection prints the dropped entries in full (up to 50; past that it says how many more and to read them with get_contact verbose:true) so you can resend them losslessly; pass allowEntryReplace:true to go ahead anyway, which rewrites every entry of THAT array from what you supplied and does NOT carry those hidden fields (arrays in the same call that merged cleanly are unaffected). addresses do NOT merge (an address entry has no matchable key) — supplying them replaces the whole set. name merges into the stored structured name: a bare string sets the full name and keeps the given/surname components, and {given}/{surname} update just that part. An empty array (emails: []) is rejected — use clearFields. notes sets a single note, so a card storing more than one is rejected rather than collapsed. A card whose kind is anything but individual (a contact group, an org, a location, ...) cannot be updated by this tool.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1283,7 +1296,7 @@ const TOOLS = [
             clearFields: {
               type: ['array', 'string'],
               items: { type: 'string', enum: ['emails', 'phones', 'addresses', 'notes'] },
-              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected.' + LENIENT_LIST_DESC,
+              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected. A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC,
             },
             allowEntryReplace: {
               type: ['boolean', 'string'],
@@ -1306,7 +1319,8 @@ const TOOLS = [
         description:
           'Delete a contact. Returns {deleted, deletedCard} — the id, and the full card as it stood immediately before the destroy. ' +
           CONTACT_ECHO_DESC +
-          ' This is IRREVERSIBLE: unlike an email, a deleted contact does not go to Trash, so the echoed card is the only copy left — keep it if there is any chance the delete was wrong. create_contact can rebuild the name, emails, phones, addresses and note from it, but NOT the rest of the card (photos, titles, organizations, nicknames, URLs, anniversaries, group membership, the uid, or the per-entry contexts/pref), so recreating gives you a similar contact rather than the one that was deleted. A contact GROUP is REFUSED: create_contact has no kind or members parameter, so this server cannot make a group and will not destroy one it could never put back — delete a group in the Fastmail web interface. (That refusal is about the kind of record, not about fields create_contact cannot set: an ordinary card carrying titles or organizations still deletes.) There is deliberately no confirmation parameter.',
+          CONTACT_STATE_GUARD_DESC +
+          ' This is IRREVERSIBLE: unlike an email, a deleted contact does not go to Trash, so the echoed card is the only copy left — keep it if there is any chance the delete was wrong. create_contact can rebuild the name, emails, phones, addresses and note from it, but NOT the rest of the card (photos, titles, organizations, nicknames, URLs, anniversaries, group membership, the uid, or the per-entry contexts/pref), so recreating gives you a similar contact rather than the one that was deleted. A card whose kind is anything but individual (a contact group, an org, a location, a device, an application) is REFUSED: create_contact has no kind or members parameter, so this server can make only individual cards and will not destroy one it could never put back — delete such a card in the Fastmail web interface. (That refusal is about the kind of record, not about fields create_contact cannot set: an individual card carrying titles or organizations still deletes.) There is deliberately no confirmation parameter.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1575,7 +1589,7 @@ const TOOLS = [
       },
       {
         name: 'delete_email',
-        description: 'Delete an email (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC,
+        description: 'Delete an email (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC + ' ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1589,7 +1603,7 @@ const TOOLS = [
       },
       {
         name: 'move_email',
-        description: 'Move an email to a different mailbox. ' + membershipReplaceDesc('add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
+        description: 'Move an email to a different mailbox. ' + membershipReplaceDesc('add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1618,7 +1632,7 @@ const TOOLS = [
           'Each entry\'s `mailboxes`/`roles` are the PROJECTED filing for the two branches that wrote, the OBSERVED unchanged filing for notInInbox and refused (which write nothing), and for failed either the filing as OBSERVED BEFORE the write was attempted or, when no write was attempted for it, nothing at all; read roles for "archive" to tell whether a message is in Archive, since the branch name alone will not say. Both fields are ABSENT on a notFound entry (there is no filing to report) and on the failed sub-case where the current filing could not be READ (the server returned no mailboxIds object, or an empty one, which is not a filing a message can have; its filing was never observed, which is why it failed), and `roles` is absent whenever nothing the message is filed in has a role. A `unresolvedMailboxIds` on an entry means a mailbox id could not be resolved to a name, so `mailboxes`/`roles` are incomplete for that message and those raw ids are the remainder — which is also what tells you how to read an absent `roles`: absent with no `unresolvedMailboxIds` means no role mailboxes, absent WITH them means the roles are unknown for the ids listed there. ' +
           'The Archive destination is found by JMAP role, never by folder name, so a folder merely NAMED "archive" is not it, and there is no destination parameter — use move_email to file into anything else. ' +
           'The whole call throws, rather than reporting per message, in four account-wide cases. Three happen BEFORE anything is written, so nothing was archived and the message says so: a read that failed or came back incomplete, an account with no inbox-role mailbox, and an account with no archive-role mailbox when a message actually needed Archive (use move_email instead). The fourth is the write itself failing, which happens AFTER it was dispatched — there the outcome of the batch is unknown and you should re-read the messages rather than assume nothing changed. A per-message problem never throws. ' +
-          'No keyword is written, but that is not the same as the read state being untouched: $seen is reported only when every one of a message\'s per-mailbox copies carries it, so dropping an unread Inbox copy can flip a message to read. ' +
+          SEEN_AGGREGATE_DESC + ' ' +
           'This describes an account in LABELS mode. In folders mode a message has a single membership, so every archive is the move-to-Archive case.',
         inputSchema: {
           type: 'object',
@@ -1674,7 +1688,7 @@ const TOOLS = [
       },
       {
         name: 'get_email_attachments',
-        description: 'List an email\'s parts, as raw JMAP part objects (partId, blobId, type, size, name, disposition, cid) rather than the simplified shape the read tools return. ' + UNION_SCOPE_DESC + ' A body-embedded part usually reports disposition:null rather than "inline", and nothing in this raw listing tells it apart from a genuinely attached file — the derived isInline flag lives only in get_email (and get_thread with includeBodies), so cross-check there before acting on an entry, e.g. before handing its blobId to edit_draft removeAttachments, which would strip an image the body still displays. ' + MINTED_CID_NONDURABILITY + ' This listing is where an attachmentId comes from: pass back an entry\'s partId or blobId — those are the durable handles, to download_attachment and to an attachments item that attaches this part to a new message (emailId + attachmentId, which needs FASTMAIL_ALLOW_BLOB_ATTACH). This listing is also what download_attachment\'s entry numbers count from: its first entry is attachmentId "0". Entry numbers are read-only and positional — they shift whenever the listing does, and attaching a part to outgoing mail rejects one.',
+        description: 'List an email\'s parts, as raw JMAP part objects (partId, blobId, type, size, name, disposition, cid) rather than the simplified shape the read tools return. An emailId that matches no message is refused, not answered with an empty list. ' + UNION_SCOPE_DESC + ' A body-embedded part usually reports disposition:null rather than "inline", and nothing in this raw listing tells it apart from a genuinely attached file — the derived isInline flag lives only in get_email (and get_thread with includeBodies), so cross-check there before acting on an entry, e.g. before handing its blobId to edit_draft removeAttachments, which would strip an image the body still displays. ' + MINTED_CID_NONDURABILITY + ' This listing is where an attachmentId comes from: pass back an entry\'s partId or blobId — those are the durable handles, to download_attachment and to an attachments item that attaches this part to a new message (emailId + attachmentId, which needs FASTMAIL_ALLOW_BLOB_ATTACH). This listing is also what download_attachment\'s entry numbers count from: its first entry is attachmentId "0". Entry numbers are read-only and positional — they shift whenever the listing does, and attaching a part to outgoing mail rejects one.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1692,7 +1706,7 @@ const TOOLS = [
       },
       {
         name: 'download_attachment',
-        description: 'Download an email attachment. If path is provided, saves the file to disk and returns the file path and size. Otherwise returns a download URL.',
+        description: 'Download an email attachment. If path is provided, saves the file to disk and returns the file path and size. A file already at that path is OVERWRITTEN without asking, and the result then says it replaced an existing file. Otherwise returns a download URL.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1714,7 +1728,7 @@ const TOOLS = [
       },
       {
         name: 'get_thread',
-        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists. A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them. By default this tool fetches no attachment parts. ' + COMPACT_ATTACHMENT_DESC + ' Under includeBodies each message gains its attachment entries too. ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + FIELDS_TOOL_DESC,
+        description: 'Get all emails in a conversation thread. Returns simplified format (metadata + preview, no bodies) unless you set includeBodies=true, which returns each message\'s plain-text body in the SAME call — use it (ideally with stripQuoted=true) to read or transcribe a whole conversation instead of issuing one get_email per message. Use raw=true for original JMAP response. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' Drafts are excluded by default (asymmetric by design — a draft reply is noise when reading a conversation); when any are present a note reports how many are hidden so you can tell a draft reply already exists (not under raw=true, whose output stays pure JSON, so there drafts are hidden silently unless you pass includeDrafts). A draft that now lives only in Trash is neither shown nor counted (it is not an active draft). Set includeDrafts=true to include them. By default this tool fetches no attachment parts. ' + COMPACT_ATTACHMENT_DESC + ' Under includeBodies each message gains its attachment entries too. ' + UNION_SCOPE_DESC + ' ' + INLINE_PAIR_DESC + ' ' + FIELDS_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1724,11 +1738,11 @@ const TOOLS = [
             },
             includeDrafts: {
               type: ['boolean', 'string'],
-              description: lenientBool('Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.'),
+              description: lenientBool('Include draft messages in the thread (default: false, drafts excluded; a note still reports how many were hidden, except under raw). Note: search_emails/list_emails differ on BOTH axes — they use excludeDrafts AND include drafts by default.'),
             },
             includeBodies: {
               type: ['boolean', 'string'],
-              description: lenientBool('Return each message\'s plain-text body (bodyText) alongside its metadata, turning an N-message conversation read into one call. HTML bodies are never returned here (that is where the size risk lives) — a message with no plain-text part is flagged bodyTextUnavailable:true, fetch that one with get_email verbose=true. Hidden drafts are excluded before bodies are read, so an in-progress reply never lands in a transcription. The combined bodies are capped at 100000 bytes: over that the call fails with a message naming the largest messages and telling you to add stripQuoted=true or fetch them individually, rather than silently truncating a body. This mode also adds each message\'s attachment entries, which are extra payload the cap does NOT measure — it counts bodies only. Attachment bytes are never inlined, but the entries themselves carry sender-supplied names and Content-IDs of unbounded length, so on a thread with many attachment-heavy messages project them away with fields (e.g. fields:["id","from","date","bodyText"]).'),
+              description: lenientBool('Return each message\'s plain-text body (bodyText) alongside its metadata, turning an N-message conversation read into one call. HTML bodies are never returned here (that is where the size risk lives) — a message with no plain-text part is flagged bodyTextUnavailable:true with its bodyHtmlSize, fetch that one with get_email verbose=true. Hidden drafts are excluded before bodies are read, so an in-progress reply never lands in a transcription. The combined bodies are capped at 100000 bytes: over that the call fails with a message naming the largest messages and telling you to add stripQuoted=true or fetch them individually, rather than silently truncating a body. This mode also adds each message\'s attachment entries, which are extra payload the cap does NOT measure — it counts bodies only. Attachment bytes are never inlined, but the entries themselves carry sender-supplied names and Content-IDs of unbounded length, so on a thread with many attachment-heavy messages project them away with fields (e.g. fields:["id","from","date","bodyText"]).'),
             },
             stripQuoted: {
               type: ['boolean', 'string'],
@@ -1758,7 +1772,7 @@ const TOOLS = [
       },
       {
         name: 'get_account_summary',
-        description: 'Get overall account summary with statistics',
+        description: 'Get overall account summary with statistics: mailbox and identity counts, and the totalEmails/unreadEmails of each mailbox. The top-level totalEmails, unreadEmails, totalThreads and unreadThreads are the SUM of the own counts of every mailbox, Trash and Spam included, so a message filed in several mailboxes (a label) is counted once per mailbox: they are not the number of distinct messages or threads in the account, and they include deleted and junk mail.',
         inputSchema: {
           type: 'object',
           properties: {},
@@ -1806,7 +1820,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_move',
-        description: 'Move multiple emails to a mailbox. ' + membershipReplaceDesc('bulk_add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. No keyword is changed: a moved message keeps its read/unread and flagged state.',
+        description: 'Move multiple emails to a mailbox. ' + membershipReplaceDesc('bulk_add_labels') + ' The destination accepts an id, role, name, or path; an unknown or ambiguous destination is rejected with the valid list. ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1825,7 +1839,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_delete',
-        description: 'Delete multiple emails (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC,
+        description: 'Delete multiple emails (move to trash).' + TRASH_REPLACES_MEMBERSHIP_DESC + ' ' + SEEN_AGGREGATE_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1860,7 +1874,7 @@ const TOOLS = [
       },
       {
         name: 'bulk_remove_labels',
-        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC + LABEL_REMOVAL_RESCUE_DESC + ' The rescue is decided per message, so a batch can archive some and merely unlabel others. A rejection is NOT decided per message: one unservable id rejects the whole batch before anything is written. When some messages succeed and others fail at the server, the error still names any message the call filed in Archive and how many of the rest carried none of these labels to begin with.',
+        description: 'Remove labels from multiple emails simultaneously. Each label mailbox may be given by id, role (e.g. inbox), name, or path; an unknown or ambiguous mailbox rejects the whole call with the valid list.' + LABEL_NAMESPACE_DESC + LABEL_REMOVAL_RESCUE_DESC + ' The rescue is decided per message, so a batch can archive some and merely unlabel others. The rejections above are NOT decided per message: a folder or unknown mailbox named as a label, a message whose filing the server does not report, or a message that would need an Archive the account lacks rejects the whole batch before anything is written. An unknown email id or a server-side per-message failure does not: the rest of the batch is written and the error names the failures and says how many messages were written. When some messages succeed and others fail at the server, the error still names any message the call filed in Archive and how many of the rest carried none of these labels to begin with.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1888,7 +1902,7 @@ const TOOLS = [
       },
       {
         name: 'test_bulk_operations',
-        description: 'Test bulk operations by finding recent emails and performing safe operations (mark read/unread)',
+        description: 'Test bulk_mark_read on up to 10 recent Inbox messages. The default dry run writes nothing and lists the messages with their current read state. With dryRun:false it WRITES to those real messages: it marks them all read, then marks unread again only the ones that were unread before, so each ends in its own prior state. A message whose read state was not reported is left out of both steps and listed as excluded rather than with a read state. If the second step fails, messages that were unread can be left read; the result reports each step.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1924,7 +1938,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  // `arguments` is optional in MCP; absent reads as {}, so each handler's own required-parameter
+  // check answers rather than a TypeError from destructuring undefined.
+  const { name } = request.params;
+  const args = request.params.arguments ?? {};
 
   try {
     // Reject unknown/misspelled parameters before touching credentials, so the
@@ -1948,8 +1965,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // coerceBool, not !!, on every flag: a lenient client's stringified "false" is
         // truthy, so `!!` would silently reverse the sort order or flip raw:"false" into
         // untransformed JMAP. (#54)
-        const ascending = coerceBool((args as any).ascending) ?? false;
-        const raw = coerceBool((args as any).raw) ?? false;
+        const ascending = coerceBool((args as any).ascending, 'ascending') ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
@@ -1962,9 +1979,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit: validLimit,
           position,
           ascending,
-          includeTrash: coerceBool((args as any).includeTrash) ?? false,
-          includeSpam: coerceBool((args as any).includeSpam) ?? false,
-          excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
+          includeTrash: coerceBool((args as any).includeTrash, 'includeTrash') ?? false,
+          includeSpam: coerceBool((args as any).includeSpam, 'includeSpam') ?? false,
+          excludeDrafts: coerceBool((args as any).excludeDrafts, 'excludeDrafts') ?? false,
         });
         // The exclusion note rides after the JSON on both raw and simplified, so the JSON
         // block stays parseable.
@@ -1986,8 +2003,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         // Same coercion as list_emails. Here `!!` on raw:"false" would also make
         // assertStripQuotedNotRaw reject a legitimate stripQuoted read.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         // Validated before the fetch so a typo'd field name costs no round trip.
         // Selecting bodyHtml implies verbose's includeHtml: without that, projecting a
         // field the simplifier never emitted would return {} — the trap the parameter
@@ -1995,7 +2012,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const fields = parseEmailFields((args as any).fields, { raw });
         // Rejected before the fetch: raw is unmodified JMAP, so honouring stripQuoted
         // there would be impossible and ignoring it would be silent (#73).
-        const strip = coerceBool(stripQuoted) ?? false;
+        const strip = coerceBool(stripQuoted, 'stripQuoted') ?? false;
         assertStripQuotedNotRaw(strip, raw);
         const email = await client.getEmailById(emailId);
         const simplified = simplifyEmail(email, { includeHtml: verbose || wantsHtmlBody(fields), stripQuoted: strip });
@@ -2049,8 +2066,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'list_contacts': {
         const { limit } = args as any;
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         const contactsClient = initializeContactsCalendarClient();
         // Hard cap: the contacts tools have no `position` param, so anything past
         // the cap is unreachable. Paging for contacts is tracked as issue #94.
@@ -2068,8 +2085,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_contact': {
         const { contactId } = args as any;
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         if (!contactId) {
           throw new McpError(ErrorCode.InvalidParams, 'contactId is required');
         }
@@ -2089,8 +2106,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'search_contacts': {
         const { query, limit } = args as any;
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         if (!query) {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
@@ -2233,8 +2250,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_identities': {
         // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw) ?? false;
-        const verbose = coerceBool((args as any).verbose) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
+        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         const client = initializeClient();
         const identities = await client.getIdentities();
         const output = raw ? identities : identities.map(i => simplifyIdentity(i, { verbose }));
@@ -2250,7 +2267,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'mark_email_read': {
         const { emailId } = args as any;
-        const read = coerceBool((args as any).read) ?? true;
+        const read = coerceBool((args as any).read, 'read') ?? true;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -2268,7 +2285,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'pin_email': {
         const { emailId } = args as any;
-        const pinned = coerceBool((args as any).pinned) ?? true;
+        const pinned = coerceBool((args as any).pinned, 'pinned') ?? true;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
@@ -2394,7 +2411,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
         // Same coercion as list_emails.
-        const raw = coerceBool((args as any).raw) ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
         const client = initializeClient();
         const result = await client.getEmailAttachments(emailId);
         return { content: buildAttachmentListContent(result, raw) };
@@ -2413,7 +2430,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               content: [
                 {
                   type: 'text',
-                  text: `Saved to: ${result.savedPath} (${result.bytesWritten} bytes)`,
+                  text: formatSavedAttachment(result),
                 },
               ],
             };
@@ -2441,8 +2458,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'search_emails': {
         const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit } = args as any;
         // Same coercion as list_emails.
-        const ascending = coerceBool((args as any).ascending) ?? false;
-        const raw = coerceBool((args as any).raw) ?? false;
+        const ascending = coerceBool((args as any).ascending, 'ascending') ?? false;
+        const raw = coerceBool((args as any).raw, 'raw') ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
@@ -2451,18 +2468,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const requiredMailboxes = coerceStringArrayStrict((args as any).requiredMailboxes, 'requiredMailboxes');
         const excludeMailboxes = coerceStringArrayStrict((args as any).excludeMailboxes, 'excludeMailboxes');
         const client = initializeClient();
-        const validLimit = Math.min(Math.max(Number(limit) || 20, 1), 100);
+        const validLimit = clampLimit(limit, 20, 100);
         const result = await client.searchEmails({
           query, from, to, cc, bcc, subject,
-          hasAttachment: coerceBool(hasAttachment),
-          isUnread: coerceBool(isUnread),
-          isPinned: coerceBool(isPinned),
+          hasAttachment: coerceBool(hasAttachment, 'hasAttachment'),
+          isUnread: coerceBool(isUnread, 'isUnread'),
+          isPinned: coerceBool(isPinned, 'isPinned'),
           mailbox, requiredMailboxes, excludeMailboxes,
           after, before, limit: validLimit, position,
           ascending,
-          excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
-          includeTrash: coerceBool((args as any).includeTrash) ?? false,
-          includeSpam: coerceBool((args as any).includeSpam) ?? false,
+          excludeDrafts: coerceBool((args as any).excludeDrafts, 'excludeDrafts') ?? false,
+          includeTrash: coerceBool((args as any).includeTrash, 'includeTrash') ?? false,
+          includeSpam: coerceBool((args as any).includeSpam, 'includeSpam') ?? false,
         });
         const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
@@ -2532,7 +2549,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_mark_read': {
-        const read = coerceBool((args as any).read) ?? true;
+        const read = coerceBool((args as any).read, 'read') ?? true;
         const emailIds = coerceStringArray((args as any).emailIds);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
@@ -2550,7 +2567,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'bulk_pin': {
-        const pinned = coerceBool((args as any).pinned) ?? true;
+        const pinned = coerceBool((args as any).pinned, 'pinned') ?? true;
         const emailIds = coerceStringArray((args as any).emailIds);
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
@@ -2729,7 +2746,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'test_bulk_operations': {
         const { limit } = args as any;
         // Defaults to dry-run, the non-acting direction.
-        const dryRun = coerceBool((args as any).dryRun) ?? true;
+        const dryRun = coerceBool((args as any).dryRun, 'dryRun') ?? true;
         const client = initializeClient();
 
         // clampLimit IS the bound on this path: a non-numeric limit would otherwise reach
@@ -2751,79 +2768,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         
-        const emailIds = emails.slice(0, testLimit).map(email => email.id);
-        const operations = [
-          {
-            name: 'bulk_mark_read',
-            description: `Mark ${emailIds.length} emails as read`,
-            parameters: { emailIds, read: true }
-          },
-          {
-            name: 'bulk_mark_read (undo)',
-            description: `Mark ${emailIds.length} emails as unread (undo previous)`,
-            parameters: { emailIds, read: false }
-          }
-        ];
-        
-        const results = {
-          testEmails: emails.map(email => ({
-            id: email.id,
-            subject: email.subject,
-            from: email.from?.[0]?.email || 'unknown',
-            receivedAt: email.receivedAt
-          })),
-          operations: [] as any[]
-        };
-        
-        if (dryRun) {
-          results.operations = operations.map(op => ({
-            ...op,
-            status: 'DRY RUN - Would execute but not actually performed',
-            executed: false
-          }));
-          
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `BULK OPERATIONS TEST (DRY RUN)\n\n${toolJson(results)}\n\nTo actually execute the test, set dryRun: false`,
-              },
-            ],
-          };
-        } else {
-          for (const operation of operations) {
-            try {
-              await client.bulkMarkRead(operation.parameters.emailIds, coerceBool(operation.parameters.read) ?? true);
-              results.operations.push({
-                ...operation,
-                status: 'SUCCESS',
-                executed: true,
-                timestamp: new Date().toISOString()
-              });
-
-              await new Promise(resolve => setTimeout(resolve, 500));
-            } catch (error) {
-              results.operations.push({
-                ...operation,
-                status: 'FAILED',
-                executed: false,
-                // Folded into result JSON rather than raised, so the top-level catch's
-                // redaction never sees it.
-                error: redactBearerTokens(error instanceof Error ? error.message : String(error)),
-                timestamp: new Date().toISOString()
-              });
-            }
-          }
-          
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `BULK OPERATIONS TEST (EXECUTED)\n\n${toolJson(results)}`,
-              },
-            ],
-          };
-        }
+        const text = await runBulkReadTest(emails.slice(0, testLimit), dryRun, client);
+        return { content: [{ type: 'text', text }] };
       }
 
       default:

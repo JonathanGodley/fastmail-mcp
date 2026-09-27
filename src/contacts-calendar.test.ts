@@ -294,7 +294,7 @@ describe('updateContact', () => {
   it('checks existence then sends a top-level patch', async () => {
     const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { updated: { C1: null } }, 'u']] };
     });
@@ -310,14 +310,14 @@ describe('updateContact', () => {
     assert.deepEqual(update, { emails: { e0: { address: 'new@example.com' } } });
   });
 
-  it('passes expectState through as ifInState', async () => {
+  it('writes only if the card state is still the one the merge was read at', async () => {
     const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 'state-42', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { updated: { C1: null } }, 'u']] };
     });
-    await client.updateContact('C1', { notes: 'x', expectState: 'state-42' });
+    await client.updateContact('C1', { notes: 'x' });
     const [setRequest] = findCallArguments(
       makeReq,
       ([req]) => req.methodCalls[0][0] === 'ContactCard/set',
@@ -325,6 +325,62 @@ describe('updateContact', () => {
     );
     assert.equal(setRequest.methodCalls[0][1].ifInState, 'state-42');
   });
+
+  it('refuses, writing nothing, when the read reports no state to guard the write with', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => (
+      { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] }
+    ));
+    await assert.rejects(
+      () => client.updateContact('C1', { notes: 'x' }),
+      /no ContactCard state.*nothing was written/,
+    );
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  it('refuses with a retry hint when the card changed between the read and the write', async () => {
+    mock.method(client, 'makeRequest', async (req: any) => {
+      if (req.methodCalls[0][0] === 'ContactCard/get') {
+        return { methodResponses: [['ContactCard/get', { state: 'state-42', list: [{ id: 'C1' }] }, 'g']] };
+      }
+      return { methodResponses: [['error', { type: 'stateMismatch' }, 'u'], ['error', { type: 'stateMismatch' }, 'g2']] };
+    });
+    await assert.rejects(
+      () => client.updateContact('C1', { notes: 'x' }),
+      /contact C1 changed since it was read; nothing was written\. Retry the update_contact call: it re-reads the contact first\. The contacts state is account-wide on Fastmail, so a change to any contact in between also causes this refusal\.$/,
+    );
+  });
+
+  it('treats a non-string state as no state, and refuses', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => (
+      { methodResponses: [['ContactCard/get', { state: 42, list: [{ id: 'C1' }] }, 'g']] }
+    ));
+    await assert.rejects(() => client.updateContact('C1', { notes: 'x' }), /no ContactCard state/);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  for (const [label, setResponse, expected] of [
+    ['another method-level error', { methodResponses: [['error', { type: 'forbidden' }, 'u']] }, /JMAP error: forbidden/],
+    ['no response for the write', { methodResponses: [] }, /missing expected method/],
+    ['no methodResponses at all', {}, /missing expected method/],
+    ['an error entry with no body', { methodResponses: [['error']] }, /malformed/],
+  ] as Array<[string, any, RegExp]>) {
+    it(`reports ${label} as itself, not as a changed contact`, async () => {
+      mock.method(client, 'makeRequest', async (req: any) => {
+        if (req.methodCalls[0][0] === 'ContactCard/get') {
+          return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
+        }
+        return setResponse;
+      });
+      await assert.rejects(
+        () => client.updateContact('C1', { notes: 'x' }),
+        (err: Error) => {
+          assert.match(err.message, expected);
+          assert.doesNotMatch(err.message, /changed since it was read/);
+          return true;
+        },
+      );
+    });
+  }
 
   it('throws not-found before attempting the update', async () => {
     const makeReq = stubMakeRequest(client, {
@@ -356,7 +412,7 @@ describe('updateContact', () => {
   it('surfaces notUpdated errors', async () => {
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { notUpdated: { C1: { type: 'stateMismatch' } } }, 'u']] };
     });
@@ -368,7 +424,7 @@ describe('updateContact', () => {
     // arguments, so it must NOT be tagged as caller-fixable input.
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { notUpdated: { C1: { type: 'stateMismatch' } } }, 'u']] };
     });
@@ -444,7 +500,7 @@ describe('updateContact merge', () => {
   ) {
     return mock.method(target, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: card ? [card] : [] }, 'card']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: card ? [card] : [] }, 'card']] };
       }
       const responses: any[] = [
         ['ContactCard/set', opts.setResult ?? { updated: { C1: null } }, 'updateContact'],
@@ -747,6 +803,24 @@ describe('updateContact merge', () => {
     assert.equal(makeReq.mock.calls.length, 1, 'a group must be refused before any write');
   });
 
+  it('refuses to update an org card, which create_contact cannot produce', async () => {
+    const makeReq = stubUpdate(client, { id: 'O1', kind: 'org', name: { full: 'Acme' } });
+    await assert.rejects(
+      () => client.updateContact('O1', { name: { full: 'Renamed' } }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.equal(
+          err.message,
+          'Contact O1 is a card of kind "org", not a person card, so update_contact refuses it: ' +
+            'name/emails/phones/addresses/notes describe a person card, this server can create only individual ' +
+            'cards, and group members are not editable here. Edit it in the Fastmail web interface instead.',
+        );
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 1, 'an org card must be refused before any write');
+  });
+
   it('echoes the pre-edit card and returns the read-back card', async () => {
     const before = storedCard();
     const after = storedCard({ notes: { n0: { note: 'hello' } } });
@@ -772,7 +846,7 @@ describe('updateContact merge', () => {
     // failure that did not happen and destroying `previousCard` on the way out.
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [storedCard()] }, 'card']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [storedCard()] }, 'card']] };
       }
       return {
         methodResponses: [
@@ -839,7 +913,7 @@ describe('deleteContact', () => {
   function destroyResponse(card: any, setResult: any) {
     return {
       methodResponses: [
-        ['ContactCard/get', { list: card ? [card] : [], ...(card ? {} : { notFound: ['ghost'] }) }, 'doomedCard'],
+        ['ContactCard/get', { state: 's0', list: card ? [card] : [], ...(card ? {} : { notFound: ['ghost'] }) }, 'doomedCard'],
         ['ContactCard/set', setResult, 'deleteContact'],
       ],
     };
@@ -939,7 +1013,7 @@ describe('deleteContact', () => {
     let call = 0;
     mock.method(client, 'makeRequest', async (_request: JmapRequest) => {
       call += 1;
-      if (call === 1) return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'card']] };
+      if (call === 1) return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'card']] };
       return {
         methodResponses: [
           ['error', { type: 'invalidArguments' }, 'doomedCard'],
@@ -973,6 +1047,38 @@ describe('deleteContact', () => {
         assert.notEqual(methodCall[0], 'ContactCard/set', 'a group must be refused before any destroy');
       }
     }
+  });
+
+  for (const kind of ['org', 'location', 'device', 'application', 'x-custom']) {
+    it(`refuses to delete a card of kind ${kind}, which create_contact cannot produce`, async () => {
+      const makeReq = stubMakeRequest(
+        client,
+        destroyResponse({ id: 'K1', kind, name: { full: 'Thing' } }, { destroyed: ['K1'] }),
+      );
+      await assert.rejects(
+        () => client.deleteContact('K1'),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.ok(err.message.startsWith(`Contact K1 is a card of kind "${kind}", not a person card, so delete_contact`), err.message);
+          assert.match(err.message, /only individual/);
+          assert.match(err.message, /so it will not destroy one it could never put back, and the deletedCard echo could not rebuild it either\. Delete it/);
+          return true;
+        },
+      );
+      for (const call of makeReq.mock.calls) {
+        for (const methodCall of call.arguments[0].methodCalls) {
+          assert.notEqual(methodCall[0], 'ContactCard/set', `a ${kind} card must be refused before any destroy`);
+        }
+      }
+    });
+  }
+
+  it('deletes a card with no kind at all, which reads as an individual', async () => {
+    const card = { id: 'C1', name: { full: 'Ada Lovelace' } };
+    const makeReq = stubMakeRequest(client, destroyResponse(card, { destroyed: ['C1'] }));
+    const result = await client.deleteContact('C1');
+    assert.deepEqual(result.deletedCard, card);
+    assert.deepEqual(destroyRequest(makeReq).methodCalls[1][1].destroy, ['C1']);
   });
 
   it('deletes an ordinary card and still echoes it, so the group guard is scoped to the kind', async () => {
@@ -1038,9 +1144,30 @@ describe('deleteContact', () => {
     );
   });
 
-  it('passes expectState through as ifInState', async () => {
-    const makeReq = stubMakeRequest(client, destroyResponse({ id: 'C1' }, { destroyed: ['C1'] }));
-    await client.deleteContact('C1', 'state-7');
+  it('destroys only if the card state is still the one the kind check read', async () => {
+    const response = destroyResponse({ id: 'C1' }, { destroyed: ['C1'] });
+    response.methodResponses[0][1].state = 'state-7';
+    const makeReq = stubMakeRequest(client, response);
+    await client.deleteContact('C1');
     assert.equal(destroyRequest(makeReq).methodCalls[1][1].ifInState, 'state-7');
+  });
+
+  it('refuses, deleting nothing, when the read reports no state to guard the destroy with', async () => {
+    const response: any = destroyResponse({ id: 'C1' }, { destroyed: ['C1'] });
+    delete response.methodResponses[0][1].state;
+    const makeReq = stubMakeRequest(client, response);
+    await assert.rejects(() => client.deleteContact('C1'), /no ContactCard state.*nothing was deleted/);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  it('refuses with a retry hint when the card changed between the kind check and the destroy', async () => {
+    const response: any = destroyResponse({ id: 'C1' }, {});
+    response.methodResponses[0][1].state = 'state-7';
+    response.methodResponses[1] = ['error', { type: 'stateMismatch' }, 'deleteContact'];
+    stubMakeRequest(client, response);
+    await assert.rejects(
+      () => client.deleteContact('C1'),
+      /contact C1 changed since it was read; nothing was deleted\. Retry the delete_contact call/,
+    );
   });
 });
