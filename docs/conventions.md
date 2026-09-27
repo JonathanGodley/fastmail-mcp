@@ -606,10 +606,12 @@ refuse. The client offers no remove-label action in Trash, Spam or the other rol
 two message-action pickers settle why (#133): the Labels picker offers the Inbox and the account's
 own labels and nothing else, while Archive, Trash, Spam, Drafts, Sent, Snoozed and Scheduled
 appear only under "Move to". So a role mailbox is a **folder** in Fastmail's model, with the Inbox
-as the sole exception, and the label tools reject one before reading any message's filing, so what a
-rescue should do for a message in a role folder is a question that cannot arise. The test is the **role**, never a name list, so a user
-label someone called "Archive" is still a label and a role Fastmail adds later is a folder from
-the day it appears.
+as the sole exception, and the label tools reject one before writing anything, so what a rescue
+should do for a message in a role folder is a question that cannot arise. The removal tools read
+the messages' current filing alongside the mailbox list, before that check, so when the filing read
+itself fails the caller gets that server error rather than the folder refusal. The test is the
+**role**, never a name list, so a user label someone called "Archive" is still a label and a role
+Fastmail adds later is a folder from the day it appears.
 
 Three conditions are refused rather than written, all raised before the write, so a batch
 containing one unservable message changes nothing at all:
