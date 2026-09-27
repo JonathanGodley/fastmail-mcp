@@ -5,7 +5,7 @@ import {
   coerceContactEmails,
   coerceContactName,
   coerceContactPhones,
-  coerceStringArray,
+  coerceStringArrayStrict,
   toolJson,
   type ContactAddressSpec,
   type ContactEmailSpec,
@@ -132,9 +132,8 @@ export async function updateContactTool(args: any, client: ContactsWriteClient):
     phones: coerceContactPhones(args?.phones),
     addresses: coerceContactAddresses(args?.addresses),
     notes: coerceContactNotes(args?.notes, `to remove the note pass clearFields:['notes'].`),
-    // Same lenient-client reason as edit_draft's clearFields: a stringified array has to
-    // coerce back before the allowed/conflict rules can see it.
-    clearFields: coerceStringArray(args?.clearFields),
+    // Strict: an ignored clearFields would report a clear that never happened.
+    clearFields: coerceStringArrayStrict(args?.clearFields, 'clearFields'),
     allowEntryReplace: coerceBool(args?.allowEntryReplace) ?? false,
   });
 

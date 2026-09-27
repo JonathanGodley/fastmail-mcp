@@ -1277,7 +1277,7 @@ const TOOLS = [
             clearFields: {
               type: ['array', 'string'],
               items: { type: 'string', enum: ['emails', 'phones', 'addresses', 'notes'] },
-              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected.' + LENIENT_LIST_DESC,
+              description: 'Field names to deliberately empty. Allowed: emails, phones, addresses, notes. `name` cannot be cleared — it is how the contact is identified in every listing, so delete and recreate the card instead. Passing a field as a value AND in clearFields in the same call is rejected. A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC,
             },
             allowEntryReplace: {
               type: ['boolean', 'string'],

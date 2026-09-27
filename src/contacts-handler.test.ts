@@ -200,6 +200,21 @@ describe('updateContactTool', () => {
     );
   });
 
+  for (const clearFields of [{ notes: true }, 42, ['notes', 7]]) {
+    it(`refuses an unparseable clearFields (${JSON.stringify(clearFields)}) rather than ignoring it`, async () => {
+      const { client, calls } = makeClient();
+      await assert.rejects(
+        () => updateContactTool({ contactId: 'C1', notes: 'hi', clearFields }, client),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /clearFields/);
+          return true;
+        },
+      );
+      assert.equal(calls.updated.length, 0);
+    });
+  }
+
   it('rejects an empty notes string, naming clearFields', async () => {
     const { client } = makeClient();
     await assert.rejects(
