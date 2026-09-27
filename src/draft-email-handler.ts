@@ -526,8 +526,7 @@ function replyAllCc(
  *
  * Deliberately no "is this the account's own message" check: a received message carries no
  * Bcc header (the submitting server strips it), so presence already marks the account's own
- * copy. That is derived, not measured, and such a check could only silently refuse an
- * imported or malformed message, whose shape is recorded as unmeasured in the same doc.
+ * copy.
  *
  * formatAddress and a case-folded ADDRESS dedupe, as in replyAllCc (#31).
  */
@@ -671,9 +670,7 @@ export async function composeDraftEmail(
   // --- 5. The identity, fetched once ---------------------------------------
   // Always fetched: the not-placed note needs to know whether the identity HAS a signature
   // even when no token was placed, and the reply-all cc excludes every identity, not just the
-  // selected one. The `?? []` is unpinnable (any non-empty stand-in matches nothing at either
-  // consumer); what the test beside it pins is that a client returning no list does not throw
-  // the compose away.
+  // selected one.
   const identities = (await client.getIdentities()) ?? [];
   // createDraft would refuse it too, but only after step 9 had blamed an empty {{signature}}
   // on the identity having none, and after the upload.

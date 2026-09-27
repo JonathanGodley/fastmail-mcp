@@ -265,13 +265,47 @@ describe('coerceRecipients', () => {
     );
   });
 
-  it('refuses text after a ">" that opens no address, and not an entry whose last "<" follows it', () => {
+  it('refuses text after a ">" that opens no address, and an entry whose last "<" follows it as not one address', () => {
     assert.throws(
       () => coerceRecipients({ to: ['a>b@example.com'] }),
       (e: any) => e instanceof InvalidInputError && e.message.startsWith('to[0] "a>b@example.com" has text after its closing ">"'),
     );
-    // parseAddress reads the whole of this as the address, so nothing after the ">" is dropped.
-    assert.deepEqual(coerceRecipients({ to: ['a>b <c@example.com'] }).to, ['a>b <c@example.com']);
+    // parseAddress reads the whole of this as the address, so nothing after the ">" is dropped,
+    // and that address is not one addr-spec.
+    assert.throws(
+      () => coerceRecipients({ to: ['a>b <c@example.com'] }),
+      (e: any) => e instanceof InvalidInputError && e.message.startsWith('to[0] "a>b <c@example.com" is not one email address.'),
+    );
+  });
+
+  it('refuses an entry holding more than one <address>, in a string and in an array', () => {
+    const entry = 'Bob <bob@example.com> <carol@example.com>';
+    assert.throws(
+      () => coerceRecipients({ to: `ada@example.com, ${entry}` }),
+      (e: any) => e instanceof InvalidInputError
+        && e.message.startsWith(`to "${entry}" holds more than one <address>`),
+    );
+    assert.throws(
+      () => coerceRecipients({ cc: ['ada@example.com', entry] }),
+      (e: any) => e instanceof InvalidInputError
+        && e.message === `cc[1] "${entry}" holds more than one <address>, and only the last would be used. `
+          + 'Give each recipient its own entry.',
+    );
+    // A "<" inside a quoted display name is the name's.
+    assert.deepEqual(coerceRecipients({ to: ['"Bob <x>" <bob@example.com>'] }).to, ['"Bob <x>" <bob@example.com>']);
+  });
+
+  it('refuses an array entry whose address half is not a single addr-spec', () => {
+    for (const to of [
+      ['@'], ['a@example.com, b@example.com'], ['x@example.com; y@example.com'],
+      '["a@example.com, b@example.com"]', ['Bob <bob@example.com>>'],
+    ]) {
+      assert.throws(
+        () => coerceRecipients({ to }),
+        (e: any) => e instanceof InvalidInputError && /^to\[0\] ".*" is not one email address\. Give each recipient its own entry\.$/.test(e.message),
+        JSON.stringify(to),
+      );
+    }
   });
 
   it('reads a JSON array string with surrounding whitespace as the array', () => {

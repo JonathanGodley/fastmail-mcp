@@ -31,7 +31,7 @@
     "fastmail_api_token": {
       "title": "Fastmail API Token",
       "type": "string",
-      "description": "Fastmail API token (Settings → Privacy & Security → API tokens)",
+      "description": "Fastmail API token (Settings → Privacy & Security → the \"Connected apps & API tokens\" section → \"Manage API tokens\" → \"New API token\")",
       "sensitive": true,
       "required": true
     },
@@ -76,7 +76,7 @@
     "fastmail_caldav_password": {
       "title": "CalDAV App Password",
       "type": "string",
-      "description": "App-specific password for CalDAV (Settings → Privacy & Security → Manage app passwords), used with the CalDAV username. Not your account login password, and not the JMAP API token. Optional: without it the calendar tools are unavailable.",
+      "description": "App-specific password for CalDAV (Settings → Privacy & Security → the \"Connected apps & API tokens\" section → \"Manage app passwords and access\"), used with the CalDAV username. Not your account login password, and not the JMAP API token. Optional: without it the calendar tools are unavailable.",
       "sensitive": true,
       "required": false
     },

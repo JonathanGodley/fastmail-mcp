@@ -83,7 +83,7 @@ export class ContactsCalendarClient extends JmapClient {
         '"urn:ietf:params:jmap:contacts", so there is no account for contacts operations to address. ' +
         'This usually means the API token lacks the contacts scope. Run check_function_availability ' +
         'to see the reported contacts status, then enable contacts for the token under Fastmail ' +
-        'Settings > Privacy & Security > Connected Apps & API tokens.'
+        'Settings → Privacy & Security, in the "Connected apps & API tokens" section under "Manage API tokens".'
       );
     }
     return accountId;

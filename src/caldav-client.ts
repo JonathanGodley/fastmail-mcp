@@ -68,8 +68,7 @@ export interface CalendarEvent {
   //
   // Values only, deliberately: TZID, VALUE=DATE and VALUE=PERIOD are dropped, so these
   // designator-less values do NOT follow the `timeZone` rule and are only evidence that other
-  // dates exist. No tool acts on an individual RDATE, so parameters would claim a precision the
-  // field cannot back up.
+  // dates exist.
   //
   // Normally absent on the listing path: Cyrus strips RDATE (and RRULE) from an expanded block
   // (scripts/probes/calendar-expand.probe.mjs, calendar-rdate-expand.probe.mjs).
@@ -163,9 +162,7 @@ export interface CalendarWindowClamp {
   // Caller-named bounds whose resolved instant ran outside the four-digit-year range every
   // consumer of these values can express, and so were pulled back to its edge. `edge` names
   // WHICH edge, because the disclosure is an opposite statement at each end and a window can
-  // saturate at both at once — knowing only the top end, the note told a caller whose bound
-  // was pulled UP to year 0000 that it had "resolved past the last date this server can
-  // express", the reverse of what happened.
+  // saturate at both at once.
   saturated?: Array<{ bound: 'startDate' | 'endDate'; edge: 'earliest' | 'latest' }>;
   // The window actually queried. `end` is exclusive.
   start: string;
@@ -281,13 +278,22 @@ function structuralLine(text: string): string | null {
   return trimEnd(text, (ch) => ch === '\r' || ch === '\t' || ch === ' ');
 }
 
+/**
+ * `structuralLine` upper-cased, for matching a BEGIN:/END: component marker: RFC 5545 §3.1
+ * names are case-insensitive. Every marker test on the read and write paths goes through this,
+ * so a `begin:valarm` the reads treat as the alarm's is also the alarm's to the write helpers.
+ */
+function markerLine(text: string): string | null {
+  return structuralLine(text)?.toUpperCase() ?? null;
+}
+
 /** Every VEVENT block in a payload, as verbatim substrings of it. */
 function extractVEventBlocks(data: string): string[] {
   const lines = icalContentLines(data);
   const blocks: string[] = [];
   let openIdx = -1;
   for (let i = 0; i < lines.length; i++) {
-    const text = structuralLine(lines[i].text);
+    const text = markerLine(lines[i].text);
     if (text === null) continue;
     if (text === 'BEGIN:VEVENT') {
       if (openIdx === -1) openIdx = i;
@@ -310,8 +316,8 @@ export function extractVEvent(data: string): string | null {
  * Fails CLOSED, since it fronts an irreversible write. Any of four markers is enough: an
  * RRULE; an RDATE (RFC 5545 §3.8.5.2, a series with no rule at all, #162); more than one
  * VEVENT block (one resource is one UID, so a second block is an override); or any
- * RECURRENCE-ID (a series whose master was removed). The last two match the read path's
- * `blockCountProvesSeries`, so the two halves agree on what a series is.
+ * RECURRENCE-ID (a series whose master was removed). The last two are what the read path's
+ * `blockCountProvesSeries` counts, so the two halves agree on what a series is.
  *
  * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. The reads
  * are position-aware (`ownPropertyLines`) and ignore it, so such an event reads as one-off
@@ -393,8 +399,8 @@ export function findValueBoundary(line: string): number {
  * `TZID=Europe/Paris` (no property name): segment 0 would then match.
  *
  * Returns `undefined`, never `''`, for an empty `TZID=`, so callers' no-TZID fallback fires.
- * A repeated TZID (malformed per RFC 5545 §3.2): the first wins. Case-sensitive on `TZID`;
- * RFC 5545 §3.1 conformance is #57/#111.
+ * A repeated TZID (malformed per RFC 5545 §3.2): the first wins. `TZID` matches in any case
+ * (RFC 5545 §3.1).
  */
 export function extractTzidParam(line: string): string | undefined {
   const boundary = findValueBoundary(line);
@@ -415,7 +421,7 @@ export function extractTzidParam(line: string): string | undefined {
   segments.push(params.slice(segStart));
 
   for (const segment of segments) {
-    if (segment.startsWith('TZID=')) {
+    if (segment.slice(0, 5).toUpperCase() === 'TZID=') {
       const value = segment.slice('TZID='.length);
       return value === '' ? undefined : value;
     }
@@ -433,9 +439,8 @@ function ownPropertyLines(lines: string[]): boolean[] {
   let depth = 0;
   let base: number | undefined;
   return lines.map((text) => {
-    // Upper-cased: RFC 5545 §3.1 names are case-insensitive, as hasICalProperty reads them.
-    const marker = structuralLine(text)?.toUpperCase();
-    if (marker === undefined) return false;
+    const marker = markerLine(text);
+    if (marker === null) return false;
     if (base === undefined && marker !== '') base = marker.startsWith('BEGIN:') ? 1 : 0;
     if (marker.startsWith('BEGIN:')) { depth++; return false; }
     if (marker.startsWith('END:')) { depth--; return false; }
@@ -447,15 +452,14 @@ function ownPropertyLines(lines: string[]): boolean[] {
  * The first matching property's value in a VEVENT block, unfolded. Whole content lines only
  * (see the line-model comment above): this read decides which record a destroy resolves to.
  *
- * CASE-SENSITIVE on the property name, deliberately, unlike `hasICalProperty`. A wholly
- * lower-cased payload yields no blocks at all and is invisible, which is fail-closed. A
- * mixed-case payload is not, and only `extractVTimezoneBlocks` guards its one such shape; the
- * rest is the RFC conformance audit (#57, #111).
+ * The property name matches in any case (RFC 5545 §3.1), as component markers do
+ * (`markerLine`) and as every write helper matches it, so a read and the write it feeds agree
+ * on which line is the property.
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   const lines = icalContentLines(vevent).map(l => l.text);
   const own = ownPropertyLines(lines);
-  const test = new RegExp(`^${key}[;:]`);
+  const test = new RegExp(`^${key}[;:]`, 'i');
 
   for (let i = 0; i < lines.length; i++) {
     if (!own[i]) continue;
@@ -488,7 +492,7 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
 export function parseAllICalProperties(vevent: string, key: string): string[] {
   const lines = icalContentLines(vevent).map(l => l.text);
   const own = ownPropertyLines(lines);
-  const regex = new RegExp(`^${key}[;:]`);
+  const regex = new RegExp(`^${key}[;:]`, 'i');
   const results: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -635,13 +639,13 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
-  const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventStart = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('replaceICalProperty: BEGIN:VEVENT not found');
 
   let veventEnd = -1;
   let depth = 0;
   for (let i = veventStart; i < lines.length; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) depth++;
     if (trimmed.startsWith('END:')) {
@@ -654,13 +658,13 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
   }
   if (veventEnd === -1) throw new Error('replaceICalProperty: END:VEVENT not found');
 
-  const propRegex = new RegExp(`^${key}[;:]`);
+  const propRegex = new RegExp(`^${key}[;:]`, 'i');
   let foundIdx = -1;
   let foundEndIdx = -1;
   let nestDepth = 0;
 
   for (let i = veventStart + 1; i < veventEnd; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) { nestDepth++; continue; }
     if (trimmed.startsWith('END:')) { nestDepth--; continue; }
@@ -686,7 +690,7 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
     for (let i = veventStart + 1; i < veventEnd; i++) {
       // structuralLine: a trimmed compare would read a folded ` BEGIN:...` as a sub-component
       // and splice the new property into the middle of the one above.
-      if (structuralLine(lines[i])?.startsWith('BEGIN:')) { insertAt = i; break; }
+      if (markerLine(lines[i])?.startsWith('BEGIN:')) { insertAt = i; break; }
     }
     const newLines = newLine.split(/\r?\n/);
     lines.splice(insertAt, 0, ...newLines);
@@ -707,13 +711,13 @@ export function removeAllICalProperties(icalData: string, key: string): string {
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
-  const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventStart = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('removeAllICalProperties: BEGIN:VEVENT not found');
 
   let veventEnd = -1;
   let depth = 0;
   for (let i = veventStart; i < lines.length; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) depth++;
     if (trimmed.startsWith('END:')) {
@@ -726,12 +730,12 @@ export function removeAllICalProperties(icalData: string, key: string): string {
   }
   if (veventEnd === -1) throw new Error('removeAllICalProperties: END:VEVENT not found');
 
-  const propRegex = new RegExp(`^${key}[;:]`);
+  const propRegex = new RegExp(`^${key}[;:]`, 'i');
   const toRemove: Array<[number, number]> = [];
   let nestDepth = 0;
 
   for (let i = veventStart + 1; i < veventEnd; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) { nestDepth++; continue; }
     if (trimmed.startsWith('END:')) { nestDepth--; continue; }
@@ -767,14 +771,14 @@ export function insertBeforeEndVEvent(icalData: string, newLine: string): string
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
-  const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventStart = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('insertBeforeEndVEvent: BEGIN:VEVENT not found');
 
   let veventEnd = -1;
   let firstSubComponent = -1;
   let depth = 0;
   for (let i = veventStart; i < lines.length; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) {
       depth++;
@@ -849,10 +853,10 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
 
   const veventBlocks: Array<{ start: number; end: number; recurrenceId?: string }> = [];
   for (let i = 0; i < lines.length; i++) {
-    if (structuralLine(lines[i]) === 'BEGIN:VEVENT') {
+    if (markerLine(lines[i]) === 'BEGIN:VEVENT') {
       const blockStart = i;
       for (let j = i + 1; j < lines.length; j++) {
-        if (structuralLine(lines[j]) === 'END:VEVENT') {
+        if (markerLine(lines[j]) === 'END:VEVENT') {
           const veventText = lines.slice(blockStart, j + 1).join('\n');
           // Trimmed here because this feeds formatICalDate, which anchors its pattern.
           const recId = parseICalValue(veventText, 'RECURRENCE-ID')?.trim();
@@ -1018,12 +1022,40 @@ function hasRecurrenceId(block: string): boolean {
 }
 
 /**
+ * `hasICalProperty` over the block's own lines only (`ownPropertyLines`): a property inside a
+ * nested VALARM is the alarm's.
+ */
+function hasOwnICalProperty(block: string, key: string): boolean {
+  const test = new RegExp(`^${key}[;:]`, 'i');
+  const lines = icalContentLines(block).map(l => l.text);
+  const own = ownPropertyLines(lines);
+  for (let i = 0; i < lines.length; i++) {
+    if (!own[i]) continue;
+    let full = lines[i];
+    for (let j = i + 1; j < lines.length && isFoldedContinuation(lines[j]); j++) full += lines[j].slice(1);
+    if (test.test(full)) return true;
+  }
+  return false;
+}
+
+/**
  * Whether an EXPANDED blob's block list proves the resource is a repeating series. A `false`
  * means "ask", not "one-off": a lone unmarked block may be a series' only in-window instance,
- * which `settleAmbiguousRecurrence` resolves.
+ * which `settleAmbiguousRecurrence` resolves. Position-aware, as the reads are.
  */
 function blockCountProvesSeries(blocks: string[]): boolean {
-  return blocks.length > 1 || blocks.some(hasRecurrenceId);
+  return blocks.length > 1 || blocks.some(b => hasOwnICalProperty(b, 'RECURRENCE-ID'));
+}
+
+/**
+ * Whether a stored resource reads as a repeating series: `isRecurringSeriesResource`, but
+ * position-aware, so the listing and get_calendar_event agree on an event whose only marker
+ * sits in a VALARM.
+ */
+function readsAsRecurringSeries(icalData: string): boolean {
+  const blocks = extractVEventBlocks(icalData);
+  return blockCountProvesSeries(blocks)
+    || blocks.some(b => hasOwnICalProperty(b, 'RRULE') || hasOwnICalProperty(b, 'RDATE'));
 }
 
 /**
@@ -1707,7 +1739,7 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * Refused as too broken to edit: a VTIMEZONE not directly under the VCALENDAR; anything inside
  * one other than STANDARD/DAYLIGHT as direct children (RFC 5545 §3.6.5 allows no deeper
  * component); a BEGIN:/END: hidden behind a fold; and an unterminated block, which takes
- * precedence over "malformed". Component names compare case-insensitively in this scan only
+ * precedence over "malformed". Component names compare case-insensitively
  * (#57, #111). A bare `BEGIN:`/`END:` is ignored.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
@@ -1798,7 +1830,7 @@ function stripVTimezoneBlockFor(icalData: string, tzid: string): string {
  */
 function insertVTimezoneBlock(icalData: string, block: string, lineEnding: string): string {
   const lines = icalData.split(/\r?\n/);
-  const veventIdx = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventIdx = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   lines.splice(veventIdx === -1 ? lines.length : veventIdx, 0, ...block.split(/\r?\n/));
   return lines.join(lineEnding);
 }
@@ -2282,8 +2314,8 @@ type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjec
  * Which hrefs a calendar-object fetch will request. Passed by EVERY `fetchCalendarObjects`
  * call in this file, so that no read reaches a record another read reports as absent (#191).
  *
- * Replaces tsdav's default `url.includes('.ics')`, which judges KIND by NAME and made `.ICS` or
- * extensionless resources unreachable. The VEVENT comp-filter keeps other resources out of a
+ * Replaces tsdav's default `url.includes('.ics')`, which judges KIND by NAME and so cannot reach
+ * a `.ICS` or extensionless resource. The VEVENT comp-filter keeps other resources out of a
  * calendar-query. The url-form multiget sends none, so there `isResolvedCalendarObject`'s
  * VEVENT test is the only guard. The collection's own url must be excluded HERE: tsdav's
  * calendar branch does not.
@@ -2422,11 +2454,11 @@ async function settleAmbiguousRecurrence(
     if (!entry) continue;
     const ical = readCalendarData(res);
     if (ical === undefined) continue;
-    // No readable VEVENT (e.g. lower-cased keywords) has not answered: `isRecurringSeriesResource`
+    // No readable VEVENT (an empty payload or VCALENDAR) has not answered: `readsAsRecurringSeries`
     // would return false, a positive "does not repeat".
     if (extractVEventBlocks(ical).length === 0) continue;
     answered.add(url);
-    if (isRecurringSeriesResource(ical)) for (const row of entry.rows) row.isRecurring = true;
+    if (readsAsRecurringSeries(ical)) for (const row of entry.rows) row.isRecurring = true;
   }
 
   if (answered.size < undecided.size) {
@@ -2474,15 +2506,15 @@ function readCalendarData(res: DAVResponse): string | undefined {
   return typeof cdata === 'string' ? cdata : undefined;
 }
 
-/**
- * The resolved copies as a caller sees them (#101). `object.url` is safe here because
- * `isResolvedCalendarObject` admitted only matches that carry one.
- */
 /** A resource's own UID, trimmed as the lookup compares it; undefined when it has none. */
 function ownUid(obj: DAVCalendarObject): string | undefined {
   return parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim();
 }
 
+/**
+ * The resolved copies as a caller sees them (#101). `object.url` is safe here because
+ * `isResolvedCalendarObject` admitted only matches that carry one.
+ */
 function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
   return matches.map(m => ({ calendar: m.calendarLabel, url: m.object.url }));
 }
@@ -2790,13 +2822,9 @@ function resolveCalendarTarget(
 ): DAVCalendar {
   const requested = typeof calendarId === 'string' ? calendarId.trim() : calendarId;
   // BOTH SIDES through the same normaliser: tsdav delivers a calendar called "2026" as a number.
-  // Accepted knowingly: a caller's `{_cdata: 'Work'}` now resolves too (lenient coercion,
-  // docs/conventions.md).
   const requestedName = unwrapDisplayName(requested);
 
-  // ADDRESSED BEATS NAMED, in a SEPARATE PASS: one url-or-name predicate let a decoy calendar
-  // whose NAME spells another's url, listed first, receive the write. Guarded against an empty
-  // url, per the fail-closed note above.
+  // ADDRESSED BEATS NAMED, in a SEPARATE PASS (see ambiguousCalendarNameError).
   const addressed = selectable.find(
     c => typeof c.url === 'string' && c.url.length > 0 && c.url === requested,
   );
@@ -3163,8 +3191,6 @@ export class CalDAVCalendarClient {
   private async discoverCalendars(): Promise<DiscoveredCalendars> {
     const client = await this.getClient();
     if (this.calendars && this.calendars.length > 0) {
-      // Nothing is cached while a collection is broken. Residual, stated on the tool surface: a
-      // calendar that breaks after a healthy discovery stays listed for the process's life.
       return { calendars: this.calendars, brokenCollections: [] };
     }
 
@@ -3506,17 +3532,18 @@ export class CalDAVCalendarClient {
     }
 
     // The addressed copy LEADS (see CalendarObjectLookup); every other order is untouched.
-    // `> 0` only skips a no-op, so it is indistinguishable from `>= 0` by any test.
     const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 
     let collision: CalendarObjectLookup['collision'];
     if (addressedIndex !== -1 && matches.slice(1).some(m => ownUid(m.object) === wanted)) {
       // Offer the addressed record's UID only where it reaches that record alone: not absent,
-      // not this same string, and not held by any other resolved record.
+      // not this same string, not another resource's url, and not held by any other resolved
+      // record.
       const uid = ownUid(matches[0].object);
       const addressedKey = addressComparisonKey(matches[0].object.url);
       const reachesAlone = uid !== undefined && uid !== '' && uid !== wanted
+        && resolveEventUrlTargets(uid, selectable).every(t => addressComparisonKey(t.objectUrl) === addressedKey)
         && !(await uidHolders(uid)).some(h => isResolvedCalendarObject(h.obj)
           && addressComparisonKey(h.obj.url) !== addressedKey);
       collision = { addressedUid: reachesAlone ? uid : undefined };
@@ -3785,7 +3812,7 @@ export class CalDAVCalendarClient {
       callerZone = validateCallerTimezone(fields.timeZone);
       if (fields.start === undefined && fields.end === undefined) {
         throw new InvalidInputError(
-          `timeZone was supplied ('${callerZone}') but neither start nor end was. timeZone only ` +
+          `timeZone was supplied ('${callerZone}'${etcGmtOffsetNote(callerZone)}) but neither start nor end was. timeZone only ` +
           "qualifies a start/end value being written in this same call — it cannot be applied to a " +
           "stored value on its own. Re-send start and/or end (even unchanged) alongside timeZone, " +
           "or drop timeZone."

@@ -159,15 +159,12 @@ const QUOTE_OPEN = '<blockquote type="cite" style="margin:0 0 0 .8ex;border-left
 // Here beside the quote and forward builders because `draft_email` and `edit_draft` both
 // expand these three tokens, and the rule for which form a part gets is one rule.
 //
-// The block carries NO marker class, deliberately: a signature lands only where the caller
-// wrote `{{signature}}`, so there is nothing for one to protect. The removed class,
-// `fm-mcp-signature`, is named here and in docs/email-bodies.md as the record of that; a
-// sweep for its last occurrences should leave both.
+// The block carries NO marker class: a signature lands only where the caller wrote
+// `{{signature}}`, so there is nothing for one to protect.
 
 /**
  * The signature as an html block. Undefined when the identity has none. A text-only
- * signature is escaped into html rather than skipped: the body is html either way, so this
- * is not fabricating html from a plain-text message.
+ * signature is escaped into html rather than skipped: the body is html either way.
  */
 export function signatureHtmlBlock(signature: ResolvedSignature | undefined): string | undefined {
   if (!signature) return undefined;

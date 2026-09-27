@@ -3,13 +3,9 @@
 // server has no timezone database of its own; the offsets below all come from `Intl` through
 // `zoneOffsetMsAt`.
 //
-// The block is not a byte-for-byte reproduction of what Cyrus (or `vzic`) would generate: those
-// carry the zone's real `RRULE` observances with their `UNTIL` trimmed to the event's span. This
-// generator instead emits one explicit, RRULE-free observance per offset change inside the span,
-// plus the observance already in force when the span starts. Both are valid RFC 5545 and resolve
-// to identical offsets for every instant the event touches, which is the only property a
-// `VTIMEZONE` needs for CalDAV round-tripping — reproducing a zone's recurrence RULE is a
-// separate, harder problem this does not attempt.
+// It emits one explicit, RRULE-free observance per offset change inside the event's span, plus
+// the observance already in force when the span starts: valid RFC 5545, resolving to the zone's
+// offset for every instant the event touches.
 
 import { zoneOffsetMsAt, InvalidInputError, utcMsFromComponents, canonicalZoneName } from './coerce.js';
 import { foldICalLine } from './ical-fold.js';

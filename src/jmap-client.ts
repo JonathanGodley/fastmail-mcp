@@ -289,13 +289,13 @@ export interface SourceReferences {
   sourceEmailId?: string;
 }
 
-// The JMAP header form used to SET and GET the recorded source instance. It is NOT
-// stripped on send (EmailSubmission transmits the stored bytes verbatim); the decision is
-// recorded in docs/security-model.md.
 // The not-found refusal of the two attachment tools, which take the same emailId.
 const ATTACHMENT_EMAIL_NOT_FOUND =
   'Email not found: that emailId matches no message. Pass an id from list_emails, search_emails or get_thread.';
 
+// The JMAP header form used to SET and GET the recorded source instance. It is NOT
+// stripped on send (EmailSubmission transmits the stored bytes verbatim); the decision is
+// recorded in docs/security-model.md.
 export const SOURCE_ID_HEADER = 'header:X-Fastmail-MCP-Source-Id:asText';
 
 // Anything that is not an RFC 8620 id is treated as absent rather than risking a
@@ -596,9 +596,6 @@ function htmlCidRefs(html: string | null | undefined): string[] {
 //
 // WHAT A DRAFT ALREADY STORES IS RE-WRITTEN UNCHANGED on edit, pattern included: refusing it
 // would block the very edit that fixes it. The send path is where a stored pattern is caught.
-//
-// `selectIdentity` in src/identity.ts is deliberately unchanged: a wildcard identity is still
-// the correct selection, and supplies the signature.
 function isWildcardIdentityEmail(email: unknown): boolean {
   return typeof email === 'string' && email.startsWith('*@');
 }
@@ -713,7 +710,7 @@ export function buildMailboxInfoMap(mailboxes: any[]): Map<string, MailboxInfo> 
 //   - An unresolved id is rare and benign: a just-created folder, a race with the
 //     separately-fetched mailbox list, or a mailbox with no `name`. Role mailboxes always
 //     resolve. Throwing would fail a whole list/search page over one such id.
-//   - Silently omitting the id WAS the #53 bug: a promised field vanished with no trace.
+//   - Silently omitting the id would drop a promised field with no trace (#53).
 // A genuine Mailbox/get `error` response still throws via the callers' catches; that is
 // not this path.
 //
@@ -1689,14 +1686,6 @@ export class JmapClient {
     );
   }
 
-  // A per-id set-error out of a JMAP `notUpdated` map, or undefined when the server did not
-  // list that id. Three things a bare `notUpdated[id]` gets wrong:
-  //
-  // 1. hasOwnProperty: the id is CALLER-supplied, and "constructor" would index a prototype
-  //    function and fabricate a failure.
-  // 2. KEY PRESENCE is the refusal, not truthiness: a null value is still a refusal, hence
-  //    the `?? {}`.
-  // 3. isPlainResponseMap: an array-shaped map would answer for the id "0".
   /**
    * Throw unless a single-id Email/set confirmed `id` in `updated`: a SetError is classified
    * by throwSingleSetError, and an id in NEITHER map is a failure, as the bulk tools count it
@@ -1714,6 +1703,14 @@ export class JmapClient {
     }
   }
 
+  // A per-id set-error out of a JMAP `notUpdated` map, or undefined when the server did not
+  // list that id. Three things a bare `notUpdated[id]` gets wrong:
+  //
+  // 1. hasOwnProperty: the id is CALLER-supplied, and "constructor" would index a prototype
+  //    function and fabricate a failure.
+  // 2. KEY PRESENCE is the refusal, not truthiness: a null value is still a refusal, hence
+  //    the `?? {}`.
+  // 3. isPlainResponseMap: an array-shaped map would answer for the id "0".
   private setErrorFor(notUpdated: any, id: string): any | undefined {
     if (!isPlainResponseMap(notUpdated)) return undefined;
     return Object.prototype.hasOwnProperty.call(notUpdated, id) ? (notUpdated[id] ?? {}) : undefined;
@@ -1992,8 +1989,8 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
-    // A header SET, round-tripped by Fastmail. Pre-vetted by the compose handler, and
-    // Fastmail rejects CRLF/non-ASCII.
+    // A header SET, round-tripped by Fastmail, which rejects CRLF/non-ASCII. draft_email vets it;
+    // edit_draft carries the stored value unvetted (see isSettableMessageId).
     if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
     // Vetted at this single seam, so a malformed value degrades to absent rather than
     // failing the create.

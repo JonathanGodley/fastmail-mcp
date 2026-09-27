@@ -36,16 +36,8 @@ export interface ContactsWriteClient {
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
 
-// No tool takes a JMAP state string, since no read tool surfaces one; the client guards each
-// write with its own pre-write read's state instead (`fetchCard`).
-
-// The pre-edit and pre-destroy echoes are ALWAYS the untransformed JMAP card, whatever
-// `verbose` or `raw` say: the simplified shape folds away the per-entry `contexts` and
-// `pref`, which are exactly the fields the merge protects.
-//
-// The echo is NOT a restore: nothing here can put back photos, titles, organizations,
-// nicknames, URLs, anniversaries, group membership, the uid, or a per-entry
-// `contexts`/`pref`. Descriptions and docs must not promise a clean recreate.
+// The pre-edit and pre-destroy echoes are always the raw card, and are not a restore; see
+// docs/conventions.md.
 
 function coerceContactNotes(value: unknown, hint: string): string | undefined {
   if (value === undefined || value === null) return undefined;

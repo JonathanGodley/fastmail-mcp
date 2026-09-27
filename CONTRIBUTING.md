@@ -60,9 +60,10 @@ id instead.
 A tool that irreversibly destroys a record refuses any record whose kind this
 server's create tools cannot produce. The recovery echo a destroy returns
 (`deletedCard`, for example) is only useful if a create tool can consume it.
-That is why `delete_contact` rejects a contact group: `create_contact` has no
-`kind` or `members` parameter. `update_contact` refuses groups for the same
-reason, through the same shared message.
+That is why `delete_contact` refuses every card whose kind is not `individual`
+(a contact group, an org, a location): `create_contact` has no `kind` or
+`members` parameter, so it makes individuals only. `update_contact` refuses the
+same kinds for the same reason, through the same shared message.
 
 The test is the record kind, not its fields. Most real records carry fields the
 create tool cannot set, such as a contact card's titles or photos; those are a

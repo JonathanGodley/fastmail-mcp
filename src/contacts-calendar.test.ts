@@ -646,6 +646,22 @@ describe('updateContact merge', () => {
     assert.equal(emails['506539'].contexts.work, true);
   });
 
+  it('keeps a hidden entry when allowEntryReplace is set on a clean merge', async () => {
+    // The flag acts only on an ambiguous array; the descriptions say so, and point at
+    // clearFields for removing an entry the view does not show.
+    const card = storedCard();
+    card.emails.blank = { '@type': 'EmailAddress', address: '' };
+    card.emails.dup = { '@type': 'EmailAddress', address: 'ada@example.com' };
+    const makeReq = stubUpdate(client, card);
+    await client.updateContact('C1', {
+      emails: [{ address: 'ada@example.com' }, { address: 'ada@work.example' }],
+      allowEntryReplace: true,
+    });
+    const emails = patchFrom(makeReq).emails;
+    assert.deepEqual(emails.blank, { '@type': 'EmailAddress', address: '' });
+    assert.deepEqual(emails.dup, { '@type': 'EmailAddress', address: 'ada@example.com' });
+  });
+
   it('patches only the fields the caller supplied, leaving the rest of the card unnamed', async () => {
     // A JMAP PatchObject replaces every property it names, so a property that has no business
     // in this edit must not appear at all — naming `titles` with the value just read would

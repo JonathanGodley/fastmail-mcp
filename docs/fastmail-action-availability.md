@@ -157,8 +157,7 @@ issue #43, which moved a message into each destination in turn and found `schedu
 and only those two - rejected by the server. That probe sorted the destinations into four groups:
 server-protected (`scheduled`, `snoozed`), accepted-but-corrupting (`drafts`, `sent`),
 destructive-or-spam (`trash`, `junk`), and normal (`archive`, `inbox`, a user label). The client
-greys exactly the server-protected pair and offers the other six live. Two independent methods
-agreeing is the standard this file sets at the top, and this row meets it.
+greys exactly the server-protected pair and offers the other six live.
 
 **What the greying does NOT settle.** That greyed means "not a valid manual destination" is a
 *reading* of the pixels, corroborated by #43 but not measured: neither greyed entry was clicked, so
@@ -264,9 +263,9 @@ zone *name* plus a local wall clock. Not one `Z` form, not one numeric offset, n
 `DTEND`, `RECURRENCE-ID`, `EXDATE`, and a recurrence rule's own bound — and it survives
 the second pass, where the only `Z` among them is the `UNTIL`. Read it as scoped to those values,
 not to the resource: the housekeeping timestamps (`CREATED`, `DTSTAMP`, `LAST-MODIFIED`, `TZUNTIL`)
-are UTC throughout, and always were. That is the measured ratification of the write model this server ships
+are UTC throughout. That is the measured ratification of the write model this server ships
 (#139, #157): a zone name plus wall clock in both directions, and an omitted zone writing the
-configured zone rather than leaving the value floating. The client would author the same bytes.
+configured zone rather than leaving the value floating.
 
 **All-day means `VALUE=DATE`, not a midnight-to-midnight timed span.** Both all-day shapes carry a
 date-only `DTSTART`, and the multi-day one ends with a date-only `DTEND` one day past the last day
@@ -300,9 +299,7 @@ it, so how the client spells busy — as `TRANSP:OPAQUE` or as no property at al
 busy/free control is moved OFF its default**, in either direction — a timed event set to free, and
 an all-day event set to busy. The all-day case is the sharper one, because it is the only way to
 find out whether the client spells busy as `TRANSP:OPAQUE` or by removing the property, and no
-fixture in the table above was authored that way. This is a gap in what is known about the Fastmail
-client, not an open question in this server: nothing here depends on the answer, since an update
-touches `TRANSP` only when told to and both spellings read identically per §3.8.2.7. Settle it the
+fixture in the table above was authored that way. Settle it the
 same way the rest of this file is settled — author one of each in the client and read the resource
 off the wire.
 
@@ -437,10 +434,6 @@ since the 22 August section records bytes only — gave `11:00 AM – 12:00 PM A
 resolves the zone name itself. **This did not measure interoperability**: whether a
 `VTIMEZONE`-less resource resolves the same way in some *other* CalDAV client was never tested.
 
-Also worth recording for the read side: #162 changed only the window filter and the refusals, not the
-create serialiser, which is unchanged since #157 — so that work produced no newly authored bytes to
-view here.
-
 One bound on this whole subsection: a client popup is not a byte-level check. The bytes in the left
 column were verified by the probe's CalDAV `REPORT` fetch-back of the stored resource, and only the
 right column is pixels.
@@ -454,13 +447,9 @@ What is still not authored, and so still not known:
 - **The weekly picker's multi-day form** ("on Saturday & Sunday"). A `BYDAY` list is the obvious
   guess and a guess is not a measurement; the single-weekday case wrote no `BYDAY` at all, which is
   reason enough not to assume the multi-day case by extension.
-- **A "this and future occurrences" split** — not merely unmeasured but unavailable: the client's
-  occurrence picker has no such option (above), so it cannot be authored from this client at all.
 - **A timed series crossing a DST boundary.** Both DST fixtures here are date-only. Whether a
   weekly 9:00 series holds its wall clock or its offset across a transition is the case that
   matters most for a zone-name-plus-wall-clock reader, and it has not been measured.
-
-These are left explicit rather than blank.
 
 ## The platform: whether the server will hand this one a `VTIMEZONE`
 

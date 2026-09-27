@@ -57,10 +57,11 @@ it matches device names, so `CON .png` is defused too. A name that sanitizes to 
 becomes `attachment`, so the value is never an empty path segment.
 
 This is deliberately stricter than the `asAttachment` forward's `sanitizeEmlFilename`, which applies
-a similar character treatment but lets device names through: that helper always appends
-`.eml`, which neutralizes them, and its output is a name a *remote* recipient's client
-saves. This one is a name a local client may write, so the inherited posture does not
-transfer. That helper also still trims after dropping leading dots, so whitespace can
+a similar character treatment but lets device names through (`CON.eml` still names the
+console on Windows, which reads a device name followed by an extension as the device): its
+output is a name a *remote* recipient's client saves, and sanitising it for that platform is
+that client's job. This one is a name a local client may write, so the inherited posture
+does not transfer. That helper also still trims after dropping leading dots, so whitespace can
 shield one there; its unconditional `.eml` suffix means the result is a named file either
 way, and changing it would alter what forwarded mail declares on the wire. The two are
 kept as separate functions for exactly these divergences.
@@ -131,10 +132,8 @@ without reading a byte off disk, so no path guard is in play at all:
   and the body displays is carried into the composed message. SVG is a scriptable document
   format, so this re-sends attacker-authored markup under the user's own From — the quote
   sanitizer governs the *quoting* html this server writes, never the bytes of a part it
-  carries by reference. It is worth stating what that means for a reply: **every reply whose
-  body places `{{quote}}` carries the SVG**, and nothing about placing the token asks whether
-  the original displays one. Choosing to quote a message is choosing to carry every image
-  that message displays; the only way not to is not to write the token. Accepted because the
+  carries by reference. A reply that places `{{quote}}` carries it, as it carries every image
+  the original displays (see "The reply path moves BYTES" below). Accepted because the
   receiving client, not this
   server, decides whether to render an SVG attachment, and because singling the type out
   would be a content filter this server does not otherwise attempt.
@@ -350,8 +349,8 @@ nothing local is read here. The escape is simply not writing `{{quote}}`: nothin
 caller did not place, so a reply whose body omits the token carries no part of the original
 at all, images included.
 
-The id is **trusted and unscoped within the connected account** — it may name *any* message,
-deliberately, so a caller can correct a draft built against the wrong original. It is **never
+The id is **trusted and unscoped within the connected account** — it may name *any* message
+the account holds, since a reply or forward may be to any of them. It is **never
 re-resolved from the draft's `In-Reply-To`** (an attacker-controllable header), so there is no
 confused-deputy / quote-spoofing surface from that direction, and there is **no cross-account
 reach** (the fetch is scoped to `session.accountId`).

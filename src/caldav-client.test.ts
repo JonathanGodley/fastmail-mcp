@@ -2012,6 +2012,33 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(read.addressCollision, { addressedUid: undefined });
   });
 
+  it('does not offer an addressed record\'s UID when that UID is another record\'s url', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const otherUrl = WORK_URL + 'other.ics';
+    const { client } = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [
+        { data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' },
+        { data: eventIcal('other@fm', 'Other'), url: otherUrl, etag: '"e-other"' },
+      ],
+      [PERSONAL_URL]: [{ data: eventIcal(otherUrl, 'Real'), url: realUrl, etag: '"e-real"' }],
+    });
+    const read = await client.getCalendarEventById(realUrl);
+    assert.equal(read.event.title, 'Real');
+    assert.deepEqual(read.addressCollision, { addressedUid: undefined });
+  });
+
+  it('offers an addressed record\'s UID that spells its own url another way', async () => {
+    // A fragment is dropped when an address is compared, so this UID reaches only real.ics.
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [{ data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
+      [PERSONAL_URL]: [{ data: eventIcal(realUrl + '#x', 'Real'), url: realUrl, etag: '"e-real"' }],
+    });
+    const read = await client.getCalendarEventById(realUrl);
+    assert.equal(read.event.title, 'Real');
+    assert.deepEqual(read.addressCollision, { addressedUid: realUrl + '#x' });
+  });
+
   // A record whose UID is its own url, and a copy elsewhere carrying the same UID: both rows list
   // the id `.../self.ics`, so a caller acting on the Copy row's id must not reach self.ics.
   const SELF_URL = PERSONAL_URL + 'self.ics';
@@ -2528,6 +2555,12 @@ describe('a VALARM\'s properties are its own, not the event\'s', () => {
     assert.equal(parseICalValue(vevent, 'DTSTART'), '20261010');
   });
 
+  it('parseAllICalProperties reads a repeated property named in lower case', () => {
+    const lower = ['BEGIN:VEVENT', 'attendee:mailto:a@example.com', 'Attendee;CN=B:mailto:b@example.com', 'END:VEVENT'].join('\r\n');
+    assert.deepEqual(parseAllICalProperties(lower, 'ATTENDEE'),
+      ['attendee:mailto:a@example.com', 'Attendee;CN=B:mailto:b@example.com']);
+  });
+
   it('parseAllICalProperties skips a VALARM\'s lines', () => {
     assert.deepEqual(parseAllICalProperties(vevent, 'ATTENDEE'), []);
   });
@@ -2544,6 +2577,27 @@ describe('a VALARM\'s properties are its own, not the event\'s', () => {
     const lower = vevent.replace('BEGIN:VALARM', 'begin:valarm').replace('END:VALARM', 'End:VAlarm');
     assert.equal(parseICalValue(lower, 'DESCRIPTION'), undefined);
     assert.deepEqual(parseAllICalProperties(lower, 'ATTENDEE'), []);
+  });
+
+  it('the write helpers read a lower-case VALARM as the alarm\'s, as the reads do', () => {
+    const lower = data.replace('BEGIN:VALARM', 'begin:valarm').replace('END:VALARM', 'end:valarm');
+    const replaced = replaceICalProperty(lower, 'DESCRIPTION', 'DESCRIPTION:event text');
+    assert.ok(replaced.includes('DESCRIPTION:This is an event reminder'), 'the alarm keeps its DESCRIPTION');
+    assert.ok(replaced.indexOf('DESCRIPTION:event text') < replaced.indexOf('begin:valarm'),
+      'the event\'s DESCRIPTION goes before the alarm');
+    assert.equal(replaceICalProperty(lower, 'DESCRIPTION', null), lower, 'a clear leaves the alarm\'s DESCRIPTION');
+    assert.equal(removeAllICalProperties(lower, 'ATTENDEE'), lower, 'the alarm keeps its ATTENDEE');
+    assert.equal(removeAllICalProperties(lower, 'DURATION'), lower, 'the alarm keeps its DURATION');
+    const inserted = insertBeforeEndVEvent(lower, 'SUMMARY:s');
+    assert.ok(inserted.indexOf('SUMMARY:s') < inserted.indexOf('begin:valarm'), 'insert goes before the alarm');
+  });
+
+  it('finds a lower-case VEVENT on every path', () => {
+    const lower = data.replace('BEGIN:VEVENT', 'begin:vevent').replace('END:VEVENT', 'end:vevent');
+    assert.ok(extractVEvent(lower)?.startsWith('begin:vevent'));
+    assert.ok(replaceICalProperty(lower, 'SUMMARY', 'SUMMARY:s').includes('SUMMARY:s'));
+    assert.ok(insertBeforeEndVEvent(lower, 'SUMMARY:s').includes('SUMMARY:s'));
+    assert.equal(removeAllICalProperties(lower, 'DTSTART').includes('DTSTART'), false);
   });
 
   it('still reads the event\'s own property that follows a VALARM', () => {
@@ -3066,6 +3120,34 @@ describe('removeExceptionVEvents', () => {
 
     const result = removeExceptionVEvents(data, [new Date()]);
     assert.ok(result.includes('SUMMARY:Master'));
+  });
+
+  it('removes an exception that comes before the master in a wrapped payload', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:rec@fm',
+      'RECURRENCE-ID:20260408T100000Z',
+      'SUMMARY:Exception 1',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'UID:rec@fm',
+      'RRULE:FREQ=WEEKLY',
+      'SUMMARY:Master',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+
+    const result = removeExceptionVEvents(data, [new Date('2026-04-08T10:00:00Z')]);
+    assert.equal(result, [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:rec@fm',
+      'RRULE:FREQ=WEEKLY',
+      'SUMMARY:Master',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n'));
   });
 });
 
@@ -4189,12 +4271,8 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
 
-  // Only hasICalProperty was made case-insensitive; the structural scan and parseICalValue
-  // were not, and this is why that is safe rather than half a fix. A payload whose STRUCTURAL
-  // keywords are lower-cased yields no VEVENT blocks, so findCalendarObjectByUID skips the
-  // object before it reads a single value: the event is invisible to every tool rather than
-  // reachable through a mis-read. Fail-closed, and pinned so the reasoning stays checkable.
-  it('cannot reach an event whose BEGIN:VEVENT is lower-cased at all', async () => {
+  // RFC 5545 §3.1: a lower-cased payload is read like any other, so its series is refused.
+  it('refuses a lower-cased repeating event as repeating', async () => {
     const lower = [
       'begin:vcalendar', 'version:2.0',
       'begin:vevent',
@@ -4205,16 +4283,14 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
       'end:vcalendar',
     ].join('\r\n');
     const { client, mockDAVClient } = createMockedRecurringClient(lower, '/cal/low.ics');
-    for (const eventId of ['low@fm', '/cal/low.ics']) {
-      await assert.rejects(
-        () => client.deleteCalendarEvent(eventId),
-        (err: unknown) => {
-          assert.ok(isInvalidInput(err), `expected InvalidInputError, got ${err}`);
-          assert.match((err as Error).message, /not found/);
-          return true;
-        },
-      );
-    }
+    await assert.rejects(
+      () => client.deleteCalendarEvent('low@fm'),
+      (err: unknown) => {
+        assert.ok(isInvalidInput(err), `expected InvalidInputError, got ${err}`);
+        assert.match((err as Error).message, /repeating event/);
+        return true;
+      },
+    );
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
 
@@ -4727,6 +4803,35 @@ describe('replaceICalProperty insert position with VALARM', () => {
     const alarmIdx = out.indexOf('BEGIN:VALARM');
     assert.ok(descIdx !== -1 && alarmIdx !== -1);
     assert.ok(descIdx < alarmIdx, 'property must precede VALARM per RFC 5545 ABNF');
+    assert.equal(out.split('\n')[4], 'DESCRIPTION:hello', 'after the event\'s own properties');
+  });
+
+  it('insertBeforeEndVEvent inserts inside the VEVENT, after its properties, in a wrapped payload', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'BEGIN:VALARM',
+      'TRIGGER:-PT15M',
+      'END:VALARM',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    assert.deepEqual(insertBeforeEndVEvent(data, 'ATTENDEE:mailto:guest@example.com').split('\n'), [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'ATTENDEE:mailto:guest@example.com',
+      'BEGIN:VALARM',
+      'TRIGGER:-PT15M',
+      'END:VALARM',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
   });
 });
 
@@ -6670,6 +6775,15 @@ describe('timeZone parameter (#157)', () => {
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
     });
 
+    it('names an Etc/GMT timeZone with its real offset when refusing it without start or end', async () => {
+      const { client } = updateClient(ZONED);
+      await assert.rejects(
+        () => client.updateCalendarEvent('tz@fm', { timeZone: 'Etc/GMT-10' }),
+        (err: Error) => err.message.startsWith(
+          "timeZone was supplied ('Etc/GMT-10' (UTC+10:00; the Etc/GMT sign is inverted)) but neither start nor end was."),
+      );
+    });
+
     it('rejects timeZone combined with a Z-designated start', async () => {
       const { client } = updateClient(ZONED);
       await assert.rejects(
@@ -8480,6 +8594,17 @@ describe('parseCalendarObjects', () => {
 
     assert.equal(events.length, 1);
     assert.equal(events[0].isRecurring, undefined);
+  });
+
+  it('marks every block of an expanded blob holding two, though neither carries a marker', () => {
+    const block = (date: string) => [
+      'BEGIN:VEVENT', 'UID:pair@fm', `DTSTART:${date}T093000Z`, 'SUMMARY:Pair', 'END:VEVENT',
+    ].join('\r\n');
+    const data = ['BEGIN:VCALENDAR', block('20270305'), block('20270312'), 'END:VCALENDAR'].join('\r\n');
+
+    const events = parseCalendarObjects({ data, url: '/cal/pair.ics' }, { expanded: true });
+
+    assert.deepEqual(events.map(e => e.isRecurring), [true, true]);
   });
 
   it('still returns only the master for the same blob when expansion was NOT requested', () => {
@@ -11822,11 +11947,48 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
     assert.equal(events[0].isRecurring, undefined);
   });
 
+  it('reads a recurrence marker inside a VALARM as the alarm\'s, agreeing with get_calendar_event', async () => {
+    const alarm = ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT15M', 'RRULE:FREQ=WEEKLY',
+      'RDATE:20260401T090000Z', 'RECURRENCE-ID:20260325T090000Z', 'END:VALARM'];
+    const stored = master('a1@fm', '20260325T090000Z', ...alarm);
+    const url = CAL + 'alarm.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('a1@fm', ['BEGIN:VEVENT', 'UID:${UID}', 'DTSTART:20260325T090000Z',
+        'SUMMARY:Weekly standup', ...alarm, 'END:VEVENT'].join('\r\n')) }],
+      async () => [multiGetResponse(url, stored)],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, undefined, 'list_calendar_events');
+    assert.equal(parseCalendarObject({ data: stored, url }, { configuredZone: 'UTC' }).isRecurring, undefined,
+      'get_calendar_event');
+  });
+
   it('reports isRecurring for a master that lists its occurrences as RDATEs instead of stating a rule', async () => {
     const url = CAL + 'rdate.ics';
     const { client } = listingClient(
       [{ url, data: expandedBlocks('r1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
       async () => [multiGetResponse(url, master('r1@fm', '20260325T090000Z', 'RDATE:20260401T090000Z'))],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
+
+  it('reads a stored RRULE whose name is folded across two continuation lines', async () => {
+    const url = CAL + 'folded.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('f1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('f1@fm', '20260325T090000Z', 'RR', ' UL', ' E:FREQ=WEEKLY'))],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
+
+  it('reports isRecurring when the stored resource is a lone override of a series', async () => {
+    // An invitation to one instance of someone else's series stores only that override.
+    const url = CAL + 'lone-override.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('lo@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('lo@fm', '20260325T090000Z', 'RECURRENCE-ID:20260325T090000Z'))],
     );
     const { events } = await client.getCalendarEvents(...WINDOW);
     assert.equal(events[0].isRecurring, true);
@@ -12045,13 +12207,21 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
     ['carries no props at all', url => ({ href: url, status: 200, ok: true })],
     ['carries no calendar-data prop', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"' } })],
     ['carries a calendar-data prop that is not text', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: { nested: 'markup' } } } })],
-    // The payload arrived and holds no event to read a rule off. An empty `<C:calendar-data/>`,
-    // a VCALENDAR with nothing in it, and a payload whose keywords are lower-cased (legal per
-    // RFC 5545 §3.1, and not what this file's case-sensitive marker scan reads) all land here.
+    // The payload arrived and holds no event to read a rule off: an empty `<C:calendar-data/>`,
+    // or a VCALENDAR with nothing in it.
     ['carries an empty calendar-data payload', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: '' } } })],
     ['carries a payload with no VEVENT in it', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR' } } })],
-    ['carries a payload this parser cannot read an event out of', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY').toLowerCase() } } })],
   ];
+
+  it('settles a follow-up payload whose keywords are lower-cased (RFC 5545 §3.1)', async () => {
+    const url = CAL + 'series.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [{ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY').toLowerCase() } } } as any],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
 
   for (const [shape, response] of unanswerable) {
     it(`fails the whole call for a follow-up response that ${shape}`, async () => {
@@ -12165,5 +12335,44 @@ describe('calendar-object fetches filter hrefs by emptiness and the collection i
     assert.ok(multiget, 'tsdav issued no multiget for the .ICS resource');
     assert.ok(multiget!.includes(href), `the multiget did not address the .ICS resource: ${multiget}`);
     assert.deepEqual(objects.map(o => o.url), [COLLECTION + 'stored.ICS']);
+  });
+});
+
+// RFC 5545 §3.1: property names are case-insensitive, so a lower-cased payload is edited, not
+// duplicated beside.
+describe('a wholly lower-cased stored event is updated in place', () => {
+  const url = '/cal/personal/lower.ics';
+  const lower = [
+    'begin:vcalendar', 'begin:vevent', 'uid:x1', 'dtstart:20260410T090000Z', 'dtend:20260410T100000Z',
+    'summary:Meet', 'organizer:mailto:o@example.com', 'attendee:mailto:a@example.com',
+    'end:vevent', 'end:vcalendar',
+  ].join('\r\n');
+
+  function lowerClient() {
+    const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: lower, url, etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  it('replaces the start and end and removes every attendee', async () => {
+    const { client, mockDAVClient } = lowerClient();
+    await client.updateCalendarEvent(url, {
+      start: '2026-04-11T09:00:00Z', end: '2026-04-11T10:00:00Z', participants: [],
+    });
+    const written: string = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.equal(written.match(/^dtstart[;:]/gim)?.length, 1, written);
+    assert.equal(written.match(/^dtend[;:]/gim)?.length, 1, written);
+    assert.match(written, /^DTSTART:20260411T090000Z/m);
+    assert.equal(/^attendee[;:]/im.test(written), false, written);
+  });
+
+  it('reads the stored UID and start', () => {
+    const event = parseCalendarObject({ data: lower, url }, { configuredZone: 'UTC' });
+    assert.equal(event.id, 'x1');
+    assert.equal(event.start, '2026-04-10T09:00:00Z');
   });
 });

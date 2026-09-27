@@ -372,7 +372,7 @@ export function rejectCidCollisionInCall(count: number, value: string): string {
   );
 }
 
-// The recreate recipe both draft-level refusals end with. It routes a reply or forward
+// The recreate recipe rejectBrokenDraft ends with. It routes a reply or forward
 // through the tools that rebuild the threading, because recreating one of those with the
 // plain compose tool splits the conversation, and it deliberately stops short of promising
 // the recreated draft will re-embed the images — with attachments disabled it cannot, and
@@ -474,11 +474,6 @@ export function rejectInterleavedTextParts(): string {
 // ---------------------------------------------------------------------------
 // Body tokens, and the read a body edit has to prove
 // ---------------------------------------------------------------------------
-//
-// These sentences serve BOTH compose and edit. The split between a refusal and a note below
-// is deliberate: draft_email refuses what would ship wrong, because the body is wholly the
-// caller's; edit_draft NOTES it, because the body may be a foreign one handed back, and a
-// refusal keyed on its text could be planted by the original's author and recur on every edit.
 
 /** Why a block had nothing to put at a token's position, as one clause of a sentence. */
 export const CAUSE_SENTENCE: Record<BlockUnavailableCause, string> = {

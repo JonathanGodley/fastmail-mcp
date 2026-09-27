@@ -18,7 +18,6 @@ export type ToolContent = Array<{ type: 'text'; text: string }>;
  * caller parses it directly, so the no-path note rides as a separate item.
  */
 export async function listMailboxes(args: any, client: MailboxClient): Promise<ToolContent> {
-  // coerceBool, not `!!`: a lenient client's "false" is truthy (#54).
   const raw = coerceBool(args?.raw, 'raw') ?? false;
   const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
 

@@ -87,11 +87,8 @@ export function redactBearerTokens(input: string): string {
  * No second parameter on purpose: callers pass this to `.map` bare, and `map` would hand it
  * the index as a bound. A wider bound goes through `describeUntrustedAt`.
  *
- * A caller that quotes the value uses `"…"`: the swap protects that span only, and inside
- * `'…'` the value's own `'` closes it (#190). A bare render is judged on the whole sentence,
- * so a new `'…'` span in any sentence that renders a bare value reopens this. The drift guard
- * in coerce.test.ts catches a single-quoted `${describeUntrusted(…)}`; the whole-sentence
- * half is a reading at the sentence you are editing.
+ * The quoting rule is `describePart`'s. The drift guard in coerce.test.ts catches a
+ * single-quoted `${describeUntrusted(…)}`.
  *
  * Not for a structured result item; see `redactedJson`.
  */
@@ -144,8 +141,7 @@ export function redactedJson(value: any): string {
  * Serialise a tool result payload. THE one seam every JSON result item goes through, across
  * every handler and formatter, so how this server serialises is decided once (#40).
  *
- * Compact, with no option to indent: every payload is read by a machine, and indentation was
- * ~17% of a 25-message list page's bytes. That includes JSON embedded in a prose frame (a list
+ * Compact, with no option to indent: every payload is read by a machine. That includes JSON embedded in a prose frame (a list
  * summary line, the bulk-operations diagnostic). See docs/conventions.md, result serialisation.
  *
  * Use redactedJson above instead where the values may carry credentials.
@@ -247,12 +243,23 @@ export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unkno
 // display name may carry one ("Smith, John" <john@example.com>). An unquoted name's comma
 // still splits, so a piece that names no address is REFUSED rather than sent to: that is
 // what "Smith, John <john@example.com>" becomes, and "Smith" is not a recipient. A quote or
-// "<" left open swallows every comma after it, and parseAddress reads only up to the last
-// ">", so both would drop recipients unseen: each is refused too.
+// "<" left open swallows every comma after it, and parseAddress reads the address from the
+// last "<" to the last ">", so each would drop recipients unseen: each is refused too, in the
+// array form as well as the comma form.
 function coerceRecipientList(value: unknown, paramName: string): string[] | undefined {
   if (typeof value !== 'string' || isJsonArrayString(value)) {
     const entries = coerceStringArrayStrict(value, paramName);
-    entries?.forEach((entry, i) => refuseTextAfterAngle(entry, `${paramName}[${i}]`));
+    entries?.forEach((entry, i) => {
+      const label = `${paramName}[${i}]`;
+      refuseTextAfterAngle(entry, label);
+      if (!SINGLE_ADDR_SPEC.test(parseAddress(entry).email)) {
+        throw new InvalidInputError(
+          `${label} "${describeUntrusted(entry.trim())}" is not one email address. Give each ` +
+          'recipient its own entry.',
+        );
+      }
+      refuseSeveralAngleAddrs(entry, label);
+    });
     return entries;
   }
   const pieces = splitRecipientList(value.trim(), paramName).map((p) => p.trim()).filter(Boolean);
@@ -265,8 +272,24 @@ function coerceRecipientList(value: unknown, paramName: string): string[] | unde
         'carries one ("Smith, John" <john@example.com>), or pass an array.',
       );
     }
+    refuseSeveralAngleAddrs(piece, paramName);
   }
   return pieces;
+}
+
+// An unquoted "<" or ">" in the display-name half means a second angle-addr, which
+// parseAddress would fold into the name.
+function refuseSeveralAngleAddrs(entry: string, label: string): void {
+  const trimmed = entry.trim();
+  const open = trimmed.lastIndexOf('<');
+  if (open === -1 || trimmed.lastIndexOf('>') < open) return;
+  const unquotedName = trimmed.slice(0, open).replace(/"(?:[^"\\]|\\.)*"/g, '');
+  if (/[<>]/.test(unquotedName)) {
+    throw new InvalidInputError(
+      `${label} "${describeUntrusted(trimmed)}" holds more than one <address>, and only the last ` +
+      'would be used. Give each recipient its own entry.',
+    );
+  }
 }
 
 // One "@" with something either side, and nothing that would make the address half several
@@ -358,7 +381,8 @@ export function assertKnownParams(
   );
 }
 
-// An unreadable value is REFUSED, not read as absent: absent would silently drop a filter
+// Read every boolean parameter through this, never `!!`: a lenient client's "false" is truthy
+// (#54). An unreadable value is REFUSED, not read as absent: absent would silently drop a filter
 // (`isUnread:"yes"`) or keep the default the caller was trying to change.
 export function coerceBool(value: unknown, paramName: string): boolean | undefined {
   if (value === undefined || value === null) return undefined;
