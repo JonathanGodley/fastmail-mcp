@@ -1653,6 +1653,20 @@ describe('updateDraft', () => {
     assert.ok(result.notes?.some((n) => /the sending identity has no signature configured/.test(n)));
   });
 
+  it('refuses, naming the signature, when the html sign-off displays an embedded image', async () => {
+    mock.method(client, 'getIdentities', async () => [
+      { ...SIGNING_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' },
+    ]);
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    await assert.rejects(
+      client.updateDraft('draft-1', {
+        htmlBody: '<p>Thanks.</p>{{signature}}', expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+      }),
+      (e: any) => e instanceof InvalidInputError
+        && /signature displays an embedded image "logo"/.test(e.message),
+    );
+  });
+
   // Both parts supplied, the token in only one: the other ships unsigned, and a recipient
   // reading that alternative sees no sign-off. Said out loud, because the body that ships is
   // the caller's and nothing here will add the missing one.

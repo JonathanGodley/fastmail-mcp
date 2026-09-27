@@ -4,7 +4,8 @@ import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
 import {
-  buildQuoteBlocks, buildForwardBlocks, emptyQuoteImages, signatureBlock,
+  buildQuoteBlocks, buildForwardBlocks, emptyQuoteImages, rejectSignatureEmbeddedImage,
+  signatureBlock, signatureCidRefs,
 } from './reply-quote.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
@@ -753,6 +754,19 @@ export async function composeDraftEmail(
       'Write prose beside the token — the block skips and the result says so — or, on a ' +
       'forward, drop {{forward}} and pass asAttachment:true.',
     );
+  }
+
+  // A sign-off displaying an image no part carries is refused before anything is uploaded.
+  // Tested on the EXPANDED html, so a token the markup hides displays nothing to refuse, and
+  // an attachments item supplying the identifier resolves the reference like any other.
+  const suppliedCids = new Set((specs ?? []).map((s) => s.cid).filter((c) => !!c));
+  const liveAfterExpansion = new Set(expandedHtml ? extractLiveCidRefs(expandedHtml) : []);
+  if (htmlBlocks.signature?.available === true) {
+    for (const ref of signatureCidRefs(signature)) {
+      if (liveAfterExpansion.has(ref) && !suppliedCids.has(ref)) {
+        throw bad(rejectSignatureEmbeddedImage(ref));
+      }
+    }
   }
 
   // --- 10. Assemble ---------------------------------------------------------

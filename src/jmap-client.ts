@@ -3,7 +3,7 @@ import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
-import { signatureBlock } from './reply-quote.js';
+import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
 import { matchesIdentity, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
@@ -2513,7 +2513,13 @@ export class JmapClient {
       }
 
       if (danglingRefs.length > 0) {
-        throw new InvalidInputError(rejectDanglingCidRef(danglingRefs[0], availability));
+        // One the caller did not write came in with an expanded sign-off.
+        const fromSignature = expandSignature
+          && signatureCidRefs(editSignature).includes(danglingRefs[0])
+          && !htmlCidRefs(callerWrittenHtml).includes(danglingRefs[0]);
+        throw new InvalidInputError(fromSignature
+          ? rejectSignatureEmbeddedImage(danglingRefs[0])
+          : rejectDanglingCidRef(danglingRefs[0], availability));
       }
     }
 

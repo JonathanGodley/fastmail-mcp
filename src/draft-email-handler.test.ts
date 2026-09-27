@@ -3165,6 +3165,33 @@ describe('draft_email — {{signature}} does not depend on the history landing',
     assert.equal(calls.draft.textBody, 'FYI\nKind regards,\nTest User');
   });
 
+  it('refuses, naming the cause, when the html signature displays an embedded image', async () => {
+    // An identity's htmlSignature is a string: the bytes a cid: reference in it points at
+    // are nowhere this server can fetch them from, so the sign-off cannot ship whole.
+    const logoIdentity = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' };
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [logoIdentity] });
+    const message = await messageFrom(() => compose(
+      {
+        mode: 'new', to: ['sam@example.com'], htmlBody: '<p>hi</p>{{signature}}',
+        attachments: [{ path: 'a.pdf' }],
+      },
+      client,
+      '/tmp/attach',
+    ));
+    assert.match(message, /signature/);
+    assert.match(message, /embedded image "logo"/);
+    assert.match(message, /write the sign-off/i);
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('still signs a text-only message from that identity, which ships no image', async () => {
+    const logoIdentity = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' };
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [logoIdentity] });
+    await compose({ mode: 'new', to: ['sam@example.com'], textBody: 'hi\n{{signature}}' }, client);
+    assert.equal(calls.draft.textBody, 'hi\nKind regards,\nTest User');
+  });
+
   it('resolves the identity BEFORE any attachment is uploaded', async () => {
     // The sign-off has to be in the body the upload plan is read against, so the order is
     // load-bearing rather than incidental.

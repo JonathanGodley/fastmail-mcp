@@ -217,17 +217,20 @@ would be a line describing something no part of the message carries. (That is th
 empty string on that branch and the token is reported as `no-text-form` rather than expanded
 into a placeholder; alt text, which always wins, still derives normally.
 
-The **other** branch deliberately does not suppress, and the asymmetry is the whole point.
-When HTML ships, the embedded image ships with it, so `[image]` is exactly what
-`unconditional` is for — and it has to agree with the derivation downstream, because an
-HTML-only draft's text fallback is derived from the *whole* signed HTML under that same
-policy. Suppressing here would give a caller who supplies both bodies a different text
-sign-off from one who supplies HTML alone, which is the by-itself drift this split exists to
-prevent. So the two spellings of "my signature is a logo" are genuinely different outcomes on
-this branch, not an inconsistency: an **embedded** (`cid:`) logo derives `[image]` and the
-sign-off is present, while a **remote** (`http(s)`) one derives nothing at all — a remote
-image writes no placeholder under any policy — and the text part's token is reported as
-`no-text-form`.
+The **other** branch deliberately does not suppress: it has to agree with the derivation
+downstream, because an HTML-only draft's text fallback is derived from the *whole* signed
+HTML under the `unconditional` policy. Suppressing here would give a caller who supplies both
+bodies a different text sign-off from one who supplies HTML alone, which is the by-itself
+drift this split exists to prevent. A **remote** (`http(s)`) logo therefore derives nothing
+at all on this branch — a remote image writes no placeholder under any policy — and the text
+part's token is reported as `no-text-form`.
+
+An **embedded** (`cid:`) image in the HTML signature never reaches that derivation. The
+identity holds the signature's HTML but not the image's bytes, so nothing can supply the part
+the reference names. Placing `{{signature}}` in an HTML body that ships is refused, naming the
+signature's embedded image as the cause, by both `draft_email` (before anything is uploaded)
+and a flagged `edit_draft`. A message that ships no HTML still signs from the text form, as
+above.
 
 **Placement is the caller's, and nothing is placed for them.** The three builders live
 together in `src/reply-quote.ts` because they feed one substitution: `draft_email` expands

@@ -721,6 +721,8 @@ A body with **no** `{{signature}}` in it is stored unsigned, and the receipt say
 
 Which form you get follows the body, not which fields the identity has configured. An HTML body gets the HTML signature, and the plain-text alternative is **derived from that HTML** rather than copied from `textSignature`. A plain-text-only message gets `textSignature` as configured. An identity that has only one of the two forms still signs either kind of body; the missing form is derived.
 
+An HTML signature that displays an **embedded** (`cid:`) image is refused wherever `{{signature}}` lands in an HTML body that ships, by both tools: the identity holds the signature's HTML but not the image, so nothing could supply it. Write the sign-off into the body yourself, or remove the image from the signature in Fastmail's settings. A message that ships no HTML still signs from the text form.
+
 Nothing detects a sign-off that is already in a body. There is no marker class, no already-signed check and no de-duplication anywhere in compose: the token is the placement, so put it once where the sign-off goes. The same token twice in one part is **refused**, since expanding it twice would store the sign-off twice.
 
 `edit_draft` signs nothing on its own. The body you give it is stored exactly as written, so a sign-off is there if you put it there and gone if you did not. `expandSignature: true` expands a `{{signature}}` **you wrote** in the body of that edit, resolved against the address the edit sends as; everything above about *which form* you get applies unchanged.
