@@ -2566,6 +2566,30 @@ describe('sendDraft', () => {
     );
   });
 
+  // The fallback is decided on the SANITISED name: one that sanitises to nothing would
+  // otherwise render as `""` or `" "` and lose the id.
+  for (const [label, name] of [['only a format character', String.fromCodePoint(0x200b)], ['only whitespace', '   ']]) {
+    it(`names a mailbox by id when its name is ${label}`, async () => {
+      mock.method(client, 'getMailboxes', async () => [
+        DRAFTS_MAILBOX,
+        SENT_MAILBOX,
+        { id: 'mb-blank', name, role: null },
+      ]);
+      const filed = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-blank': true } };
+      stubRequests(client, async () => ({
+        methodResponses: [['Email/get', { list: [filed] }, 'getEmail']],
+      }));
+
+      await assert.rejects(
+        () => client.sendDraft('draft-1'),
+        (err: Error) => {
+          assert.ok(err.message.includes('(it is in: unnamed mailbox (id: "mb-blank")). '), err.message);
+          return true;
+        },
+      );
+    });
+  }
+
   it('caps the list of locations and says how many were left out', async () => {
     const extra = Array.from({ length: 35 }, (_, i) => ({ id: `mb-x${i}`, name: `Folder ${i}`, role: null }));
     mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, SENT_MAILBOX, ...extra]);
