@@ -5,19 +5,18 @@
 // in-process unit test:
 //
 //   1. Tool output. The CallTool catch in index.ts is the single choke point where
-//      an error message becomes text the MCP caller reads. There is no exported
-//      seam for it — the mapping lives inside the request handler — so the only way
-//      to prove a given error path is redacted is to drive the real server over
-//      JSON-RPC and read what comes back.
-//   2. stderr. tsdav logs the HTTP Basic credential as bare base64 whenever DEBUG
-//      is set. That write never passes through index.ts's redaction boundary, so
-//      the only control is suppressing the logger — and the only honest proof is
-//      loading the real built module and calling the real tsdav function.
+//      an error message becomes text the MCP caller reads, and it has no exported
+//      seam, so the only proof a given error path is redacted is to drive the real
+//      server over JSON-RPC.
+//   2. stderr. tsdav logs the HTTP Basic credential whenever DEBUG is set. That
+//      write never passes through index.ts's redaction boundary, so the only control
+//      is suppressing the logger, proved by loading the real built module and
+//      calling the real tsdav function.
 //
 // Neither group needs credentials or network: every tool call below is rejected by
 // input validation before a request is issued, and the tsdav call is pure local
-// string work. The fake values are synthetic and shaped like credentials on purpose
-// — a placeholder that no pattern could match would prove nothing about redaction.
+// string work. The fake values are shaped like credentials on purpose: a
+// placeholder that no pattern could match would prove nothing about redaction.
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -42,14 +41,9 @@ const require = createRequire(join(REPO_ROOT, 'package.json'));
 // clean, registration-based redaction is what did it.
 const FAKE_API_VALUE = 'probe-value-not-a-real-credential';
 
-// `npm test`'s `pretest` script builds first, so the normal route always has a current
-// dist/. This guard is the backstop for the other route: anyone invoking
-// `tsx --test src/built-server.test.ts` directly skips `pretest`, and every assertion in
-// this file is then made against whatever dist/ happens to be lying around. A stale dist
-// would pass these tests using the previous build's code - the exact false green this
-// exists to prevent, and it would be loudest on the change most likely to break them (a
-// newly edited source file). So refuse to run against a stale artifact rather than
-// reporting a pass that means nothing.
+// `npm test`'s `pretest` builds first, but `tsx --test src/built-server.test.ts` run
+// directly skips it, and a stale dist/ would then pass these tests using the previous
+// build's code. So refuse to run against a stale artifact.
 function assertDistIsCurrent(): void {
   let built: number;
   try {
@@ -164,8 +158,7 @@ describe('every error path reaching tool output is redacted', () => {
   it('redacts the top-level McpError rethrow', async () => {
     await registerCredential();
     // The unknown-parameter rejection echoes the offending KEY back to the caller,
-    // so a credential-shaped key lands inside an McpError message that the catch
-    // used to rethrow untouched.
+    // so a credential-shaped key lands inside an McpError message.
     const message = await callAndCaptureError('list_emails', { [FAKE_API_VALUE]: 1 });
     assertRedacted(message);
     // Redacting in place rather than rebuilding the error: a rebuild would run the
@@ -178,13 +171,10 @@ describe('every error path reaching tool output is redacted', () => {
 // 1b. The capability flag as the real process parses it
 // ---------------------------------------------------------------------------
 //
-// FASTMAIL_ALLOW_BLOB_ATTACH opens a send capability, so how its value is PARSED is a
-// security property, not a formatting detail: under a truthy-string test the value "false"
-// would enable the capability the operator wrote it to refuse. That parse runs once at
-// module load in the real process, against the real environment — an in-process unit test
-// cannot reach it, because the flag is resolved before any exported function is called. So
-// the check spawns the built server and reads the clause it advertises in tools/list, which
-// is derived from the same resolved value the handlers use.
+// FASTMAIL_ALLOW_BLOB_ATTACH opens a send capability, so its parse is a security property:
+// under a truthy-string test, "false" would enable it. The flag is resolved at module load,
+// before any exported function is called, so the check spawns the built server and reads
+// the clause it advertises in tools/list, derived from the same value the handlers use.
 
 describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
   before(() => assertDistIsCurrent());
@@ -228,11 +218,9 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
     }
   });
 
-  // The values an operator reaching for "on" actually types. All of them fail CLOSED today,
-  // which is the right direction for a capability gate — a flag that half-works is worse
-  // than one that plainly did not take. Pinned so a later "be more helpful about spellings"
-  // change has to be a deliberate edit here, and so the same widening cannot arrive by
-  // accident and drag "FALSE"/"False" in with it.
+  // The values an operator reaching for "on" actually types. They fail CLOSED on purpose, so
+  // accepting more spellings has to be a deliberate edit here, and cannot arrive by accident
+  // and drag "FALSE"/"False" in with it.
   it('leaves every other spelling disabled, including the ones that look like yes', async () => {
     for (const value of ['TRUE', 'True', 'yes', 'on', '0', '2', ' ', '']) {
       const clause = await attachmentsClause(value);
@@ -249,17 +237,14 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
 // 1b. The lenient array parameters advertise the string form they accept
 // ---------------------------------------------------------------------------
 //
-// This server coerces a stringified array (coerceStringArray takes a JSON or comma-separated
-// string), but a client validates the ADVERTISED schema first, so a parameter declared
-// `type: 'array'` has its string form rejected before any handler runs — leniency that
-// cannot be exercised. The two halves have to be checked against each other, and only the
-// advertised schema says what a client will see, which is why this reads tools/list off the
-// real process rather than asserting over the source.
+// This server coerces a stringified array, but a client validates the ADVERTISED schema
+// first, so a parameter declared `type: 'array'` has its string form rejected before any
+// handler runs. Only the advertised schema says what a client will see, so this reads
+// tools/list off the real process rather than the source.
 
-// The element constraint sits in `items`, which applies to array instances only — so it
+// The element constraint sits in `items`, which applies to array instances only, so it
 // reads the same off a type union (property-level `items`) as off the array branch of a
-// `oneOf`. Module-scoped because two blocks below read an array parameter's element enum,
-// and both want the same indifference to which shape the declaration is written in.
+// `oneOf`.
 function arrayItems(declared: any): any {
   if (declared.items) return declared.items;
   const branch = (declared.oneOf ?? declared.anyOf ?? []).find((b: any) => b.type === 'array');
@@ -267,12 +252,9 @@ function arrayItems(declared: any): any {
 }
 
 // What a client can SEND is the fact under test, not how the schema spells it. A
-// `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, so this
-// reads the types a declaration admits (and, in arrayItems() above, the constraint on its
-// array elements) whichever shape carries them — src/index.ts writes only the union spelling
-// today, but a rewrite into `oneOf` must not silently fail this guard for a schema that still
-// behaves the same. Module-scoped beside arrayItems() because the drift guard below (#98)
-// walks every tool's schema with it, not just edit_draft's.
+// `type: ['array', 'string']` union and a two-branch `oneOf` admit the same values, so a
+// rewrite of the union into `oneOf` must not fail this guard for a schema that behaves the
+// same.
 function admittedTypes(declared: any): string[] {
   const out = new Set<string>();
   const add = (t: any) => {
@@ -321,45 +303,35 @@ describe('edit_draft advertises the stringified-array form its handler accepts',
 // 1b-ter. Array-side schema drift guard (#98)
 // ---------------------------------------------------------------------------
 //
-// The lenient-boolean convention (src/tool-schema.test.ts's `lenient-boolean convention`) has
-// no array-side counterpart: nothing stops a new tool parameter shipping a narrow
-// `type: 'array'`, which makes its coercer unreachable through a validating client for exactly
-// the reason a narrow `type: 'boolean'` does. Reading tools/list off one spawn of the built
-// server (rather than scanning src/index.ts as text, the way the boolean guard does) is the
-// point here, not an inconsistency with it: this guard reads the ADVERTISED schema because
-// that is the only thing that says what a client actually sees, which is the fact every
-// assertion below is about.
+// The array-side counterpart of the `lenient-boolean convention` in src/tool-schema.test.ts:
+// a narrow `type: 'array'` makes a coercer unreachable through a validating client for the
+// same reason a narrow `type: 'boolean'` does. Unlike the boolean guard, this reads tools/list
+// off the built server rather than scanning source, because the ADVERTISED schema is what a
+// client actually sees.
 //
 // Four things, each lost independently by a different mistake:
 //
-//   1. Every top-level parameter admitting `array` also admits `string`. Without this, a
-//      validating client rejects the stringified form before any coercer runs.
-//   2. No top-level parameter carries `items` with no declared `type` at all — that shape
-//      admits no `array`, so it slips past assertion 1 unseen even though it is array-shaped
-//      to every reader and to the schema's own intent.
+//   1. Every top-level parameter admitting `array` also admits `string`.
+//   2. No top-level parameter carries `items` with no declared `type` at all: that shape
+//      admits no `array`, so it slips past assertion 1 unseen.
 //   3. Every array-admitting parameter keeps `items` and states which string forms it accepts,
-//      in one of the sentences below — matched by SENTENCE TEXT, not by parameter name, so
-//      `participants`' own wording (which is deliberately not one of the shared constants) is
-//      accepted on the same footing as the shared ones.
+//      in one of the sentences below, matched by SENTENCE TEXT rather than parameter name, so
+//      `participants`' own wording is accepted on the same footing as the shared constants.
 //   4. Every array-admitting parameter is named in the table below against the coercer that
-//      reads it, checked in BOTH directions. Coercion here is wired by hand per call site —
-//      `assertKnownParams` (src/coerce.ts) is key-strictness only — so a widened type with no
-//      coercer wired is a silent fail-OPEN: the schema now promises a string works, nothing
-//      converts it, and a handler doing `for (const id of "abc")` iterates characters. A
-//      name-pattern scan of the handler files cannot replace this table: `coerceRecipients(a)`
-//      names none of to/cc/bcc/replyTo, and `fields` is read by `parseEmailFields`. The table
-//      is therefore the enumerated claim, not a sampled one.
+//      reads it, checked in BOTH directions. Coercion is wired by hand per call site
+//      (`assertKnownParams` in src/coerce.ts is key-strictness only), so a widened type with
+//      no coercer is a silent fail-OPEN: a handler doing `for (const id of "abc")` iterates
+//      characters. A name-pattern scan of the handlers cannot replace the table:
+//      `coerceRecipients(a)` names none of to/cc/bcc/replyTo, and `fields` is read by
+//      `parseEmailFields`.
 //
-// Scoped to TOP-LEVEL tool parameters only. Nothing below the top level declares an array type
-// on the live surface as of this writing, so that bound is a stated limit rather than
-// machinery, and not itself enforced by a test — a nested array parameter would need this walk
-// extended to reach it.
+// Scoped to TOP-LEVEL tool parameters only. Nothing below the top level declared an array type
+// when this was written, and no test enforces that bound: a nested array parameter would need
+// this walk extended to reach it.
 
-// The accepted string-form sentences, matched by substring. Both LENIENT_LIST_DESC and
-// LENIENT_OBJECT_LIST_DESC (src/index.ts) are copied here verbatim rather than imported:
-// index.ts has no exported seam for them, and copying pins the exact prose a widening must not
-// silently drop. participants' own sentence is included on equal footing — assertion 3 accepts
-// any of these, keyed by text, not by which parameter is being checked.
+// The accepted string-form sentences, matched by substring. LENIENT_LIST_DESC and
+// LENIENT_OBJECT_LIST_DESC (src/index.ts) are copied verbatim because index.ts has no
+// exported seam for them, and copying pins the exact prose a widening must not drop.
 const ARRAY_STRING_FORM_SENTENCES = [
   'Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.',
   'Accepts an array, or a JSON-encoded array as one string; a comma-joined string is NOT accepted.',
@@ -367,10 +339,7 @@ const ARRAY_STRING_FORM_SENTENCES = [
 ];
 
 // Every array-admitting top-level parameter, named against the coercer that reads its string
-// form — derived by reading each call site in index.ts and the handler modules, since coercion
-// here is wired by hand rather than by a naming convention a scan could follow. Checked against
-// the live surface in both directions by the last test below: a wire parameter missing from
-// this table, or a row naming a parameter no longer on the wire, both fail.
+// form, derived by reading each call site in index.ts and the handler modules.
 const ARRAY_PARAM_COERCERS: Record<string, string> = {
   'list_emails.fields': 'index.ts parseEmailFields() -> coerceStringArray',
   'get_email.fields': 'index.ts parseEmailFields() -> coerceStringArray',
@@ -419,17 +388,13 @@ describe('array-side schema drift guard (#98)', () => {
   let tools: any[];
   let bootError: unknown;
 
-  // Spawned ONCE and shared by every test below, unlike toolSchema() above (which spawns a
-  // fresh server per call): a 41-tool walk has no reason to pay for 41 spawns to read one
-  // tools/list. Same env scrub as toolSchema() — every FASTMAIL_* name stripped, then only the
-  // token set — so an ambient setting cannot be what the assertions below see.
+  // Spawned ONCE and shared by every test below, with the same env scrub as toolSchema(), so
+  // an ambient setting cannot be what the assertions see.
   //
-  // The spawn/init/list is wrapped in its own try/catch, unlike the assertDistIsCurrent() call
-  // above it: a throwing before() makes node:test report the whole suite CANCELLED, not
-  // failed — fail 0, a green-looking exit, the real reason buried in a hook stack trace (the
-  // same trap assertDistIsCurrent's own definition comment names for a missing build). Storing
-  // the error and asserting it below turns a boot or tools/list failure into an ordinary
-  // failing assertion instead.
+  // The spawn/init/list has its own try/catch: a throwing before() makes node:test report the
+  // whole suite CANCELLED, not failed (fail 0, a green-looking exit). Storing the error and
+  // asserting it in the first test turns a boot or tools/list failure into a failing
+  // assertion instead.
   before(async () => {
     assertDistIsCurrent();
     const env: Record<string, string> = {};
@@ -453,8 +418,6 @@ describe('array-side schema drift guard (#98)', () => {
     }
   });
 
-  // Every top-level property of every tool, flattened so a failure can name which tool and
-  // which parameter, alongside the schema fragment under test.
   function topLevelParams(): { key: string; declared: any }[] {
     const out: { key: string; declared: any }[] = [];
     for (const tool of tools) {
@@ -466,9 +429,8 @@ describe('array-side schema drift guard (#98)', () => {
   }
 
   it('sees all 41 tools on the wire', () => {
-    // Checked here, first, so a boot/list failure caught in before() (see the comment there)
-    // reads as this test's own failure rather than every test below blaming an empty tool set
-    // on the wrong thing.
+    // Checked first, so a boot/list failure caught in before() reads as this test's failure
+    // rather than every test below blaming an empty tool set on the wrong thing.
     assert.equal(
       bootError,
       undefined,
@@ -477,15 +439,10 @@ describe('array-side schema drift guard (#98)', () => {
     );
 
     // A floor on the TOOL count, separate from the array-admitting floor below: a tool
-    // removed outright (rather than a parameter narrowed) shrinks `tools` itself, which every
-    // assertion below would otherwise absorb silently — each just walks fewer properties.
-    // Kept as its own test so a failure here reads as "a tool went missing", not "a parameter
-    // widening broke", which is what the array-admitting floor's own message says instead.
-    // Pinned to the count on the day this was written (41), not a loose sanity margin, so a
-    // single deliberate removal trips it. `>=` cannot see the opposite case: adding a tool
-    // takes the count to 42 and this floor stays green, so it is only as good as whoever adds
-    // one remembering to raise it too — do that in the same change, or single-removal
-    // sensitivity erodes straight back toward the loose margin this floor replaced.
+    // removed outright shrinks `tools` itself, which every assertion below would absorb
+    // silently. Pinned to the exact count so a single removal trips it. `>=` cannot see an
+    // added tool, so raise this floor in the same change that adds one, or it loses
+    // single-removal sensitivity.
     assert.ok(
       tools.length >= 41,
       `found only ${tools.length} tools (expected 41); either tools/list stopped returning the ` +
@@ -496,13 +453,9 @@ describe('array-side schema drift guard (#98)', () => {
   it('never advertises array without also admitting string', () => {
     const params = topLevelParams();
     // A floor on the ARRAY-ADMITTING set, not the total walked: re-spelling every array
-    // parameter as a narrow `type: 'string'` still walks every tool and every parameter, so a
-    // floor on the walk itself would stay green through exactly the regression this guard
-    // exists to catch. This floor fails if the admittedTypes() match goes blind OR if array
-    // parameters are actually removed — either way, "the array check stopped seeing
-    // arrays" is the fact worth surfacing, distinct from the cure below. Pinned to today's
-    // actual count (41), same reasoning as the tool floor above: a deliberate removal or
-    // narrowing updates this number on purpose, in the same change.
+    // parameter as a narrow `type: 'string'` still walks every parameter, so a floor on the
+    // walk would stay green through exactly the regression this guard catches. Pinned to the
+    // exact count, like the tool floor above.
     const arrayAdmitting = params.filter((p) => admittedTypes(p.declared).includes('array'));
     assert.ok(
       arrayAdmitting.length >= 41,
@@ -525,11 +478,8 @@ describe('array-side schema drift guard (#98)', () => {
         `ships with nothing behind it: ${offenders.join(', ')}`,
     );
 
-    // A second, separate offender list: every array-admitting parameter in this codebase
-    // today is the exact pair ['array', 'string'], never a wider set, so a third admitted
-    // type is a change nobody has explained rather than a variant of the convention above.
-    // No filter for "admits string" here: the assertion above throws on any array-admitting
-    // parameter that does not, so this code only ever runs once every one of them already does.
+    // No "admits string" filter needed: the assertion above has already thrown on any
+    // array-admitting parameter that does not.
     const extraTypeOffenders = arrayAdmitting
       .filter((p) => admittedTypes(p.declared).some((t) => t !== 'array' && t !== 'string'))
       .map((p) => {
@@ -613,12 +563,10 @@ describe('array-side schema drift guard (#98)', () => {
 // 1b-bis. The calendar tools advertise `transparency` (#194)
 // ---------------------------------------------------------------------------
 //
-// Same reason as the block above: only the ADVERTISED schema says what a client will see. A
-// parameter the handler threads but the schema never declares is unreachable through a
-// validating client — the call is rejected before any handler runs — and the caldav-client
-// tests, which call the client methods directly, cannot tell that apart from a wired-up
-// parameter. This is the one assertion that spans the whole path: the `TOOLS` literal in
-// index.ts, the build, and the real process's tools/list response.
+// A parameter the handler threads but the schema never declares is rejected by a validating
+// client before any handler runs, and the caldav-client tests, which call the client
+// directly, cannot tell that apart from a wired-up parameter. This is the one assertion that
+// spans the `TOOLS` literal, the build, and the real process's tools/list response.
 
 describe('the calendar write tools advertise transparency with its closed value set', () => {
   before(() => assertDistIsCurrent());
@@ -675,12 +623,10 @@ describe('the calendar write tools advertise transparency with its closed value 
 // 1c. FASTMAIL_TIMEZONE refuses to start the real process (#157 amendment)
 // ---------------------------------------------------------------------------
 //
-// resolveConfiguredTimezone's throw path (coerce.test.ts) proves the pure logic; this proves
-// the thing that actually matters operationally — that runServer() in index.ts really does
-// call process.exit(1) with the message on stderr, rather than starting up and silently
-// working out of the wrong zone. That wiring lives in runServer() itself and is not covered by
-// any in-process unit test (importing src/index.ts would run runServer() for real and try to
-// open a stdio transport), so a spawned real process is the only way to prove it.
+// coerce.test.ts covers resolveConfiguredTimezone's throw; this proves runServer() really
+// calls process.exit(1) with the message on stderr rather than starting in the wrong zone.
+// Importing src/index.ts would run runServer() for real and open a stdio transport, so only
+// a spawned process can prove that wiring.
 
 describe('an unusable FASTMAIL_TIMEZONE refuses to start the built server', () => {
   before(() => assertDistIsCurrent());
@@ -725,11 +671,9 @@ describe('an unusable FASTMAIL_TIMEZONE refuses to start the built server', () =
     assert.match(result.stderr, /is not a time zone this server can resolve/);
   });
 
-  // A server that starts successfully keeps running (it awaits requests on stdio), so it never
-  // exits on its own — spawnSync would just hang until its timeout and report a kill, not a
-  // clean exit. These spawn asynchronously instead, wait for the "running on stdio" line on
-  // stderr (or a timeout), then kill the process explicitly — the same shape mcp-harness.mjs
-  // uses for its own client, but scoped down to only what a stderr assertion needs.
+  // A server that starts successfully never exits on its own, so spawnSync would hang until
+  // its timeout. These spawn asynchronously, wait for the "running on stdio" line on stderr
+  // (or a timeout), then kill the process.
   function spawnAndCaptureStartupLine(env: Record<string, string>): Promise<{ stderr: string; exited: boolean }> {
     return new Promise((resolve) => {
       const child = spawn(process.execPath, [SERVER_ENTRY], { env });
@@ -831,12 +775,10 @@ describe('tsdav credential logging is suppressed', () => {
   }
 
   it('logs the account identity without the suppression (control)', () => {
-    // Without this control the suppression test would silently go vacuous the day
-    // tsdav stops logging anything from the auth helper, and would keep passing
-    // while a real regression elsewhere went unnoticed. It deliberately asserts on
-    // the account identity rather than the passphrase: which of the two tsdav
-    // prints is tsdav's choice and has already changed once, so pinning the exact
-    // secret form would make a routine bump red for no security reason.
+    // Without this control the suppression test would go vacuous the day tsdav stops
+    // logging from the auth helper. It asserts on the account identity rather than the
+    // passphrase: which of the two tsdav prints is tsdav's choice and has changed
+    // before, so pinning the secret form would make a routine bump red for no reason.
     const child = runTsdavCall({ loadServer: false });
     assert.equal(child.status, 0, `probe failed: ${child.stderr}`);
     assert.ok(
@@ -889,8 +831,7 @@ describe('tsdav credential logging is suppressed', () => {
     // Find whatever identifier tsdav binds the debug factory to, then collect every
     // string literal it is called with. Keyed off the import rather than off the
     // string "tsdav", so a namespace renamed to something else is still collected.
-    // Both binding forms stay recognised: the ESM build imports, and a future build
-    // shape could go back to a require.
+    // The require form stays for a future build shape that goes back to require.
     const binding =
       source.match(/import\s+(\w+)\s+from\s*['"]debug['"]/) ??
       source.match(/(?:var|const|let)\s+(\w+)\s*=\s*require\(['"]debug['"]\)/);
@@ -904,10 +845,8 @@ describe('tsdav credential logging is suppressed', () => {
     // reimplementing the glob.
     const { default: createDebug } = await import('debug');
     // `disable()` returns the namespace string currently in force and clears it, so
-    // it both captures the state to restore and puts the matcher in a known one. The
-    // alternative read, `createDebug.namespaces`, is a real runtime property that
-    // @types/debug does not declare, and reaching it would need a cast; this is the
-    // declared API for the same job.
+    // it both captures the state to restore and puts the matcher in a known one.
+    // `createDebug.namespaces` would need a cast: @types/debug does not declare it.
     const restore = createDebug.disable();
     try {
       createDebug.enable('*,-tsdav*');

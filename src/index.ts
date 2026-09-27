@@ -39,9 +39,7 @@ const MAX_ICAL_TOTAL_KB = MAX_ICAL_TOTAL_BYTES / 1024;
 //
 //   * The skip is `-tsdav*` with NO colon. `-tsdav:*` matches only colon-prefixed
 //     children, so a logger created as bare `tsdav` — or a future `tsdavFoo` — would
-//     still log. The bare glob covers every current namespace (tsdav:account,
-//     tsdav:addressBook, tsdav:authHelper, tsdav:calendar, tsdav:collection,
-//     tsdav:request) and any sibling a future release adds.
+//     still log.
 //   * Deleting process.env.DEBUG here does NOT work: the `debug` package snapshots the
 //     environment once at its own module init, and under ESM the whole import chain
 //     (caldav-client -> tsdav -> debug) evaluates before this module's body runs. This
@@ -113,12 +111,9 @@ function getAuthConfig(): FastmailConfig {
     'fastmail_base_url',
   ]);
 
-  // Opt-in for self-hosted JMAP servers. Required to use any base URL outside
-  // the api.fastmail.com / www.fastmailusercontent.com allowlist (which already
-  // covers Fastmail's regional hosts, e.g. phl.api.fastmail.com).
-  // Deliberately env-only: this kill switch is not exposed as a DXT user_config
-  // key, so it resolves a single name rather than the four-name fallback the
-  // configurable settings use.
+  // Opt-in for self-hosted JMAP servers (base URLs outside the Fastmail host allowlist).
+  // Deliberately env-only: this kill switch is not a DXT user_config key, so it resolves
+  // a single name rather than the four-name fallback.
   const unsafeInfo = findEnvValue([
     'FASTMAIL_ALLOW_UNSAFE_BASE_URL',
   ]);
@@ -221,17 +216,10 @@ function getAttachDir(): string | undefined {
 // local-disk opt-in has nothing to say about it (see docs/security-model.md).
 //
 // Parsed STRICTLY: only "true" or "1" enable it. A truthy-string test would read
-// FASTMAIL_ALLOW_BLOB_ATTACH="false" as ON, turning an operator's explicit refusal into the
-// capability they refused. Same parse as the base-URL kill switch — but resolved through the
-// four-name fallback the configurable settings use, not that one's deliberate single name,
-// so a host that only forwards USER_CONFIG_* spellings can still set it.
-//
-// Settable from a DXT install too: manifest.json declares `fastmail_allow_blob_attach` as a
-// boolean in both user_config and server.mcp_config.env, so a host renders it as a checkbox
-// and hands the answer over as "true"/"false". "false" is exactly what the strict parse
-// above reads as off, so the unchecked box means what it looks like. The base-URL kill
-// switch stays out of the manifest; this is a send capability, not a security control that
-// decides where the token may be sent.
+// FASTMAIL_ALLOW_BLOB_ATTACH="false" as ON — and "false" is exactly what the DXT checkbox
+// (manifest.json `fastmail_allow_blob_attach`) sends when unchecked. Resolved through the
+// four-name fallback, unlike the base-URL kill switch, so a host that only forwards
+// USER_CONFIG_* spellings can still set it.
 function getAllowBlobAttach(): boolean {
   const info = findEnvValue([
     'FASTMAIL_ALLOW_BLOB_ATTACH',
@@ -272,26 +260,17 @@ function attachmentsDescription(forEdit: boolean): string {
     `To remove all, use clearFields:['attachments']. Passing attachments together with clearFields:['attachments'] is rejected as a conflict.`;
 }
 
-// How an `attachmentId` names a part, shared verbatim by the two places a caller supplies
-// one: download_attachment (read a part out) and an attachments item (attach a part to
-// outgoing mail). Written once because the resolver is one function — a per-site copy would
-// drift from it and from each other, and the entry-number rule differs between the sites in
-// exactly one way, which is stated here rather than left to two half-descriptions.
+// How an `attachmentId` names a part, shared by download_attachment and an attachments
+// item because one resolver serves both; the one difference (entry numbers) is stated here.
 const ATTACHMENT_REF_DESC =
   'Which part to use. Four accepted forms, resolved in this fixed order: (1) a partId from get_email_attachments; (2) a blobId; (3) cid:<value> for an embedded image, using the cid from get_email — the cid: prefix is REQUIRED for this form, only the first one is stripped (cid:cid:x looks up the Content-ID "cid:x"), and a value matching more than one part is rejected rather than guessed at; (4) a plain entry number (0, 1, 2, ...) counting from the start of the get_email_attachments listing. The order is a real precedence, not a single match: every part is checked for a matching partId before any is checked for a matching blobId, and digits therefore resolve as a partId FIRST — Fastmail partIds are themselves digit strings — so the entry-number form applies only when no part claims that value. A number with anything else in it (3a, -1, 1.5) is rejected rather than silently read as an entry number. ' +
   'The entry-number form is READ-ONLY: entry numbers are positional and shift whenever the listing does, so download_attachment accepts one for a one-off read, while attaching a part to outgoing mail rejects a reference that resolved only that way (the rejection is on how it resolved, not on how the string looks) — pass a partId or blobId there, and prefer one anywhere you will reuse the reference.';
 
-// `leadIn` prepends tool-specific context to the shared description (defaulted to ''
-// so send/edit are untouched) — draft_email uses it to state how NEW uploads relate to
-// the original's own carried attachments on a forward.
-//
-// The item schema is FLAT: all seven keys sit in one `properties` map, with the exactly-one-
-// source rule stated in prose. Item-level `oneOf` branches would hide the key list from a
-// reader for no enforcement gain — the SDK does not validate inputSchema at all, so
-// coerceAttachments' source rules are the only real gate either way. (A TOP-LEVEL oneOf on a
-// tool's inputSchema would be worse than useless: it leaves `properties` undefined, which
-// empties that tool's TOOL_SCHEMAS key set and makes assertKnownParams reject every call.)
-// There is no `required` for the same reason: no single key is required on every item.
+// The item schema is FLAT, with the exactly-one-source rule stated in prose: item-level
+// `oneOf` branches would hide the key list for no enforcement gain, since the SDK does not
+// validate inputSchema and coerceAttachments is the only real gate. (A TOP-LEVEL oneOf would
+// leave `properties` undefined and make assertKnownParams reject every call.) No `required`:
+// no single key is required on every item.
 function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
   return {
     type: ['array', 'string'],
@@ -311,22 +290,14 @@ function attachmentsSchemaProperty(forEdit: boolean, leadIn = '') {
   };
 }
 
-// Shared `participants` schema for the two calendar write tools, so the accepted shapes
-// stay identical between create and update. `leadIn` carries the per-tool sentence
-// (create adds an ORGANIZER; update REPLACES the whole attendee list).
+// Shared `participants` schema for the two calendar write tools.
 //
-// The shared text has to say that naming an attendee SENDS them mail, because nothing
-// else here does. The invitation is emitted by the server's scheduling layer when the
-// event is written, not by any tool in this server, so a caller reasoning about which
-// tools transmit — send_draft and nothing else — reaches the wrong answer about this one.
-// Confirmed live: an event created with one attendee produced an outbound invitation, and
-// deleting that event produced the matching cancellation.
+// The shared text has to say that naming an attendee SENDS them mail: the server's
+// scheduling layer emits the invitation (and, on delete, the cancellation; confirmed live),
+// so a caller reasoning "only send_draft transmits" gets this one wrong.
 //
-// The type is widened to ['array', 'string'] for the same reason every lenient boolean is
-// widened: coerceParticipants accepts a JSON-stringified array from clients that
-// stringify structured params, and a client validating against a narrow `type: 'array'`
-// would reject that string before dispatch, making the coercion unreachable. The
-// description spells out which strings work, because the type alone does not say.
+// The type is widened to ['array', 'string'] so a validating client does not reject the
+// JSON-string form coerceParticipants accepts before dispatch.
 function participantsSchemaProperty(leadIn: string) {
   return {
     type: ['array', 'string'],
@@ -348,17 +319,8 @@ function participantsSchemaProperty(leadIn: string) {
 }
 
 /**
- * How `calendarId` is matched, said ONCE for the two tools that take one.
- *
- * The read and the write path resolve it through ONE function, so everything below holds
- * identically on both: the same filtered calendar list, the same trim, the same fail-closed
- * treatment of an empty value, the same not-found error, and — since issue #173 — the same
- * answer to a tie. Only the descriptions had diverged: 394 characters on the read side against
- * 41 on the write side ("ID of the calendar to create the event in"), so a caller reading the
- * write tool could not learn that a display name works, that it is matched case-sensitively
- * with surrounding whitespace ignored on both sides, or that a miss is rejected rather than
- * answered emptily.
- *
+ * How `calendarId` is matched, said ONCE for the two tools that take one: the read and the
+ * write path resolve it through ONE function, so everything below holds on both (#173).
  * `update_calendar_event` takes no calendarId, so these two are the whole set.
  */
 const CALENDAR_ID_MATCHING_DESC =
@@ -374,12 +336,9 @@ const CALENDAR_ID_MATCHING_DESC =
   'that URL.';
 
 /**
- * What `eventId` accepts, on all three tools that take one, written once (#137).
- *
- * The three descriptions had said different amounts about the same parameter — get_calendar_event
- * said only "ID of the event to retrieve" — and the rules below hold identically for all of them,
- * because all three resolve the id through one lookup. Appended to each tool's own eventId text
- * rather than replacing it: what a WRONG id costs differs per tool, and that part stays local.
+ * What `eventId` accepts, on all three tools that take one, written once because all three
+ * resolve the id through one lookup (#137). Appended to each tool's own eventId text rather
+ * than replacing it: what a WRONG id costs differs per tool, and that part stays local.
  */
 const CALENDAR_EVENT_ID_DESC =
   ' Accepts the event\'s `id` (its UID) or the `url` from a list_calendar_events row. BOTH FORMS ARE ALWAYS TRIED, ' +
@@ -409,14 +368,11 @@ function getTimezone(): string | undefined {
   ]).value;
 }
 
-// The IANA zone name actually in force for calendar reads, resolved once so the
-// list_calendar_events/get_calendar_event descriptions below can say "no timeZone means
-// THIS zone" instead of leaving a model to infer it from FASTMAIL_TIMEZONE's env-var name.
-// Reads the environment directly rather than through `setDefaultTimezone`'s stored value, so
-// it does not depend on that call having run first — TOOLS is built once at module load,
-// before any request has reached the handler that calls `setDefaultTimezone`. Resolved by the
-// same `resolveConfiguredTimezone` as `runServer()`; where that throws, `runServer()` exits
-// before any client reads a description, and the fallback only keeps this module importable.
+// The zone in force for calendar reads, so the descriptions can say "no timeZone means THIS
+// zone". Reads the environment directly, not `setDefaultTimezone`'s stored value: TOOLS is
+// built at module load, before runServer calls `setDefaultTimezone`. Resolved as runServer
+// resolves it; where that throws, runServer exits before any client reads a description, and
+// the fallback only keeps this module importable.
 const CONFIGURED_TIMEZONE = (() => {
   try {
     return resolveConfiguredTimezone(getTimezone()).zone;
@@ -425,16 +381,10 @@ const CONFIGURED_TIMEZONE = (() => {
   }
 })();
 
-// Appended to every boolean whose handler runs coerceBool. The schema declares
-// `type: ['boolean', 'string']` alongside it, so a validating client can actually send
-// the string form; declaring the pair together keeps the advertised type and the runtime
-// coercion from drifting apart. A narrow `type: 'boolean'` makes the coercion
-// unreachable, which is the failure this note exists to prevent. (#54)
-//
-// The prose earns its bytes on top of the widened type: `["boolean","string"]` says a
-// string is accepted but not WHICH strings, and coerceBool recognises only "true"/"false"
-// — anything else falls back to the parameter's default rather than erroring, so a caller
-// guessing "1" or "yes" would get the default with no signal.
+// Appended to every boolean whose handler runs coerceBool, alongside a schema type of
+// `['boolean', 'string']`: a narrow `type: 'boolean'` makes the coercion unreachable from a
+// validating client (#54). The prose says WHICH strings, because coerceBool reads only
+// "true"/"false" and anything else ("1", "yes") silently falls back to the default.
 const LENIENT_BOOL_DESC =
   ' Also accepts the strings "true"/"false", for clients that stringify booleans.';
 
@@ -448,24 +398,16 @@ function lenientBool(description: string): string {
   return description + (needsStop ? '.' : '') + LENIENT_BOOL_DESC;
 }
 
-// Shared scope-control descriptions for the read tools, defined once so the per-flag
-// strings and the reliability-contract clause stay in sync between the tools rather than
-// drifting as hand-copied strings.
-//
-// The set is SPLIT by what is true of a given tool, not by tool name: the base constants
-// say only what holds for any tool with a single `mailbox` scope parameter (today
-// list_emails and search_emails), and the SEARCH_-prefixed constants append the clauses
-// that exist only where the multi-mailbox scope arrays do — which is search_emails alone,
-// because list_emails deliberately does not offer them. Do not fold a search-only clause
-// back into a base constant, or the base ones start describing parameters their other
-// consumer doesn't have.
+// Shared scope-control descriptions for the read tools. The base constants say only what
+// holds for any tool with a single `mailbox` scope (list_emails and search_emails); the
+// SEARCH_-prefixed ones add the clauses for the multi-mailbox arrays, which only
+// search_emails has. Do not fold a search-only clause back into a base constant, or it
+// starts describing parameters list_emails doesn't have.
 const EXCLUDE_DRAFTS_DESC =
   lenientBool('Drafts are included by default; set true to omit them from results (and from the total count). (Note: get_thread differs on BOTH axes — it uses includeDrafts AND excludes drafts by default.)');
-// What "excluded" actually means, stated once and carried by both flags so they cannot
-// drift apart. JMAP's only exclusion operator is inMailboxOtherThan, which is SOLELY-IN:
-// it withholds a message only when every mailbox the message is filed in is excluded.
-// Said plainly here because the flag names ("include Trash") imply the opposite reading,
-// under which a caller would conclude a cross-filed message must be missing and re-run.
+// What "excluded" means: JMAP's only exclusion operator, inMailboxOtherThan, is SOLELY-IN.
+// Said plainly because the flag names ("include Trash") imply the opposite reading, under
+// which a caller would conclude a cross-filed message must be missing and re-run.
 const SOLELY_IN_CAVEAT =
   'Exclusion is "solely in": a message is withheld only when EVERY mailbox it is filed in is excluded, so one filed in both Trash and a normal folder is never withheld — it is already in the results and the withheld-count note does not count it.';
 const INCLUDE_TRASH_DESC =
@@ -473,22 +415,17 @@ const INCLUDE_TRASH_DESC =
 const INCLUDE_SPAM_DESC =
   lenientBool('The Spam/Junk folder is excluded by default; set true to also include it in the results. ' + SOLELY_IN_CAVEAT);
 
-// `ascending`, declared identically on the two list/search tools (list_emails,
-// search_emails) so their sort contract can't drift.
 const ASCENDING_DESC =
   lenientBool('Sort oldest first instead of newest first (default: false).');
 
-// The reliability contract that makes silence trustworthy. Lead with the no-note
-// guarantee as its own sentence (a skimming model must hit "no note => trustworthy"
-// first), then the per-signal actions; scoped to the default all-mailbox scope.
+// The reliability contract that makes silence trustworthy. The no-note guarantee leads as
+// its own sentence (a skimming model must hit "no note => trustworthy" first).
 //
-// Each note is quoted through the phrase constants buildExclusionNote itself emits
-// (src/response-formatters.ts), never as hand-copied text: telling a caller to look for a
-// string the server never prints reads to it as "no note", which is the one conclusion
-// this contract exists to make safe.
-// The per-signal actions, shared verbatim; only the lead "what silence promises" sentence
-// differs between the tools, because on search_emails the caller can have withheld
-// messages itself and silence has to be qualified accordingly.
+// Each note is quoted through the phrase constants buildExclusionNote itself emits, never
+// hand-copied: telling a caller to look for a string the server never prints reads to it
+// as "no note", which is the one conclusion this contract exists to make safe. Only the
+// lead sentence differs between the tools, because on search_emails the caller can have
+// withheld messages itself.
 const SCOPE_NOTE_ACTIONS =
   `A note saying "${excludedCountPhrase('Trash/Spam')}" means re-run (includeTrash:true / includeSpam:true, or mailbox:"trash"/"junk") to see those matches. ` +
   `A note saying "${UNCONFIRMED_COUNT_PHRASE}" or "${NOT_EXCLUDED_PHRASE}" means re-run to be sure. ` +
@@ -498,32 +435,24 @@ const SCOPE_RELIABILITY_CONTRACT =
   'When you search the default scope (no mailbox set): NO note means nothing was withheld — no message filed ONLY in Trash/Spam matched this search, so do not re-run with includeTrash/includeSpam just to re-check the same query. ' +
   SCOPE_NOTE_ACTIONS;
 
-// search_emails additionally has the multi-mailbox scope arrays, and they land on
-// opposite sides of the disable rule — which is exactly the thing a caller would guess
-// wrong, so it is stated rather than left to symmetry. The lead sentence is also
-// qualified rather than inherited: excluding Trash or Spam through excludeMailboxes takes
-// that role out of the default set, so silence there means "nothing was withheld BEYOND
-// what you excluded" — the unqualified promise would be literally false in that state.
+// search_emails' scope arrays land on opposite sides of the disable rule, which a caller
+// would guess wrong from symmetry. The lead sentence is qualified because excluding
+// Trash/Spam through excludeMailboxes makes the unqualified promise literally false.
 const SEARCH_SCOPE_RELIABILITY_CONTRACT =
   'When you search the default scope (no mailbox and no requiredMailboxes set): NO note means nothing was withheld beyond what you excluded yourself — no message filed ONLY in Trash/Spam matched this search, other than any Trash/Spam you named in excludeMailboxes, so do not re-run with includeTrash/includeSpam just to re-check the same query. ' +
   SCOPE_NOTE_ACTIONS +
   ' requiredMailboxes is an explicit scope too and turns the default exclusion and its note off the same way; excludeMailboxes does NOT — the default exclusion and its note stay on, minus any Trash/Spam role you excluded yourself.';
 
-// The forms every mailbox-taking parameter accepts, written ONCE and shared by all of
-// them — the scalar ones (mailbox / targetMailbox / parent) and the array ones (the label
-// tools' mailboxes, search_emails' requiredMailboxes/excludeMailboxes) alike. They resolve
-// through a single matcher, so a form documented on one tool and not another would be a
-// documentation-only difference, and the path form is specified here and nowhere else in
-// the schemas.
+// The forms every mailbox-taking parameter accepts, scalar and array alike. They resolve
+// through a single matcher, so they are written once; the path form is specified here and
+// nowhere else in the schemas.
 const MAILBOX_REF_FORMS =
   'Accepts an id, a role (inbox, archive, sent, drafts, trash, junk), a folder name (e.g. Receipts), or a root-anchored path (e.g. Archive/2026/Receipts): "/"-separated, no leading or trailing slash, segments matched case-insensitively. ' +
   'A folder name matching exactly one mailbox wins over reading the same text as a path, so a folder whose own name contains "/" stays reachable by that name — unless the same text ALSO reaches a different mailbox as a path (a folder named "A/B" alongside a real A > B nesting), which is rejected as ambiguous and answered with the id of each, since no path can tell those two apart. ' +
   'A name shared by several mailboxes is rejected as ambiguous, listing their full paths — retry with one of those, or with the id. An unknown mailbox is rejected with the valid list. ' +
   'list_mailboxes returns each mailbox\'s path, and a path it returns can be pasted straight back into this parameter.';
 
-// True of every read tool that scopes by a single mailbox (list_emails, search_emails).
-// Anything specific to the multi-mailbox arrays belongs in SEARCH_MAILBOX_PARAM_DESC
-// below, not here — the other one does not have them.
+// Anything specific to the multi-mailbox arrays belongs in SEARCH_MAILBOX_PARAM_DESC.
 const MAILBOX_PARAM_DESC =
   'Mailbox to scope to. ' + MAILBOX_REF_FORMS +
   ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion.';
@@ -533,10 +462,7 @@ const SEARCH_MAILBOX_PARAM_DESC =
   MAILBOX_PARAM_DESC +
   ' It is exactly the single-mailbox shorthand for requiredMailboxes: mailbox:"X" and requiredMailboxes:["X"] are the same query, with no hidden difference. Passing both is allowed — they fold into one intersection (the message must be in all of them).';
 
-// The two multi-mailbox scope arrays (#26). Both take every reference form the scalar
-// `mailbox` takes, resolved by the same exact matcher as the label arrays and with the
-// same all-or-nothing rejection, so a path or role learned on one works on the others and
-// a bad array is fixed in one retry.
+// The two multi-mailbox scope arrays (#26).
 const SCOPE_ARRAY_REJECT_DESC =
   ' Any entry that fails to resolve rejects the whole call (no widened search runs), and the error names every failing entry at once. Every entry must be a string; a non-string entry is rejected by index.';
 
@@ -567,121 +493,81 @@ const DRAFT_MAILBOX_PARAM_DESC =
 const STATS_MAILBOX_PARAM_DESC =
   'Mailbox to report on (optional, defaults to all mailboxes). ' + MAILBOX_REF_FORMS;
 
-// The parent narrowing on list_mailboxes and the nesting parent on create_mailbox are
-// different jobs, so they get separate leading sentences over the shared forms.
 const LIST_PARENT_PARAM_DESC =
   'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox. ' + MAILBOX_REF_FORMS;
 
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
 
-// The string forms a lenient list parameter accepts, appended to the parameter's own
-// description. The prose earns its place on top of the widened type for the same reason
-// lenientBool's does: `["array", "string"]` says a string is accepted but not WHICH strings,
-// and the two coercers behind these parameters do not read the same set. (#98)
+// The string forms a lenient list parameter accepts, appended to its description: the
+// widened type says a string is accepted but not WHICH strings (#98). The OBJECT-item lists
+// (attachments, the contact entry lists) read a whole-value string ONLY as a JSON array, so
+// they take LENIENT_OBJECT_LIST_DESC instead; promising them a comma-separated list would
+// advertise a shape that errors.
 //
-// coerceStringArray takes all three forms. The OBJECT-item lists (attachments, and the
-// contact entry lists) go through coercers that read a whole-value string ONLY as a
-// JSON-encoded array and reject anything else naming the parameter, so promising those a
-// comma-separated list would advertise a shape that errors.
+// Declared HERE, above the first description that appends it: those are `const`
+// initialisers evaluated in file order, and a reference from further up would hit the
+// temporal dead zone.
 //
-// Declared HERE, above the first description that appends it: several of those are plain
-// `const` initialisers evaluated in file order, and one referencing this from further up
-// would read it in its temporal dead zone.
+// `participants` says it in its own words, deliberately: its sentence carries a worked JSON
+// example of the object shape. Do not replace it with a constant for uniformity.
 //
-// EVERY LIST PARAMETER IN THIS FILE NOW DECLARES ITS STRING FORM AND SAYS WHICH STRINGS IT
-// READS. `participants` is the one that says it in its own words rather than by appending a
-// constant, and that is deliberate: its sentence carries a worked JSON example of the object
-// shape, which neither constant can. Do not replace it with one of these for the sake of
-// uniformity.
-//
-// This is now guarded (#98): src/built-server.test.ts's `array-side schema drift guard` reads
-// the ADVERTISED schema off a spawned server and fails a top-level parameter that admits
-// `array` with no `string` alternative, that carries `items` with no `type` at all, that drops
-// `items` or its string-form sentence, or that is not named against a coercer in its table.
-// Two bounds stay open, stated there rather than fixed by this comment: the walk covers
-// TOP-LEVEL tool parameters only, and the table pins that a coercer is NAMED for a parameter —
-// not that the named coercer is the right one, or that it actually runs.
+// Guarded by the `array-side schema drift guard` in src/built-server.test.ts, which states
+// its own bounds.
 const LENIENT_LIST_DESC =
   ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
 
-// The recipient lists (to/cc/bcc/replyTo on draft_email and edit_draft) accept every SHAPE
-// LENIENT_LIST_DESC names, and then FAIL CLOSED on a value that cannot be read as one:
-// coerceRecipients puts all four through coerceStringArrayStrict, so a present-but-unusable
-// value is a refusal naming the parameter rather than a silent undefined. It has to be said
-// on the surface because the two things a dropped recipient field turns into are both
-// plausible outcomes the caller would not question — a reply that quietly reverts to
-// reply-all, an edit that reports success while changing nothing. Its by-index element clause
-// is the one SCOPE_ARRAY_REJECT_DESC carries for the mailbox scope arrays, in a recipient
-// list's vocabulary; the whole-value clause has no counterpart there.
+// The recipient lists (to/cc/bcc/replyTo on draft_email and edit_draft) FAIL CLOSED through
+// coerceStringArrayStrict. Said on the surface because a dropped recipient field turns into
+// an outcome the caller would not question: a reply that quietly reverts to reply-all, an
+// edit that reports success while changing nothing.
 //
-// WHAT AN EMPTY WHOLE VALUE MEANS IS NOT SAID HERE, and must not be: this string is appended
-// to all eight parameters, and the answer differs between them. On draft_email an empty value
-// reads as absence, so on mode:'reply' an empty to/cc/bcc leaves the reply-all defaults
-// RUNNING; on every edit_draft recipient field an empty value is refused outright
-// (updateDraft, "cannot be empty; ... clearFields"). All this says is that an empty value is
-// not a TYPE refusal — the coercion reads it — and each parameter's own description states
-// what it then means.
+// WHAT AN EMPTY WHOLE VALUE MEANS IS NOT SAID HERE, and must not be: the answer differs
+// between the eight parameters (draft_email reads it as absence, edit_draft refuses it), so
+// each parameter's own description states it.
 const RECIPIENT_LIST_STRICT_DESC =
   ' A value that is present but cannot be read as a list of addresses (a number, an object, a boolean) rejects the whole call naming this parameter; it is never ignored, because a field dropped here would read as one you never passed. Every entry must be a non-empty string, and a non-string or blank entry is rejected by index. An empty or whitespace-only value for the WHOLE parameter — [], "" or " " — is read as the empty list rather than refused as a bad type, which a blank ENTRY is. What an empty list then MEANS is each tool\'s own rule rather than a shared one.';
 
-// The denial is spelled out rather than left to be inferred from what this sentence omits: a
-// caller who has just read the comma-separated form on a sibling parameter is exactly the one
-// who will try it here, and the rejection names the parameter without naming the shape to use.
+// The denial is spelled out: a caller who has just read the comma-separated form on a sibling
+// parameter is exactly the one who will try it here.
 const LENIENT_OBJECT_LIST_DESC =
   ' Accepts an array, or a JSON-encoded array as one string; a comma-joined string is NOT accepted.';
 
-// The label arrays, which take the same forms per entry. A function rather than two
-// constants so the add/remove verb is the only thing that differs.
 const labelMailboxesDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
   LENIENT_LIST_DESC;
 
-// Shared by all four label tools (#133). States the namespace the tools operate in, which a
-// caller cannot infer from "label" alone: Fastmail's own label picker offers the Inbox and
-// the account's user labels and nothing else, while every other role mailbox appears only
-// under "Move to".
+// Shared by all four label tools (#133): the namespace, which a caller cannot infer from
+// "label" alone.
 const LABEL_NAMESPACE_DESC =
   ' Labels here means the Inbox and the account\'s own user labels ONLY. A mailbox with any other JMAP role (archive, trash, junk/Spam, drafts, sent, snoozed, scheduled) is a FOLDER in Fastmail\'s model, not a label — Fastmail\'s label picker does not offer it — so naming one rejects the whole call before anything is written; use move_email or bulk_move to put a message in a folder. The Inbox is the one mailbox in both namespaces: removing the inbox label is exactly what archiving a message is, and adding it is how a message is put back in the Inbox.';
 
-// Shared by remove_labels and bulk_remove_labels. A message must be filed somewhere, so a
-// removal that would take away its last mailbox needs an answer; this states the one the
-// Fastmail client gives, since a caller cannot otherwise predict where the message lands.
+// Shared by remove_labels and bulk_remove_labels: where a message lands when its last
+// mailbox is removed, which a caller cannot otherwise predict.
 const LABEL_REMOVAL_RESCUE_DESC =
   ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. One case is rejected instead of served: the account has no archive-role mailbox at all, so there is no fallback to reach for. It says so and points at move_email/bulk_move or delete_email/bulk_delete. (Removing Archive itself never reaches that question — Archive is a folder, so the namespace rule above rejects it whatever the message is filed under.)' +
   ' Naming a label the message does not carry changes nothing for that message.' +
   ' Every rejection here, and a message whose current filing the server does not report, aborts the WHOLE call before anything is written — the message says so. Per-message server failures are reported per message as usual.' +
-  ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request (see issue #130). That combination has not been measured.';
+  ' Surviving mailboxes are re-asserted in the same write, which is what stops the removal emptying the message; one consequence is that a message also in Scheduled may come back as a failure, because the server appears to reject re-asserting a scheduled membership outside a send request.';
 
-// One canonical explanation of the simplified location + status fields, shared
-// verbatim by every read tool (get_email, get_thread, list_emails, search_emails) so
-// the four can't drift. Carries the only-when-true semantics, the junk=Spam gloss,
-// the "same set, not parallel arrays — test membership" rule, and the
-// keyword-vs-location two-axis model. The rare unresolvedMailboxIds field is
-// intentionally NOT here (documented in the README, not this per-call surface). (#49)
+// The simplified location + status fields, shared by every read tool. The rare
+// unresolvedMailboxIds field is intentionally NOT here (README only, not this per-call
+// surface). (#49)
 const LOCATION_FIELDS_DESC =
   'Use `roles` to tell where a message is filed — stable lowercase JMAP roles: inbox, archive, sent, drafts, trash, junk (junk is the role of the folder shown as "Spam"; there is no "spam" role). `mailboxes` holds folder display names, which the user can rename, so do not identify a folder by a `mailboxes` name (a custom folder can even be named "Trash"). `roles` and `mailboxes` describe the SAME set of mailboxes the message is in (a message can be in several at once) but are NOT positionally aligned — a custom folder appears in `mailboxes` with no `roles` entry — so test membership (roles.includes("trash")), never roles[0] or roles[i] vs mailboxes[i]. Separately, the is* flags (isRead/isFlagged/isDraft/isAnswered/isForwarded) are status, not location: isDraft and a drafts role normally agree, and when they diverge (a draft filed in Trash gives isDraft:true with roles:["trash"]) both are still correct. isAnswered/isForwarded appear only when true. Simplified-only — raw=true returns the underlying JMAP keywords and opaque mailboxIds.';
 
-// Shared, verbatim across the compact-listing read tools (list_emails, search_emails,
-// get_thread) so their preview/size guidance can't drift. Names the trap behind #59: an
-// agent read a `preview` snippet, saw a large `size`, and wrongly concluded the body's
-// real content was absent without ever fetching get_email.
+// Shared by the compact-listing read tools. Names the trap behind #59: concluding from a
+// `preview` and a large `size` that the body's content was absent, without get_email.
 const PREVIEW_SIZE_DESC =
   '`preview` is a truncated snippet (~256 chars max), NOT the full body. `bodyTextSize` is the full text-body size in bytes (it includes quoted history, so treat it as an upper bound); when it is much larger than the preview, fetch get_email before concluding content is absent. `size` is the whole-message size including attachments and inline images, so it is NOT a body-length proxy.';
 
-// Shared, verbatim across draft_email's inReplyTo and references, so the hand-rolled
-// threading hazard is stated on whichever one the caller reaches for. Fastmail groups a
-// message into a conversation by subject as well as by the threading headers, so a draft
-// carrying the headers under a different subject lands on a new threadId; observed after
-// that: every later draft replying to the same original was assigned to that splinter
-// thread too, and deleting the offending drafts did not restore the grouping (#68).
+// Shared by draft_email's inReplyTo and references, so the hand-rolled threading hazard is
+// stated on whichever one the caller reaches for. The splinter behaviour was observed (#68).
 const THREAD_SPLINTER_DESC =
   'THREADING HAZARD: Fastmail groups a message into an existing conversation by SUBJECT as well as by these headers. A draft that carries them under a subject that does not match the thread\'s base subject is given a NEW threadId, and from then on later drafts replying to that same original message are grouped onto that splinter thread as well — including ones created afterwards with the correct "Re:" subject and full reference chain. Deleting the offending drafts does not undo it. The effect is display-only (the headers are correct, so recipients thread normally and sending resolves it), but the drafts stay detached from the conversation in the Fastmail UI. To reply on an existing thread prefer mode:\'reply\', which builds the headers and the matching subject for you and takes a deliberate `subject` override.';
 
-// The `fields` projection, shared verbatim by every read tool that offers it
-// (get_email, list_emails, search_emails, get_thread) so they
-// can't drift. One sentence goes in the tool description (why you would reach for
+// The `fields` projection: one sentence in the tool description (why you would reach for
 // it), the full contract in the parameter description. (#69, #79)
 const FIELDS_TOOL_DESC =
   'Use `fields` to return ONLY the fields you need (e.g. fields:["id","subject","from","date","threadId"]) when the default shape would be too large for one response.';
@@ -689,10 +575,6 @@ const FIELDS_TOOL_DESC =
 const FIELDS_PARAM_DESC =
   'Return ONLY these simplified fields, e.g. ["id","subject","from","date","threadId"] for a headers-only sweep. Response size otherwise depends on what is in the mailbox (thread references and previews dominate a wide listing), so this is the way to keep a many-message read inside one response instead of splitting it into several. Names must match the simplified field names EXACTLY (camelCase); an unknown name is rejected with the full valid list rather than silently returning nothing. Omit the parameter for the default shape - an empty array is rejected. Cannot be combined with raw:true (raw returns untransformed JMAP, whose field names differ). A field a message does not have is simply absent, so a narrow projection can come back as {}. Any field needing the full-message fetch (bodyText, bodyHtml, bodyHtmlSize, attachments, forwardedMessageId, sourceEmailId) is a valid name on list_emails/search_emails but is never populated there — those results carry hasAttachment, isForwarded and bodyTextSize instead; fetch get_email for the rest. Selecting `mailboxes` or `roles` also emits `unresolvedMailboxIds` in the rare case an id could not be resolved, so a partial location is never hidden. On get_thread, `bodyText` IS populated when includeBodies:true (`bodyHtml` never is), and a projected bodyText keeps its signals (quotedBytesStripped/quotedStripSkipped/bodyTextUnavailable) uninvited — without them a stripped body would read as verbatim.';
 
-// The `fields` parameter, declared identically on every read tool that offers it.
-// The type is widened so a validating client passes a stringified array through instead of
-// rejecting it before coerceStringArray ever runs; LENIENT_LIST_DESC names the strings that
-// coercion reads, which the type alone does not say. (#69, #79)
 function fieldsSchemaProperty() {
   return {
     type: ['array', 'string'],
@@ -701,9 +583,7 @@ function fieldsSchemaProperty() {
   };
 }
 
-// Paging, shared verbatim by the two list/search tools (list_emails, search_emails) so
-// their offset contract can't drift. One sentence goes in each tool description (that a
-// result is one page and how to tell there are more), the full contract in the parameter
+// Paging: one sentence in each tool description, the full contract in the parameter
 // description. (#51)
 const POSITION_TOOL_DESC =
   'Results are ONE PAGE: the summary line always states the total number of matches, and when more remain it carries a `nextPosition` to pass back as `position`. No `nextPosition` means you have seen every match — do not re-run to check.';
@@ -711,8 +591,6 @@ const POSITION_TOOL_DESC =
 const POSITION_PARAM_DESC =
   'Skip this many results before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. All filters (including the default Trash/Spam exclusion) are applied server-side to every page, so paging never changes what matches. The Trash/Spam withheld-count note describes the WHOLE match set, not the page: the same count repeats on every page, so never add up the notes across pages. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected (JMAP would read it as counting back from the end; to read from the oldest end use ascending:true) and so is a fraction.';
 
-// The `position` parameter, declared identically on every list/search tool. Numbers are
-// also accepted as strings, matching `limit`, because lenient clients stringify them.
 function positionSchemaProperty() {
   return {
     type: ['number', 'string'],
@@ -720,29 +598,18 @@ function positionSchemaProperty() {
   };
 }
 
-// One canonical statement that the attachment listing is not just "attached files",
-// shared verbatim by every tool that emits one (get_email, get_email_attachments, and
-// get_thread under includeBodies) so they can't drift on what the listing covers (#13).
+// Shared by every tool that emits an attachment listing (#13).
 const UNION_SCOPE_DESC =
   'Attachment entries include images embedded in the message body, not only "attached" files.';
 
-// The two keys a simplified attachment entry gains for embedded images, shared verbatim
-// by the tools that emit simplified entries (get_email, and get_thread under
-// includeBodies, whose messages carry the same entry shape). get_email_attachments
-// deliberately does NOT carry this: it returns raw JMAP parts, which have no derived
-// flag to describe. The sender-declared caveat travels with the keys because both
-// values come from the message itself. (#13)
+// The two keys a simplified attachment entry gains for embedded images. Deliberately NOT
+// on get_email_attachments: it returns raw JMAP parts, which have no derived flag. (#13)
 const INLINE_PAIR_DESC =
   'Attachment entries carry two extra keys for embedded images. isInline:true means EITHER the server routed the part into the message body OR the sender marked it Content-Disposition: inline — so it covers body-displayed images, and also an ordinary file the sender merely labelled inline. `cid` is that part\'s Content-ID: the value a cid: reference in the HTML body points at, and the handle download_attachment accepts as cid:<value>; a part the body actually references has one. Both keys are omitted when they do not apply (isInline never appears as false). Both are SENDER-DECLARED metadata, exactly like `name` and `contentType`: a sender chooses whether a part is marked inline and what it is called, so isInline is a rendering hint, never a reason to treat a part as harmless or to skip inspecting it.';
 
-// Shared verbatim by every tool that shows a caller a Content-ID this server manages
-// (get_email and get_email_attachments both emit `cid` values, and a quoted image's is one
-// of these), so the warning cannot appear on one read and be missing from the other. It
-// matters because the value looks perfectly stable in a single response: it survives edits
-// for as long as the stored body keeps referencing it, and a fresh compose of the same
-// quoted message mints a different one. The compose tools reject an authored reference to
-// one outright, and edit_draft rejects one naming a part the draft does not carry; this is
-// why. (#13)
+// Shared by every tool that shows a caller a Content-ID this server manages (get_email,
+// get_email_attachments). The value looks stable within one response, which is why it
+// needs saying. (#13)
 const MINTED_CID_NONDURABILITY =
   'Server-managed identifiers for quoted images belong to one stored message: they survive edits that keep referencing them, but a fresh reply or forward of the same original mints different ones — so pass an identifier back only from the message you just read, and never author one.';
 
@@ -752,16 +619,12 @@ const MINTED_CID_NONDURABILITY =
 const CARRIED_IMAGE_BOUND_DESC =
   'What is carried is bounded only by this: a part is carried when the body references it AND the sender declared it an image (image/*). The content type is sender-declared metadata — nothing is sniffed and nothing verifies the claim — and there is no size limit and no count limit, because the parts are re-referenced by blob rather than uploaded.';
 
-// Shared verbatim by the compact list/search reads (list_emails, search_emails) and by
-// get_thread's default mode, which fetch no attachment parts at all. Without this,
-// hasAttachment:false reads as "no images" — and Fastmail's hasAttachment heuristic
-// answers "content or decoration", so an embedded logo or a small pasted image is
-// exactly what it filters out. (#13)
+// Shared by the reads that fetch no attachment parts (list_emails, search_emails, default
+// get_thread). Without it, hasAttachment:false reads as "no images". (#13)
 const COMPACT_ATTACHMENT_DESC =
   'These results carry hasAttachment but never the attachment entries themselves, and hasAttachment is a server heuristic that deliberately ignores small decorative images — so a message whose only picture is embedded in its body can read as hasAttachment:false here. Fetch get_email (or get_thread with includeBodies) to see the actual parts.';
 
-// Shared by get_email and get_thread so the two can't drift on what stripping does,
-// what it does NOT touch, and how to read the signal it returns (#73).
+// Shared by get_email and get_thread (#73).
 const STRIP_QUOTED_DESC =
   'Remove quoted reply history from the plain-text body, so a long thread is not re-read at every quote depth. Opt-in; the default output is verbatim. ' +
   'Detection is deliberately conservative and covers the conventional markers only: leading ">" quote runs (including nested ">>"), an "On <date>, <someone> wrote:" attribution directly above such a run, an Outlook From:/Sent:/To:/Subject: header block, and "-----Original Message-----". An unrecognised shape is returned UNCHANGED rather than guessed at. ' +
@@ -769,13 +632,9 @@ const STRIP_QUOTED_DESC =
   'Applies to `bodyText` only — a `bodyHtml` returned alongside it is NOT stripped. Cannot be combined with raw (raw is unmodified JMAP). ' +
   'Stripping can also over-reach, because these markers are conventions rather than syntax: a leading ">" is equally a markdown blockquote or a pasted shell prompt, a pasted email header block (From: with an address, plus To:/Sent:/Subject:) is treated as a quoted section and cuts to the end of the message, and a FORWARDED message\'s content sits below the same "-----Original Message-----" marker, leaving only the covering note. So treat a `quotedBytesStripped` that looks too large for the message as the cue to re-read that message without the flag.';
 
-// The destination parameter shared by move_email and bulk_move, declared once so the two
-// cannot drift on what a destination accepts or on how an unknown one is refused.
-//
-// The delete tool is a PARAMETER for the same reason membershipReplaceDesc's additive tool
-// is: this text is attached to a bulk tool as well as a single-message one, and a bulk
-// caller sent to the single-email `delete_email` would find it rejects their `emailIds`.
-// `archive_email` needs no such treatment — it takes an array and serves both callers.
+// The destination parameter shared by move_email and bulk_move. The delete tool is a
+// PARAMETER because a bulk caller sent to the single-email `delete_email` would find it
+// rejects their `emailIds`; `archive_email` takes an array and serves both.
 const targetMailboxParamDesc = (deleteTool: 'delete_email' | 'bulk_delete') =>
   'Destination mailbox. ' + MAILBOX_REF_FORMS +
   ' A role name resolves to the mailbox carrying that ROLE whenever the account has one, so a user-created folder of the same name does not capture it. That folder is then reachable by its id, or by its full path if it is nested — a TOP-LEVEL folder sharing a role name has a path identical to its name, and the path form is only tried for an input containing a separator, so its id is the only way to reach it. But the role branch is tried FIRST, not exclusively — on an account with no mailbox carrying the role, the name branch runs and a folder of that name is what you get. ' +
@@ -784,28 +643,16 @@ const targetMailboxParamDesc = (deleteTool: 'delete_email' | 'bulk_delete') =>
 
 // The membership-replacement warning shared by move_email and bulk_move.
 //
-// NOT an inventory of what writes mailboxIds whole-value. delete_email and bulk_delete do
-// too (targetMailboxParamDesc above says so, and #123 is the open record of the labels their
-// move to Trash drops). This constant is the warning for the two
-// tools where the caller NAMES a destination and an additive alternative exists, which is
-// what makes the warning actionable rather than merely true.
-//
-// archive_email is deliberately not among them — it patches the Inbox membership away and
-// re-asserts the rest, so it never drops other filing. Neither is the send that files a draft
-// into Sent: it patches too, trading Drafts for Sent by name and leaving a draft's other
-// labels alone (see sendDraft's onSuccessUpdateEmail). Written once because the consequence
-// is the same on both: a message filed under several labels keeps only the destination, and the
-// additive alternative is the one a caller usually wants. The additive tool is a
-// parameter rather than a fixed word — a bulk caller sent to the single-email
-// `add_labels` would find it rejects their `emailIds`, which is a worse outcome than no
-// pointer at all.
+// NOT an inventory of what writes mailboxIds whole-value: delete_email and bulk_delete do
+// too (#123). This is the warning for the two tools where the caller NAMES a destination
+// and an additive alternative exists, which is what makes it actionable. archive_email and
+// send_draft's file-into-Sent both PATCH membership, so neither belongs here. The additive tool
+// is a parameter for the same bulk-vs-single reason as targetMailboxParamDesc.
 const membershipReplaceDesc = (additiveTool: 'add_labels' | 'bulk_add_labels') =>
   'This REPLACES the message\'s entire mailbox membership: every other label/folder it was filed under is removed. ' +
   `To file it somewhere while KEEPING its existing labels, use ${additiveTool} instead — with one limit: the label tools take the Inbox and the account's own labels only, so a folder (any other role mailbox: Archive, Trash, Spam, Drafts, Sent, Snoozed, Scheduled) is reachable only by moving. Archiving is the exception, and archive_email is the tool for it: it drops the Inbox membership and keeps every other label.`;
 
-// What the three contacts READ tools return, written once. All three had a hand-copied
-// duplicate of this sentence and of the `verbose` parameter text below, which is how the
-// wrong field name ("org" for `organization`) survived in all three at once.
+// What the three contacts READ tools return.
 const CONTACT_SHAPE_DESC =
   'Returns simplified format by default: id, name, emails, phones, organization, notes, and kind. ' +
   'In the DEFAULT view kind appears only when the card is NOT an ordinary person, so no kind ' +
@@ -821,7 +668,6 @@ const CONTACT_SHAPE_DESC =
   'individual" reading above applies to the default view only). Use raw=true for the original ' +
   'JMAP response, which also carries kind on every card.';
 
-// The `verbose` parameter text shared by the same three tools.
 const CONTACT_VERBOSE_PARAM_DESC =
   'Return each emails/phones entry whole (contexts, pref and any other stored field) instead ' +
   'of the bare-string-or-{value,label} shape, and include the extra contact fields ' +
@@ -840,19 +686,14 @@ const CONTACT_ECHO_DESC =
   'organizations, nicknames, URLs, anniversaries, group membership, uid and per-entry ' +
   'contexts/pref would have to be restored in a Fastmail client.';
 
-// Single source of truth for the tool catalog. Hoisted to module scope so the
-// CallTool handler can derive each tool's declared parameter set for the
-// unknown-parameter guard (#11) — no drift from what clients see via ListTools.
+// The tool catalog, at module scope so the CallTool handler can derive each tool's
+// declared parameter set for the unknown-parameter guard (#11).
 const TOOLS = [
       {
         name: 'list_mailboxes',
-        // No `properties` projection parameter, deliberately. Upstream added one so that
-        // accounts with hundreds of mailboxes could trim the payload; this server does not
-        // expose it, so a client-side option would be surface nothing can reach, and a
-        // narrowed set that dropped id/name/role/parentId would silently break the path
-        // column and every path-form lookup. The full payload sits well inside the result
-        // window on this account's mailbox count; a large-account trim would be a real
-        // feature to design, not an option to leave unreachable.
+        // No `properties` projection parameter, deliberately (upstream has one): a narrowed
+        // set that dropped id/name/role/parentId would silently break the path column and
+        // every path-form lookup. A large-account trim would be a feature to design.
         description: 'List the mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, path, role, counts). Each mailbox carries `path`, its root-anchored "/"-separated location (e.g. Archive/2026/Receipts), which can be passed straight back to any mailbox parameter. Use parent to list one folder\'s direct children. Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response (no path — raw is untransformed JMAP).',
         inputSchema: {
           type: 'object',
@@ -1045,7 +886,7 @@ const TOOLS = [
       },
       {
         name: 'edit_draft',
-        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). THE BODY YOU SUPPLY IS STORED EXACTLY AS WRITTEN. Nothing is appended, removed, rebuilt or recognised in it: whatever you hand back is what the draft holds, character for character. So to keep a reply\'s quoted original or a forward\'s forwarded-message block, read the draft and hand the whole body back with your edits made in it — the quoted history is just text in the body, and it survives because you sent it, not because this tool detected it. Conversely, a body you send without the quote drops the quote, with no challenge and no warning. The one exception is opt-in and explicit: expandSignature:true expands a `{{signature}}` placeholder you wrote (see that parameter). ANY EDIT THAT WRITES OR CLEARS A BODY REQUIRES bodyHash — the value get_email returns for this draft — which proves you are replacing the body you actually read; a wrong or missing hash is rejected, re-read the draft and try again. Metadata-only edits (subject/recipients/attachments) need no hash and leave both bodies untouched — but an attachment edit can still stale a hash you are HOLDING, because the hash covers the parts the draft\'s body lists carry: removeAttachments taking off a part the server routed into a body list (an embedded image) changes what the hash is taken over with no body written, while taking off a part that only sat in the attachments list changes nothing. Adding one may do the same if the server routes the new part into a body list — this server always writes attachments to the attachments list and does not decide where a later read surfaces them, so that direction is unconfirmed. Either way nothing is lost: your next body edit is rejected and you re-read. The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had, and says so); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Supplying htmlBody to a text-only reply draft converts it to HTML. A draft marked as a forward stays marked as one through every edit; clearFields:[\'forwardedMessageId\'] is how you de-forward it, which also stops send_draft marking the original forwarded, and drops the recorded sourceEmailId with it on a forward draft (the pointer refines the marking it rides on; on a reply draft it stays, since the draft is still a reply to that instance). A name you pass in `from` wins outright; when you pass none, the display name written alongside the From address prefers the name the draft already carries against that address; the identity\'s configured name is only used as a fallback when the draft carries none, so a display name you set yourself is never silently reverted to your account\'s name by an edit that never touched `from` — including a metadata-only edit. A draft whose From matches no identity you can send as keeps its own address and its own display name unchanged. Since JMAP emails are immutable, this creates a replacement draft and moves the old one to Trash (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. The replaced draft is never destroyed: it stays recoverable in Trash until Trash is emptied or auto-purged (Trash retention is a per-account setting), so an edit made from an out-of-date copy of the draft can be undone. The result also reports what the replaced draft contained (subject, recipients, body sizes) — compare it against what you expected to replace. A body edit\'s result carries the bodyHash for your NEXT edit of the draft, read back off the saved message, so a run of edits costs one get_email at the start rather than one between each pair; when a hash cannot be issued honestly the result says so: re-read after an edit that expanded the body, one whose surviving body is a text part this server derived from html, or one whose read-back failed — and recreate the draft, rather than re-reading, when the saved body is one no hash could be spent on at all: a part the server flagged as truncated or as having an encoding problem, a body part no read returns (one whose declared type does not match the body list it sits in), or a body that puts two parts of the same text type in one list (every edit of which is refused). The saved draft is judged by exactly the rule get_email applies to any draft, so the two tools never disagree about the same stored body. Drafts with embedded (cid:) images can be edited: an image the edited body still displays keeps its identifier, an image the body no longer displays is taken off the draft if this server put it there and becomes a regular attachment if it came from elsewhere, and the result says what the draft ended up embedding. Two body shapes still can\'t be rebuilt faithfully and are rejected — a body part that is neither text nor a carriable image, audio, video or attached message, and a body that interleaves two parts of the same text type — recreate those drafts instead. If the draft\'s stored body already references an image that isn\'t attached, editing its body is rejected until the edit resolves that (replace the body, or add an attachments item supplying the missing cid); metadata and attachment edits still work on such a draft.',
+        description: 'Edit an existing draft email. Only fields you provide are changed; omit a field to leave it unchanged. Setting a field to an empty value is rejected: to deliberately clear a field, name it in `clearFields`. A cleared draft is still valid (it just may not be sendable, e.g. with no recipients). THE BODY YOU SUPPLY IS STORED EXACTLY AS WRITTEN. Nothing is appended, removed, rebuilt or recognised in it: whatever you hand back is what the draft holds, character for character. So to keep a reply\'s quoted original or a forward\'s forwarded-message block, read the draft and hand the whole body back with your edits made in it — the quoted history is just text in the body, and it survives because you sent it, not because this tool detected it. Conversely, a body you send without the quote drops the quote, with no challenge and no warning. The one exception is opt-in and explicit: expandSignature:true expands a `{{signature}}` placeholder you wrote (see that parameter). ANY EDIT THAT WRITES OR CLEARS A BODY REQUIRES bodyHash — the value get_email returns for this draft — which proves you are replacing the body you actually read; a wrong or missing hash is rejected, re-read the draft and try again. Metadata-only edits (subject/recipients/attachments) need no hash and leave both bodies untouched — but an attachment edit can still stale a hash you are HOLDING, because the hash covers the parts the draft\'s body lists carry: removeAttachments taking off a part the server routed into a body list (an embedded image) changes what the hash is taken over with no body written, while taking off a part that only sat in the attachments list changes nothing. Adding one may do the same if the server routes the new part into a body list (unconfirmed). Either way nothing is lost: your next body edit is rejected and you re-read. The plain-text body is an auto-managed fallback of the HTML: editing htmlBody alone regenerates textBody from the new HTML (an html-alone edit discards any custom textBody the draft had, and says so); editing textBody alone while htmlBody is present is rejected (it would not change what recipients render); clearFields:[\'textBody\'] while htmlBody is present is rejected (the fallback is auto-managed); clearFields:[\'htmlBody\'] converts the draft to plain text. An edit that would leave the draft with no body is rejected. Supplying htmlBody to a text-only reply draft converts it to HTML. A draft marked as a forward stays marked as one through every edit; clearFields:[\'forwardedMessageId\'] is how you de-forward it, which also stops send_draft marking the original forwarded, and drops the recorded sourceEmailId with it on a forward draft (the pointer refines the marking it rides on; on a reply draft it stays, since the draft is still a reply to that instance). A name you pass in `from` wins outright; when you pass none, the display name written alongside the From address prefers the name the draft already carries against that address; the identity\'s configured name is only used as a fallback when the draft carries none, so a display name you set yourself is never silently reverted to your account\'s name by an edit that never touched `from` — including a metadata-only edit. A draft whose From matches no identity you can send as keeps its own address and its own display name unchanged. Since JMAP emails are immutable, this creates a replacement draft and moves the old one to Trash (so the returned email ID is new); the edit preserves the draft\'s threading headers (In-Reply-To/References), attachments, and other keywords. The replaced draft is never destroyed: it stays recoverable in Trash until Trash is emptied or auto-purged (Trash retention is a per-account setting), so an edit made from an out-of-date copy of the draft can be undone. The result also reports what the replaced draft contained (subject, recipients, body sizes) — compare it against what you expected to replace. A body edit\'s result carries the bodyHash for your NEXT edit of the draft, read back off the saved message, so a run of edits costs one get_email at the start rather than one between each pair; when a hash cannot be issued honestly the result says so: re-read after an edit that expanded the body, one whose surviving body is a text part this server derived from html, or one whose read-back failed — and recreate the draft, rather than re-reading, when the saved body is one no hash could be spent on at all: a part the server flagged as truncated or as having an encoding problem, a body part no read returns (one whose declared type does not match the body list it sits in), or a body that puts two parts of the same text type in one list (every edit of which is refused). Drafts with embedded (cid:) images can be edited: an image the edited body still displays keeps its identifier, an image the body no longer displays is taken off the draft if this server put it there and becomes a regular attachment if it came from elsewhere, and the result says what the draft ended up embedding. Two body shapes still can\'t be rebuilt faithfully and are rejected — a body part that is neither text nor a carriable image, audio, video or attached message, and a body that interleaves two parts of the same text type — recreate those drafts instead. If the draft\'s stored body already references an image that isn\'t attached, editing its body is rejected until the edit resolves that (replace the body, or add an attachments item supplying the missing cid); metadata and attachment edits still work on such a draft.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1099,27 +940,16 @@ const TOOLS = [
             },
             attachments: attachmentsSchemaProperty(true),
             removeAttachments: {
-              // Declared array-OR-string for the same reason `fields` is (#69, #79): the
-              // handler runs these through coerceStringArray, which accepts a JSON or
-              // comma-separated string, and a validating client rejects that form against a
-              // narrow `type: 'array'` before the coercion is ever reached — leniency that
-              // cannot be exercised is not leniency.
-              // Spelled as a type union rather than a `oneOf`, matching `to`/`cc`/`bcc` on
-              // draft_email and the rest of the lenient list parameters: it is the form most
-              // of this file already uses, and the one a simple validator is likeliest to
-              // read, which is the entire point of declaring the string form at all.
+              // A type union rather than a `oneOf`: the form a simple validator is likeliest
+              // to read, which is the point of declaring the string form at all.
               type: ['array', 'string'],
               items: { type: 'string' },
               description: "Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string. Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: drop its <img> reference from the body you supply in the same call, or keep the attachment. To remove every attachment, use clearFields:['attachments'] instead.",
             },
             clearFields: {
-              // Array-OR-string, as removeAttachments above. The `enum` stays in `items` and
-              // is not lifted onto the property: it is what produces the rejection naming the
-              // valid field names, and widening the property without it would trade a named
-              // error for a generic one. `items` constrains ARRAY instances only, so it goes
-              // on constraining the array form exactly as before while leaving the string
-              // form through to the server, where validateClearFields raises the same named
-              // rejection over the coerced array.
+              // The `enum` stays in `items`, not on the property: `items` constrains ARRAY
+              // instances only, so the string form passes through to validateClearFields,
+              // which raises the same named rejection over the coerced array.
               type: ['array', 'string'],
               items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId'] },
               description: "Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string. Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments, forwardedMessageId. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). Clearing textBody or htmlBody requires bodyHash. clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). clearFields:['forwardedMessageId'] de-forwards the draft: it drops the recorded X-Forwarded-Message-Id so send_draft will not mark the original forwarded, and on a forward draft it drops the recorded sourceEmailId with it (that pointer names the instance the marking is about; on a reply draft it is kept). That is metadata, so it works on a body edit and a metadata-only edit alike, and it does NOT touch the body — a forwarded-message block already in the body stays there until you replace the body yourself. The converse holds too: deleting that block from the body does not de-forward the draft, so send_draft still marks the original forwarded until you clear this field.",
@@ -1130,7 +960,7 @@ const TOOLS = [
       },
       {
         name: 'send_draft',
-        description: 'Send an existing draft email. This is the ONLY tool that transmits a composed message: draft_email saves a draft as stored, inspectable bytes, and this tool submits it. Naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event. The draft must have recipients (to/cc/bcc) and a from address, and that from address must be a real address rather than a WILDCARD PATTERN: a draft whose stored From is "*@example.com" — the form a wildcard identity carries as its own address — is refused, since the asterisk would go out as the sender. Edit the draft with an explicit from first. IT MUST ALSO BE IN THE DRAFTS FOLDER: a draft that has been moved to Archive, to Trash or to any other folder is refused, and the refusal says where it is now — move it back to Drafts with move_email and send it again. Being in Drafts is what says the message is still meant to go out; filed anywhere else, it has since been made something other than outbound mail, and this is the only tool that transmits. A draft that is in Drafts AND carries another label is still in Drafts and sends normally, and it KEEPS that label: the send files the message into Sent by PATCHING its membership — naming just those two mailboxes, removing Drafts and adding Sent — so every other label the draft carried, and any Inbox membership, survives the send untouched. delete_email does NOT work that way: its move to Trash is a whole-value write that replaces the entire membership, so it does drop a message\'s other labels and the Trash copy cannot show you what they were. Issue #123 is the open record of that one. BOTH folders are resolved by their JMAP ROLE rather than by name, so a folder merely called "Draft notes" or "Sent" satisfies neither: if no mailbox in the account carries the "drafts" role, or none carries the "sent" role, this tool refuses rather than sending unchecked or sending with nowhere to file the sent copy. Either refusal happens before the message is submitted, so nothing is transmitted. It also refuses, with a different message, when the server returns the draft with no readable filing at all: nothing is sent and no move is suggested, because where the draft sits is unknown rather than known to be wrong. After sending, the draft keyword is removed. An HTML-only draft with real content sends as-is: that is a draft whose html yields no derivable text at all, e.g. one showing a remote image with no alt text (a draft displaying an embedded (cid:) image is not in that group — it derives \"[image]\" and carries a text part). Only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. EVERY body part is checked, so a blank one is rejected wherever it sits in the draft\'s body list and whether or not it declares a content type: a part that declares none counts as the body of whichever list carries it, which is how a recipient\'s client renders it. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by draft_email\'s mode:\'forward\') marks it forwarded and read. Drafts made by draft_email\'s reply and forward modes also record WHICH stored copy they were composed from, so when several copies of the original exist (e.g. a self-addressed message filed in two folders) exactly that copy is marked. Best-effort — on a draft without that record the original is found from the Message-ID; when the mark succeeds the result says so, and when the message cannot be identified (no match, or several copies and no record of which) the result says it was not marked and why. A draft that records neither header marks nothing (an ordinary compose). The result also reports how many embedded (cid:) images the message carried out, read off the draft as submitted — a receipt on what was sent, not a check: this tool never refuses a draft over its images.',
+        description: 'Send an existing draft email. This is the ONLY tool that transmits a composed message: draft_email saves a draft as stored, inspectable bytes, and this tool submits it. Naming an attendee on a calendar event makes the server email them from this account — an invitation when the event is written, a cancellation when the event is deleted — with no send_draft call; see the participants parameter and create_calendar_event/update_calendar_event/delete_calendar_event. The draft must have recipients (to/cc/bcc) and a from address, and that from address must be a real address rather than a WILDCARD PATTERN: a draft whose stored From is "*@example.com" — the form a wildcard identity carries as its own address — is refused, since the asterisk would go out as the sender. Edit the draft with an explicit from first. IT MUST ALSO BE IN THE DRAFTS FOLDER: a draft that has been moved to Archive, to Trash or to any other folder is refused, and the refusal says where it is now — move it back to Drafts with move_email and send it again. A draft that is in Drafts AND carries another label is still in Drafts and sends normally, and it KEEPS that label: the send files the message into Sent by PATCHING its membership — naming just those two mailboxes, removing Drafts and adding Sent — so every other label the draft carried, and any Inbox membership, survives the send untouched. delete_email does NOT work that way: its move to Trash is a whole-value write that replaces the entire membership, so it does drop a message\'s other labels and the Trash copy cannot show you what they were. BOTH folders are resolved by their JMAP ROLE rather than by name, so a folder merely called "Draft notes" or "Sent" satisfies neither: if no mailbox in the account carries the "drafts" role, or none carries the "sent" role, this tool refuses rather than sending unchecked or sending with nowhere to file the sent copy. Either refusal happens before the message is submitted, so nothing is transmitted. It also refuses, with a different message, when the server returns the draft with no readable filing at all: nothing is sent and no move is suggested, because where the draft sits is unknown rather than known to be wrong. After sending, the draft keyword is removed. An HTML-only draft with real content sends as-is: that is a draft whose html yields no derivable text at all, e.g. one showing a remote image with no alt text (a draft displaying an embedded (cid:) image is not in that group — it derives \"[image]\" and carries a text part). Only a genuinely empty body part (e.g. a blank htmlBody alongside real text) is rejected, because it would render blank to recipients — edit the draft to supply or clear that body first. EVERY body part is checked, so a blank one is rejected wherever it sits in the draft\'s body list and whether or not it declares a content type: a part that declares none counts as the body of whichever list carries it, which is how a recipient\'s client renders it. Thread state is maintained after sending: a draft that replies to a message (In-Reply-To) marks that original answered and read, and a draft that forwards one (X-Forwarded-Message-Id, set by draft_email\'s mode:\'forward\') marks it forwarded and read. Drafts made by draft_email\'s reply and forward modes also record WHICH stored copy they were composed from, so when several copies of the original exist (e.g. a self-addressed message filed in two folders) exactly that copy is marked. Best-effort — on a draft without that record the original is found from the Message-ID; when the mark succeeds the result says so, and when the message cannot be identified (no match, or several copies and no record of which) the result says it was not marked and why. A draft that records neither header marks nothing (an ordinary compose). The result also reports how many embedded (cid:) images the message carried out, read off the draft as submitted — a receipt on what was sent, not a check: this tool never refuses a draft over its images.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1144,15 +974,9 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        // One search tool, not two. The structured filters below (from/to/cc/bcc/subject,
-        // hasAttachment/isUnread/isPinned, the date range, and the mailbox scoping params)
-        // are the whole of what upstream exposes as a separate `advanced_search`; this
-        // server folds them into `search_emails` and ships no second tool. Two tools whose
-        // only difference is which filters they accept forces the caller to pick before
-        // knowing what it needs, and a filter added to one silently makes the other the
-        // weaker choice — the same split-vocabulary failure that made a free-text-only
-        // search and an id-only mailbox parameter worth consolidating (#12). Anything new
-        // here is a parameter on this tool.
+        // One search tool, not two: upstream's separate `advanced_search` is folded in here
+        // (#12). Two tools differing only in which filters they accept force the caller to
+        // pick before knowing what it needs. Anything new is a parameter on this tool.
         description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
@@ -1197,12 +1021,8 @@ const TOOLS = [
               type: 'string',
               description: SEARCH_MAILBOX_PARAM_DESC,
             },
-            // Widened like every other lenient list, and SAFE here specifically because
-            // these two already read through coerceStringArrayStrict: a value that is
-            // present but uncoercible is an error naming the parameter, never a silent
-            // undefined. On an argument that narrows what a call touches, the plain
-            // coercer's silent drop would widen the search the argument was passed to
-            // restrict - which is why the strict half was written first (#98).
+            // Read through coerceStringArrayStrict: on an argument that narrows what a call
+            // touches, the plain coercer's silent drop would widen the search (#98).
             requiredMailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
@@ -1501,19 +1321,19 @@ const TOOLS = [
         name: 'list_calendar_events',
         description:
           'List events from a calendar, one entry per occurrence in the requested window. ' +
-          'RECURRING EVENTS ARE EXPANDED: give startDate/endDate and a repeating event returns one entry for each occurrence that falls inside the window, with start/end set to that occurrence\'s real dates — so a fortnightly event across three months is several entries, not one. Reading four recurrence fields tells you exactly what a date is: `recurrenceId` present means start/end ARE the in-window occurrence; `recurrenceRule` present (the RRULE) means you are looking at the series master shown at its ORIGINAL start date, which may be years before the window; `recurrenceDates` present (the raw RDATE values, comma-separated) means the same thing for a series that LISTS its occurrences instead of stating a rule, so it too is a master at its original date; `isRecurring` says the entry belongs to a repeating series, and on any row read out of a VEVENT its ABSENCE says the entry does NOT repeat — the field is decided there, never left off for want of evidence. ONE KIND OF ROW MAKES NO RECURRENCE CLAIM AT ALL: a stored record this server can read no VEVENT out of still produces a row, titled "Untitled" and carrying no dates, and `isRecurring` is absent on it because nothing about it was established rather than because it does not repeat. `recurrenceDates` CARRIES THE VALUES AND NOT THE PARAMETERS: a TZID, VALUE=DATE or VALUE=PERIOD on the RDATE line is dropped, so a designator-less value in that list does NOT follow the `timeZone` rule that governs `start`, and RDATEs written in different zones are indistinguishable once joined. Read it as proof that other dates exist, never as a date you can place on a clock — pass a window and let the server expand the series if you need real occurrence times. A SERIES THAT ONLY LISTS ITS DATES IS MATCHED BY THE WINDOW OVER ITS OWN START ALONE: where a series states no RRULE and lists its occurrences as RDATEs, Fastmail indexes it across `DTSTART` only, so a window covering one of those listed dates but NOT the series start returns nothing whatsoever for it — the row is ABSENT rather than mis-dated, nothing in the response marks the omission, and an empty result is not proof of a free day. Confirm such a day in the Fastmail web interface, or widen the window until it reaches the series start (fork issue #167). Master and occurrence are the usual split, but the two fields CAN appear together — RFC 5545 allows an override block to carry its own rule — and where they do, `recurrenceId` names the instance this entry is and `recurrenceRule` is that block\'s own rule, not the series\'. In an expanded window the FIRST occurrence of a series arrives with no recurrenceId of its own (the server marks only instances after the first), so where the window holds that occurrence and no sibling, the entry the server sent is indistinguishable from a one-off. This tool settles those entries for you by re-reading their stored records, which still state the repeat, so `isRecurring` is trustworthy on every row it was read out of a VEVENT for — and if that follow-up read cannot be completed, or comes back with no readable event in it, the whole call fails rather than return rows it cannot vouch for. ' +
+          'RECURRING EVENTS ARE EXPANDED: give startDate/endDate and a repeating event returns one entry for each occurrence that falls inside the window, with start/end set to that occurrence\'s real dates — so a fortnightly event across three months is several entries, not one. Reading four recurrence fields tells you exactly what a date is: `recurrenceId` present means start/end ARE the in-window occurrence; `recurrenceRule` present (the RRULE) means you are looking at the series master shown at its ORIGINAL start date, which may be years before the window; `recurrenceDates` present (the raw RDATE values, comma-separated) means the same thing for a series that LISTS its occurrences instead of stating a rule, so it too is a master at its original date; `isRecurring` says the entry belongs to a repeating series, and on any row read out of a VEVENT its ABSENCE says the entry does NOT repeat — the field is decided there, never left off for want of evidence. ONE KIND OF ROW MAKES NO RECURRENCE CLAIM AT ALL: a stored record this server can read no VEVENT out of still produces a row, titled "Untitled" and carrying no dates, and `isRecurring` is absent on it because nothing about it was established rather than because it does not repeat. `recurrenceDates` CARRIES THE VALUES AND NOT THE PARAMETERS: a TZID, VALUE=DATE or VALUE=PERIOD on the RDATE line is dropped, so a designator-less value in that list does NOT follow the `timeZone` rule that governs `start`, and RDATEs written in different zones are indistinguishable once joined. Read it as proof that other dates exist, never as a date you can place on a clock — pass a window and let the server expand the series if you need real occurrence times. A SERIES THAT ONLY LISTS ITS DATES IS MATCHED BY THE WINDOW OVER ITS OWN START ALONE: where a series states no RRULE and lists its occurrences as RDATEs, Fastmail indexes it across `DTSTART` only, so a window covering one of those listed dates but NOT the series start returns nothing whatsoever for it — the row is ABSENT rather than mis-dated, nothing in the response marks the omission, and an empty result is not proof of a free day. Confirm such a day in the Fastmail web interface, or widen the window until it reaches the series start. Master and occurrence are the usual split, but the two fields CAN appear together — RFC 5545 allows an override block to carry its own rule — and where they do, `recurrenceId` names the instance this entry is and `recurrenceRule` is that block\'s own rule, not the series\'. In an expanded window the FIRST occurrence of a series arrives with no recurrenceId of its own (the server marks only instances after the first), so where the window holds that occurrence and no sibling, the entry the server sent is indistinguishable from a one-off. This tool settles those entries for you by re-reading their stored records, which still state the repeat, so `isRecurring` is trustworthy on every row it was read out of a VEVENT for — and if that follow-up read cannot be completed, or comes back with no readable event in it, the whole call fails rather than return rows it cannot vouch for. ' +
           'EVERY OCCURRENCE OF A SERIES CARRIES THE SAME `id`, and that id names the SERIES, not the occurrence: seven rows of a fortnightly event are seven identical ids. update_calendar_event and delete_calendar_event REFUSE that id — a repeating event cannot be changed or removed through this server at all, neither one occurrence of it nor the whole series — so there is no per-occurrence id here and nothing to be done with the series id but read it. Use the Fastmail web interface to change a repeating event. A row\'s `url` is the SAME record under another name and is EQUALLY SERIES-WIDE: it reaches the identical refusal, so it is not a way round it. Where the `url` IS the handle to reach for is the other case an id can be wrong: two calendars holding the SAME id, which those two tools also refuse. A url with a record still at it ADDRESSES exactly one, so it is not the ambiguous case; a url whose record was deleted addresses nothing and is matched as a UID instead — see their `eventId` parameter. ' +
           'ROWS CARRY CORE FIELDS ONLY — never `participants` and never `organizer`, even on an event that has them, because this tool does not fetch them. An absent participant list here does NOT mean the event has no attendees, and empty fields are omitted throughout, so there is nothing to distinguish "none" from "not asked for". Call get_calendar_event on the id before any destructive call: it is the only way to see who is about to be mailed a cancellation. ' +
-          'WITHOUT startDate/endDate THE NEXT MONTH IS LISTED: the window runs from the start of today in the configured timezone for 31 days, expanded like any other window, and the response says so in a trailing "Note:" line naming the range actually searched. There is no unwindowed listing — an absent window is an OPEN-ENDED one, and expanding recurrences across it would materialise every occurrence of every repeating event. Pass a window to ask about other days; call get_calendar_event on an id to see the unexpanded series master. ' +
+          'WITHOUT startDate/endDate THE NEXT MONTH IS LISTED: the window runs from the start of today in the configured timezone for 31 days, expanded like any other window, and the response says so in a trailing "Note:" line naming the range actually searched. There is no unwindowed listing. Pass a window to ask about other days; call get_calendar_event on an id to see the unexpanded series master. ' +
           'A DATE IS A LOCAL DAY: startDate/endDate written as plain dates (2026-08-12) cover that calendar day in the account\'s configured timezone (FASTMAIL_TIMEZONE, falling back to this server\'s own zone — the same zone every email `date` is shown in), NOT the UTC day. A datetime with no Z and no offset is read as local time too. Only a value carrying Z or a numeric offset means the exact instant it names, so that is how to ask for something the local-day rule cannot express. ' +
-          'ONE-SIDED WINDOWS ARE BOUNDED: pass only startDate (or only endDate) and the missing half is filled in 31 days away — a month — because expanding recurrences over an open-ended range would materialise every occurrence of every repeating event. The response says so in a trailing "Note:" line naming the range actually searched; pass both bounds to choose the span yourself. ' +
+          'ONE-SIDED WINDOWS ARE BOUNDED: pass only startDate (or only endDate) and the missing half is filled in 31 days away. The response says so in a trailing "Note:" line naming the range actually searched; pass both bounds to choose the span yourself. ' +
           `ONE SERIES TOO DENSE FOR THE WINDOW FAILS THE WHOLE CALL: if any single repeating event expands to more than ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} occurrences in the range searched, the call returns an error naming that event (title, id, occurrence count and calendar) instead of a listing, even though every other event was fine. Narrow the window so it covers fewer of that event's occurrences, or pass a calendarId that does not hold it. ` +
           'Every calendar the account listed is queried before the results are sorted and trimmed, so `limit` is a genuine "earliest N" across all of them (a collection the server failed to list is not in that set, and the response names it — see the discovery clause below). The response opens with a summary line stating how many events matched in total; when that total exceeds the returned count, `limit` cut the rest off and there is no paging, so raise `limit` (up to 500) to see more, or narrow the window if the total is larger than that. ' +
           `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET. \`start\`/\`end\` is a bare local wall clock (2026-04-20T10:00:00), a Z-designated UTC instant, or a date-only (all-day) value — this server never puts an offset in either and never asks you to compute one. READ THE VALUE'S OWN DESIGNATOR FIRST: \`timeZone\` only QUALIFIES a value that carries neither Z nor a date-only marker, so "absent means the configured zone" applies to a bare wall-clock \`start\` and nothing else. \`timeZone\` names the IANA zone a wall-clock \`start\` is in, but ONLY when it differs from this server's configured zone (${CONFIGURED_TIMEZONE}): an ABSENT \`timeZone\` means ${CONFIGURED_TIMEZONE}, and \`timeZone: null\` means \`start\` is genuinely FLOATING (RFC 5545 §3.3.5 — no TZID, no Z, a different instant for every reader), which is a different fact from "in the configured zone". A Z-designated value or an all-day value never carries \`timeZone\` at all, because both already name themselves; \`null\` there would wrongly assert "floating". \`endTimeZone\` describes \`end\` the same way but ONLY relative to \`start\` — it appears only when \`end\`'s zone differs from \`start\`'s, which is legal (a flight departing one zone and landing in another), and is omitted whenever \`end\` is absent or shares \`start\`'s zone. ` +
           '`transparency` APPEARS ONLY WHEN THE EVENT DOES NOT BLOCK YOUR CALENDAR. A row carrying `transparency: "free"` is an event you are still available during — typically an all-day marker. A ROW THAT SAYS NOTHING IS BUSY: most events are, so the field is omitted on them to keep rows small, and its absence here is never "unknown". Call get_calendar_event, which states the value on every event, if you want it said out loud for one. A value that is neither "busy" nor "free" is the stored iCalendar token reported verbatim, which means the record holds something outside the two the spec defines. ' +
-          'WHICH ROWS MAY SIT OUTSIDE THE WINDOW. Rows are filtered EXACTLY against the window you asked for, and all-day events are your account\'s LOCAL days: a date-only value covers that whole day in the configured zone, and an all-day event on a neighbouring day is not returned. Behind that, the range this server REQUESTS of Fastmail is deliberately up to 14 hours wider at each edge than the window you gave, because the server matches an all-day value on its UTC day and reads a floating time as UTC — without the widening it would withhold both from a window narrower than a day, and no filter can keep what was never sent. The extra rows that widening pulls in are then trimmed. TWO KINDS OF ROW CAN STILL SIT OUTSIDE IT. A block that still carries its own recurrence (`recurrenceRule` or `recurrenceDates`) is never dropped whatever its dates say — its start is the series\' ORIGINAL date, which may be years away, and judging it on that would delete a real event rather than misdate it. And a FLOATING timed event comes back from expansion stamped as UTC with the floating marker destroyed, so nothing downstream can move it to your clock; it is judged on UTC and can therefore land in the wrong day for an account far from UTC. THE TWO FAIL IN OPPOSITE DIRECTIONS. A recurrence carrier only ever ADDS a row, so check each `start` against the window you asked for rather than assuming every row is inside it. A floating timed event can be ABSENT from the window it really belongs to, judged into a neighbouring day instead, which is how an account far from UTC loses a row it asked for. A THIRD CASE IS NOT A ROW SITTING OUTSIDE THE WINDOW BUT A ROW THAT NEVER ARRIVES: a series that lists its occurrences as RDATEs and states no RRULE is matched by Fastmail\'s own filter over the series start alone, so a window covering one of its listed dates and not that start returns nothing for it, and no filter on this side can keep what the server never sent. So an empty result is NOT proof of a free day on ANY account, and a "nothing on then" answer built from this call alone can be wrong in the direction that matters; confirm in the Fastmail web interface, or widen the window until it reaches the series start (fork issue #167). ' +
+          'WHICH ROWS MAY SIT OUTSIDE THE WINDOW. Rows are filtered EXACTLY against the window you asked for, and all-day events are your account\'s LOCAL days: a date-only value covers that whole day in the configured zone, and an all-day event on a neighbouring day is not returned. TWO KINDS OF ROW CAN STILL SIT OUTSIDE IT. A block that still carries its own recurrence (`recurrenceRule` or `recurrenceDates`) is never dropped whatever its dates say — its start is the series\' ORIGINAL date, which may be years away, and judging it on that would delete a real event rather than misdate it. And a FLOATING timed event comes back from expansion stamped as UTC with the floating marker destroyed, so nothing downstream can move it to your clock; it is judged on UTC and can therefore land in the wrong day for an account far from UTC. THE TWO FAIL IN OPPOSITE DIRECTIONS. A recurrence carrier only ever ADDS a row, so check each `start` against the window you asked for rather than assuming every row is inside it. A floating timed event can be ABSENT from the window it really belongs to, judged into a neighbouring day instead, which is how an account far from UTC loses a row it asked for. A THIRD CASE IS NOT A ROW SITTING OUTSIDE THE WINDOW BUT A ROW THAT NEVER ARRIVES: the RDATE-only series described above. So an empty result is NOT proof of a free day on ANY account, and a "nothing on then" answer built from this call alone can be wrong in the direction that matters. ' +
           'A TOTAL calendar-discovery failure is reported as an error, never as an empty list, and a calendarId matching no calendar is an error too — never an empty result. An empty or whitespace-only calendarId is that same error, not "every calendar". A calendarId whose display NAME matches more than one calendar is an error as well, naming each match with its URL: WHEN A calendarId IS GIVEN this call reads that one calendar or none, never a union of the calendars sharing a name. (Omitting calendarId still reads every calendar — that is the one case where more than one is read, and it is not ambiguous because nothing was named.) ' +
-          'A PARTIAL failure has THREE distinct forms and they behave differently. (1) A collection that comes back BROKEN INSIDE THE CALENDAR-HOME LISTING is detected when that list is built: this call answers from the calendars that did list and adds a trailing "Note:" line whose subject ends "' + BROKEN_COLLECTION_PHRASE + '" (the subject counts them: "a collection …", or "N collections …"; the line itself continues past the path) naming its path. The failure destroys the collection\'s name and type, so nothing can say whether it was a calendar — but if it was, its events are missing from these results AND from the total, so an empty or quiet answer is not proof of a free day. A list built while one was broken is never cached, so the next call re-asks. (2) A calendar that LISTED and then fails when its events are read fails this WHOLE call with an error — there is no "rest of it" to answer from, so no partial result is returned. (3) A collection this account cannot see at all is invisible: the server omits it from the listing entirely, leaving no trace for anything here to report. Fork issue #136.',
+          'A PARTIAL failure has THREE distinct forms and they behave differently. (1) A collection that comes back BROKEN INSIDE THE CALENDAR-HOME LISTING is detected when that list is built: this call answers from the calendars that did list and adds a trailing "Note:" line whose subject ends "' + BROKEN_COLLECTION_PHRASE + '" (the subject counts them: "a collection …", or "N collections …"; the line itself continues past the path) naming its path. The failure destroys the collection\'s name and type, so nothing can say whether it was a calendar — but if it was, its events are missing from these results AND from the total, so an empty or quiet answer is not proof of a free day. A list built while one was broken is never cached, so the next call re-asks. (2) A calendar that LISTED and then fails when its events are read fails this WHOLE call with an error — there is no "rest of it" to answer from, so no partial result is returned. (3) A collection this account cannot see at all is invisible: the server omits it from the listing entirely, leaving no trace for anything here to report.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1533,7 +1353,7 @@ const TOOLS = [
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging: when the summary line reports a total larger than the number returned, raise `limit` to reach the rest, and narrow the window only if the total is above 500. Recurrence expansion means this is reached sooner than it used to be. The summary line states the total of rows that MATCHED, which is what answers "how many rows did `limit` cut off".',
+              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging: when the summary line reports a total larger than the number returned, raise `limit` to reach the rest, and narrow the window only if the total is above 500. The summary line states the total of rows that MATCHED, which is what answers "how many rows did `limit` cut off".',
               default: 50,
             },
           },
@@ -1543,11 +1363,11 @@ const TOOLS = [
         name: 'get_calendar_event',
         description:
           'Get a specific calendar event by ID. Unlike list_calendar_events this returns `organizer` and `participants` when the event has them, so it is the call to make before deleting or rescheduling anything: it is the only way to see who the server will mail. ' +
-          'For a repeating event this returns the SERIES MASTER: `isRecurring` is set, and start/end are the series\' original dates, NOT the next or nearest occurrence. What states the repeat is `recurrenceRule` (the RRULE) or `recurrenceDates` (the raw RDATE values, comma-separated, for a series that LISTS its occurrences rather than stating a rule) — either or both may be present, and this is the path where they show up, because the master is returned unexpanded. `recurrenceDates` CARRIES THE VALUES AND NOT THE PARAMETERS: a TZID, VALUE=DATE or VALUE=PERIOD on the RDATE line is dropped, so a designator-less value in that list does NOT follow the `timeZone` rule that governs `start`, and RDATEs written in different zones are indistinguishable once joined. It is proof that other dates exist, not a date you can place on a clock. To find out when the event actually falls on given days, call list_calendar_events with a startDate/endDate window, which expands the recurrence. THAT ROUTE DOES NOT WORK FOR AN RDATE-ONLY SERIES: Fastmail\'s window filter matches such a record over its `DTSTART` alone, so a window covering one of the `recurrenceDates` values but not the series start returns NOTHING for it — the row never arrives and nothing marks its absence. Widen the window until it reaches the series start (the `start` in this response), or confirm the date in the Fastmail web interface (fork issue #167). The id is the series id, and update_calendar_event and delete_calendar_event REFUSE a repeating event outright — the whole series and a single occurrence alike — so a series is read-only ground here; change one in the Fastmail web interface. One exception: where a record holds only overridden instances and no master at all, what comes back is one of those overrides and carries a `recurrenceId` — so a `recurrenceId` here means you are NOT looking at the series master. ' +
+          'For a repeating event this returns the SERIES MASTER: `isRecurring` is set, and start/end are the series\' original dates, NOT the next or nearest occurrence. What states the repeat is `recurrenceRule` (the RRULE) or `recurrenceDates` (the raw RDATE values, comma-separated, for a series that LISTS its occurrences rather than stating a rule) — either or both may be present, and this is the path where they show up, because the master is returned unexpanded. `recurrenceDates` CARRIES THE VALUES AND NOT THE PARAMETERS: a TZID, VALUE=DATE or VALUE=PERIOD on the RDATE line is dropped, so a designator-less value in that list does NOT follow the `timeZone` rule that governs `start`, and RDATEs written in different zones are indistinguishable once joined. It is proof that other dates exist, not a date you can place on a clock. To find out when the event actually falls on given days, call list_calendar_events with a startDate/endDate window, which expands the recurrence. THAT ROUTE DOES NOT WORK FOR AN RDATE-ONLY SERIES: Fastmail\'s window filter matches such a record over its `DTSTART` alone, so a window covering one of the `recurrenceDates` values but not the series start returns NOTHING for it — the row never arrives and nothing marks its absence. Widen the window until it reaches the series start (the `start` in this response), or confirm the date in the Fastmail web interface. The id is the series id, and update_calendar_event and delete_calendar_event REFUSE a repeating event outright — the whole series and a single occurrence alike — so a series is read-only ground here; change one in the Fastmail web interface. One exception: where a record holds only overridden instances and no master at all, what comes back is one of those overrides and carries a `recurrenceId` — so a `recurrenceId` here means you are NOT looking at the series master. ' +
           `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET. \`start\`/\`end\` is a bare local wall clock (2026-04-20T10:00:00), a Z-designated UTC instant, or a date-only (all-day) value. READ THE VALUE'S OWN DESIGNATOR FIRST: \`timeZone\` only QUALIFIES a value that carries neither Z nor a date-only marker, so "absent means the configured zone" applies to a bare wall-clock \`start\` and nothing else. \`timeZone\` names the IANA zone a wall-clock \`start\` is in, but ONLY when it differs from this server's configured zone (${CONFIGURED_TIMEZONE}): an ABSENT \`timeZone\` means ${CONFIGURED_TIMEZONE}, and \`timeZone: null\` means \`start\` is genuinely FLOATING (RFC 5545 §3.3.5 — a different instant for every reader), which is a different fact from "in the configured zone". A Z-designated value or an all-day value never carries \`timeZone\`, because both already name themselves. \`endTimeZone\` describes \`end\` relative to \`start\` — it appears only when \`end\`'s zone differs from \`start\`'s, which is legal (a flight departing one zone and landing in another), and is otherwise omitted. This path returns the stored property exactly as written, with no normalisation, so it is where a floating or differently-zoned value is most likely to show up. Same rule as list_calendar_events.` +
           ' `transparency` IS ALWAYS PRESENT HERE, and it says whether the event blocks the account\'s free/busy: "busy" or "free". Unlike list_calendar_events, which carries it only when the event does not block your calendar, this call states it on every event — so you never have to read an absence. BUT READ WHERE THE VALUE CAME FROM: an event whose record says nothing about free/busy is reported as "busy", DERIVED from RFC 5545 §3.8.2.7 (an absent TRANSP property means OPAQUE) rather than read off the record. The event is busy either way. A stored iCalendar token that is neither of the spec\'s two values is reported verbatim, so a `transparency` that is neither "busy" nor "free" is what the record holds.' +
           ' A COLLECTION THAT COULD NOT BE SEARCHED IS NAMED: this call looks in every calendar the account listed, so when one collection came back broken in that listing, the response carries a trailing "Note:" line whose subject ends "' + BROKEN_COLLECTION_PHRASE + '" (the subject counts them: "a collection …", or "N collections …"; the line itself continues past the path) giving its path — and a "Calendar event not found" error carries the same fact, because the id you gave may name an event sitting in the collection nobody could read. See list_calendars for what that note can and cannot claim.' +
-          ' AN ID NAMING TWO RECORDS IS ANSWERED HERE, NOT REFUSED: where two calendars hold the same id, this returns the FIRST copy, adds an `otherCopies` array to the JSON naming each other copy\'s calendar and `url`, and carries a trailing "Note:" line stating how many records the id names and that update_calendar_event and delete_calendar_event will refuse it. This call cannot damage the copy it was not asked about, which is why it answers where they refuse — and it is the only way to get the `url` that picks one copy out. Pass that `url` as eventId to read or write that copy alone. PASSING A `url` CHANGES WHICH COPY COMES FIRST, not merely how many are found: the record AT that url leads, and the "Note:" then says the write tools will act on it rather than refuse — a url is an address, so it is not the ambiguous case even where some other record carries it as a UID. That depends on the record still BEING there: a url whose event has been deleted addresses nothing and is matched as a UID like any other id, which can be ambiguous again.',
+          ' AN ID NAMING TWO RECORDS IS ANSWERED HERE, NOT REFUSED: where two calendars hold the same id, this returns the FIRST copy, adds an `otherCopies` array to the JSON naming each other copy\'s calendar and `url`, and carries a trailing "Note:" line stating how many records the id names and that update_calendar_event and delete_calendar_event will refuse it. It is the only way to get the `url` that picks one copy out. Pass that `url` as eventId to read or write that copy alone. PASSING A `url` CHANGES WHICH COPY COMES FIRST, not merely how many are found: the record AT that url leads, and the "Note:" then says the write tools will act on it rather than refuse — a url is an address, so it is not the ambiguous case even where some other record carries it as a UID. That depends on the record still BEING there: a url whose event has been deleted addresses nothing and is matched as a UID like any other id, which can be ambiguous again.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1561,7 +1381,7 @@ const TOOLS = [
       },
       {
         name: 'create_calendar_event',
-        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. AN ALL-DAY EVENT IS CREATED FREE, A TIMED EVENT BUSY, unless you say otherwise. With \`transparency\` omitted, a date-only start/end marks the day without blocking your free/busy, and a timed event blocks its hours; both defaults match what the Fastmail client itself does. Pass \`transparency\` to override either one — "busy" on an all-day event to block the whole day, "free" on a timed one to stay showing as available. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. Both values land in ONE zone here: a designator-less pair is written in the configured zone, and this tool takes no per-value zone, so an event whose two ends sit in different named zones cannot be made with it. Such an event is legal and does exist (a flight departing one zone and landing in another), and update_calendar_event says how its order is judged when you edit one (fork issue #140). Write both as strict ISO-8601 (2026-04-07, 2026-04-07T14:00:00, 2026-04-07T14:00:00Z, or 2026-04-07T14:00:00+10:00): other spellings such as 2026/04/07 or "April 7 2026" are rejected rather than guessed at, since guessing would place the event on a day that depends on the server's own time zone, and so is a day that does not exist in its month (2026-02-31). ` +
+        description: `Create a new calendar event. Supports date-only (e.g. 2026-04-01) for all-day events. DTEND is exclusive per RFC 5545 — a one-day event on April 1 needs end: 2026-04-02. AN ALL-DAY EVENT IS CREATED FREE, A TIMED EVENT BUSY, unless you say otherwise. With \`transparency\` omitted, a date-only start/end marks the day without blocking your free/busy, and a timed event blocks its hours; both defaults match what the Fastmail client itself does. Pass \`transparency\` to override either one — "busy" on an all-day event to block the whole day, "free" on a timed one to stay showing as available. start and end must use the SAME form — both date-only, both with a zone designator (Z or +HH:MM), or both without one — and end must be later than start; a mismatched or backwards pair is rejected. Both values land in ONE zone here: a designator-less pair is written in the configured zone, and this tool takes no per-value zone, so an event whose two ends sit in different named zones cannot be made with it. Such an event is legal and does exist (a flight departing one zone and landing in another), and update_calendar_event says how its order is judged when you edit one. Write both as strict ISO-8601 (2026-04-07, 2026-04-07T14:00:00, 2026-04-07T14:00:00Z, or 2026-04-07T14:00:00+10:00): other spellings such as 2026/04/07 or "April 7 2026" are rejected rather than guessed at, and so is a day that does not exist in its month (2026-02-31). ` +
           `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET, and this tool never asks you to compute one. \`timeZone\` only QUALIFIES a designator-less start/end — a bare wall clock with no Z and no date-only marker — because that is the one shape with no zone of its own to contradict. Pass \`timeZone\` as an IANA name (e.g. "Australia/Sydney") to say which zone that wall clock is in; OMITTING it does NOT mean floating here — it means writing the event in this server's configured zone (${CONFIGURED_TIMEZONE}), a deliberate difference from update_calendar_event, which never defaults it (see that tool). Combining \`timeZone\` with a start/end that already carries Z/an offset, or with a date-only value, is rejected — both already name their own instant or have no time component, so \`timeZone\` would contradict rather than qualify. \`timeZone: null\` and an empty/whitespace string are rejected too: there is no way to force a genuinely floating write through this parameter. The response states what actually got written — a zone name, UTC, or all-day (no time component) — as one combined statement when start and end land the same way, or a separate statement for each side in the event that they differ, since a caller-named zone, an inherited one, and the configured default all read as the same "no designator" input. ` +
           `participants entries may be { email, name? } objects or bare email-address strings. Text size limits: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated. ` +
           'A COLLECTION THAT FAILED TO LIST IS NEVER A TARGET: when an entry in the account\'s calendar home came back broken, it has no name and no id to write to, so naming it here is refused with "Calendar not found" — the refusal lists the calendars that DID answer and gives the broken collection\'s path, because a destroyed name is indistinguishable from a typo. Writing to a healthy calendar succeeds as normal and the response carries a trailing "Note:" line whose subject ends "' + BROKEN_COLLECTION_PHRASE + '" (the subject counts them: "a collection …", or "N collections …"; the line itself continues past the path) naming what could not be seen. Nothing in that collection was read or written; no copy of the event was looked for there, because a create looks for none anywhere. See list_calendars.',
@@ -1598,12 +1418,9 @@ const TOOLS = [
               description: 'Whether this event blocks the account\'s free/busy: "busy" or "free". Optional. Omit to take the default, which follows the event\'s frame the way the Fastmail client does — an all-day event is created free, a timed event busy. Passing a value overrides that on either frame and records the choice on the event, so "busy" on an all-day event blocks the whole day and "free" on a timed one leaves you showing as available.',
             },
             timeZone: {
-              // 'null' is a real, meaningful input here (rejected, with a tailored message
-              // explaining there is no way to force a floating write on create) — not absence.
-              // A validating client checks a value's type against the schema before this
-              // server's own handler ever runs, so restricting this to 'string' would make such
-              // a client reject a null timeZone with a generic schema-mismatch error instead of
-              // ever reaching that tailored rejection.
+              // 'null' stays a valid schema type: it is a real input with its own tailored
+              // rejection, which a validating client would otherwise pre-empt with a generic
+              // schema-mismatch error.
               type: ['string', 'null'],
               description: `IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end — the ONE shape it can qualify. Omit to write the account's configured zone (${CONFIGURED_TIMEZONE}); this is create's default and is never floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: combined with a start/end that already carries Z/an offset or is date-only (both already name themselves), and \`null\`/empty/whitespace (there is no way to force a floating write here — this server never creates a floating calendar time). A zoned start/end is always written with a VTIMEZONE definition per zone referenced (RFC 5545 §3.6.5), generated from the runtime's own timezone data. Generating that definition is bounded: an event spanning more than a century, an event starting before year 2 (and, depending on its time zone, one in the first days of year 2 too), or an event ending in year 10000 or later (UTC) — which, depending on its time zone, includes one ending late on 31 December 9999 — is rejected rather than accepted, with the thrown error stating the exact bound.`,
             },
@@ -1616,10 +1433,10 @@ const TOOLS = [
       },
       {
         name: 'update_calendar_event',
-        description: `Update an existing calendar event. AN AMBIGUOUS ID IS REFUSED: where two calendars hold the same id this patches neither, and names every copy with its calendar and its \`url\` so you can pass the one you mean — see the \`eventId\` parameter. SINGLE (NON-REPEATING) EVENTS ONLY: a repeating event is REFUSED, and no parameter overrides that — eventId names the whole series (every occurrence row list_calendar_events returns for a repeating event carries the same id, and so does its url), a patch would move EVERY occurrence past and future, and this server cannot create a repeating event, so it will not rewrite one it has no way to put back. REPEATING covers a series that LISTS its occurrences (an RDATE series, the one that shows \`recurrenceDates\` and no \`recurrenceRule\`) exactly as much as one stating a rule, and a record made only of edited occurrences. Change a repeating event, or one occurrence of it, in the Fastmail web interface instead; get_calendar_event still reads it here. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description, location or transparency). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. When both values end up carrying DIFFERENT named time zones — a flight departing one zone and landing in another is a legal event whose wall clocks read backwards — their order is judged on INSTANTS rather than on the wall clocks: Rome 10:00 to New York 08:00 the same day is written, New York 07:00 to Rome 08:00 is rejected (fork issue #140). The check stands down only where a time zone name cannot be resolved at all, such as a vendor name like "AUS Eastern Standard Time". So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. Both are read as strict ISO-8601, matching create_calendar_event: a non-ISO spelling like 2026/04/07, or a day its month does not have (2026-02-31), is rejected rather than guessed at. FREE/BUSY IS ONLY EVER CHANGED WHEN YOU ASK: pass \`transparency\` ("busy" or "free") to set or replace it, or \`clearFields: ["transparency"]\` to delete the property (the event still reads as busy — that is what an event saying nothing means — it just no longer says so). Omit both and the stored value is left exactly as it is, no matter what else this call changes. In particular, changing an event between all-day and timed hours does NOT touch its free/busy in either direction: an all-day event you convert to a meeting stays marked free until you say otherwise, and a timed event you convert to all-day keeps whatever it had. Pass \`transparency\` in the same call as the new dates when a converted event should read differently; create_calendar_event is the only tool here that picks a default. ` +
+        description: `Update an existing calendar event. AN AMBIGUOUS ID IS REFUSED: where two calendars hold the same id this patches neither, and names every copy with its calendar and its \`url\` so you can pass the one you mean — see the \`eventId\` parameter. SINGLE (NON-REPEATING) EVENTS ONLY: a repeating event is REFUSED, and no parameter overrides that — eventId names the whole series (every occurrence row list_calendar_events returns for a repeating event carries the same id, and so does its url), a patch would move EVERY occurrence past and future, and this server cannot create a repeating event, so it will not rewrite one it has no way to put back. REPEATING covers a series that LISTS its occurrences (an RDATE series, the one that shows \`recurrenceDates\` and no \`recurrenceRule\`) exactly as much as one stating a rule, and a record made only of edited occurrences. Change a repeating event, or one occurrence of it, in the Fastmail web interface instead; get_calendar_event still reads it here. Preserves all existing data (attendees, reminders, recurrence rules, etc.) not being changed. Omit a field to leave it unchanged; passing an empty/whitespace string for title, description, or location is rejected (use clearFields to delete description, location or transparency). Floating times (no Z/offset) preserve the original timezone; explicit UTC/offset times convert to UTC. A new start/end is checked against the value it will sit beside — the other one you passed, or the stored one you left alone: they must end up in the same form (both date-only, both UTC, both floating, or both in the same TZID) and end must be later than start, otherwise the update is rejected. When both values end up carrying DIFFERENT named time zones — a flight departing one zone and landing in another is a legal event whose wall clocks read backwards — their order is judged on INSTANTS rather than on the wall clocks: Rome 10:00 to New York 08:00 the same day is written, New York 07:00 to Rome 08:00 is rejected. The check stands down only where a time zone name cannot be resolved at all, such as a vendor name like "AUS Eastern Standard Time". So moving an event to a different day or converting only one side to UTC means passing BOTH start and end. Both are read as strict ISO-8601, matching create_calendar_event: a non-ISO spelling like 2026/04/07, or a day its month does not have (2026-02-31), is rejected rather than guessed at. FREE/BUSY IS ONLY EVER CHANGED WHEN YOU ASK: pass \`transparency\` ("busy" or "free") to set or replace it, or \`clearFields: ["transparency"]\` to delete the property (the event still reads as busy — that is what an event saying nothing means — it just no longer says so). Omit both and the stored value is left exactly as it is, no matter what else this call changes. In particular, changing an event between all-day and timed hours does NOT touch its free/busy in either direction: an all-day event you convert to a meeting stays marked free until you say otherwise, and a timed event you convert to all-day keeps whatever it had. Pass \`transparency\` in the same call as the new dates when a converted event should read differently; create_calendar_event is the only tool here that picks a default. ` +
           `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET. \`timeZone\` only QUALIFIES a designator-less start/end you are ALSO passing in this same call — the one shape with no zone of its own to contradict. Unlike create_calendar_event, OMITTING \`timeZone\` never defaults to the configured zone here: it leaves start/end exactly as today — an inherited stored TZID stays, or a value with no stored zone stays floating. Rejected: \`timeZone\` combined with a start/end that already carries Z/an offset or is date-only (both already name themselves); \`timeZone\` with NEITHER start nor end (still reachable — re-send start and/or end unchanged alongside it to re-zone them); \`timeZone\` with only ONE of start/end when the untouched side is stored in a DIFFERENT named zone, because re-zoning just one side would silently strand the other into a two-zone event — pass BOTH start and end (re-sending the one you are not otherwise moving, unchanged) to change the zone; and \`null\`/empty/whitespace (there is no way to force a floating write through this parameter). For each side actually written this call, the response states what ended up there — a zone name, UTC, all-day (no time component), or floating (no zone). ` +
           `WARNING: providing participants replaces ALL existing attendee data (acceptance status, roles, etc.). participants: [] removes all attendees, and its entries may be { email, name? } objects or bare email-address strings. Text size limits match create_calendar_event: title, description, location and each participant name/email are capped at ${MAX_ICAL_FIELD_KB}KB each, at most ${MAX_ICAL_PARTICIPANTS} participants, and all of that text together must stay under ${MAX_ICAL_TOTAL_KB}KB. Oversized input is rejected naming the field and the limit — nothing is silently truncated. ` +
-          'A COLLECTION THAT FAILED TO LIST DOES NOT BLOCK THE UPDATE: when an entry in the account\'s calendar home came back broken, this call still patches the copy it found in a collection that did answer, and the response carries a trailing "Note:" line whose subject ends "' + BROKEN_COLLECTION_PHRASE + '" (the subject counts them: "a collection …", or "N collections …"; the line itself continues past the path) naming what it could not look in. Refusing instead would block every calendar write for as long as one collection stays unhealthy. Nothing is left half-done — the event is searched for once and written once — but where the SAME UID also exists in the collection that failed, that copy is not patched. A "Calendar event not found" error carries the same path, since the id may name an event in the collection nobody could read.',
+          'A COLLECTION THAT FAILED TO LIST DOES NOT BLOCK THE UPDATE: when an entry in the account\'s calendar home came back broken, this call still patches the copy it found in a collection that did answer, and the response carries a trailing "Note:" line whose subject ends "' + BROKEN_COLLECTION_PHRASE + '" (the subject counts them: "a collection …", or "N collections …"; the line itself continues past the path) naming what it could not look in. Nothing is left half-done — the event is searched for once and written once — but where the SAME UID also exists in the collection that failed, that copy is not patched. A "Calendar event not found" error carries the same path, since the id may name an event in the collection nobody could read.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1653,10 +1470,7 @@ const TOOLS = [
               description: 'Whether this event blocks the account\'s free/busy: "busy" or "free". Sets or replaces the stored value; omit to leave it alone. Cannot be combined with `transparency` in clearFields — pass it as a value or clear it, not both. This is the ONLY way an update changes an event\'s free/busy — nothing else this tool does touches it, including converting the event between all-day and timed hours.',
             },
             timeZone: {
-              // Same reasoning as create_calendar_event's timeZone: 'null' is a real, rejected
-              // input (there is no way to force a floating write through this parameter), not
-              // absence, so it must stay a valid schema type or a validating client would reject
-              // it with a generic error before this server's own tailored message is reached.
+              // 'null' stays a valid schema type, as on create_calendar_event.
               type: ['string', 'null'],
               description: 'IANA zone name (e.g. "Australia/Sydney") for a designator-less start/end you are ALSO passing this call — the ONE shape it can qualify. Omitting it never defaults to a configured zone here (unlike create_calendar_event): a stored TZID is inherited unchanged, or the value stays floating. MUST contain a region-qualifying slash, or be exactly "UTC" — a bare abbreviation or alias such as "EST", "NZ", "GMT" or "Zulu" is REJECTED even though it resolves to a real zone, because it is ambiguous: "EST" resolves to a fixed-offset zone with no daylight saving, NOT US Eastern. Write "Pacific/Auckland" rather than "NZ". Written as its CANONICAL IANA spelling, which may differ in case or alias from what you passed (e.g. "us/pacific" is written as "America/Los_Angeles"). Rejected: with neither start nor end (re-send one unchanged alongside it to re-zone); with only one of start/end when the untouched side is stored in a different named zone (pass both, or omit timeZone); combined with a start/end already carrying Z/an offset or date-only; and `null`/empty/whitespace. A zoned start/end carries a VTIMEZONE definition per zone referenced (RFC 5545 §3.6.5), recomputed from the runtime\'s own timezone data whenever start or end changes; a call that changes neither leaves the stored block(s) exactly as they were. Recomputing it is bounded: a resulting span longer than a century, a start before year 2 (and, depending on its time zone, one in the first days of year 2 too), or an end in year 10000 or later (UTC) — which, depending on its time zone, includes one ending late on 31 December 9999 — is rejected rather than accepted, with the thrown error stating the exact bound.',
             },
@@ -1787,7 +1601,7 @@ const TOOLS = [
           'What it actually does: it REMOVES the message from the Inbox and leaves every other folder and label in place, adding the Archive folder only when removing the Inbox would otherwise leave the message filed nowhere. ' +
           'So a message filed in the Inbox plus a label keeps the label and does NOT go to Archive; a message filed only in the Inbox moves to Archive; a message that already left the Inbox is left completely untouched. ' +
           'A no-op is a legitimate, successful outcome here, not a failure. ' +
-          'Once a message has LEFT the Inbox, it REFUSES one in Trash, Spam, Drafts, Scheduled, Sent or Snoozed, because the Fastmail client offers no Archive action there either; the refusal says why, and names an alternative in this server where one exists (for a scheduled send or a snooze there is none, and it says so). The Inbox is tested first, so a message somehow in the Inbox AND one of those is archived rather than refused, keeping that membership and gaining nothing — except that a message also in Scheduled may come back as `failed`, because the server appears to reject re-asserting a scheduled membership outside a send request; that combination has not been measured yet. ' +
+          'Once a message has LEFT the Inbox, it REFUSES one in Trash, Spam, Drafts, Scheduled, Sent or Snoozed, because the Fastmail client offers no Archive action there either; the refusal says why, and names an alternative in this server where one exists (for a scheduled send or a snooze there is none, and it says so). The Inbox is tested first, so a message somehow in the Inbox AND one of those is archived rather than refused, keeping that membership and gaining nothing — except that a message also in Scheduled may come back as `failed`, because the server appears to reject re-asserting a scheduled membership outside a send request. ' +
           'Never throws on a partial failure: the result reports each id separately as movedToArchive, removedFromInbox, notInInbox, refused, notFound or failed, with counts that sum to the number of distinct ids you passed (duplicates are collapsed). The JSON beside the summary is `{ counts, results }`, so both the per-id detail and the counts are parseable. ' +
           'Each entry\'s `mailboxes`/`roles` are the PROJECTED filing for the two branches that wrote, the OBSERVED unchanged filing for notInInbox and refused (which write nothing), and for failed either the filing as OBSERVED BEFORE the write was attempted or, when no write was attempted for it, nothing at all; read roles for "archive" to tell whether a message is in Archive, since the branch name alone will not say. Both fields are ABSENT on a notFound entry (there is no filing to report) and on the failed sub-case where the current filing could not be READ (the server returned no mailboxIds object, or an empty one, which is not a filing a message can have; its filing was never observed, which is why it failed), and `roles` is absent whenever nothing the message is filed in has a role. A `unresolvedMailboxIds` on an entry means a mailbox id could not be resolved to a name, so `mailboxes`/`roles` are incomplete for that message and those raw ids are the remainder — which is also what tells you how to read an absent `roles`: absent with no `unresolvedMailboxIds` means no role mailboxes, absent WITH them means the roles are unknown for the ids listed there. ' +
           'The Archive destination is found by JMAP role, never by folder name, so a folder merely NAMED "archive" is not it, and there is no destination parameter — use move_email to file into anything else. ' +
@@ -2110,9 +1924,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const client = initializeClient();
 
     switch (name) {
-      // Both mailbox tools are thin result wrappers: their orchestration lives in
-      // src/mailbox-handler.ts behind an injected client, so it is covered by npm test
-      // rather than only by running the server.
+      // Orchestration for both mailbox tools lives in src/mailbox-handler.ts.
       case 'list_mailboxes':
         return { content: await listMailboxes(args, client) };
 
@@ -2121,28 +1933,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'list_emails': {
         const { mailbox, limit } = args as any;
-        // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
-        // silently reverse the sort order. Defaults to false (newest first), matching the
-        // documented default. Sits alongside the scope flags below, which coerce the same way.
+        // coerceBool, not !!, on every flag: a lenient client's stringified "false" is
+        // truthy, so `!!` would silently reverse the sort order or flip raw:"false" into
+        // untransformed JMAP. (#54)
         const ascending = coerceBool((args as any).ascending) ?? false;
-        // raw takes coerceBool like every other flag on this server, not `!!`. A lenient
-        // client's stringified "false" is truthy, so `!!` on raw:"false" returned
-        // untransformed JMAP to a caller that had explicitly asked for the simplified shape
-        // — a silent response-format flip, and raw/verbose sit on nearly every read tool.
-        // Both default to false, which is what `!!undefined` already produced, so the
-        // default shape is unchanged. An unrecognised value ("1", "yes") now lands on that
-        // default instead of flipping the format. Repeated per handler rather than hoisted:
-        // each read tool destructures its own args, and the surrounding code differs. (#54)
         const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
         const position = coercePosition((args as any).position);
-        // clampLimit, not a bare Math.min/max: this is the same expression
-        // (Math.min(Math.max(Number(value) || fallback, 1), max)) written through the
-        // shared helper so the source-scan drift guard in tool-schema.test.ts, which
-        // matches every `.getEmails(` call site against a literal `clampLimit(` call,
-        // can see this one too.
+        // clampLimit, not a bare Math.min/max: the drift guard in tool-schema.test.ts
+        // matches every `.getEmails(` call site against a literal `clampLimit(` call.
         const validLimit = clampLimit(limit, 20, 100);
         const result = await client.getEmails({
           mailbox,
@@ -2153,8 +1954,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           includeSpam: coerceBool((args as any).includeSpam) ?? false,
           excludeDrafts: coerceBool((args as any).excludeDrafts) ?? false,
         });
-        // Append the exclusion note (if any) to the formatter's string — same out-of-band
-        // discipline on both raw + simplified; the JSON block stays parseable.
+        // The exclusion note rides after the JSON on both raw and simplified, so the JSON
+        // block stays parseable.
         const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
@@ -2171,9 +1972,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
-        // Same coercion as list_mailboxes for both flags. It matters most here: `!!` on
-        // verbose:"false" pulled the HTML body into the response, and `!!` on raw:"false"
-        // ALSO made assertStripQuotedNotRaw reject a legitimate stripQuoted read.
+        // Same coercion as list_emails. Here `!!` on raw:"false" would also make
+        // assertStripQuotedNotRaw reject a legitimate stripQuoted read.
         const raw = coerceBool((args as any).raw) ?? false;
         const verbose = coerceBool((args as any).verbose) ?? false;
         // Validated before the fetch so a typo'd field name costs no round trip.
@@ -2188,9 +1988,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const email = await client.getEmailById(emailId);
         const simplified = simplifyEmail(email, { includeHtml: verbose || wantsHtmlBody(fields), stripQuoted: strip });
         // The draft body hash, attached HERE rather than inside simplifyEmail: whether one
-        // can be issued honestly depends on what THIS READ returns, not on the message. The
-        // rules (and the reason each one is a rule) are in attachDraftBodyHash, which is
-        // where they can be unit-tested; this is the only tool that calls it.
+        // can be issued honestly depends on what THIS READ returns, not on the message.
+        // The rules are in attachDraftBodyHash; this is the only tool that calls it.
         attachDraftBodyHash(email, simplified, { raw, fields, stripQuoted: strip });
         return {
           content: [
@@ -2203,28 +2002,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'draft_email': {
-        // The whole orchestration (mode gating, the token scan and its refusals, block
-        // building, the single expansion pass, attachment carry/upload, create) lives in
-        // composeDraftEmail so it is unit-testable with a mock client; this handler just
-        // maps the result to the response text. That rendering lives in
-        // formatDraftEmailResult beside the other result formatters, and is unit-tested
-        // there: the recipient lines are the only place the stored bcc reaches a caller, so
-        // "it renders" has to be an assertion rather than a claim about untested code here.
         const result = await composeDraftEmail(args, client, getAttachDir(), getAllowBlobAttach());
         return { content: [{ type: 'text', text: formatDraftEmailResult(result) }] };
       }
 
       case 'edit_draft': {
-        // The orchestration (field coercion, the body guard, attachment upload/resolution,
-        // the update) lives in editDraft so it is unit-testable with a mock client — the
-        // attachment seam decides whether a capability gate refuses the call, and a gate
-        // proved only by a live run is not regression protection. This handler just maps
-        // the result to the response text.
         const updateResult = await editDraft(args, client, getAttachDir(), getAllowBlobAttach());
 
-        // JMAP content is immutable, so an edit creates a replacement draft and moves the
-        // old one to Trash. The summary reports where that old copy went and what it held,
-        // so an unintended overwrite is visible and undoable (#65).
+        // The summary reports where the replaced draft went and what it held, so an
+        // unintended overwrite is visible and undoable (#65).
         return {
           content: [
             {
@@ -2236,10 +2022,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'send_draft': {
-        // The orchestration (submit, then best-effort thread-state maintenance on the
-        // message the draft replied to or forwarded) lives in sendDraftAndMaintainKeywords
-        // so it is unit-testable with a mock client; this handler just maps the result to
-        // the response text.
         const result = await sendDraftAndMaintainKeywords(args, client);
 
         return {
@@ -2301,8 +2083,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, 'query is required');
         }
         const contactsClient = initializeContactsCalendarClient();
-        // Hard cap, same as list_contacts — no `position` param, so results past
-        // the cap are unreachable. Paging for contacts is tracked as issue #94.
+        // Hard cap, same as list_contacts (#94).
         const result = await contactsClient.searchContacts(query, clampLimit(limit, 20, 100));
         return {
           content: [
@@ -2314,9 +2095,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // The three contacts write tools are thin result wrappers: their coercion and
-      // orchestration live in src/contacts-handler.ts behind an injected client, so they are
-      // covered by npm test rather than only by running the server against a real account.
+      // Orchestration for the three contacts write tools lives in src/contacts-handler.ts.
       case 'create_contact':
         return { content: await createContactTool(args, initializeContactsCalendarClient()) };
 
@@ -2338,12 +2117,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        // No longer pure JSON on one path, and knowingly (#136): a collection that failed to
-        // list has no name and no type to put in a row, so the only place it can be reported
-        // is a trailing note. The alternative — a JSON field — would have to be read out of a
-        // listing whose whole shape says "these are your calendars", and a caller that ignores
-        // it is told nothing. Same seam as the calendar window note: the client returns the
-        // paths, the formatter owns the wording, this concatenates.
+        // A collection that failed to list has no name and no type to put in a row, so it is
+        // reported in a trailing note rather than a JSON field a caller could ignore (#136).
         const { calendars, brokenCollections } = await davClient.getCalendars();
         return {
           content: [{ type: 'text', text: `${toolJson(calendars)}${buildBrokenCollectionNote(brokenCollections, 'read')}` }],
@@ -2357,21 +2132,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
         const { events, total, windowClamp, brokenCollections } = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
-        // Rendered through the shared seam every other list/search read tool uses, so the
-        // summary wording cannot drift here on its own. Unpaged: this tool takes no
-        // `position`, so formatQueryResult offers no nextPosition — passing one back would be
-        // rejected by the unknown-parameter guard. Recurrence expansion makes the count
-        // load-bearing, since one fortnightly event across a quarter is now several rows.
-        //
-        // The window note rides AFTER the JSON, like the Trash/Spam exclusion note on the
-        // email listings, so the JSON block stays parseable. It appears only when the window
-        // queried was not the window asked for. Both the wording and the blank-line separator
-        // come from the note builder, exactly as buildExclusionNote owns them for the email
-        // listings — the handler concatenates and decides nothing.
-        //
-        // The broken-collection note (#136) rides after the window note, each owning its own
-        // separator, because they disclose independent things: the window note is about which
-        // DAYS were searched, this one about which COLLECTIONS could be. A call can need both.
+        // Unpaged: this tool takes no `position`, so formatQueryResult offers no nextPosition.
+        // The window note and the broken-collection note (#136) ride AFTER the JSON so it
+        // stays parseable; each builder owns its wording and separator, and a call can need
+        // both.
         return { content: [{ type: 'text', text: `${formatQueryResult({ items: events, total })}${buildCalendarWindowNote(windowClamp)}${buildBrokenCollectionNote(brokenCollections, 'read')}` }] };
       }
 
@@ -2384,8 +2148,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        // Same accepted cost as list_calendars: the JSON body stays the event, and the
-        // collection that could not be searched is disclosed after it (#136).
         const { event, otherCopies, addressedByUrl, brokenCollections } = await davClient.getCalendarEventById(eventId);
         // The `otherCopies` merge lives in calendarEventBody rather than here: it is a branch,
         // and a branch in this switch has no test harness (#101).
@@ -2398,13 +2160,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'create_calendar_event': {
         const { calendarId, title, description, start, end, location, timeZone, transparency } = args as any;
         // Coerce BEFORE the size guard below, so it measures the real array rather than a
-        // lenient client's JSON string (which would slip through as a non-array and be
-        // left unmeasured). Per-item shape and key checks live in coerceParticipants.
+        // lenient client's JSON string, which would slip through unmeasured.
         const participants = coerceParticipants((args as any).participants);
-        // Bound the text before anything measures, escapes or folds it: the iCal line
-        // folding these values pass through is quadratic in the field length, so an
-        // unbounded description or participant name stalls the whole process. Rejects
-        // (never truncates) with the field, its size and the limit. See ical-limits.ts.
+        // Bound the text before anything folds it: iCal line folding is quadratic in the
+        // field length, so an unbounded value stalls the whole process. See ical-limits.ts.
         assertICalTextLimits({ title, description, location, participants });
         if (!calendarId || !title || !start || !end) {
           throw new McpError(ErrorCode.InvalidParams, 'calendarId, title, start, and end are required');
@@ -2421,19 +2180,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'update_calendar_event': {
         const { eventId, title, description, start, end, location, timeZone, transparency } = args as any;
-        // Same coercion, and the same ordering, as create_calendar_event. An omitted
-        // participants stays undefined here ("leave the attendees alone"), so the
-        // no-field-to-update check and updateCalendarEvent still read it correctly.
+        // Same coercion, ordering and bound as create_calendar_event. An omitted
+        // participants stays undefined ("leave the attendees alone").
         const participants = coerceParticipants((args as any).participants);
-        // Same bound the create path applies, for the same reason: the update path folds
-        // SUMMARY/DESCRIPTION/LOCATION and every ATTENDEE line through the same quadratic
-        // folder, so it is the identical stall from the identical input. See ical-limits.ts.
         assertICalTextLimits({ title, description, location, participants });
-        // Same lenient-client reason as edit_draft's clearFields: a stringified array
-        // ('["location"]') would fail the Array.isArray test below, so the call would be
-        // rejected as "no field to update" while the caller had named one — and if some
-        // other field carried the update, the clear would be dropped silently on the way
-        // to updateCalendarEvent. Coerce once and pass the coerced value on. (#54)
+        // Coerced so a stringified array ('["location"]') passes the Array.isArray test
+        // below instead of being dropped silently. (#54)
         const clearFields = coerceStringArray((args as any).clearFields);
         if (!eventId) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
@@ -2555,11 +2307,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'archive_email': {
-        // Strict, not the lenient coerceStringArray: that one maps every element through
-        // String(), so `emailIds: [null]` would reach Email/get as the literal id "null"
-        // and come back reported as notFound — a type error wearing a not-found error's
-        // clothes, which would falsify this tool's promise that notFound means the server
-        // did not know the id.
+        // Strict, not the lenient coerceStringArray: that one would send `emailIds: [null]`
+        // as the literal id "null", reported as notFound, which this tool promises means
+        // the server did not know the id.
         const emailIds = coerceStringArrayStrict((args as any).emailIds, 'emailIds');
         if (!emailIds || emailIds.length === 0) {
           throw new McpError(ErrorCode.InvalidParams, 'emailIds array is required and must not be empty');
@@ -2569,30 +2319,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [
             { type: 'text', text: formatArchiveResult(result) },
-            // The whole result as its own item, so the summary prose never has to be parsed
-            // and the JSON stays parseable. `counts` rides along with `results` because both
-            // descriptions promise counts that sum to the distinct id count, and a caller
-            // cannot check that invariant against prose — a bucket with no entries produces
-            // no line at all.
+            // The whole result as its own parseable item. `counts` rides along because the
+            // description promises counts that sum to the distinct id count, and the prose
+            // omits empty buckets.
             //
-            // Redacted like the prose beside it. This path RETURNS rather than throws, so the
-            // CallTool catch never sees it, and the renderer's own redaction of a set-error
-            // description would be decorative if the same server string then went out verbatim
-            // one content item later. Applied to every string VALUE, so it covers descriptions,
-            // mailbox names and ids alike rather than a field list that has to be kept in step
-            // with the type.
-            //
-            // Redaction is ALL this item gets, and that is a deliberate difference from the
-            // prose: the renderer passes mailbox names through describePart, which also strips
-            // format characters such as a bidi override. Here the defence is JSON quoting,
-            // which escapes quotes and control characters but leaves a bidi override intact.
-            // This item is DATA — a caller parses it rather than reading it as the server
-            // speaking — and truncating or rewriting names inside it would corrupt the values
-            // it exists to convey. The prose is the neutralised surface; this one is verbatim
-            // by design.
+            // Redacted here because this path RETURNS rather than throws, so the CallTool
+            // catch never sees it. Redaction is ALL it gets, deliberately: unlike the prose it
+            // is not passed through describePart (a bidi override survives JSON quoting),
+            // because it is DATA and rewriting names would corrupt the values it conveys.
             // redactedJson, NOT redactBearerTokens(JSON.stringify(...)): redacting a finished
-            // JSON document lets the bearer pattern eat the delimiters that terminate a value,
-            // and this item's whole promise is that it parses. See its definition in coerce.ts.
+            // document lets the bearer pattern eat a value's delimiters. See coerce.ts.
             { type: 'text', text: redactedJson({ counts: result.counts, results: result.results }) },
           ],
         };
@@ -2645,8 +2381,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
-        // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
-        // hand back the raw JMAP shape to a caller who asked for the simplified one.
+        // Same coercion as list_emails.
         const raw = coerceBool((args as any).raw) ?? false;
         const client = initializeClient();
         const result = await client.getEmailAttachments(emailId);
@@ -2682,39 +2417,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
         } catch (error) {
-          // Let path-confinement rejections through so the caller sees why their path was
-          // rejected. PathAccessError is the tagged discriminator (the path guards no
-          // longer prefix "Save path", so a substring match would miss them). Redacted
-          // like every other error egress — this branch returns caller-reflected path text
-          // and short-circuits the top-level catch, so it has to do its own redaction for
-          // the no-exemptions audit to hold.
+          // Path-confinement rejections go out as InvalidParams so the caller sees why.
+          // Redacted here because this branch short-circuits the top-level catch.
           if (error instanceof PathAccessError) {
             throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
           }
-          // Everything else goes to the top-level catch, which maps a bad emailId /
-          // attachmentId to InvalidParams naming what to pass instead, and a transport or
-          // JMAP failure to InternalError carrying the server's own reason. Both are
-          // redacted there, so this tool needs no error handling of its own beyond the
-          // path branch above.
           throw error;
         }
       }
 
       case 'search_emails': {
         const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit } = args as any;
-        // coerceBool, not !!: a lenient client's stringified "false" is truthy and would
-        // silently reverse the sort order. Defaults to false (newest first), matching the
-        // three-valued coerceBool the other flags on this call already use.
+        // Same coercion as list_emails.
         const ascending = coerceBool((args as any).ascending) ?? false;
-        // Same coercion for raw — see list_emails for why `!!` was wrong here.
         const raw = coerceBool((args as any).raw) ?? false;
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
         const position = coercePosition((args as any).position);
-        // The scope arrays coerce STRICTLY: a present-but-uncoercible value is rejected
-        // rather than read as absent. Dropping one would silently widen the query the
-        // caller passed it to narrow, and the results would look like a complete answer.
+        // STRICT: dropping an uncoercible scope array would silently widen the query.
         const requiredMailboxes = coerceStringArrayStrict((args as any).requiredMailboxes, 'requiredMailboxes');
         const excludeMailboxes = coerceStringArrayStrict((args as any).excludeMailboxes, 'excludeMailboxes');
         const client = initializeClient();
@@ -2749,9 +2470,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const client = initializeClient();
         try {
-          // The flag guards, the body-size cap and the per-message signals live in
-          // readThread so they are unit-testable with a mock client; this stays a
-          // result-to-text wrapper.
           const text = await readThread(args, client);
           return {
             content: [
@@ -2762,13 +2480,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ],
           };
         } catch (error) {
-          // Re-raise the tagged caller-input errors BARE so the top-level catch applies
-          // its InvalidParams mapping (both tagged branches there redact) — otherwise
-          // this local catch would collapse them to InternalError. getThread throws
-          // InvalidInputError on a not-found threadId (a bad id is caller-fixable input);
-          // PathAccessError is re-raised too for parity with download_attachment, though
-          // get_thread has no path input today. Everything else is an operational thread
-          // failure → InternalError (redacted here, since it doesn't reach a tagged branch).
+          // Re-raise the tagged caller-input errors BARE so the top-level catch maps them to
+          // InvalidParams (a not-found threadId is InvalidInputError); otherwise this catch
+          // would collapse them to InternalError. Everything else is redacted here.
           if (error instanceof PathAccessError || error instanceof InvalidInputError) {
             throw error;
           }
@@ -2923,20 +2637,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const client = initializeClient();
         const session = await client.getSession();
 
-        // Every calendar tool runs over CalDAV — the JMAP calendar path is disabled
-        // and its client methods are gone. So availability is CalDAV configuration
-        // alone: reporting available off the JMAP calendar capability would promise
-        // tools that then throw "CalDAV not configured" on every call.
+        // Every calendar tool runs over CalDAV, so availability is CalDAV configuration
+        // alone, never the JMAP calendar capability.
         const caldavConfigured = initializeCalDAVClient() !== null;
         const calendarAvailable = caldavConfigured;
         const calendarNote = caldavConfigured
           ? 'Calendar is available via CalDAV'
           : 'Calendar access not available - set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD (a Fastmail app password)';
 
-        // Contacts need BOTH the JMAP contacts capability and a contacts primary
-        // account on the session: every contacts method addresses the contacts
-        // account and throws when the session reports none, so the capability on
-        // its own would promise tools that cannot run.
+        // Contacts need BOTH the capability and a contacts primary account: every contacts
+        // method addresses that account and throws when the session reports none.
         const contactsCapability = !!session.capabilities['urn:ietf:params:jmap:contacts'];
         const contactsAccount = !!session.primaryAccounts?.['urn:ietf:params:jmap:contacts'];
         const contactsAvailable = contactsCapability && contactsAccount;
@@ -2960,11 +2670,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             available: contactsAvailable,
             functions: ['list_contacts', 'get_contact', 'search_contacts', 'create_contact', 'update_contact', 'delete_contact'],
             note: contactsAvailable
-              // The session reports the contacts capability and an account for it, which is
-              // what the READS need. It says nothing about whether the token may WRITE: a
-              // read-only contacts scope looks identical here and only refuses at the
-              // ContactCard/set, so the write tools are reported available and the caveat is
-              // stated rather than implied.
+              // A read-only contacts token looks identical here, so the write caveat is stated.
               ? 'Contacts are available. Read access is confirmed by this session; whether create_contact/update_contact/delete_contact can write is not — a read-only contacts token reports exactly the same capability and only refuses when a write is attempted. If a write comes back forbidden, re-issue the API token with read-write contacts access.'
               : contactsCapability
                 ? 'Contacts access not available - this session reports the contacts capability but no primary account for it, so there is no account for contacts operations to address'
@@ -3008,20 +2714,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'test_bulk_operations': {
         const { limit } = args as any;
-        // Coerce dryRun for lenient clients: a stringified "false" is otherwise truthy
-        // and would silently keep the diagnostic in dry-run mode. Defaults to dry-run
-        // (the safe, non-acting direction).
+        // Defaults to dry-run, the non-acting direction.
         const dryRun = coerceBool((args as any).dryRun) ?? true;
         const client = initializeClient();
 
-        // Get some recent emails to test with. clampLimit, not a bare Math.min/max: a
-        // non-numeric limit would otherwise reach JMAP as NaN, which serializes as
-        // `"limit": null` — an unbounded metadata dump. The client passes `limit` straight
-        // to JMAP with no clamp of its own, so this IS the bound on this path.
+        // clampLimit IS the bound on this path: a non-numeric limit would otherwise reach
+        // JMAP as NaN, serialised as `"limit": null`, an unbounded metadata dump.
         //
-        // `mailbox: 'inbox'` stays explicit: this diagnostic wants ordinary delivered
-        // messages to mark read and pin, and an all-mail read would hand it drafts and sent
-        // copies to write to instead.
+        // `mailbox: 'inbox'` stays explicit: an all-mail read would hand this diagnostic
+        // drafts and sent copies to write to.
         const testLimit = clampLimit(limit, 3, 10);
         const { items: emails } = await client.getEmails({ limit: testLimit, mailbox: 'inbox' });
 
@@ -3076,7 +2777,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ],
           };
         } else {
-          // Execute the test operations
           for (const operation of operations) {
             try {
               await client.bulkMarkRead(operation.parameters.emailIds, coerceBool(operation.parameters.read) ?? true);
@@ -3086,8 +2786,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 executed: true,
                 timestamp: new Date().toISOString()
               });
-              
-              // Small delay between operations
+
               await new Promise(resolve => setTimeout(resolve, 500));
             } catch (error) {
               results.operations.push({
@@ -3095,8 +2794,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 status: 'FAILED',
                 executed: false,
                 // Folded into result JSON rather than raised, so the top-level catch's
-                // redaction never sees it — redact here for defense-in-depth parity now
-                // that richer #22 reasons flow through this path.
+                // redaction never sees it.
                 error: redactBearerTokens(error instanceof Error ? error.message : String(error)),
                 timestamp: new Date().toISOString()
               });
@@ -3118,38 +2816,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
   } catch (error) {
-    // EVERY branch below runs its message through redactBearerTokens, with no exemption.
-    // This is the single choke point where error text becomes tool output, so making the
-    // rule unconditional is what makes the audit — "no unredacted error text reaches tool
-    // output" — a grep anyone can run and verify, rather than a claim resting on an
-    // exemption list that has to be re-argued (and kept accurate) per error class. Each
-    // exemption costs one function call to remove and one reader-hour to justify, so
-    // there are none.
+    // EVERY branch below runs its message through redactBearerTokens, with no exemption:
+    // this is the single choke point where error text becomes tool output, so "no
+    // unredacted error text reaches tool output" stays a grep anyone can verify.
     if (error instanceof McpError) {
       // Redact in place rather than rebuilding: McpError's constructor prefixes the
-      // message with "MCP error <code>: ", so re-wrapping an already-wrapped message
-      // would double the prefix. Mutating preserves the code, the data, and any McpError
-      // subclass identity the SDK constructed.
-      // Only `.message` is redacted; `.data` is deliberately left alone. Nothing in this
-      // codebase ever populates it, so redacting it would guard a channel that carries
-      // nothing — and `.data` is arbitrary JSON, which a string-shaped scrubber cannot
-      // walk without either flattening structure or recursing over untyped values.
-      // Revisit if anything here starts setting it.
+      // message with "MCP error <code>: ", so re-wrapping would double the prefix.
+      // `.data` is deliberately left alone: nothing here populates it. Revisit if
+      // anything starts setting it.
       error.message = redactBearerTokens(error.message);
       throw error;
     }
-    // The two compose handlers (draft_email/edit_draft) have no
-    // local try/catch, so an attachment opt-in/path/contentType rejection thrown as a
-    // PathAccessError surfaces here. Map it to InvalidParams (actionable) rather than the
-    // generic InternalError wrap below. (download_attachment maps its own PathAccessError
-    // locally and never reaches here.)
+    // Caller-input errors (e.g. an attachment rejection from the compose handlers, which
+    // have no local catch) map to InvalidParams rather than the generic wrap below.
     if (error instanceof PathAccessError) {
       throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
     }
-    // A semantically-invalid caller input (unresolvable mailbox, label id that is
-    // really a name). Map to InvalidParams like PathAccessError above. Placed after the
-    // PathAccessError branch and before the generic wrap so an InvalidInputError can't
-    // fall through to InternalError.
     if (error instanceof InvalidInputError) {
       throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
     }
@@ -3162,20 +2844,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function runServer() {
-  // Resolve the display and window-interpretation zone once, before any tool handler can fire.
-  // One stored value does both jobs: every email `date` renders in it, AND list_calendar_events
-  // interprets a date-only window bound as a whole day in it, so the day a calendar query covers
-  // and the day an email is dated cannot drift apart.
+  // Resolve the zone once, before any tool handler can fire: every email `date` renders in it
+  // AND list_calendar_events reads a date-only window bound in it, so the two cannot drift.
   //
-  // FASTMAIL_TIMEZONE (or the host zone it falls back to when unset) is held to the same slash
-  // rule as the caller-supplied `timeZone` parameter (#157 amendment): a shorthand or
-  // unresolvable OPERATOR-SET value refuses to start this server, rather than silently rendering
-  // every date in the wrong zone with nothing said. A rejected HOST zone is different — nobody
-  // configured it, so it falls back to UTC with a loud one-time warning instead of making an
-  // unconfigured machine unusable. This has to run here, not at module load: a module-level throw
-  // would make src/index.ts unimportable, breaking every test that imports it, and would produce
-  // a stack trace instead of an operator-readable refusal. See resolveConfiguredTimezone's own
-  // comment in coerce.ts for the full reasoning.
+  // Runs here, not at module load: a module-level throw would make src/index.ts unimportable
+  // and produce a stack trace instead of an operator-readable refusal. The refuse-vs-warn
+  // rules are in resolveConfiguredTimezone (coerce.ts).
   let resolvedTimezone: { zone: string; warning?: string };
   try {
     resolvedTimezone = resolveConfiguredTimezone(getTimezone());

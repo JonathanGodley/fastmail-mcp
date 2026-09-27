@@ -12,9 +12,8 @@
 // conversation is legitimate ("Re: your invoice" written deliberately to a new thread), and
 // a refusal would leave that caller no way through at all.
 //
-// ONE matcher serves both routes, from this module, so compose and edit cannot come to
-// disagree about what counts as a prefix — a caller warned on the way in and not on the way
-// out (or the reverse) would read the difference as a rule rather than as drift.
+// One matcher serves both routes so compose and edit cannot disagree about what counts as a
+// prefix.
 
 /** Which mode the prefix claims: `Re` is a reply, `Fwd`/`Fw` a forward. */
 export type SubjectPrefixKind = 'reply' | 'forward';
@@ -24,36 +23,22 @@ export type SubjectPrefixKind = 'reply' | 'forward';
 // whitespace anywhere between the pieces, then the colon that ends the prefix.
 //
 // NOTHING ELSE, deliberately. A miss costs a note nobody sees, while a false hit tells a
-// caller their perfectly ordinary subject will not thread — so the set stays narrow enough
-// to state in one sentence and obvious enough that a reader can tell at a glance which
-// subjects are in it. That rules out the localised prefixes ("AW:", "RE~:", "SV:", "Odp:")
-// every mail client spells differently, and the trailing-prefix forms ("... (fwd)"): both
-// would widen the set past what the description in the tool surface can honestly say.
+// caller their ordinary subject will not thread, so the set stays narrow enough to state in
+// one sentence. That rules out the localised prefixes ("AW:", "SV:", "Odp:") and the
+// trailing forms ("... (fwd)").
 //
-// The colon is required, so a subject that merely BEGINS with those letters — "Reference
-// pricing", "Fwd of the notes" — is not a prefix. Anchored, so a prefix that appears later
-// in the line ("Notes on Re: pricing") is just text, which is what it looks like to a mail
-// client too.
 // The trailing whitespace run sits INSIDE the optional counter group on purpose. With it
-// outside, a subject carrying no counter matches two adjacent runs (`\s*\s*:`), and a long
-// whitespace run with no colon after it makes the engine hand characters back one at a
-// time while the second run re-scans: quadratic, and measured at 265ms for 20,000 spaces
+// outside, a subject with no counter matches two adjacent runs (`\s*\s*:`), and a long
+// whitespace run with no colon backtracks quadratically: measured at 265ms for 20,000 spaces
 // against 0.02ms for this form. Nothing caps a subject before it reaches here and the
-// server is one stdio process, so a stall here stalls every other call. This spelling
-// accepts exactly the same subjects - proved row by row against the enumerated sets.
+// server is one stdio process, so a stall here stalls every other call.
 const SUBJECT_PREFIX = /^\s*(re|fwd|fw)\s*(?:\[\s*\d+\s*\]\s*)?:/i;
 
 /**
  * The kind of prefix a subject opens with, or undefined for a subject that carries none.
  *
- * Takes `undefined` as well as a string so both callers can hand it whatever they hold: a
- * subject nobody passed, and a blank one (which `coerceSubjectOverride` has already turned
- * into `undefined`), both come back as no match rather than needing a guard of their own.
- *
- * The type test is for the compiler and for a lenient caller, and no test can observe it
- * being removed: `exec` stringifies whatever it is handed, and the pattern is anchored, so
- * an absent subject that reached it would fail to match anyway. It stays because reading a
- * subject that is not a string is a caller bug, not a subject without a prefix.
+ * No test can observe the type test's removal (`exec` stringifies, and "undefined" does not
+ * match), but it stays: a non-string subject is a caller bug, not a subject without a prefix.
  */
 export function matchSubjectPrefix(subject: string | undefined): SubjectPrefixKind | undefined {
   if (typeof subject !== 'string') return undefined;

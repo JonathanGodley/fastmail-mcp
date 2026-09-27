@@ -1,10 +1,3 @@
-// The edit_draft orchestration, exercised through its injected client.
-//
-// This seam existed only inside the CallTool switch until the attachment sources grew a
-// second capability gate. A gate that can only be observed by running the real server
-// against a real account is not regression protection — so the orchestration moved into
-// editDraft() and the branches below are covered here, with no credentials and no network.
-
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { editDraft } from './edit-draft-handler.js';
@@ -16,9 +9,8 @@ const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf
 
 const RESULT: any = { id: 'draft-new', replacedDraft: { id: 'draft-old' }, trashedOldDraftId: 'draft-old' };
 
-// A spy EditDraftClient. uploadAttachments records its arguments — including the two
-// capability flags, which is the whole point of the extraction — and returns canned parts
-// so they can be asserted where they land on the update.
+// uploadAttachments records both capability flags and returns canned parts, so they can be
+// asserted where they land on the update.
 function spyClient(over: Partial<EditDraftClient> = {}) {
   const calls: any = {};
   const client: EditDraftClient = {

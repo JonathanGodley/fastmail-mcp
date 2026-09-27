@@ -54,9 +54,8 @@ try {
   let r = await c.call('edit_draft', { emailId: D0, subject: 'Foreign-shape roundtrip fixture (edited subject)' });
   check('metadata edit succeeded', !r.isError, text(r).slice(0, 300));
   const d1 = idOf(text(r)); if (d1) trash.push(d1);
-  // verbose:true so the read returns BOTH stored parts: this draft carries a text/plain and
-  // a text/html part, and get_email issues a bodyHash only for a read that showed the whole
-  // stored body. Without it the read withholds and the body edits below cannot be made.
+  // verbose:true returns BOTH stored parts; get_email issues a bodyHash only for a read that
+  // showed the whole stored body, and the body edits below need one.
   r = await c.call('get_email', { emailId: d1, verbose: true });
   let em = jsonOf(text(r));
   check('metadata edit: read issues a bodyHash', typeof em.bodyHash === 'string', JSON.stringify(em.bodyHashWithheld ?? em.bodyHash));

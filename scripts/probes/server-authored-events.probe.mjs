@@ -19,52 +19,29 @@
 //
 // `calendarName` defaults to "MCP probe calendar" and must be the SAME in both phases.
 //
-// WHY THE FIXTURES PERSIST. Every other probe here deletes its fixtures in a finally.
-// This one deliberately does not: the whole point is that a human views them in the
-// client, which cannot happen inside a script run. `create` leaves the four events in
-// place and exits; `cleanup` removes the whole collection later. Nothing else sweeps
+// WHY THE FIXTURES PERSIST. A human has to view them in the client, so `create` leaves the
+// four events in place and `cleanup` removes the whole collection later. Nothing else sweeps
 // them, so an un-run `cleanup` leaves a stray calendar in the account.
 //
-// MKCALENDAR OR STOP, AND NEVER TOUCH A COLLECTION IT DID NOT MINT. The fixtures go into a
-// temporary collection minted by MKCALENDAR. If MKCALENDAR fails the probe prints the status
-// and exits non-zero — it NEVER writes into a calendar it did not mint. This runs against a
-// live personal account and the cleanup phase deletes a WHOLE COLLECTION, so a display name
-// alone is not enough to identify a target: `cleanup Personal` must not wipe a real calendar.
+// NEVER TOUCH A COLLECTION IT DID NOT MINT. `cleanup` deletes a WHOLE COLLECTION, so a display
+// name alone cannot identify a target: `cleanup Personal` must not wipe a real calendar. The
+// provenance test is the PATH: `create` mints a collection whose last segment starts with
+// `mcp-164-`, and both phases match on the display name AND that segment. If MKCALENDAR fails,
+// or a same-named collection exists on any other path, both phases refuse loudly and non-zero.
+// The writes are addressed by the minted URL, never by the name.
 //
-// The provenance test is the PATH, not the name. `create` mints its collection at a path
-// whose last segment starts with `mcp-164-`, and both phases match on the display name AND
-// that segment. A same-named collection on any other path is refused, loudly and non-zero,
-// by both phases: `create` will not write into it and `cleanup` will not delete it.
+// EVERY RUN MINTS ITS OWN COLLECTION, so its resource count is meaningful and one run's
+// `cleanup` cannot take another's fixtures unasked. `cleanup` deletes EVERY minted collection
+// under the name, so nothing is stranded.
 //
-// `create` refuses whenever such a collection exists AT ALL — having one of its own too is
-// not a reprieve, because a display name is not a unique key and the write would go to
-// whichever the server discovers first. And the writes are addressed by the minted
-// collection's URL rather than by the name, so the fixtures cannot land anywhere else even
-// if the account gains a same-named calendar mid-run.
+// NO PARTICIPANTS: an attendee makes the server send real iTIP mail (see the README).
 //
-// EVERY RUN MINTS ITS OWN COLLECTION, and never reuses one an earlier run left behind. That
-// keeps the run's own resource count meaningful — the four events it wrote are the only
-// things in the collection it minted — and stops one run's `cleanup` from taking another
-// run's fixtures with it. An earlier minted collection is reported and left alone. Nothing is
-// stranded by that: `cleanup` deletes EVERY minted collection under the name, so one cleanup
-// sweeps every run's leftovers at once.
+// WHAT IS PRINTED. Each create_calendar_event response verbatim, then every stored resource
+// fetched back raw (REPORT, NO expand) — what the client is rendering — then a "Look for in
+// the client:" line per event. Output redacts the account name and every email-shaped string.
 //
-// NO PARTICIPANTS. None of the four events carries one. An attendee makes the server's
-// scheduling layer send a real iTIP invitation from the account under test, and the later
-// delete sends the matching cancellation (see the README, "Creating a calendar event with
-// a participant sends real mail"). Nothing here needs the scheduling hop.
-//
-// WHAT IS PRINTED. For each event: the create_calendar_event response verbatim (its
-// statement of the zone / all-day form it actually wrote, and the id and url it returned),
-// then — after all four are written — every resource in the collection fetched back raw
-// over CalDAV with a calendar-query REPORT and NO expand, printed as stored. That raw
-// iCalendar is what the client is rendering, so it is the thing to compare the screen
-// against. Each event then gets a "Look for in the client:" line naming what to check.
-// Output redacts the account name and every email-shaped string.
-//
-// The writes go through the BUILT server over the MCP harness (so the create path under
-// test is the shipped one); the collection plumbing and the read-back are raw CalDAV over
-// bare fetch, so none of our parsing sits between the store and the dump.
+// The writes go through the BUILT server over the MCP harness; the collection plumbing and the
+// read-back are raw CalDAV, so none of our parsing sits between the store and the dump.
 
 import { makeChecker, text, jsonOf } from './probelib.mjs';
 import { createClient } from '../mcp-harness.mjs';
@@ -90,16 +67,12 @@ const CAL_NAME = process.argv[3] || 'MCP probe calendar';
 const ROOT = 'https://caldav.fastmail.com/dav/';
 const AUTH = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
 
-// Every CalDAV href on this server embeds the account's own address, and an event's
-// ORGANIZER carries it too. Nothing printed here may: probe output gets pasted into issues.
+// CalDAV hrefs and an event's ORGANIZER carry the account's address; output gets pasted into issues.
 const redact = s => String(s)
   .split(USERNAME).join('<account>')
   .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>');
 
-// ---------------------------------------------------------------------------
-// Minimal HTTP + XML plumbing. Regex parsing is enough for a probe against one known
-// server; every matcher tolerates any namespace prefix because Cyrus picks its own.
-// ---------------------------------------------------------------------------
+// Every XML matcher tolerates any namespace prefix because Cyrus picks its own.
 async function dav(method, url, { body, headers = {} } = {}) {
   const res = await fetch(url, {
     method,
@@ -122,18 +95,10 @@ const elAll = (xml, name) =>
 const responses = xml => elAll(xml, 'response');
 const abs = href => new URL(href, ROOT).href;
 
-// Cyrus returned calendar-data as a CDATA section on one live run (23 Aug 2026), so the raw
-// iCalendar arrives wrapped and NOT entity-escaped; a dump that still says
-// `<![CDATA[BEGIN:VCALENDAR` is not the stored bytes. Harmless when absent - a payload with
-// no CDATA falls through to the entity pass unchanged, which is what the sibling
-// client-authored probe does on every response.
-//
-// EVERY section, SPLICED IN PLACE. A payload containing a literal `]]>` is emitted as two
-// adjacent CDATA sections split around it, so taking only the first would truncate the dump —
-// but returning only the sections' contents is just as lossy the other way, because a MIXED
-// payload (entity-escaped text either side of a CDATA section) would lose everything outside
-// the brackets. So substitute each section with its own contents inside the original string
-// and run the entity pass over what remains, which is the only part that was ever escaped.
+// Cyrus returned calendar-data as a CDATA section on one live run (23 Aug 2026), wrapped and
+// NOT entity-escaped. EVERY section is SPLICED IN PLACE: a literal `]]>` splits a payload into
+// two adjacent sections, and a MIXED payload has escaped text either side, so only the text
+// outside the sections gets the entity pass.
 const ENTITIES = t => t
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
   .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&amp;/g, '&');
@@ -205,12 +170,9 @@ const summaryOf = data => (data.match(/^SUMMARY:(.*)$/m)?.[1] ?? '(no SUMMARY)')
 
 /** Is THIS run's collection — the one at `url` — present in a list_calendars response?
  *
- *  The URL, never the display name. A name test cannot tell this run's collection from an
- *  earlier run's sitting under the same name: the earlier one is already listed, so the wait
- *  would succeed on attempt 1 and report the fresh collection as visible before the server
- *  had ever seen it. The walk matches `url`/`href` by choice; either names exactly one
- *  collection, where a display name does not. Compared with any trailing slash removed,
- *  since the two sides mint it from different places and need not agree on that. */
+ *  The URL, never the display name: an earlier run's same-named collection is already listed,
+ *  so a name test would pass before the server had seen this one. Trailing slashes are
+ *  ignored because the two sides need not agree on them. */
 const sameCalendarUrl = (a, b) => a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
 
 function calendarIsListed(body, url) {
@@ -234,10 +196,7 @@ function calendarIsListed(body, url) {
   }
 }
 
-// PROVENANCE. The one marker that says this probe made a collection: `create` mints the path
-// segment, so only a collection sitting on such a path is eligible to be written into or
-// deleted. A display name is caller-supplied and can name anything in the account, which is
-// why it is never the sole test.
+// PROVENANCE: only a collection on a minted path is eligible to be written into or deleted.
 const MINTED_PREFIX = 'mcp-164-';
 const mintedSegment = () => `${MINTED_PREFIX}${Date.now()}`;
 const isMinted = url => {
@@ -245,18 +204,12 @@ const isMinted = url => {
   return (segments.at(-1) ?? '').startsWith(MINTED_PREFIX);
 };
 
-// ---------------------------------------------------------------------------
-// The four reference shapes, on dates computed from TODAY so a run in any month still lands
-// its fixtures in the coming week rather than on a date that has gone past. The anchor is
-// the next Wednesday at least two days out: far enough ahead that nothing here competes with
-// today's real entries, and a fixed weekday so the four sit in one contiguous stretch that a
-// single week view of the client shows at once.
+// The four reference shapes, dated from TODAY: anchored on the next Wednesday at least two
+// days out, clear of today's real entries and all in one week view.
 //
 // `timeZone` is omitted on the first (create writes the configured zone) and named on the
-// second — that pair is what tells you whether the client annotates a non-default zone the
-// way it does its own. DTEND is exclusive, so the three-day band ends on the fourth day to
-// cover three.
-// ---------------------------------------------------------------------------
+// second: that pair shows whether the client annotates a non-default zone the way it does its
+// own. DTEND is exclusive, so the three-day band ends on the fourth day.
 const WEDNESDAY = 3;
 const MIN_DAYS_AHEAD = 2;
 
@@ -312,7 +265,6 @@ const EVENTS = [
   },
 ];
 
-// ---------------------------------------------------------------------------
 const { check, failures } = makeChecker();
 
 async function runCreate() {
@@ -320,22 +272,10 @@ async function runCreate() {
   console.log(`Calendar home: ${redact(homeUrl)}`);
   console.log(`Temporary calendar display name: ${JSON.stringify(CAL_NAME)}`);
 
-  // --- the collection: ALWAYS mint a fresh one -----------------------------------------
-  // TWO RULES, and neither ever writes into a collection that already exists.
-  //
-  // 1. A same-named collection this probe did not mint means STOP, always — whether or not a
-  //    minted one also exists. Having our own is no protection, because a display name is not
-  //    a unique key: src/caldav-client.ts resolves `calendarId` as
-  //    `c.url === requested || c.displayName === requested` over the discovery order, so with
-  //    two collections carrying the name the write goes to whichever the server lists first,
-  //    which can be the operator's real calendar. Refusing on `foreign` alone removes the
-  //    ambiguity rather than betting on the order.
-  //
-  // 2. Every run MINTS ITS OWN stamped collection and NEVER reuses an earlier one. Reuse made
-  //    this run's own resource-count check meaningless (it counted a previous run's fixtures
-  //    too) and let one run's `cleanup` delete another run's events. An earlier minted
-  //    collection is reported and left exactly as it is; `cleanup` sweeps every minted
-  //    collection under the name, so nothing is stranded by leaving it alone.
+  // --- the collection: ALWAYS mint a fresh one (see the header) ------------------------
+  // A foreign same-named collection means STOP even when a minted one exists:
+  // src/caldav-client.ts resolves a `calendarId` name to whichever collection discovery
+  // lists first, which can be the operator's real calendar.
   const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
   const earlier = sameName.filter(c => isMinted(c.url));
   const foreign = sameName.find(c => !isMinted(c.url));
@@ -380,15 +320,12 @@ async function runCreate() {
   try {
     await client.init();
 
-    // The collection this run just minted has to reach the surface the server discovers
-    // before anything can be written to it. Bounded retry, not a poll loop. How long that
-    // takes is itself one of the things the run reports.
+    // The minted collection has to reach the server's discovery before anything is written.
+    // Bounded retry; how long it takes is itself reported.
     const ATTEMPTS = 5;
     let visible = false;
     for (let attempt = 1; attempt <= ATTEMPTS && !visible; attempt++) {
       visible = calendarIsListed(text(await client.call('list_calendars', {})), calendarUrl);
-      // Log the outcome BEFORE waiting, so a slow appearance shows its progress as it goes
-      // rather than arriving as one silent pause; and never wait after the last attempt.
       console.log(`list_calendars attempt ${attempt}/${ATTEMPTS}: ${visible ? 'minted collection listed' : 'not yet listed'}`);
       if (!visible && attempt < ATTEMPTS) await new Promise(r => setTimeout(r, 1000 * attempt));
     }
@@ -404,8 +341,7 @@ async function runCreate() {
       console.log(`  args: ${JSON.stringify(ev.args)}`);
       try {
         const res = await client.call('create_calendar_event', {
-          // BY URL, never by display name. `calendarId` accepts either, and the URL is the
-          // only one of the two that names exactly one collection — see the rule above.
+          // BY URL, never by display name: only the URL names exactly one collection.
           calendarId: calendarUrl,
           title: ev.title,
           ...ev.args,
@@ -427,8 +363,7 @@ async function runCreate() {
   console.log(`\n${'='.repeat(70)}`);
   console.log(`Stored resources, fetched back raw over CalDAV (REPORT ${status} ${statusText})`);
   console.log(`This is what the client is rendering.`);
-  // Exactly the four this run wrote: the collection was minted by this run and nothing else
-  // has ever written to it, so any other count is a real discrepancy rather than history.
+  // Nothing else has ever written to this collection, so any other count is a real discrepancy.
   check(`exactly the ${EVENTS.length} events this run wrote are stored in the collection it minted`,
     resources.length === EVENTS.length,
     `found ${resources.length}`);
@@ -457,14 +392,9 @@ async function runCleanup() {
   console.log(`Calendar home: ${redact(homeUrl)}`);
   console.log(`Looking for the collection named ${JSON.stringify(CAL_NAME)}.`);
 
-  // Name AND minted path, both. This DELETEs a whole collection, so a display-name match on
-  // its own is not proof of anything: the name is a CLI argument and could name a real
-  // calendar. Only a collection sitting on a path this probe minted is eligible.
   const sameName = (await listCollections(homeUrl)).filter(c => c.name === CAL_NAME);
-  // ALL of them, not the first. Two minted collections can legitimately carry one name: a
-  // `create` that crashed after MKCALENDAR but before it finished leaves one behind, and the
-  // next `create` mints a second (the path segment is stamped, so the two never collide).
-  // Deleting only the first would leave the other stranded with nothing to find it again.
+  // ALL of them, not the first: a crashed `create` leaves one behind and the next mints
+  // another, and deleting only the first would strand the rest.
   const targets = sameName.filter(c => isMinted(c.url));
   if (!targets.length) {
     const foreign = sameName.find(c => !isMinted(c.url));
@@ -495,9 +425,7 @@ async function runCleanup() {
       `HTTP ${del.status} ${del.statusText}`);
   }
 
-  // Scoped to MINTED collections. A name-only test would report a successful cleanup as a
-  // failure whenever a foreign collection happens to share the display name — and that
-  // foreign one is precisely what this phase refuses to touch, so its survival is correct.
+  // Scoped to MINTED collections: a foreign same-named one surviving is correct.
   const stillThere = (await listCollections(homeUrl))
     .filter(c => c.name === CAL_NAME && isMinted(c.url));
   check('every minted collection under that name is gone from the calendar home',
@@ -515,9 +443,7 @@ try {
 
 if (failures() > 0) {
   console.error(`\n${failures()} check(s) FAILED.`);
-  // Only offer the cleanup line when a write was actually attempted. A run that stopped at
-  // MKCALENDAR or at the provenance guard wrote nothing, and telling the operator to go
-  // clean up after it would send them looking for fixtures that do not exist.
+  // Only when a write was attempted: otherwise there are no fixtures to look for.
   if (MODE === 'create' && outcome.wroteAnything) {
     console.error('Nothing was auto-deleted: what got written is listed above, and removing it is your call.');
     console.error(`Run: python scripts/probes/run-probe.py server-authored-events.probe.mjs cleanup ${JSON.stringify(CAL_NAME)}`);

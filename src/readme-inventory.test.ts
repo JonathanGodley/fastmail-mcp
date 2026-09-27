@@ -1,47 +1,38 @@
-// Drift guards keeping the two catalogues DERIVED from the tool list in step with it:
-// README's tool reference, and the report `check_function_availability` returns. Both are
-// hand-maintained lists of tool names sitting next to the `TOOLS` array they describe, and
-// both go stale the same way — a tool is added and its entry is simply never written.
+// Drift guards keeping README's tool reference and the `check_function_availability` report
+// in step with the `TOOLS` array. Both are hand-maintained lists of tool names, and both go
+// stale when a tool is added and its entry is never written.
 //
-// The failure this exists to catch is not a stale count. A tool gets appended to TOOLS,
-// the "Available Tools (N Total)" heading is bumped along with it, and the tool's own
-// README entry is simply never written — a count-only check passes and the tool ships
-// undocumented. So the assertion is SET EQUALITY between the names in TOOLS and the names
-// README documents, in both directions (the reverse direction catches docs left behind by
-// a removed tool, which this fork has done more than once), and the heading number is
-// derived from the set rather than checked on its own.
+// A count-only check passes when the "Available Tools (N Total)" heading is bumped but the
+// entry is missing, so the assertion is SET EQUALITY between TOOLS and README, in both
+// directions (the reverse catches an entry left behind by a removed tool), and the heading
+// number is derived from the set rather than checked on its own.
 //
-// Both sides are read as source TEXT out of src/, never from the built server. A text scan
-// needs no build and no server spawn, and tsc does not rewrite a tool's name or description
-// literal, so the source read is accurate whether or not dist/ is current — the same
-// reasoning as the schema scan in tool-schema.test.ts.
+// Both sides are read as source TEXT: that needs no build or server spawn, and tsc does not
+// rewrite a tool's name or description literal, so the read is accurate whether or not
+// dist/ is current.
 //
-// README STRUCTURAL CONTRACT — what counts as a tool's reference entry:
+// README STRUCTURAL CONTRACT - what counts as a tool's reference entry:
 //
 //   An UNINDENTED list item whose first content is the tool name in bold, immediately
 //   followed by a colon:  `- **send_draft**: Send an existing draft email …`
 //   living under a `###` subsection of the `## Available Tools (N Total)` section.
 //
-// Everything else that names a tool is a mention, not documentation, and is deliberately
-// not counted: prose and cross-references name tools in backticks (`send_draft`); the
-// "Most Popular Tools" teaser at the top of the section uses the same bullet shape but
-// sits above the first `###`, and is a pointer to the entries below rather than an entry
-// itself (so a tool listed only there is still reported as undocumented, which is the
-// point); the Troubleshooting list near the end of the file is outside the section
-// altogether. Nested detail bullets under an entry are indented, so they never match.
+// Everything else that names a tool is a mention, and is deliberately not counted: prose
+// names tools in backticks (`send_draft`); the "Most Popular Tools" teaser uses the same
+// bullet shape but sits above the first `###`, so a tool listed only there is still
+// reported as undocumented; the Troubleshooting list is outside the section. Nested detail
+// bullets are indented, so they never match.
 //
 // If you restructure that part of README, keep the shape above or real entries will stop
 // counting here and this guard will report them as missing.
 //
-// AVAILABILITY REPORT CONTRACT — what `check_function_availability` has to list:
+// AVAILABILITY REPORT CONTRACT - what `check_function_availability` has to list:
 //
 //   Every tool the server ships appears in exactly ONE of the report's `functions: [...]`
-//   arrays (email / identity / contacts / calendar), so a caller asking what it can do
-//   gets the whole surface and never sees a tool claimed by two capability groups. The two
-//   meta-tools are exempt: they report on the server rather than acting on an account, so
-//   they belong to no capability group and are listed in README's "Most Popular Tools"
-//   teaser instead. A tool missing from the report is invisible to any caller that plans
-//   its work off it, which is the whole reason the report exists.
+//   arrays (email / identity / contacts / calendar), so a caller planning off the report
+//   sees the whole surface and no tool claimed by two groups. The two meta-tools are
+//   exempt: they report on the server rather than acting on an account, and are listed in
+//   README's "Most Popular Tools" teaser instead.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -101,7 +92,6 @@ function collectAvailabilityGroups(): string[][] {
   return groups;
 }
 
-// The tool names README documents, plus the number written into the section heading.
 function collectDocumentedToolNames(): { names: string[]; headingCount: number } {
   const lines = readLines(README_FILE);
   const headingIndex = lines.findIndex((l) => TOOLS_HEADING.test(l));

@@ -4,10 +4,6 @@ import type { SimplifiedEmail } from './email-formatter.js';
 import { parseEmailFields, projectEmail } from './field-projection.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 
-// get_thread's orchestration, extracted from the CallTool switch so it is unit-testable
-// with an injected client: the flag guards, the body-size cap, the per-message body
-// signals, and the hidden-draft note. The handler is a thin text wrapper around this.
-
 // The client surface get_thread needs. JmapClient satisfies it structurally.
 export interface ThreadClient {
   getThread(
@@ -17,13 +13,9 @@ export interface ThreadClient {
   ): Promise<{ emails: any[]; hiddenDraftCount: number }>;
 }
 
-// Total plain-text body bytes one get_thread response may carry (#74). Roughly 25k
-// tokens: large enough to return a whole ordinary conversation in one call, small enough
-// that it cannot quietly consume a context window. Chosen as a cap that ERRORS rather
-// than truncates — a silently shortened body is indistinguishable from a short message,
-// which is precisely the trap the thread-body feature exists to remove. A thread that
-// trips it is almost always one with deep quoted history, where stripQuoted:true brings
-// it back under by removing duplication rather than content.
+// Total plain-text body bytes one get_thread response may carry (#74), roughly 25k tokens.
+// It ERRORS rather than truncates: a silently shortened body is indistinguishable from a
+// short message.
 export const THREAD_BODY_BYTE_CAP = 100_000;
 
 const LARGEST_LISTED = 3;
@@ -83,10 +75,7 @@ function rawBodyBytes(emails: any[]): Array<{ id: string; bytes: number }> {
 
 export async function readThread(args: any, client: ThreadClient): Promise<string> {
   const { threadId } = args ?? {};
-  // Every flag here follows the lenient-value convention (a stringified "true"/"false" is
-  // accepted), `raw` included. Under the old `!!` test, raw:"false" was truthy: the caller
-  // got untransformed JMAP after explicitly asking for the simplified shape, and
-  // assertStripQuotedNotRaw below rejected an otherwise valid stripQuoted read. (#54)
+  // coerceBool, not `!!`: a lenient client's "false" is truthy (#54).
   const raw = coerceBool(args?.raw) ?? false;
   const includeDrafts = coerceBool(args?.includeDrafts) ?? false;
   const includeBodies = coerceBool(args?.includeBodies) ?? false;
@@ -96,9 +85,8 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
   // Validated before the fetch, and rejected with raw for the same reason as the other
   // read tools: raw is untransformed JMAP, whose field names differ (#69).
   const fields = parseEmailFields(args?.fields, { raw });
-  // stripQuoted rewrites bodies, and without includeBodies there are none. Rejecting is
-  // the same reasoning as the unknown-parameter guard: a flag that silently does nothing
-  // lets a caller believe it read stripped bodies when it read previews.
+  // Rejected rather than ignored: a silent no-op would let a caller believe it read
+  // stripped bodies when it read previews.
   if (stripQuoted && !includeBodies) {
     throw new InvalidInputError(
       'stripQuoted has nothing to strip without includeBodies: get_thread returns no bodies by default. ' +
@@ -109,11 +97,8 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
   const { emails, hiddenDraftCount } = await client.getThread(threadId, includeDrafts, includeBodies);
 
   if (raw) {
-    // raw is a pure-JSON escape valve that external clients may JSON.parse wholesale; the
-    // draft note (below) is appended only on the simplified path so raw output stays
-    // faithfully parseable. hiddenDraftCount never leaks into the raw JSON — a raw
-    // consumer can pass includeDrafts itself. The size cap still applies: it guards the
-    // response, not the formatting.
+    // No draft note on raw, so the output stays parseable JSON. The size cap still applies:
+    // it guards the response, not the formatting.
     if (includeBodies) assertThreadBodiesWithinCap(rawBodyBytes(emails), { stripQuoted: false, raw: true });
     return toolJson(emails);
   }
@@ -121,10 +106,9 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
   const simplified: SimplifiedEmail[] = emails.map((e: any) => simplifyEmail(e, { stripQuoted }));
 
   if (includeBodies) {
-    // Never-silent: a message with no plain-text body (an HTML-only one) yields no
-    // bodyText, and thread reads deliberately never carry HTML. Say so per message
-    // instead of letting the field quietly go missing. Set before projection so the
-    // flag rides along with a projected bodyText.
+    // An HTML-only message yields no bodyText (thread reads never carry HTML), so flag it
+    // rather than let the field go missing. Set before projection so the flag rides along
+    // with a projected bodyText.
     for (const msg of simplified) {
       if (typeof msg.bodyText !== 'string') msg.bodyTextUnavailable = true;
     }

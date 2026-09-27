@@ -75,9 +75,7 @@ describe('coerceStringArrayStrict', () => {
   });
 
   it('trims on the array branch, so both branches agree about whitespace', () => {
-    // Without this the two branches of one coercer disagree: the comma-split branch has
-    // always trimmed, while the array branch passed a padded element straight through. A
-    // padded id then reaches the server and comes back as a not-found — a type error
+    // An untrimmed padded id reaches the server and comes back as a not-found, a type error
     // wearing a lookup error's clothes, which is the exact failure this variant exists to
     // stop. Deleting the trim leaves every other assertion in this file green.
     // Through the LENIENT coercer directly. The strict one delegates here for the trim, so an
@@ -226,9 +224,8 @@ describe('coerceRecipients', () => {
       e instanceof InvalidInputError && e.message === 'cc[0] must be a string; received object.');
     assert.throws(() => coerceRecipients({ to: ['a@b.example', null] } as any), (e: any) =>
       e instanceof InvalidInputError && e.message === 'to[1] must be a string; received null.');
-    // [''] used to survive as one blank recipient (it reads as a real, present list and
-    // suppresses the reply Bcc carry). It is now refused by index like any other unusable
-    // element; '' and [] as the WHOLE value still coerce to the empty list.
+    // [''] would read as a real, present list and suppress the reply Bcc carry, so it is
+    // refused by index; '' and [] as the WHOLE value still coerce to the empty list.
     assert.throws(() => coerceRecipients({ bcc: [''] } as any), (e: any) =>
       e instanceof InvalidInputError && e.message === 'bcc[0] must be a non-empty string.');
   });
@@ -502,8 +499,7 @@ describe('coerceUtcDate (#70)', () => {
     assert.throws(
       () => coerceUtcDate(long, 'after'),
       (err: Error) => {
-        // One ellipsis CHARACTER, not three dots: every echo in this server now goes through
-        // the same helper, so the truncation marker is the same everywhere.
+        // One ellipsis CHARACTER, not three dots: every echo goes through the same helper.
         assert.match(err.message, /x{60}…/);
         assert.ok(!err.message.includes('x'.repeat(61)));
         return true;
@@ -551,7 +547,6 @@ describe('redactedJson', () => {
   });
 
   it('still redacts a real credential inside a value', () => {
-    // The other half: staying parseable must not come at the cost of letting a token through.
     const out = redactedJson({ results: [{ id: 'e1', reason: { description: 'auth failed: Bearer abc123xyz' } }] });
     JSON.parse(out);
     assert.match(out, /Bearer \[REDACTED\]/);
@@ -711,10 +706,10 @@ describe('describeUntrustedAt', () => {
 });
 
 describe('echoPath', () => {
-  // The two properties a path refusal loses when it interpolates the path directly, which is
-  // what every one of them used to do: a separator in a filename forges a second line that
-  // reads as the server's own prose, and an unbounded path lets a caller push that prose past
-  // anything the message says first. Quoting the span answers neither.
+  // The two properties a path refusal loses when it interpolates the path directly: a
+  // separator in a filename forges a second line that reads as the server's own prose, and an
+  // unbounded path lets a caller push that prose past anything the message says first.
+  // Quoting the span answers neither.
   it('neutralises a quote and a line separator, so a path cannot forge server prose', () => {
     assert.equal(echoPath('/tmp/a"b\u2028c'), "/tmp/a'b c");
     assert.equal(echoPath('/tmp/a\u2029b'), '/tmp/a b');
@@ -1633,10 +1628,9 @@ describe('validateCallerTimezone', () => {
   // Cyrus (the CalDAV server behind this account) looks a TZID up with an exact-string match
   // against its own tzdata — far stricter than ICU. So the return value is ICU's own canonical
   // spelling for whatever resolved, not an echo of what the caller typed, and these pin actual
-  // resolutions on this runtime (Node's ICU) rather than assuming case alone changes. Both
-  // inputs here are slash-qualified, so the slash rule below (#157 amendment) does not affect
-  // them — a bare alias like "NZ" or "Zulu" used to canonicalise the same way but no longer
-  // passes at all; see the "slash rule" describe block for those.
+  // resolutions on this runtime (Node's ICU). Both inputs are slash-qualified, so the slash
+  // rule below (#157 amendment) does not affect them; bare aliases like "NZ" are rejected
+  // there.
   for (const [input, canonical] of [
     ['australia/sydney', 'Australia/Sydney'],
     ['AUSTRALIA/SYDNEY', 'Australia/Sydney'],
@@ -1705,9 +1699,8 @@ describe('validateCallerTimezone', () => {
   // GMT/UTC/UT/leading-digit shapes only superficially (Etc/GMT-10 embeds a POSIX-style sign
   // AFTER the name, not at the start) and must still resolve via isUsableTimezone. Both are
   // also unchanged by canonicalisation (an Etc/GMT offset name is already ICU-canonical).
-  // EST5EDT used to belong in this list too — it is a real, non-offset-shaped IANA name — but
-  // it has no region-qualifying slash, so the slash rule below now rejects it as shorthand; see
-  // that describe block.
+  // EST5EDT is a real, non-offset-shaped IANA name too, but it has no region-qualifying slash,
+  // so the slash rule below rejects it as shorthand.
   for (const [legit, canonical] of [
     ['Etc/GMT-10', 'Etc/GMT-10'],
     ['Etc/GMT+5', 'Etc/GMT+5'],
@@ -1727,7 +1720,6 @@ describe('validateCallerTimezone', () => {
   it('echoes the caller-supplied value in an unresolvable-zone rejection, bounded', () => {
     const long = 'Not/A'.repeat(20);
     assert.throws(() => validateCallerTimezone(long), (err: Error) => {
-      // Bounded rather than reflecting the full (potentially huge) input verbatim.
       assert.ok(err.message.length < long.length + 200);
       return true;
     });
@@ -1760,7 +1752,6 @@ describe('validateCallerTimezone rejects zone abbreviations and aliases with no 
     );
   });
 
-  // The literal name "UTC" is the rule's one exception, checked case-insensitively.
   for (const utcSpelling of ['UTC', 'utc', 'Utc']) {
     it(`accepts "${utcSpelling}" as the rule's one exception`, () => {
       assert.equal(validateCallerTimezone(utcSpelling), 'UTC');
@@ -1768,8 +1759,7 @@ describe('validateCallerTimezone rejects zone abbreviations and aliases with no 
   }
 
   // Aliases that DO contain a slash are unaffected — the rule targets bare abbreviations, not
-  // every non-canonical spelling. US/Pacific still canonicalises to America/Los_Angeles exactly
-  // as it did before this rule existed.
+  // every non-canonical spelling.
   for (const [slashed, canonical] of [
     ['US/Pacific', 'America/Los_Angeles'],
     ['Etc/GMT-10', 'Etc/GMT-10'],
@@ -1945,8 +1935,6 @@ describe('calendar window bounds reject a time of day that does not exist (#138)
 // reads as trusted. One helper decides how, so the policy cannot differ per message.
 describe('echoCallerText is the one echo policy (#141)', () => {
   it('strips the control characters that would forge extra lines in a message', () => {
-    // Measured before this converged: coerceUtcDate echoed a raw ESC straight through while
-    // the calendar window's backwards-range error scrubbed the identical value.
     const withEsc = '2026-08-12T\u001B[31mBAD\u2028INJECTED';
     assert.throws(
       () => coerceUtcDate(withEsc, 'after'),
@@ -2188,7 +2176,7 @@ describe('echo-quoting convention', () => {
 
   // Recursive, so the claim the helpers' doc comments make — a bad render fails this guard
   // anywhere under src/ — is true of every source file rather than of the top level only.
-  // src/testing/ holds one today; a directory added later is covered without touching this.
+  // src/testing/ is nested today; a directory added later is covered without touching this.
   function sourceFiles(dir: string = SRC_DIR, prefix = ''): string[] {
     const found: string[] = [];
     for (const entry of readdirSync(dir, { withFileTypes: true })) {

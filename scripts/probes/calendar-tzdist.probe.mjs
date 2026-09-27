@@ -1,18 +1,14 @@
 // What this probe settles
 // -----------------------
-// Before #166, this server's calendar create path wrote `DTSTART;TZID=<zone>:<wall clock>` and
-// embedded no `VTIMEZONE` for that zone. Every timed event Fastmail's own client authors ends up
-// stored with one too — added by Cyrus's JMAP-to-iCalendar converter, not sent by the client itself
-// (measured, in docs/fastmail-action-availability.md) — so matching that stored shape meant
-// embedding one too. The only open question was where the block would come from.
+// #166: every timed event Fastmail's own client authors is stored with a `VTIMEZONE` (added by
+// Cyrus's JMAP-to-iCalendar converter; measured in docs/fastmail-action-availability.md), so
+// matching that shape means embedding one. Where would the block come from?
 //
 // The cheap source is RFC 7808 timezone data distribution: ask the server for a zone by name
 // and get its `VTIMEZONE` back, optionally truncated to a span. The expensive alternative is
-// bundling or generating daylight-saving rules ourselves. Cyrus implements the tzdist service
-// and Fastmail runs Cyrus, but Cyrus implementing it is NOT proof Fastmail exposes it on this
-// account — the service is gated on a per-deployment config switch, and no amount of source
-// reading settles which way that switch is set here. That is the entire reason this probe
-// exists, and its FAIL is as useful an answer as its PASS.
+// bundling or generating daylight-saving rules ourselves. Cyrus implements tzdist, but the
+// service is gated on a per-deployment config switch that no source reading can settle, so
+// this probe measures it; its FAIL is as useful an answer as its PASS.
 //
 // Three conditions, reported separately so a partial result is legible:
 //
@@ -21,9 +17,7 @@
 //      are asked for: one the account plausibly uses and one clearly foreign.
 //   3. Truncation is honoured. A zone bounded by `start`/`end` must come back actually
 //      truncated AND carrying the `TZUNTIL` the server adds for the `end` bound. A service
-//      that answers but IGNORES truncation is a materially different result from one that
-//      honours it — it cannot reproduce that stored shape — so it reports as a
-//      FAIL on this condition rather than being folded into condition 2's pass.
+//      that IGNORES truncation cannot reproduce that stored shape, so it FAILS here.
 //
 // Discovery. The base URL is asked for, never assumed. Four routes, all read off the Cyrus
 // source (imap/http_tzdist.c, imap/http_caldav.c, imap/httpd.c) rather than the RFC alone:
@@ -45,23 +39,17 @@
 // condition 1 is the service ANSWERING, and the discovery result is reported beside it.
 //
 // Reading a 404 correctly. The host sits behind an edge proxy that routes only some path
-// prefixes to the CalDAV backend, so a 404 has two quite different meanings depending on which
-// tier sent it, and only one of them is about the service. Condition 1 therefore names the tier
-// that answered, and asks a second time under the DAV root — a prefix that demonstrably reaches
-// the backend, since every other request here succeeds there. The account-scoped routes A and B
-// are the ones that settle it either way: both are served by the backend through that same
-// working prefix, and both are emitted only when the timezone namespace is enabled.
+// prefixes to the CalDAV backend, so a proxy 404 says nothing about the service. Condition 1
+// names the tier that answered and asks again under the DAV root, which reaches the backend.
+// Routes A and B settle it either way: both are served by the backend and emitted only when
+// the timezone namespace is enabled.
 //
-// The probe is READ-ONLY: it creates no calendar, no event and no collection, deletes
-// nothing, and needs no fixture. Everything it asks for is timezone data plus the account's
-// own collection listing.
+// READ-ONLY: it creates and deletes nothing.
 //
-// OUTPUT DISCIPLINE. PASS/FAIL, counts and zone names only. No collection URL, no UID, no
-// event title, no account-derived string — the account name and every email-shaped string are
-// redacted, as is server error text, which echoes the request back on some failures. Zone
-// names (`Australia/Sydney`) are ours, not the account's, so they are printed. A `VTIMEZONE`
-// block is timezone data rather than account data, so ONE truncated block is printed, capped
-// at 25 lines, as the evidence for condition 3; the rest are reported as counts.
+// OUTPUT DISCIPLINE. PASS/FAIL, counts and zone names only; account-derived strings and server
+// error text (which echoes the request on some failures) are redacted. ONE truncated
+// `VTIMEZONE` block (timezone data, not account data) is printed, capped at 25 lines, as the
+// evidence for condition 3.
 //
 // Raw CalDAV/HTTP over bare `fetch`, not the built server and not tsdav — the question is what
 // the platform serves, with none of our parsing in the way.
@@ -88,8 +76,7 @@ const ORIGIN = new URL(ROOT).origin;
 // wherever it is used, so a run never reports a guessed URL as a discovered one.
 const CYRUS_DEFAULT_PREFIX = '/tzdist';
 
-// One the account plausibly uses, one clearly foreign. Both are constants of this probe, not
-// values read from the account, so both are safe to print.
+// One the account plausibly uses, one clearly foreign. Probe constants, so safe to print.
 const ZONES = ['Australia/Sydney', 'Asia/Hong_Kong'];
 
 // The truncation spans. Fixed constants, chosen so the result is directly comparable to that
@@ -106,9 +93,7 @@ const icalUtc = iso => `${new Date(iso).toISOString().slice(0, 19).replace(/[-:.
 
 const { check, failures } = makeChecker();
 
-// Every account-derived string that must never reach the log, pushed as it is read. `redact`
-// is applied to anything this probe does not control — server error text in particular, which
-// echoes the request back on some failures. Matches the sibling calendar probes' redaction.
+// Every account-derived string that must never reach the log, pushed as it is read.
 const secrets = [];
 const redact = s => {
   const substringPass = secrets
@@ -164,15 +149,10 @@ const PROPFIND = props =>
 /**
  * Which tier answered a FAILED request: the CalDAV backend, or the edge proxy in front of it.
  *
- * Both sit behind the same `Server:` header, so that cannot tell them apart. The backend builds
- * every error page through its own markup helper, which stamps a `color-scheme` style attribute
- * on the `<html>` element; the proxy's stock error page has none. So the marker, not the header,
- * is the discriminator — and a body with no marker at all is attributed to the proxy rather than
- * guessed at, which is the conservative reading (it claims less about the backend).
- *
- * It reads an ERROR PAGE, so it is only meaningful on a failure: a successful tzdist response is
- * iCalendar or JSON and carries no marker either way, which the heuristic would misreport as the
- * proxy having answered. Hence the empty string on a 200 — the question does not arise there.
+ * Both send the same `Server:` header. The backend's error pages carry a `color-scheme` style
+ * attribute on `<html>`; the proxy's stock page has none, and a body with no marker is
+ * attributed to the proxy (the conservative reading). A 200 body carries no marker either, so
+ * it gets the empty string rather than a misreported proxy.
  */
 const tier = res => (res.status === 200
   ? ''
@@ -182,9 +162,8 @@ const tier = res => (res.status === 200
 const unfold = s => String(s ?? '').replace(/\r?\n[ \t]/g, '');
 
 /**
- * Parse the VTIMEZONE blocks out of an iCalendar body. Returns one entry per block with the
- * facts the three conditions turn on, and nothing else — deliberately, since the caller prints
- * from this and the raw body is only ever printed once, under an explicit cap.
+ * The VTIMEZONE blocks in an iCalendar body, reduced to the facts the conditions turn on: the
+ * caller prints from this, and the raw body is printed only once, under a cap.
  */
 function timezonesIn(body) {
   const text = unfold(body);
@@ -202,13 +181,9 @@ function timezonesIn(body) {
 /**
  * GET one zone from the tzdist service, with optional truncation.
  *
- * RFC 7808 puts the tzid in the path percent-encoded, so `/` becomes `%2F`; Cyrus's own path
- * parser also accepts the literal slash (it counts path "levels" rather than requiring the
- * escape). Both forms are tried and the one that answered is reported, because which spelling
- * a server accepts is a property of the server, not something to assume.
- *
- * `start`/`end` go on the wire UNENCODED (`2026-08-22T00:00:00Z`), which is the form RFC 7808's
- * own examples use and is legal in a query string.
+ * RFC 7808 percent-encodes the tzid's `/`; Cyrus's path parser also accepts the literal slash.
+ * Both are tried and the one that answered is reported. `start`/`end` go UNENCODED, as in RFC
+ * 7808's own examples.
  */
 async function getZone(base, zone, span) {
   const query = span ? `?start=${span.start}&end=${span.end}` : '';
@@ -230,15 +205,8 @@ async function getZone(base, zone, span) {
 console.log('\nRFC 7808 timezone data distribution on this account (#166)');
 console.log('PASS/FAIL, counts and zone names only — no account value is printed.\n');
 
-// The whole run is wrapped so an unguarded rejection (login, discovery, a fetch) lands as one
-// redacted FAIL line rather than a raw stack, per the pattern the sibling calendar probes use.
-// The summary print and exit below always run.
+// Wrapped so an unguarded rejection lands as one redacted FAIL line rather than a raw stack.
 try {
-  // ------------------------------------------------------------------------------------
-  // Discovery. Four routes, reported individually — a service that is present but not
-  // advertised, or advertised but not serving, is a different answer from either extreme.
-  // ------------------------------------------------------------------------------------
-
   console.log('=== Discovery: where does this account say its timezone service lives? ===');
 
   const rootPf = await http('PROPFIND', ROOT, {
@@ -273,11 +241,10 @@ try {
 
   // Route B: CALDAV:timezone-service-set. The authoritative one — the server names the prefix.
   //
-  // The same request carries CALDAV:calendar-timezone-id, the other RFC 7809 property. Keep it
-  // REPORTED AND NOT GATED: it names no base URL, and a deployment may serve the timezone service
-  // with no zone id set on any collection, so a condition over it would fail a working service.
-  // It rides along for scope — it is what separates "the whole time-zones-by-reference family is
-  // off here" from "the service is off". Measured-not-gated as in calendar-uid-query.probe.mjs.
+  // CALDAV:calendar-timezone-id rides along REPORTED AND NOT GATED: a deployment may serve the
+  // service with no zone id set on any collection, so a condition over it would fail a working
+  // service. It separates "the whole time-zones-by-reference family is off" from "the service
+  // is off".
   if (home) {
     const tzsPf = await http('PROPFIND', home, {
       body: PROPFIND(['c:timezone-service-set', 'c:calendar-timezone-id']),
@@ -324,12 +291,7 @@ try {
       : `  Using the base named by route ${discovered[0].route}.`,
   );
 
-  // ------------------------------------------------------------------------------------
-  // Condition 1: the service answers at all. `capabilities` is the action RFC 7808 defines
-  // for exactly this, and its body says which actions the deployment offers — so a server
-  // that answers but has no `get` action is caught here rather than misreporting later.
-  // ------------------------------------------------------------------------------------
-
+  // `capabilities` also lists the actions offered, so a server with no `get` is caught here.
   console.log('\n=== Condition 1: does the timezone service answer? ===');
   const capa = await http('GET', `${base}/capabilities`);
   console.log(`  GET <base>/capabilities: HTTP ${capa.status}${tier(capa)}`);
@@ -337,12 +299,7 @@ try {
     console.log(`    body: ${redact(capa.text).replace(/\s+/g, ' ').slice(0, 200)}`);
   }
 
-  // A 404 is two different answers depending on who sent it, and the difference decides what a
-  // reader does next. The host sits behind an edge proxy that routes only some path prefixes to
-  // the CalDAV backend, so a 404 from the PROXY means "this path is not routed here" and says
-  // nothing about whether the backend implements the service — while a 404 from the BACKEND
-  // means the backend itself has no such namespace. This asks again under the DAV root, which is
-  // known to reach the backend because every other request in this probe succeeds there.
+  // See "Reading a 404 correctly" in the header.
   const viaDav = await http('GET', `${ROOT}tzdist/capabilities`);
   console.log(`  GET <dav root>tzdist/capabilities: HTTP ${viaDav.status}${tier(viaDav)}`);
 
@@ -365,11 +322,6 @@ try {
       : discovered[0].route,
   );
 
-  // ------------------------------------------------------------------------------------
-  // Condition 2: a named zone returns a parseable VTIMEZONE for the zone asked for. Both
-  // zones are asked for; a per-zone divergence therefore reports as one, not as a summary.
-  // ------------------------------------------------------------------------------------
-
   console.log('\n=== Condition 2: does a named zone return a parseable VTIMEZONE? ===');
   const full = new Map();
   for (const zone of ZONES) {
@@ -389,16 +341,8 @@ try {
     check(`condition 2 [${zone}]: it carries at least one STANDARD/DAYLIGHT observance`, (blocks[0]?.observances ?? 0) >= 1);
   }
 
-  // ------------------------------------------------------------------------------------
-  // Condition 3: truncation is honoured. THE ONE THAT DECIDES WHETHER WE CAN MATCH THE
-  // STORED SHAPE. Cyrus's `get` action adds TZUNTIL itself when `end` is given and
-  // trims the observances to the span; a server that answers but ignores `start`/`end`
-  // returns the full block, which is a different platform answer and must read as one.
-  //
-  // The untruncated block carrying NO TZUNTIL is checked too: without it, a TZUNTIL that was
-  // simply present in the zone file all along would read as proof of truncation.
-  // ------------------------------------------------------------------------------------
-
+  // The untruncated block carrying NO TZUNTIL is checked too: otherwise a TZUNTIL present in
+  // the zone file all along would read as proof of truncation.
   console.log('\n=== Condition 3: is start/end truncation honoured? ===');
   let printed = false;
   for (const zone of ZONES) {
@@ -442,8 +386,7 @@ try {
       `event-span=${eventBlock?.observances ?? 0} full=${fullBlock?.observances ?? 0}`,
     );
 
-    // One block is printed as the evidence for this condition — it is timezone data, not
-    // account data. Capped, and only the first zone's, because the rest add no information.
+    // Only the first zone's block: the rest add no information.
     if (!printed && eventBlock) {
       printed = true;
       const lines = unfold(event.text).match(/BEGIN:VTIMEZONE[\s\S]*?END:VTIMEZONE/)?.[0].split(/\r?\n/) ?? [];

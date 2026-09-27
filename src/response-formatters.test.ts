@@ -429,11 +429,8 @@ describe('simplifyContact', () => {
 
   it('includes verbose fields when verbose=true', () => {
     const result = simplifyContact(raw, { verbose: true });
-    // addresses flattened to array of objects (hash keys stripped)
     assert.deepEqual(result.addresses, [{ street: '123 Main St', locality: 'Springfield' }]);
-    // titles flattened to array of name strings
     assert.deepEqual(result.titles, ['CEO']);
-    // online flattened to array of URI strings
     assert.deepEqual(result.online, ['https://example.com']);
     assert.deepEqual(result.photos, raw.photos);
     assert.deepEqual(result.anniversaries, raw.anniversaries);
@@ -760,12 +757,7 @@ describe('formatContactQueryResult', () => {
   });
 });
 
-// ==========================================================================
-// Functional test issues — these tests document gaps found during live testing.
-// Written as TDD: tests first, then fix the code.
-// ==========================================================================
-
-// ---------- simplifyContact: notes bug ----------
+// ---------- simplifyContact: notes ----------
 
 describe('simplifyContact notes extraction', () => {
   it('extracts notes from JMAP object format { hash: { note: "text" } }', () => {
@@ -1766,9 +1758,8 @@ describe('buildCalendarWindowNote names the bound that was invented', () => {
 
 // A saturated bound is a bound the caller CHOSE and is not getting, so the note that names it
 // has to name the right end. Saturation happens at both ends of the four-digit-year range and
-// the two are opposite statements: a startDate pulled UP to year 0000 was reported as having
-// "resolved past the last date this server can express", which is the reverse of what
-// happened, and the bottom end had no coverage at all.
+// the two are opposite statements: a startDate pulled UP to year 0000 must not read as having
+// "resolved past the last date this server can express".
 describe('buildCalendarWindowNote names the edge a bound was saturated at', () => {
   it('says the last date for a bound pulled back from beyond year 9999', () => {
     const note = buildCalendarWindowNote({
@@ -1894,9 +1885,9 @@ describe('buildBrokenCollectionNote', () => {
   });
 
   it('agrees in number PAST the subject line, in every clause that follows it', () => {
-    // The subject alone was pluralised once and the pronouns after it were not, so a
-    // two-collection note read "2 collections … The failure destroyed ITS name … anything held
-    // in THAT ONE" — which describes a single failure and undercounts what is missing.
+    // Pluralising the subject alone is not enough: with singular pronouns after it, a
+    // two-collection note reads "2 collections … The failure destroyed ITS name … anything held
+    // in THAT ONE", which describes a single failure and undercounts what is missing.
     const two = [PATH, `${PATH}two/`];
     const read = buildBrokenCollectionNote(two, 'read');
     assert.ok(
@@ -1912,11 +1903,8 @@ describe('buildBrokenCollectionNote', () => {
     assert.ok(write.includes('so nothing in them was read, written, or checked'), write);
     assert.ok(!write.includes('It was not among'), write);
 
-    // THE CLOSING CLAUSE, which this test's name always claimed to cover and did not: it
-    // ended "re-asks the server about it" under a plural subject for a whole review round,
-    // green the entire time. Asserted across every context, and on the singular note too, so
-    // the clause is checked wherever it is emitted rather than in the one case it was written
-    // for.
+    // The closing clause, asserted across every context and on the singular note too, so it
+    // is checked wherever it is emitted.
     const closing = 'Nothing was cached: the next calendar call re-asks the server for the whole calendar list.';
     for (const context of ['read', 'create', 'write'] as const) {
       for (const paths of [[PATH], two]) {
@@ -2074,9 +2062,8 @@ describe('buildAmbiguousEventNote', () => {
   it('bounds one copy url with a visible marker, well past a Fastmail collection url', () => {
     const long = `${WORK}?pad=${'w'.repeat(400)}`;
     const note = buildAmbiguousEventNote([{ calendar: 'Work', url: long }]);
-    // The whole url did not reach the note...
     assert.ok(!note.includes('w'.repeat(400)), 'the whole url reached the note');
-    // ...but the bound is generous enough that a real resource url survives intact: the
+    // The bound is generous enough that a real resource url survives intact: the
     // collection prefix plus a UUID-length resource name is nowhere near it.
     assert.ok(note.includes(WORK), note.slice(0, 300));
     assert.ok(note.includes('…'), note.slice(0, 300));
@@ -2157,11 +2144,9 @@ describe('buildAmbiguousEventNote', () => {
   });
 });
 
-
 // ---------- calendarEventBody ----------
 
-// The JSON body get_calendar_event serialises (#101). It is a branch, and it lives here rather
-// than in the CallTool switch precisely so it can be exercised without a live account.
+// The JSON body get_calendar_event serialises (#101).
 describe('calendarEventBody', () => {
   const EVENT = { id: 'dup@fm', url: 'https://caldav.example.invalid/dav/x/dup.ics', title: 'Standup' };
 
@@ -2177,7 +2162,6 @@ describe('calendarEventBody', () => {
     const copies = [{ calendar: 'Work', url: 'https://caldav.example.invalid/dav/y/dup.ics' }];
     const body = calendarEventBody(EVENT, copies);
     assert.deepEqual(body, { ...EVENT, otherCopies: copies });
-    // The event's own fields survive the merge — this is the JSON a caller reads.
     assert.equal((body as typeof EVENT).title, 'Standup');
   });
 });

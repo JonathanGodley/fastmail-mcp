@@ -130,7 +130,6 @@ describe('getEmails', () => {
     const filter = batch[0][1].filter;
     assert.equal(filter.inMailbox, 'mb-inbox');
     assert.equal(filter.inMailboxOtherThan, undefined);
-    // Explicit mailbox => no exclusion => no count query and no exclusion metadata.
     assert.equal(batch.length, 2);
     assert.equal(result.exclusion, undefined);
   });
@@ -147,7 +146,6 @@ describe('getEmails', () => {
     const batch = callArguments(makeReq)[0].methodCalls;
     const filter = batch[0][1].filter;
     assert.deepEqual([...filter.inMailboxOtherThan].sort(), ['mb-junk', 'mb-trash']);
-    // Count query present (visible filter minus inMailboxOtherThan) at index 2.
     assert.equal(batch.length, 3);
     assert.equal(batch[2][1].filter.inMailboxOtherThan, undefined);
     // hidden = broaderTotal - visibleTotal = 11 - 8 = 3.
@@ -178,12 +176,10 @@ describe('getEmails', () => {
     await client.getEmails({ excludeDrafts: true });
     const batch = callArguments(makeReq)[0].methodCalls;
     const filter = batch[0][1].filter;
-    // AND of the base (carrying inMailboxOtherThan) and the $draft keyword condition.
     assert.equal(filter.operator, 'AND');
     const hasExclusion = filter.conditions.some((c: any) => c.inMailboxOtherThan);
     const hasDraft = filter.conditions.some((c: any) => c.notKeyword === '$draft');
     assert.ok(hasExclusion && hasDraft);
-    // Count filter keeps the $draft cond but drops inMailboxOtherThan -> differs from visible.
     const countFilter = batch[2][1].filter;
     assert.equal(countFilter.notKeyword, '$draft');
     assert.equal(countFilter.inMailboxOtherThan, undefined);
@@ -385,7 +381,6 @@ describe('moveEmail', () => {
     assert.deepEqual(Object.keys(update), ['mailboxIds']);
   });
 
-  // Drive a notUpdated failure with a chosen SetError.
   function stubMoveFailure(setError: { type: string; description?: string }) {
     stubMakeRequest(client, {
       methodResponses: [
@@ -499,9 +494,9 @@ const ARCHIVE_MAILBOXES = [
 ];
 
 /**
- * A request-aware stub for the two-request archive shape. getMailboxes() is no longer
- * used by this path — Mailbox/get rides in the read batch — so stubMailboxes would
- * intercept nothing here, and a test that relied on it would attempt a real network call.
+ * A request-aware stub for the two-request archive shape. getMailboxes() is not used by
+ * this path — Mailbox/get rides in the read batch — so stubMailboxes would intercept
+ * nothing here, and a test that relied on it would attempt a real network call.
  * The branch is on the FIRST method name, mirroring queryResponse's request-shape switch.
  */
 function stubArchive(
@@ -520,8 +515,8 @@ function stubArchive(
     // A compliant server reports every id it was handed in exactly one of `updated` /
     // `notUpdated` (RFC 8620 §5.3), so the default stub acknowledges everything the client
     // actually asked it to write rather than returning a bare `{ updated: {} }` — which
-    // would model a server that silently swallowed the batch, and archiveEmails now reports
-    // that as a failure. A test can still hand in its own `set` to model either map,
+    // would model a server that silently swallowed the batch, which archiveEmails reports
+    // as a failure. A test can still hand in its own `set` to model either map,
     // including the non-compliant no-acknowledgement case.
     const written = Object.keys((request.methodCalls[0][1] as any)?.update ?? {});
     const notUpdatedIds = new Set(Object.keys((opts.set as any)?.notUpdated ?? {}));
@@ -552,9 +547,8 @@ describe('archiveEmails', () => {
   });
 
   it('removes the Inbox and KEEPS other filing, without adding Archive', async () => {
-    // The behaviour the whole rewrite exists for, measured against the live client: a
-    // message in Inbox + a label comes out holding the label alone. The previous
-    // whole-value replace destroyed the label.
+    // Measured against the live Fastmail client: a message in Inbox + a label comes out
+    // holding the label alone. A whole-value mailboxIds replace destroys the label.
     const makeReq = stubArchive(client, { emails: [email('e1', 'mb-inbox', 'mb-label')] });
 
     const result = await client.archiveEmails(['e1']);
@@ -998,8 +992,7 @@ describe('archiveEmails', () => {
     // On a plain object, `update['__proto__'] = patch` invokes the prototype SETTER rather
     // than creating an own key. The entry vanishes from the write, no Email/set carries it,
     // and the id then gets reported as "acknowledged in neither map" — a statement about a
-    // request the server was never sent, which is the failure the acknowledgement check was
-    // added to prevent, arriving through a different door.
+    // request the server was never sent.
     const makeReq = stubArchive(client, {
       emails: [email('__proto__', 'mb-inbox', 'mb-label')],
     });
@@ -1064,8 +1057,8 @@ describe('archiveEmails', () => {
   });
 
   it('serves a batch that never needs Archive even with no archive-role mailbox', async () => {
-    // The unconditional guard the old code had would have rejected this outright, and the
-    // call is perfectly serviceable: nothing here reaches the Inbox-only branch.
+    // An unconditional guard would reject this outright, and the call is perfectly
+    // serviceable: nothing here reaches the Inbox-only branch.
     const makeReq = stubArchive(client, {
       mailboxes: [INBOX_MAILBOX, LABEL_MAILBOX],
       emails: [email('e1', 'mb-inbox', 'mb-label'), email('e2', 'mb-label')],
@@ -1209,7 +1202,7 @@ describe('archiveEmails', () => {
     // (imap/jmap_mail.c:11760-11773) and there is no prefix-collision check — RFC 8620
     // section 5.3 is an explicit TODO at jmap_util.c:136-139 — so an update carrying both
     // would silently apply only the whole-value half and still report success. This pins
-    // OUR side of that; upstream may tighten theirs later.
+    // OUR side of that.
     const makeReq = stubArchive(client, {
       emails: [email('a', 'mb-inbox'), email('b', 'mb-inbox', 'mb-label'), email('c', 'mb-label')],
     });
@@ -1285,7 +1278,6 @@ describe('deleteEmail', () => {
     });
 
     await client.deleteEmail('e1');
-    // No error means success
   });
 
   it('throws when trash mailbox is not found', async () => {
@@ -1434,9 +1426,9 @@ describe('bulkMarkRead', () => {
   it('throws when some emails fail to update, surfacing counts + failing ids + reason (#22)', async () => {
     stubMakeRequest(client, {
       methodResponses: [
-        // updated carries e1 explicitly: the success count now comes from what the server
-        // acknowledged, not from total - failCount, so a stub that omits it would
-        // (correctly) report e1 as having no reported outcome instead of as a success.
+        // updated carries e1 explicitly: the success count comes from what the server
+        // acknowledged, so a stub that omits it would (correctly) report e1 as having no
+        // reported outcome instead of as a success.
         ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': { type: 'notFound' } } }, 'bulkUpdate'],
       ],
     });
@@ -1444,7 +1436,6 @@ describe('bulkMarkRead', () => {
     await assert.rejects(
       () => client.bulkMarkRead(['e1', 'e2']),
       (err: Error) => {
-        // counts: 1 of 2 failed, 1 succeeded; failing id grouped by its reason
         assert.match(err.message, /Failed to mark as read 1 of 2 emails \(1 succeeded\)/);
         assert.match(err.message, /notFound: e2/);
         // every failure is notFound (a bad id) → caller-fixable → InvalidInputError (#41)
@@ -1539,7 +1530,6 @@ describe('bulk set-error formatting', () => {
       () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
       (err: Error) => {
         assert.match(err.message, /Failed to move 2 of 2 emails \(0 succeeded\)/);
-        // both ids share one reason → grouped under it together
         assert.match(err.message, /invalidArguments - bad patch: e1, e2/);
         // a malformed argument is fixed by re-forming the call → InvalidInputError
         assert.equal(err.name, 'InvalidInputError');
@@ -1635,7 +1625,6 @@ describe('bulk set-error formatting', () => {
         assert.match(err.message, /Failed to delete 12 of 12 emails/);
         assert.match(err.message, /Partial list/);
         assert.match(err.message, /idempotent/);
-        // the 11th/12th ids are NOT shown (capped at 10)
         assert.doesNotMatch(err.message, /id11/);
         return true;
       },
@@ -1714,7 +1703,6 @@ describe('bulk set-error formatting', () => {
     await assert.rejects(
       () => client.bulkMove(['e1', 'e2'], 'mb-archive'),
       (err: Error) => {
-        // Two groups, each naming one id — never one group naming both.
         assert.doesNotMatch(err.message, /: e1, e2/);
         assert.match(err.message, /: e1/);
         assert.match(err.message, /: e2/);
@@ -1788,11 +1776,7 @@ describe('bulk set-error formatting', () => {
     // withUnaccountedFailures only Object.assigns the server's notUpdated in when it passes
     // isPlainResponseMap; a non-compliant server sending an array (or any other non-map)
     // there must be treated as "reported nothing", not merged in as if its own keys (here,
-    // the array's numeric indices) were real ids the server named. On `main`, this same
-    // input read as a failing id `0` of type `undefined` — not because isPlainResponseMap
-    // didn't exist there, but because main's bulkMarkRead never routed through
-    // withUnaccountedFailures at all; routing this call through that helper is what makes
-    // a non-map `notUpdated` read as "the server reported nothing" instead.
+    // the array's numeric indices) were real ids the server named.
     stubMakeRequest(client, {
       methodResponses: [['Email/set', { updated: { e1: null, e2: null }, notUpdated: ['bogus'] }, 'bulkUpdate']],
     });
@@ -2062,10 +2046,8 @@ describe('getThread', () => {
     stubRequests(client, async () => {
       callCount++;
       if (callCount === 1) {
-        // probe resolves the email's threadId
         return { methodResponses: [['Email/get', { list: [{ threadId: 'thread-gone' }] }, 'checkEmail']] };
       }
-      // Thread/get reports the thread missing
       return { methodResponses: [['Thread/get', { list: [], notFound: ['thread-gone'] }, 'getThread']] };
     });
 
@@ -2261,8 +2243,8 @@ describe('list method property checks', () => {
     ],
   };
 
-  // getEmails/searchEmails fetch getMailboxes() separately now, so stub it (mocked, not
-  // via makeRequest) — makeRequest then only ever sees the Email/query batch as calls[0].
+  // getEmails/searchEmails fetch getMailboxes() separately, so stub it (mocked, not via
+  // makeRequest) — makeRequest then only ever sees the Email/query batch as calls[0].
   function mockAndCall(method: string, callFn: () => Promise<any>) {
     mock.method(client, 'getMailboxes', async () => DEFAULT_MAILBOXES);
     const makeReq = stubRequests(client, async () => standardQueryResponse);
@@ -2428,8 +2410,8 @@ describe('mailbox location (#10)', () => {
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('mailboxIds')); // superset
   });
 
-  // Names now come from the separately-fetched getMailboxes() list, NOT an in-batch
-  // Mailbox/get (searchEmails/getEmails no longer append one).
+  // Names come from the separately-fetched getMailboxes() list, NOT an in-batch
+  // Mailbox/get.
   const NAME_MAILBOXES = [
     { id: 'mb-inbox', name: 'Inbox', role: 'inbox' },
     { id: 'mb-receipts', name: 'Receipts', role: null },
@@ -2439,7 +2421,7 @@ describe('mailbox location (#10)', () => {
       ['Email/query', { ids: ['e1', 'e2'], total: 2 }, 'query'],
       ['Email/get', { list: [
         { id: 'e1', subject: 'A', mailboxIds: { 'mb-inbox': true, 'mb-receipts': true } },
-        { id: 'e2', subject: 'B', mailboxIds: { 'mb-unknown': true } }, // id not in the map → omit
+        { id: 'e2', subject: 'B', mailboxIds: { 'mb-unknown': true } }, // id not in the map → surfaced as unresolved
       ] }, 'emails'],
     ],
   };
@@ -2450,7 +2432,6 @@ describe('mailbox location (#10)', () => {
 
     const result = await client.getEmails({ mailbox: 'mb-inbox', limit: 5 });
 
-    // No in-batch Mailbox/get — explicit mailbox => just query + get.
     const calls = callArguments(makeReq)[0].methodCalls;
     assert.equal(calls.length, 2);
     assert.equal(calls.some((c: any) => c[0] === 'Mailbox/get'), false);
@@ -2486,7 +2467,6 @@ describe('mailbox location (#10)', () => {
     assert.equal(callArguments(makeReq)[0].methodCalls.length, 2);
     assert.deepEqual((result.items[0] as any)._mailboxNames, ['Inbox', 'Receipts']);
     assert.deepEqual((result.items[0] as any)._mailboxRoles, ['inbox']);
-    // e2's id is not in the map → surfaced, not dropped.
     assert.deepEqual((result.items[1] as any)._unresolvedMailboxIds, ['mb-unknown']);
   });
 
@@ -2833,7 +2813,6 @@ describe('searchEmails exclusion + count', () => {
     await client.searchEmails({ query: 'x', excludeDrafts: true });
     const batch = callArguments(makeReq)[0].methodCalls;
     const countFilter = batch[2][1].filter;
-    // $draft cond survives; inMailboxOtherThan is gone -> count filter != visible filter.
     const flatHasDraft = countFilter.notKeyword === '$draft'
       || (countFilter.conditions || []).some((c: any) => c.notKeyword === '$draft');
     assert.ok(flatHasDraft);
@@ -3184,10 +3163,10 @@ describe('getMailboxStats resolution', () => {
 
 // ---------- bulk writers treat an unacknowledged id as a failure (#185) ----------
 //
-// Each of these five now throws on a submitted id the server acknowledged in NEITHER
-// `updated` nor `notUpdated`, matching archiveEmails and applyLabelRemoval's existing
-// outcomeUnknown treatment of the same non-compliant-server condition — a write nothing
-// confirmed must not read as a success just because the server never named the id as failed.
+// Each of these five throws on a submitted id the server acknowledged in NEITHER `updated`
+// nor `notUpdated`, as archiveEmails and applyLabelRemoval do (outcomeUnknown) — a write
+// nothing confirmed must not read as a success just because the server never named the id
+// as failed.
 describe('bulk writers treat an unacknowledged id as a failure (#185)', () => {
   let client: JmapClient;
 
@@ -3680,8 +3659,7 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
 
   it('still reports a notFound error for an id the server does not know', async () => {
     // The read already told us the id does not exist, so it is left out of the write
-    // entirely rather than sent as a bare null against an unknown filing. The error
-    // contract the caller sees is unchanged: the same notFound it always got.
+    // entirely rather than sent as a bare null against an unknown filing.
     const makeReq = stubRemoval(client, {});
     await assert.rejects(
       () => client.removeLabels('e1', ['Receipts']),
@@ -3824,9 +3802,8 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
   });
 
   it('fails closed with the tell when the filing read comes back malformed', async () => {
-    // The guard that closed the round-one blocker: a non-array `list` must not degrade to
-    // empty, because that puts every id on the "filing unknown" path, which is the one place
-    // a removal destroys a message.
+    // A non-array `list` must not degrade to empty, because that puts every id on the
+    // "filing unknown" path, which is the one place a removal destroys a message.
     const makeReq = stubRequests(client, async (request: JmapRequest) => {
       const [method, , callId] = request.methodCalls[0] as [string, any, string];
       if (method === 'Email/get') return { methodResponses: [['Email/get', { list: null, notFound: [] }, callId]] };
@@ -3992,9 +3969,7 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     // A non-compliant server can send `null` as Email/set's own result data -
     // getMethodResult hands it straight back, and this read goes through
     // `result?.updated`/`result?.notUpdated` rather than assuming `result` is always an
-    // object. That read predates #185 (it is why applyLabelRemoval already synthesized
-    // outcomeUnknown for every id here); this test is a mutation kill on the line #185
-    // rewrote around it, not a pin of behaviour #185 introduced.
+    // object. The read predates #185; this pins it on the line #185 rewrote around it.
     stubRequests(client, async (request: JmapRequest) => {
       const [method, , callId] = request.methodCalls[0] as [string, any, string];
       if (method === 'Email/get') {
@@ -4202,9 +4177,8 @@ describe('label tools take labels, not folders (#133)', () => {
   });
 
   it('refuses on the namespace regardless of what the message is filed under', async () => {
-    // The old refusal for naming Archive depended on the message's filing (it fired only
-    // when the removal would empty the message). This one does not: a message filed in
-    // Archive AND a user label is refused just the same, before its filing is consulted.
+    // The refusal does not depend on the message's filing: a message filed in Archive AND a
+    // user label is refused just the same, before its filing is consulted.
     const makeReq = stubRemoval(client, { e1: { 'mb-archive': true, 'mb-receipts': true } });
     await assert.rejects(() => client.removeLabels('e1', ['archive', 'Receipts']), assertRefusal);
     assert.equal(issuedEmailSet(makeReq), false);
@@ -4244,9 +4218,8 @@ describe('label tools take labels, not folders (#133)', () => {
   });
 
   it('serves a user label untouched, rescue included', async () => {
-    // The namespace gate must not have moved the line for the case it was never about: a
-    // role-less mailbox is a label, and removing a message's last one still files it in
-    // Archive rather than destroying it.
+    // The role refusal must not reach a label: a role-less mailbox is a label, and removing
+    // a message's last one still files it in Archive rather than destroying it.
     const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true } });
     const result = await client.removeLabels('e1', ['Receipts']);
     const update = setUpdateOf(makeReq);
@@ -4613,7 +4586,7 @@ describe('findMailboxExact', () => {
 
   it('resolves a flat name containing the separator that matches nothing by path', () => {
     // Here the folder named "A/B" is nested, so its path is "X/A/B" and the input matches
-    // by name only. The name branch answers, exactly as it did before the collision check.
+    // by name only, so the name branch answers.
     const tree = [
       { id: 'mb-x', name: 'X' },
       { id: 'mb-literal', name: 'A/B', parentId: 'mb-x' },
