@@ -812,7 +812,7 @@ That declaration is metadata. Nothing is sniffed and nothing verifies the claim,
 Your recourse is per-tool, and it is coarse on purpose:
 
 - **`mode:'reply'`** — leaving `{{quote}}` out of the body omits the whole quote, and is the only way to send none of it. There is no quote-text-without-images option.
-- **`mode:'forward'`** — body images are carried **even when `includeOriginalAttachments` is false**, because they are body content rather than attached files; that flag governs the original's attached *files*. If you must forward without the images, use `asAttachment: true` (the original rides as a `.eml` and nothing is re-composed) or don't forward it.
+- **`mode:'forward'`** — body images are carried **even when `includeOriginalAttachments` is false**, because they are body content rather than attached files; that flag governs the original's attached *files*. There is no way to forward the message without its images: `asAttachment: true` re-composes nothing, but its `.eml` carries the whole original, images included. If they must not go, don't forward it.
 
 Carrying needs an HTML body to put the images in:
 
