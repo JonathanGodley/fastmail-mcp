@@ -1027,6 +1027,23 @@ describe('draft_email — {{signature}} expands the FROM identity, not the first
     assert.equal(calls.draft, undefined);
   });
 
+  it('refuses the wildcard pattern as `from` before uploading, even with that identity present', async () => {
+    // The pattern equals the wildcard identity's own email, so an identity lookup finds it.
+    for (const from of ['*@example.com', 'Me <*@example.com>']) {
+      const { client, calls } = spyClient(makeOriginal(), {
+        getIdentities: async () => [{ id: 'w', email: '*@example.com', textSignature: 'S' }],
+      });
+      const message = await messageFrom(() => compose(
+        { mode: 'new', from, to: ['sam@example.com'], textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
+        client,
+        '/tmp/attach',
+      ));
+      assert.match(message, /is a wildcard identity's pattern, not an address/);
+      assert.equal(calls.upload, undefined);
+      assert.equal(calls.draft, undefined);
+    }
+  });
+
   it('keeps the wildcard-pattern refusal for a `from` that IS the pattern', async () => {
     const { client } = spyClient(makeOriginal(), {
       getIdentities: async () => [{ id: 'a', email: 'first@example.com' }],

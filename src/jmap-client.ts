@@ -618,12 +618,13 @@ const REJECT_UNVERIFIED_FROM =
   'From address is not verified for sending. Choose one of your verified identities.';
 
 /**
- * The refusal createDraft raises for a caller `from` whose address half matches no identity,
- * for a compose handler that has to raise it earlier.
+ * createDraft's refusal of a caller `from` address half, in its order (the pattern before the
+ * identity match), for a compose handler that has to raise it earlier. Undefined when valid.
  */
-export function rejectUnverifiedFrom(fromAddress: string): string {
-  return isWildcardIdentityEmail(fromAddress)
-    ? rejectWildcardFromValue(fromAddress)
+export function rejectFromAddress(identities: any[], fromAddress: string): string | undefined {
+  if (isWildcardIdentityEmail(fromAddress)) return rejectWildcardFromValue(fromAddress);
+  return identities.some((id) => typeof id?.email === 'string' && matchesIdentity(id.email, fromAddress))
+    ? undefined
     : REJECT_UNVERIFIED_FROM;
 }
 

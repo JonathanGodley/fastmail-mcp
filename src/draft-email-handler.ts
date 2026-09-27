@@ -24,7 +24,7 @@ import {
 } from './inline-images.js';
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
-import { rejectUnverifiedFrom } from './jmap-client.js';
+import { rejectFromAddress } from './jmap-client.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 import { matchSubjectPrefix, noteComposeSubjectPrefix } from './subject-prefix.js';
 
@@ -668,10 +668,11 @@ export async function composeDraftEmail(
   // consumer); what the test beside it pins is that a client returning no list does not throw
   // the compose away.
   const identities = (await client.getIdentities()) ?? [];
-  const identity = selectIdentity(identities, fromAddress);
   // createDraft would refuse it too, but only after step 9 had blamed an empty {{signature}}
   // on the identity having none, and after the upload.
-  if (fromAddress && !identity) throw new InvalidInputError(rejectUnverifiedFrom(fromAddress));
+  const fromRefusal = fromAddress ? rejectFromAddress(identities, fromAddress) : undefined;
+  if (fromRefusal) throw new InvalidInputError(fromRefusal);
+  const identity = selectIdentity(identities, fromAddress);
   const signature = signatureOf(identity);
 
   // --- 6. The caller's embedded images, read PRE-expansion -----------------
