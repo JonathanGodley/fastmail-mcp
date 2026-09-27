@@ -537,6 +537,8 @@ const LABEL_NAMESPACE_DESC =
 
 // Shared by remove_labels and bulk_remove_labels: where a message lands when its last
 // mailbox is removed, which a caller cannot otherwise predict.
+// The Scheduled re-assert caveat is the same hazard as #130 (filed for archive_email);
+// unmeasured on this path.
 const LABEL_REMOVAL_RESCUE_DESC =
   ' If removing these labels would take away the LAST mailbox holding the message, the archive-role mailbox is added in the same write (found by ROLE — a folder merely NAMED "Archive" is not it), so removing a message\'s only label archives it rather than deleting it. One case is rejected instead of served: the account has no archive-role mailbox at all, so there is no fallback to reach for. It says so and points at move_email/bulk_move or delete_email/bulk_delete. (Removing Archive itself never reaches that question — Archive is a folder, so the namespace rule above rejects it whatever the message is filed under.)' +
   ' Naming a label the message does not carry changes nothing for that message.' +
@@ -2474,6 +2476,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Re-raise the tagged caller-input errors BARE so the top-level catch maps them to
           // InvalidParams (a not-found threadId is InvalidInputError); otherwise this catch
           // would collapse them to InternalError. Everything else is redacted here.
+          // PathAccessError is re-raised for parity with download_attachment although
+          // get_thread has no path input today, so that check is not dead code to delete.
           if (error instanceof PathAccessError || error instanceof InvalidInputError) {
             throw error;
           }

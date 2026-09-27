@@ -12,6 +12,9 @@
 //   - the read path's `recurrenceDates` field is documented as "expected to be absent on the
 //     ordinary listing path" on the strength of the same claim.
 //
+// `update_calendar_event` / `delete_calendar_event`'s RDATE refusal reads the UNEXPANDED stored
+// master, so a FAIL here does not touch it.
+//
 // WHAT IS MEASURED, and how to read a result. Four queries against a temporary collection
 // holding three synthetic series:
 //

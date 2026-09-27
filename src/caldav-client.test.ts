@@ -5502,10 +5502,11 @@ describe('TRANSP: create writes an all-day event free, update leaves it alone (#
   });
 
   it('an update converting an all-day event to timed leaves its TRANSP:TRANSPARENT in place', async () => {
-    // The reverse flip, under the same rule as the three tests above. The converted event is a real meeting that still
-    // shows this account as free, and that is the caller's to change — `transparency: 'busy'`
-    // in the same call as the new hours (#194) does it, and the transparency suite below pins
-    // that. What an update must not do is decide it for them off the back of a date edit.
+    // The reverse flip, under the same rule as the three tests above. The converted event is a
+    // real meeting that still shows this account as free, and that is the caller's to change —
+    // `transparency: 'busy'` in the same call as the new hours (#194) does it, and the
+    // transparency suite below pins that. What an update must not do is decide it for them off
+    // the back of a date edit.
     const allDay = storedEvent('back@fm', [
       'DTSTART;VALUE=DATE:20261003', 'DTEND;VALUE=DATE:20261006', 'TRANSP:TRANSPARENT',
     ]);
@@ -5941,9 +5942,9 @@ describe('transparency: busy and free as caller values (#194)', () => {
     });
 
     it('serialises transparency through the seam each tool renders with', async () => {
-      // `transparency` is an ordinary field in the compact JSON, per docs/conventions.md. Asserting on the rendered text rather than
-      // the object is what proves the field survives the serialisation seam rather than
-      // stopping at the parser.
+      // `transparency` is an ordinary field in the compact JSON, per docs/conventions.md.
+      // Asserting on the rendered text rather than the object is what proves the field survives
+      // the serialisation seam rather than stopping at the parser.
       const free = storedEvent('ser@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:TRANSPARENT']);
       const { event } = await readClient(free).getCalendarEventById('ser@fm');
       assert.match(toolJson(event), /"transparency":"free"/);
@@ -6195,10 +6196,10 @@ describe('timeZone parameter (#157)', () => {
 
     it('omitting timeZone never defaults — a designator-less value still inherits the stored TZID, not the configured default', async () => {
       // A dedicated fixture, not the shared ZONED above: ZONED's stored TZID is Australia/Sydney,
-      // the dev host's own zone, so "inherits the stored TZID" and "falls back to the host
-      // default" would write the identical TZID. Stored in Europe/London, matching neither that
-      // nor the block's America/New_York pin, either wrong fallback writes a TZID this assertion
-      // does not expect.
+      // the dev host's own zone, so "inherits the stored TZID" and "falls back to the host or
+      // configured default" would write the identical TZID. Stored in Europe/London, matching
+      // neither that nor the block's America/New_York pin, either wrong fallback writes a TZID
+      // this assertion does not expect.
       const inheritZoned = storedEvent('tz-inherit@fm', 'DTSTART;TZID=Europe/London:20260321T090000', 'DTEND;TZID=Europe/London:20260321T100000');
       const { client, mockDAVClient } = updateClient(inheritZoned);
       await client.updateCalendarEvent('tz-inherit@fm', { start: '2026-03-21T09:30:00' });
@@ -6296,9 +6297,9 @@ describe('timeZone parameter (#157)', () => {
     });
 
     it('a differently-spelled same zone does NOT stand down the ordering check (backwards pair rejected)', async () => {
-      // Compared with raw !==, 'Australia/Sydney' vs 'australia/sydney' read as two DIFFERENT
-      // zones and stood the ordering check down — silently accepting a backwards pair as a
-      // "flight lands elsewhere" shape it is not.
+      // Compared with raw !==, 'Australia/Sydney' vs 'australia/sydney' would read as two
+      // DIFFERENT zones and stand the ordering check down — silently accepting a backwards pair
+      // as a "flight lands elsewhere" shape it is not.
       const { client, mockDAVClient } = updateClient(ZONED);
       await assert.rejects(
         // Stored start is 19:00; an end of 08:00 the same day, in the "same" zone under a
@@ -9587,9 +9588,10 @@ describe('findBrokenCalendarHomeCollections', () => {
 describe('VEVENT splitting is line-anchored against folded content', () => {
   // A DESCRIPTION whose folded continuation lines carry the two component markers.
   // Deterministic to construct: libical folds at a fixed octet count, so a description padded
-  // to the right length puts the fold exactly there. The property order is the attacker's to choose, so the real SUMMARY and DTSTART sit AFTER
-  // them: unanchored, the payload's own text ends the component early and starts a second
-  // one, and the real event's properties land in the phantom.
+  // to the right length puts the fold exactly there. The property order is the attacker's to
+  // choose, so the real SUMMARY and DTSTART sit AFTER them: unanchored, the payload's own text
+  // ends the component early and starts a second one, and the real event's properties land in
+  // the phantom.
   const FOLDED_TERMINATOR = [
     'BEGIN:VCALENDAR',
     'BEGIN:VEVENT',
@@ -9973,9 +9975,9 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
   });
 
   it('saturates a CALLER-NAMED bound too, and says that it did', async () => {
-    // Saturation covers a caller bound as well as the invented half: a caller bound
-    // resolves through a zone, so an offset alone pushes `9999-12-31` over the end of the
-    // four-digit-year range and tsdav answered a caller-fixable argument with a plain Error.
+    // Saturation covers a caller bound as well as the invented half: a caller bound resolves
+    // through a zone, so an offset alone pushes `9999-12-31` over the end of the four-digit-year
+    // range and tsdav would answer a caller-fixable argument with a plain Error.
     setDefaultTimezone('America/New_York');
     try {
       const { client, mockDAVClient } = mockedClient();
@@ -10009,8 +10011,8 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
 
   it('rejects a one-sided window that saturation collapses to zero length', async () => {
     // A one-sided window can invert too, so the inversion check is not an alternative to the
-    // clamp: a startDate on the last representable instant leaves the invented month nowhere
-    // to go, and tsdav answered with a plain Error (InternalError) over a caller-fixable bound.
+    // clamp: a startDate on the last representable instant leaves the invented month nowhere to
+    // go, and tsdav would answer with a plain Error (InternalError) over a caller-fixable bound.
     const { client, mockDAVClient } = mockedClient();
     await assert.rejects(
       () => client.getCalendarEvents(undefined, 50, '9999-12-31T23:59:59Z'),
