@@ -2688,7 +2688,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               'mark_email_read', 'pin_email', 'delete_email', 'move_email', 'archive_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
-              'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'
+              'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels',
+              'test_bulk_operations', 'check_function_availability'
             ]
           },
           identity: {
