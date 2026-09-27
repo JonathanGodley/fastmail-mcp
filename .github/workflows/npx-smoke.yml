@@ -34,7 +34,7 @@ jobs:
           # npm's GitFetcher cannot pack a git dependency with a prepare script
           # from npx ("GitFetcher requires an Arborist constructor"), so the
           # github: form never worked in CI. The tarball exercises the same
-          # surface: the prepare/tsc build, package.json's `files` allowlist
+          # surface: the prepack clean rebuild, package.json's `files` allowlist
           # (dist/ without source maps), and the bin wiring.
           npm ci
           npm pack

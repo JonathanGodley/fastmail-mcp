@@ -16,6 +16,7 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "prepare": "npm run build",
+    "prepack": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && npm run build",
     "pretest": "npm run build",
     "test": "tsx --test src/*.test.ts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
