@@ -1312,7 +1312,8 @@ verbatim; each therefore renders through `echoCallerText` inside `"…"`
 as text — **recursively**, so the "anywhere in the sources" the helpers' comments claim is what
 it actually scans — drops comments so a doc can quote the wrong spelling in order to warn
 against it, and fails on a single-quoted render of any helper it knows — `echoCallerText`,
-`describeUntrusted`, `describePart`, `echoPath` — in any of them. Two assertions sit beside
+`describeUntrusted`, `describeUntrustedAt`, `describePart`, `echoPath`, `echoRecipients` —
+in any of them. Two assertions sit beside
 it: a floor, so a pattern that silently stops matching cannot make it pass vacuously, and a
 reach pin, because a scan that quietly stopped at the top level would still clear that floor.
 What it does NOT cover is the whole-sentence half above: a value described into a local and

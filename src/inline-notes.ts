@@ -42,7 +42,8 @@ const MAX_NAMED_PARTS = 3;
  * HERE, because "a member" is a different thing on either side. Find yours before you pass
  * anything:
  *
- *  - FILENAME CALLERS — `noteForwardPooled` and `noteMintedDropped`. A member is a PART, and
+ *  - FILENAME CALLERS — `noteForwardPooled`, `noteMintedDropped` and
+ *    `noteForwardUnreferenced`. A member is a PART, and
  *    `total` is the part count. Names MAY repeat and must not be collapsed: two forwarded
  *    parts can genuinely both be called "image001.png", and merging them would report one
  *    part lost where five were. A part with no filename at all is why `total` is a separate
