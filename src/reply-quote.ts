@@ -190,8 +190,8 @@ export function signatureCidRefs(signature: ResolvedSignature | undefined): stri
 export function rejectSignatureEmbeddedImage(ref: string): string {
   return (
     `The sending identity's signature displays an embedded image "${describePart(ref)}", ` +
-    'which this server cannot carry: the identity holds the signature\'s html but not the ' +
-    'image. Write the sign-off into htmlBody yourself in place of {{signature}}, or remove ' +
+    'and nothing in this call supplies it: the identity holds the signature\'s html but not ' +
+    'the image. Write the sign-off into htmlBody yourself in place of {{signature}}, or remove ' +
     'the embedded image from the identity\'s signature in Fastmail\'s settings.'
   );
 }

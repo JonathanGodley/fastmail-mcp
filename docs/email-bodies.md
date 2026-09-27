@@ -226,10 +226,11 @@ at all on this branch — a remote image writes no placeholder under any policy 
 part's token is reported as `no-text-form`.
 
 An **embedded** (`cid:`) image in the HTML signature never reaches that derivation. The
-identity holds the signature's HTML but not the image's bytes, so nothing can supply the part
-the reference names. Placing `{{signature}}` in an HTML body that ships is refused, naming the
-signature's embedded image as the cause, by both `draft_email` (before anything is uploaded)
-and a flagged `edit_draft`. A message that ships no HTML still signs from the text form, as
+identity holds the signature's HTML but not the image's bytes, so the identity cannot supply
+the part the reference names. Placing `{{signature}}` in an HTML body that ships is refused,
+naming the signature's embedded image as the cause, by both `draft_email` (before anything is
+uploaded) and a flagged `edit_draft`, unless an `attachments` item in the same call supplies
+that identifier, as it would for any other reference. A message that ships no HTML still signs from the text form, as
 above.
 
 **Placement is the caller's, and nothing is placed for them.** The three builders live
