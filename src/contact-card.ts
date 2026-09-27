@@ -191,7 +191,9 @@ export function mergeEntryMap(
   return { map, dropped, added };
 }
 
-const MAX_ECHOED_DROPPED_ENTRIES = 5;
+// Past any real card's entry count, so the echo is whole in practice; the bound only keeps a
+// pathological card from producing an unbounded error message.
+const MAX_ECHOED_DROPPED_ENTRIES = 50;
 
 /**
  * The card-level `kind` (RFC 9553 section 2.1.4), read ONLY here so the read surface and the
@@ -249,8 +251,9 @@ export function isAmbiguousEntryEdit(outcome: EntryMergeOutcome): boolean {
  * Reject an edit that both drops a known entry and adds an unknown one: it reads as a
  * correction or as a removal plus an unrelated addition, and silent replace is the lossy one.
  *
- * The dropped entries are echoed in FULL, hidden fields included, so the lossless retry is
- * cheaper than reaching for `allowEntryReplace`.
+ * The dropped entries are echoed in FULL, hidden fields included, up to
+ * MAX_ECHOED_DROPPED_ENTRIES, so the lossless retry is cheaper than reaching for
+ * `allowEntryReplace`.
  */
 export function assertUnambiguousEntryEdit(field: string, outcome: EntryMergeOutcome): void {
   if (!isAmbiguousEntryEdit(outcome)) return;
@@ -258,7 +261,7 @@ export function assertUnambiguousEntryEdit(field: string, outcome: EntryMergeOut
   const shown = outcome.dropped.slice(0, MAX_ECHOED_DROPPED_ENTRIES);
   const more = outcome.dropped.length - shown.length;
   const droppedText = `${shown.map((d) => JSON.stringify(d.entry)).join(', ')}${
-    more > 0 ? `, …and ${more} more` : ''
+    more > 0 ? `, …and ${more} more (read them in full with get_contact with verbose:true)` : ''
   }`;
 
   throw new InvalidInputError(

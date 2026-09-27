@@ -300,11 +300,29 @@ describe('assertUnambiguousEntryEdit', () => {
     );
   });
 
-  it('caps the echoed entries and says the list is partial', () => {
+  it('echoes every dropped entry of an ordinary card, so the resend can be lossless', () => {
     const dropped = Array.from({ length: 8 }, (_, i) => ({ key: `k${i}`, entry: { address: `d${i}@b.example` } }));
     assert.throws(
-      () => assertUnambiguousEntryEdit('phones', { map: {}, dropped, added: ['x'] }),
-      /…and 3 more/,
+      () => assertUnambiguousEntryEdit('emails', { map: {}, dropped, added: ['x'] }),
+      (err: Error) => {
+        for (let i = 0; i < 8; i++) assert.match(err.message, new RegExp(`"d${i}@b\\.example"`));
+        assert.doesNotMatch(err.message, /more/);
+        return true;
+      },
+    );
+  });
+
+  it('caps the echo at 50 entries and says how to read the rest', () => {
+    const dropped = Array.from({ length: 53 }, (_, i) => ({ key: `k${i}`, entry: { address: `d${i}@b.example` } }));
+    assert.throws(
+      () => assertUnambiguousEntryEdit('emails', { map: {}, dropped, added: ['x'] }),
+      (err: Error) => {
+        assert.match(err.message, /d49@b\.example/);
+        assert.doesNotMatch(err.message, /d50@b\.example/);
+        assert.match(err.message, /…and 3 more/);
+        assert.match(err.message, /get_contact with verbose:true/);
+        return true;
+      },
     );
   });
 });
