@@ -122,8 +122,14 @@ function collectBooleanParams(): { unionNames: string[]; narrow: string[] } {
     const isUnion = line === "type: ['boolean', 'string'],";
     const isNarrow = line === "type: 'boolean',";
     if (!isUnion && !isNarrow) continue;
-    // The property name is the line that opened this block.
-    const name = lines[i - 1].trim().replace(/:\s*\{$/, '');
+    // The property name is the line that opened this block: the nearest line above that is
+    // indented less than `type:`, so a comment or a sibling key inside the block is skipped.
+    const indent = lines[i].search(/\S/);
+    let open = i - 1;
+    while (open >= 0 && !(lines[open].trim() && lines[open].search(/\S/) < indent)) open--;
+    const name = (lines[open] ?? '').trim().replace(/:\s*\{$/, '');
+    // A block opened by anything but `key: {` (a helper's `return {`) has no name here.
+    assert.match(name, /^[A-Za-z_$][\w$]*$/, `no property name for the boolean at src/index.ts:${i + 1}`);
     if (isUnion) unionNames.add(name);
     else narrow.push(`${name} (src/index.ts:${i + 1})`);
   }

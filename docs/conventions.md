@@ -594,7 +594,9 @@ second call.
 reads the message's current membership first and emits a `mailboxIds/<id>` patch: `null` for the
 mailboxes it is taking away, `true` re-asserted for every mailbox the message keeps. The reason is
 their shared contract, which is the opposite of a move's: subtracting one membership must **never**
-drop the others, because Fastmail's own Archive and Remove-label actions do not.
+drop the others, because Fastmail's own Archive and Remove-label actions do not. Every `null` is
+written before any `true`, so if one id is ever both removed and kept, the `true` overwrites the
+`null` and the collision keeps the message filed rather than taking the mailbox away.
 
 What differs is the trigger, not the resolution. `archive_email` adds Archive when the Inbox was
 the only filing; `remove_labels`/`bulk_remove_labels` add it, per message, when the named labels
