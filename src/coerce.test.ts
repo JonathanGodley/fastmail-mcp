@@ -1593,8 +1593,16 @@ describe('canonicalZoneName', () => {
 
   it('retains nothing for a name ICU cannot resolve', () => {
     const before = zoneCanonicalizationCacheSize();
+    assert.equal(typeof before, 'number');
     for (let i = 0; i < 50; i++) canonicalZoneName(`Vendor/Zone-${i}-${'x'.repeat(1000)}`);
     assert.equal(zoneCanonicalizationCacheSize(), before, 'unresolvable names were cached');
+  });
+
+  it('keeps what it holds while below its limit', () => {
+    canonicalZoneName('Asia/Kathmandu');
+    canonicalZoneName('Atlantic/Faroe');
+    assert.ok(zoneCanonicalizationCacheHas('Asia/Kathmandu'), 'the second insert evicted the first');
+    assert.ok(zoneCanonicalizationCacheHas('Atlantic/Faroe'));
   });
 
   it('never holds more than its limit, even for distinct spellings ICU does resolve', () => {
@@ -2061,10 +2069,11 @@ describe('startOfLocalDayUtcIso', () => {
 describe('zoneOffsetMsAt', () => {
   it('holds one formatter per zone, not one per spelling of it', () => {
     const variants = ['America/Argentina/Salta', 'america/argentina/salta', 'AMERICA/ARGENTINA/SALTA', 'America/ARGENTINA/salta'];
-    zoneOffsetMsAt(0, variants[0]);
     const before = zoneOffsetFormatterCacheSize();
+    zoneOffsetMsAt(0, variants[0]);
+    assert.equal(zoneOffsetFormatterCacheSize(), before + 1, 'the first spelling was not cached');
     for (const zone of variants) zoneOffsetMsAt(0, zone);
-    assert.equal(zoneOffsetFormatterCacheSize(), before, 'a case variant of a cached zone added a formatter');
+    assert.equal(zoneOffsetFormatterCacheSize(), before + 1, 'a case variant of a cached zone added a formatter');
   });
 
   it('floors a sub-second instant to its own whole second, at a Sydney transition boundary', () => {

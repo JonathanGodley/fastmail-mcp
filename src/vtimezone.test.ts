@@ -56,10 +56,11 @@ describe('generateVTimezone', () => {
   it('holds one abbreviation formatter per zone, not one per spelling of it', () => {
     const variants = ['America/Argentina/Jujuy', 'america/argentina/jujuy', 'AMERICA/ARGENTINA/JUJUY', 'America/ARGENTINA/jujuy'];
     const t = Date.UTC(2026, 0, 1);
-    generateVTimezone(variants[0], t, t + 3600000);
     const before = abbreviationFormatterCacheSize();
+    generateVTimezone(variants[0], t, t + 3600000);
+    assert.equal(abbreviationFormatterCacheSize(), before + 1, 'the first spelling was not cached');
     for (const zone of variants) generateVTimezone(zone, t, t + 3600000);
-    assert.equal(abbreviationFormatterCacheSize(), before, 'a case variant of a cached zone added a formatter');
+    assert.equal(abbreviationFormatterCacheSize(), before + 1, 'a case variant of a cached zone added a formatter');
   });
 
   it('wraps a TZID matching the zone passed in, BEGIN to END', () => {
