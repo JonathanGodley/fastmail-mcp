@@ -1094,14 +1094,11 @@ type ZoneDescriptor =
 /**
  * Classify a DTSTART/DTEND property's zone from its raw line(s). Built on
  * `describeDateProperty` so the read path and the write path's consistency check agree on what
- * `zoned` is. Its `date` and `utc` frames both become `none`: neither carries a zone name. So
- * does a malformed `;TZID=X:...Z` line: the Z value is the instant `start` reports, and a zone
- * beside it would contradict it.
+ * `zoned` is. Its `date` and `utc` frames both become `none`: neither carries a zone name.
  */
 function classifyZoneFromLines(rawLines: string[]): ZoneDescriptor {
   if (rawLines.length === 0) return { kind: 'absent' };
   const d = describeDateProperty(rawLines[0]);
-  if (d.frame === 'zoned' && /Z$/.test(d.value)) return { kind: 'none' };
   if (d.frame === 'zoned') return { kind: 'tzid', name: d.tzid! };
   if (d.frame === 'floating') return { kind: 'floating' };
   return { kind: 'none' };
@@ -1550,12 +1547,14 @@ function describeDateProperty(rawLine: string, displayOverride?: string, tzidSou
   if (isDateOnlyProperty(line) || /^\d{8}$/.test(value)) {
     return { frame: 'date', value, display };
   }
+  // Before the TZID test: a malformed `;TZID=X:...Z` line names a UTC instant, and the read
+  // reports it as one, so every consumer here must too.
+  if (/Z$/.test(value)) {
+    return { frame: 'utc', value, display };
+  }
   const storedTzid = extractTzidParam(params);
   if (storedTzid !== undefined) {
     return { frame: 'zoned', tzid: storedTzid.replace(/^"|"$/g, ''), tzidSource: tzidSourceOverride, value, display };
-  }
-  if (/Z$/.test(value)) {
-    return { frame: 'utc', value, display };
   }
   return { frame: 'floating', value, display };
 }

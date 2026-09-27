@@ -3050,6 +3050,26 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.equal(result.eventId, 'by-url@fm');
   });
 
+  // A malformed `;TZID=X:...Z` line is a UTC value, as the read reports it, so moving the other
+  // side to another UTC value is not a frame mismatch.
+  it('treats a stored Z value that also carries a TZID as UTC when checking a new start', async () => {
+    const ical = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:z-tzid@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000Z',
+      'DTEND;TZID=Asia/Tokyo:20260320T093000Z',
+      'SUMMARY:Malformed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client, mockDAVClient } = createMockedPatchClient([{ data: ical, url: '/cal/personal/z-tzid.ics' }]);
+
+    await client.updateCalendarEvent('z-tzid@fm', { start: '2026-03-20T07:00:00Z' });
+
+    assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 1);
+  });
+
   it('preserves unknown properties when updating title only', async () => {
     const ical = makeRichIcal('evt1@fm');
     const objects = [{ data: ical, url: '/cal/evt1.ics' }];
@@ -6749,6 +6769,15 @@ describe('VTIMEZONE embedding (#166)', () => {
   });
 
   describe('regenerateVTimezones — span computation and block replacement (#166)', () => {
+    it('generates no block for a Z value that also carries a TZID', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'BEGIN:VEVENT',
+        'UID:z-tzid@fm', 'DTSTART;TZID=Pacific/Auckland:20260320T083000Z',
+        'DTEND;TZID=Asia/Tokyo:20260320T093000Z', 'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.ok(!regenerateVTimezones(data, '\r\n').includes('BEGIN:VTIMEZONE'));
+    });
+
     it('computes the span from BOTH DTSTART and DTEND, not just one, when they straddle a DST transition', () => {
       // Sydney's own 2026 October transition (STANDARD +1000 -> DAYLIGHT +1100 at
       // 2026-10-04T02:00 local, per src/vtimezone.test.ts). DTSTART sits before it, DTEND
