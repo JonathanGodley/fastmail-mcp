@@ -509,7 +509,7 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
 
 ### Writing contacts
 
-`create_contact`, `update_contact` and `delete_contact` take the same entry arrays, and accept both shapes on input too: `emails` may be `["a@b.example"]` or `[{address, label}]`, `phones` may be `["+1 555 0100"]` or `[{number, label}]`. `addresses` take `{full, label?}` objects only. Any array may also arrive as a JSON string. An unknown per-item key, a key of the wrong type, or a repeated value is rejected naming its position (e.g. `emails[2]`).
+`create_contact` and `update_contact` take the same entry arrays (`delete_contact` takes only `contactId`), and accept both shapes on input too: `emails` may be `["a@b.example"]` or `[{address, label}]`, `phones` may be `["+1 555 0100"]` or `[{number, label}]`. `addresses` take `{full, label?}` objects only. Any array may also arrive as a JSON string. An unknown per-item key, a key of the wrong type, or a repeated value is rejected naming its position (e.g. `emails[2]`).
 
 **`update_contact` merges per entry rather than overwriting the card.** A JMAP patch replaces a top-level property outright, so writing `emails` from a flat array alone would silently discard the `contexts` and `pref` that sit on nearly every real entry. Instead the tool reads the card first, and:
 
