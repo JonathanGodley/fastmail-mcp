@@ -385,7 +385,8 @@ export function assertKnownParams(
   );
 }
 
-// An unreadable value is REFUSED, not read as absent: absent would silently drop a filter
+// Read every boolean parameter through this, never `!!`: a lenient client's "false" is truthy
+// (#54). An unreadable value is REFUSED, not read as absent: absent would silently drop a filter
 // (`isUnread:"yes"`) or keep the default the caller was trying to change.
 export function coerceBool(value: unknown, paramName: string): boolean | undefined {
   if (value === undefined || value === null) return undefined;

@@ -167,8 +167,8 @@ export function describePart(value: unknown, max: number = DESCRIBE_PART_MAX): s
 // matching device names, so "CON .png" is the console too.
 const WINDOWS_RESERVED_STEM = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])[ .]*$/i;
 
-// draft_email's sanitizeEmlFilename is similar and deliberately NOT folded into this: its
-// ".eml" suffix neutralizes a device name, and its fallback differs.
+// draft_email's sanitizeEmlFilename is similar and deliberately NOT folded into this: it
+// leaves a device name for the receiving client to handle, and its fallback differs.
 function sanitizeFilenameChars(value: string | null | undefined): string {
   const stripped = trimEnd(
     (value ?? '')

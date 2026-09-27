@@ -57,10 +57,11 @@ it matches device names, so `CON .png` is defused too. A name that sanitizes to 
 becomes `attachment`, so the value is never an empty path segment.
 
 This is deliberately stricter than the `asAttachment` forward's `sanitizeEmlFilename`, which applies
-a similar character treatment but lets device names through: that helper always appends
-`.eml`, which neutralizes them, and its output is a name a *remote* recipient's client
-saves. This one is a name a local client may write, so the inherited posture does not
-transfer. That helper also still trims after dropping leading dots, so whitespace can
+a similar character treatment but lets device names through (`CON.eml` still names the
+console on Windows, which reads a device name followed by an extension as the device): its
+output is a name a *remote* recipient's client saves, and sanitising it for that platform is
+that client's job. This one is a name a local client may write, so the inherited posture
+does not transfer. That helper also still trims after dropping leading dots, so whitespace can
 shield one there; its unconditional `.eml` suffix means the result is a named file either
 way, and changing it would alter what forwarded mail declares on the wire. The two are
 kept as separate functions for exactly these divergences.
@@ -350,8 +351,8 @@ nothing local is read here. The escape is simply not writing `{{quote}}`: nothin
 caller did not place, so a reply whose body omits the token carries no part of the original
 at all, images included.
 
-The id is **trusted and unscoped within the connected account** — it may name *any* message,
-deliberately, so a caller can correct a draft built against the wrong original. It is **never
+The id is **trusted and unscoped within the connected account** — it may name *any* message
+the account holds, since a reply or forward may be to any of them. It is **never
 re-resolved from the draft's `In-Reply-To`** (an attacker-controllable header), so there is no
 confused-deputy / quote-spoofing surface from that direction, and there is **no cross-account
 reach** (the fetch is scoped to `session.accountId`).

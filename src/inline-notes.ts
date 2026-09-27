@@ -372,7 +372,7 @@ export function rejectCidCollisionInCall(count: number, value: string): string {
   );
 }
 
-// The recreate recipe both draft-level refusals end with. It routes a reply or forward
+// The recreate recipe rejectBrokenDraft ends with. It routes a reply or forward
 // through the tools that rebuild the threading, because recreating one of those with the
 // plain compose tool splits the conversation, and it deliberately stops short of promising
 // the recreated draft will re-embed the images — with attachments disabled it cannot, and

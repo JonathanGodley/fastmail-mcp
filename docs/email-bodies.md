@@ -131,7 +131,7 @@ is why the guard sits in the client method there, alongside the rest of the edit
 rules).
 
 `editDraft` (`src/edit-draft-handler.ts`) runs the same check ahead of its attachment
-coercion and upload. That is an ordering belt, not a fifth seam: `updateDraft` stays
+coercion and upload. That is an ordering belt, not a third seam: `updateDraft` stays
 authoritative, and because the guard is a pure idempotent check on the caller's own input,
 running it earlier refuses nothing new — it only stops a body that was always going to be
 rejected from orphaning freshly uploaded blobs first. Its position above the attachment
@@ -654,7 +654,7 @@ so the mitigation is on the disposal side plus disclosure:
   caller who wants Trash content reads Trash). If the `trash` role can't be resolved,
   every draft is counted as before — fail toward over-warning, never toward missing a
   real draft reply.
-- **The result echoes back what was replaced** (`replacedDraft`: id, subject, to/cc, and
+- **The result echoes back what was replaced** (`replacedDraft`: id, subject, to/cc/bcc/replyTo, and
   body character counts), so a caller comparing against its own copy sees an unintended
   overwrite immediately. Sizes rather than the previous bodies: the old draft is intact in
   Trash, so its full content is one `get_email` away.
@@ -667,8 +667,8 @@ replaced draft is never left unstated.
 Reconstructing a draft's existing bodies on recreate has one non-obvious trap, settled
 by live experiments against Fastmail.
 
-The server does not auto-generate the missing partner body in either direction at draft
-storage time. A single-format draft has its ONE part aliased into BOTH the `textBody`
+Fastmail's server does not auto-generate the missing partner body in either direction at
+draft storage time. A single-format draft has its ONE part aliased into BOTH the `textBody`
 and `htmlBody` lists. For example, a text-only draft lists its `text/plain` part under
 `htmlBody` too, with `type: "text/plain"`. RFC 8621 §4.1.4 keys `bodyValues` by
 `partId`; the `textBody` / `htmlBody` arrays are independent lists of body-part objects.
@@ -779,11 +779,11 @@ reference.
   `<blockquote type="cite">` survives intact. Two text shapes appear, and the difference is
   the server's rather than the caller's: a caller-supplied text body (the text-only and dual
   cases) comes back as `wrote:\n> ` (one newline), but the html-DERIVED text fallback (the
-  html-only case, where the server adds the text part) comes back as `wrote:\n\n> ` — a blank
+  html-only case, where this MCP server derives the text part before writing) comes back as `wrote:\n\n> ` — a blank
   line between the attribution and the first `> ` line. Any rule written against one of those
   shapes has to tolerate the other. A *text-only* reply draft returns **no** `text/html` part
   (its one `text/plain` part aliases into both lists), so `bodyValueForType('text/html')` is
   undefined and `existingHtmlValue` is blank. An *html-only* reply draft is actually stored
-  dual (the server derives and stores the text fallback); a genuinely text-part-less html
+  dual (this MCP server derives the text fallback and writes both parts); a genuinely text-part-less html
   reply draft only arises from another client. Covers only drafts this server makes;
   foreign-client shapes are assumed, not probed.

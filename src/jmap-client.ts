@@ -1992,8 +1992,8 @@ export class JmapClient {
     if (email.inReplyTo?.length) emailObject.inReplyTo = email.inReplyTo;
     if (email.references?.length) emailObject.references = email.references;
     if (email.replyTo?.length) emailObject.replyTo = email.replyTo.map(parseAddress);
-    // A header SET, round-tripped by Fastmail. Pre-vetted by the compose handler, and
-    // Fastmail rejects CRLF/non-ASCII.
+    // A header SET, round-tripped by Fastmail, which rejects CRLF/non-ASCII. draft_email vets it;
+    // edit_draft carries the stored value unvetted (see isSettableMessageId).
     if (email.forwardedMessageId?.length) emailObject['header:X-Forwarded-Message-Id:asMessageIds'] = email.forwardedMessageId;
     // Vetted at this single seam, so a malformed value degrades to absent rather than
     // failing the create.

@@ -75,7 +75,6 @@ function rawBodyBytes(emails: any[]): Array<{ id: string; bytes: number }> {
 
 export async function readThread(args: any, client: ThreadClient): Promise<string> {
   const { threadId } = args ?? {};
-  // coerceBool, not `!!`: a lenient client's "false" is truthy (#54).
   const raw = coerceBool(args?.raw, 'raw') ?? false;
   const includeDrafts = coerceBool(args?.includeDrafts, 'includeDrafts') ?? false;
   const includeBodies = coerceBool(args?.includeBodies, 'includeBodies') ?? false;
