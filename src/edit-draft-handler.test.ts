@@ -77,6 +77,28 @@ describe('editDraft — coercion and delegation', () => {
     }
   }
 
+  const draftFreeRefusals: Array<[string, Record<string, unknown>, RegExp]> = [
+    ['a value-plus-clear conflict', { clearFields: ['attachments'] }, /cannot both set and clear attachments/],
+    ['an empty subject', { subject: '' }, /subject cannot be empty/],
+    ['an empty recipient array', { to: [] }, /to cannot be empty/],
+    ['an unclearable field', { clearFields: ['from'] }, /Cannot clear "from"/],
+    ['a wildcard from', { from: '*@example.com' }, /wildcard/i],
+  ];
+  for (const [label, extra, message] of draftFreeRefusals) {
+    it(`refuses ${label} before uploading any attachment`, async () => {
+      const { client, calls } = spyClient();
+      await assert.rejects(
+        editDraft(
+          { emailId: 'd1', attachments: [{ blobId: 'Bsrc', name: 'n.txt' }], ...extra },
+          client, undefined, true,
+        ),
+        (e: any) => e instanceof InvalidInputError && message.test(e.message),
+      );
+      assert.equal(calls.upload, undefined);
+      assert.equal(calls.update, undefined);
+    });
+  }
+
   it("still reads '' and [] on a recipient field as the empty list, and still splits a comma string", async () => {
     const { client, calls } = spyClient();
     await editDraft({ emailId: 'd1', cc: '', bcc: [], to: 'a@b.example, c@d.example' }, client, undefined, false);

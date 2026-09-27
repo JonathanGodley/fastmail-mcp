@@ -616,6 +616,49 @@ function rejectWildcardFromValue(fromAddress: string): string {
     'A from needs a concrete address in that domain; the wildcard identity still verifies it and still supplies its signature.';
 }
 
+/**
+ * edit_draft's refusals that need neither the stored draft nor the network. updateDraft runs
+ * them in its own order; editDraft also runs them before an upload, so none of them orphans a
+ * blob. `attaching` stands for parts not uploaded yet.
+ *
+ * A provided-but-empty value is a loud error (almost always an accidental clobber); blanking
+ * is done through clearFields. `from` is not clearable: a draft always has a sender.
+ * `forwardedMessageId` is clearable but not settable.
+ */
+export function assertDraftEditValues(
+  updates: {
+    to?: string[]; cc?: string[]; bcc?: string[]; replyTo?: string[];
+    subject?: string; textBody?: string; htmlBody?: string; from?: string;
+    clearFields?: string[]; attachments?: unknown[]; removeAttachments?: string[];
+  },
+  attaching = false,
+): void {
+  const parsedFrom = updates.from ? parseAddress(updates.from) : undefined;
+  if (parsedFrom && isWildcardIdentityEmail(parsedFrom.email)) {
+    throw new InvalidInputError(rejectWildcardFromValue(parsedFrom.email));
+  }
+  const CLEARABLE = new Set(['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId']); // NOT 'from'
+  const SETTABLE = ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'from'] as const;
+  const provided = new Set<string>(SETTABLE.filter(f => (updates as any)[f] !== undefined));
+  // So validateClearFields refuses clear-then-append of attachments in one call.
+  if (attaching || updates.attachments?.length || updates.removeAttachments?.length) provided.add('attachments');
+  validateClearFields(updates.clearFields, CLEARABLE, provided);
+  const clear = new Set(updates.clearFields ?? []);
+
+  const clearHint = 'omit to leave it unchanged, or list it in clearFields to clear it';
+  if (updates.subject  !== undefined && !clear.has('subject'))  requireNonEmpty(updates.subject,  'subject',  clearHint);
+  if (updates.textBody !== undefined && !clear.has('textBody')) requireNonEmpty(updates.textBody, 'textBody', clearHint);
+  if (updates.htmlBody !== undefined && !clear.has('htmlBody')) requireNonEmpty(updates.htmlBody, 'htmlBody', clearHint);
+  if (updates.from     !== undefined) requireNonEmpty(updates.from, 'from'); // not clearable; no hint about clearFields
+  for (const f of ['to', 'cc', 'bcc', 'replyTo'] as const) {
+    if (updates[f] !== undefined && !clear.has(f) && updates[f]!.length === 0) {
+      throw new InvalidInputError(`${f} cannot be empty; ${clearHint}`);
+    }
+  }
+  // The body checks above are GUARDS ONLY: their trimmed return is discarded so stored
+  // bodies keep their exact value.
+}
+
 const REJECT_UNVERIFIED_FROM =
   'From address is not verified for sending. Choose one of your verified identities.';
 
@@ -2150,29 +2193,8 @@ export class JmapClient {
     const existingTextValue = this.bodyValueForType(existingEmail.textBody, 'text/plain', bodyValues);
     const existingHtmlValue = this.bodyValueForType(existingEmail.htmlBody, 'text/html', bodyValues);
 
-    // A provided-but-empty value is a loud error (almost always an accidental clobber);
-    // blanking is done through clearFields. `from` is not clearable: a draft always has a
-    // sender. `forwardedMessageId` is clearable but not settable.
-    const CLEARABLE = new Set(['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId']); // NOT 'from'
-    const SETTABLE = ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'from'] as const;
-    const provided = new Set<string>(SETTABLE.filter(f => (updates as any)[f] !== undefined));
-    // So validateClearFields refuses clear-then-append of attachments in one call.
-    if (updates.attachments?.length || updates.removeAttachments?.length) provided.add('attachments');
-    validateClearFields(updates.clearFields, CLEARABLE, provided);
+    assertDraftEditValues(updates);
     const clear = new Set(updates.clearFields ?? []);
-
-    const clearHint = 'omit to leave it unchanged, or list it in clearFields to clear it';
-    if (updates.subject  !== undefined && !clear.has('subject'))  requireNonEmpty(updates.subject,  'subject',  clearHint);
-    if (updates.textBody !== undefined && !clear.has('textBody')) requireNonEmpty(updates.textBody, 'textBody', clearHint);
-    if (updates.htmlBody !== undefined && !clear.has('htmlBody')) requireNonEmpty(updates.htmlBody, 'htmlBody', clearHint);
-    if (updates.from     !== undefined) requireNonEmpty(updates.from, 'from'); // not clearable; no hint about clearFields
-    for (const f of ['to', 'cc', 'bcc', 'replyTo'] as const) {
-      if (updates[f] !== undefined && !clear.has(f) && updates[f]!.length === 0) {
-        throw new InvalidInputError(`${f} cannot be empty; ${clearHint}`);
-      }
-    }
-    // The body checks above are GUARDS ONLY: their trimmed return is discarded so stored
-    // bodies keep their exact value.
 
     // ---- What this edit does to each body ----
     // Order below: the coupling guards, the hash, the token refusals, then the merge.
