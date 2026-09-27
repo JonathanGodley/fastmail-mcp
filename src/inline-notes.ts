@@ -223,7 +223,7 @@ export function noteDraftEmbeds(count: number, bytes: number): string {
 
 /** What a sent message actually carried, reported back on the send. */
 export function noteSentWithEmbedded(count: number, bytes: number): string {
-  return `Sent with ${count} embedded image(s) (${formatSize(bytes)}).`;
+  return `Sent with ${count} image(s) shown in the body or marked inline (${formatSize(bytes)}).`;
 }
 
 /**

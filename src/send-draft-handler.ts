@@ -31,7 +31,7 @@ export interface KeywordMaintenance {
 export interface SendDraftResult {
   submissionId: string;
   keywordMaintenance?: KeywordMaintenance;
-  // What the transmitted message carried as embedded images, reported straight through
+  // The images the transmitted message showed in its body or marked inline, reported straight through
   // from the send (#13).
   notes?: string[];
 }

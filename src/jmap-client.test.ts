@@ -2424,7 +2424,7 @@ describe('sendDraft', () => {
     });
 
     const outcome = await client.sendDraft('draft-1');
-    assert.deepEqual(outcome.notes, ['Sent with 1 embedded image(s) (2 KB).']);
+    assert.deepEqual(outcome.notes, ['Sent with 1 image(s) shown in the body or marked inline (2 KB).']);
     // The receipt needs the part listing, so the pre-send read must ask for it.
     const getParams = callArguments(makeReq)[0].methodCalls[0][1];
     assert.ok(getParams.properties.includes('attachments'));

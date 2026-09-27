@@ -224,7 +224,7 @@ describe('the notes a call emits', () => {
   it('reports what a sent message actually carried', () => {
     assert.equal(
       noteSentWithEmbedded(2, MB1_4),
-      'Sent with 2 embedded image(s) (1.4 MB).',
+      'Sent with 2 image(s) shown in the body or marked inline (1.4 MB).',
     );
   });
 
@@ -561,7 +561,7 @@ describe('emitInlineNotes', () => {
       'This draft embeds 2 image(s) (214 KB).',
     ]);
     assert.deepEqual(emitInlineNotes(t, { surface: 'send' }), [
-      'Sent with 2 embedded image(s) (214 KB).',
+      'Sent with 2 image(s) shown in the body or marked inline (214 KB).',
     ]);
   });
 
