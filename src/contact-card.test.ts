@@ -190,6 +190,19 @@ describe('mergeEntryMap', () => {
     assert.deepEqual(outcome.dropped, [{ key: 'short1', entry: stored.short1 }]);
   });
 
+  it('keeps an entry with no value, which the default view never shows, when the list is resent', () => {
+    // simplifyEntryMap skips such an entry, so a caller resending exactly what it read cannot
+    // name it; merging must not read its absence as a delete.
+    const card = {
+      k1: { address: 'a@example.com' },
+      k2: { address: '', label: 'old' },
+      k3: { pref: 1 },
+    };
+    const outcome = mergeEntryMap(card, [{ address: 'a@example.com' }], 'address');
+    assert.deepEqual(outcome.map, card);
+    assert.deepEqual(outcome.dropped, []);
+  });
+
   it('leaves a matched entry untouched when nothing but its value was supplied', () => {
     const outcome = mergeEntryMap(stored, [{ address: 'b@example.com' }], 'address');
     assert.deepEqual(outcome.map.short1, { address: 'b@example.com', pref: 2 });

@@ -30,7 +30,8 @@ export function resolveEntryLabel(entry: any): string | undefined {
 /**
  * The default read shape of an emails/phones map: a HYBRID list. An unlabelled entry emits
  * as a BARE STRING, the common case, to save tokens; a labelled one as `{address, label}`.
- * An entry with no value is skipped, still reachable through `verbose` and `raw`.
+ * An entry with no value is skipped, still reachable through `verbose` and `raw`; the merge
+ * keeps such an entry for the same reason (see `hasEntryValue`).
  */
 export function simplifyEntryMap(
   map: any,
@@ -39,12 +40,21 @@ export function simplifyEntryMap(
   if (!map || typeof map !== 'object') return undefined;
   const out: Array<string | Record<string, string>> = [];
   for (const entry of Object.values(map)) {
-    const value = (entry as any)?.[keyField];
-    if (typeof value !== 'string' || value === '') continue;
+    if (!hasEntryValue(entry, keyField)) continue;
+    const value = (entry as any)[keyField];
     const label = resolveEntryLabel(entry);
     out.push(label ? { [keyField]: value, label } : value);
   }
   return out.length ? out : undefined;
+}
+
+/**
+ * Whether the default read shape shows this entry. One the view hides cannot be named in a
+ * resent list, so `mergeEntryMap` carries it over rather than reading its absence as a drop.
+ */
+function hasEntryValue(entry: any, keyField: EntryKeyField): boolean {
+  const value = entry?.[keyField];
+  return typeof value === 'string' && value !== '';
 }
 
 export interface ContactEntryInput {
@@ -187,7 +197,12 @@ export function mergeEntryMap(
     }
   }
 
-  const dropped = existingKeys.filter((k) => !matched.has(k)).map((k) => ({ key: k, entry: existing[k] }));
+  const dropped: Array<{ key: string; entry: any }> = [];
+  for (const k of existingKeys) {
+    if (matched.has(k)) continue;
+    if (hasEntryValue(existing[k], keyField)) dropped.push({ key: k, entry: existing[k] });
+    else map[k] = existing[k];
+  }
   return { map, dropped, added };
 }
 
