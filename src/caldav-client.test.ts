@@ -2041,6 +2041,23 @@ describe('CalDAVCalendarClient event lookup', () => {
     await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
   });
 
+  it('names the addressed record by its calendar and url in the collision refusal', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), (err: Error) => {
+      assert.ok(err.message.includes(`The record at that url is "Personal" ("${realUrl}");`), err.message);
+      return true;
+    });
+  });
+
+  it('reports no url collision on a plain duplicate UID', async () => {
+    const { client } = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [{ data: eventIcal('dup@fm', 'A'), url: WORK_URL + 'a.ics', etag: '"ea"' }],
+      [PERSONAL_URL]: [{ data: eventIcal('dup@fm', 'B'), url: PERSONAL_URL + 'b.ics', etag: '"eb"' }],
+    });
+    assert.equal((await client.getCalendarEventById('dup@fm')).addressCollision, undefined);
+  });
+
   it('reports the url of the resource a delete removed, beside its UID', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
     const { client } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
@@ -2497,6 +2514,14 @@ describe('a VALARM\'s properties are its own, not the event\'s', () => {
 
   it('parseAllICalProperties skips a VALARM\'s lines', () => {
     assert.deepEqual(parseAllICalProperties(vevent, 'ATTENDEE'), []);
+  });
+
+  it('finds the block\'s own lines behind a leading blank line', () => {
+    assert.equal(parseICalValue('\r\nBEGIN:VEVENT\r\nSUMMARY:Own\r\nEND:VEVENT', 'SUMMARY'), 'Own');
+  });
+
+  it('skips a VALARM in a block of bare properties', () => {
+    assert.equal(parseICalValue('SUMMARY:s\nBEGIN:VALARM\nDESCRIPTION:alarm\nEND:VALARM', 'DESCRIPTION'), undefined);
   });
 
   it('recognises component markers in any case (RFC 5545 §3.1)', () => {
@@ -5307,7 +5332,8 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     const base = { calendarId: 'Personal', title: 'T', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' };
     for (const [label, patch, message] of [
       ['numeric title', { title: 5 }, /title must be a string; received number/],
-      ['whitespace-only title', { title: '   ' }, /title cannot be empty/],
+      ['whitespace-only title', { title: '   ' }, /title cannot be empty; pass the event title/],
+      ['array description', { description: ['x'] }, /description must be a string; received array/],
       ['numeric description', { description: 5 }, /description must be a string; received number/],
       ['object location', { location: {} }, /location must be a string; received object/],
     ] as Array<[string, Record<string, unknown>, RegExp]>) {
@@ -5764,6 +5790,12 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   });
 
   // RFC 5545 §3.6.1: a DATE DTSTART takes only a dur-day or dur-week DURATION.
+  it('accepts a start change on an event with neither DTEND nor DURATION', async () => {
+    const { client, mockDAVClient } = mockClient(stored('bare@fm', 'DTSTART:20260410T090000Z'));
+    await client.updateCalendarEvent('bare@fm', { start: '2026-04-11T09:00:00Z' });
+    assert.ok(callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data.includes('DTSTART:20260411T090000Z'));
+  });
+
   it('refuses a date-only start beside a stored DURATION that has a time part', async () => {
     const { client, mockDAVClient } = mockClient(stored('dur4@fm', 'DTSTART:20260410T090000Z', 'DURATION:PT1H'));
     await assert.rejects(
@@ -5771,6 +5803,7 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
       (err: Error) => {
         assert.equal(err.name, 'InvalidInputError');
         assert.match(err.message, /start "2026-04-10" is a date-only \(all-day\) value but the stored DURATION "PT1H" has a time part/);
+        assert.match(err.message, /Pass start with a time, or pass end as well, which replaces the DURATION\.$/);
         return true;
       },
     );

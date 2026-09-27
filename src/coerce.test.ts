@@ -1549,6 +1549,8 @@ describe('etcGmtOffsetNote', () => {
     ['Etc/GMT+0', ''],
     ['Etc/UTC', ''],
     ['Australia/Sydney', ''],
+    ['Etc/GMT+10x', ''],
+    ['Foo/Etc/GMT+10', ''],
   ] as const) {
     it(`"${zone}" -> "${note}"`, () => assert.equal(etcGmtOffsetNote(zone), note));
   }
