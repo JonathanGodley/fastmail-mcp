@@ -13,7 +13,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CalDAVCalendarClient, TRANSPARENCY_VALUES, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
 import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrusted, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
 import { composeDraftEmail } from './draft-email-handler.js';
@@ -2209,7 +2209,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const fields = { title, description, start, end, location, participants, clearFields, timeZone, transparency };
         const result = await davClient.updateCalendarEvent(eventId, fields);
-        return { content: [{ type: 'text', text: `Calendar event updated. Event ID: ${result.eventId}${describeUpdateCalendarEventResult(result)}${buildBrokenCollectionNote(result.brokenCollections, 'write')}` }] };
+        return { content: [{ type: 'text', text: `Calendar event updated. Event ID: "${describeUntrusted(result.eventId)}"${describeUpdateCalendarEventResult(result)}${buildBrokenCollectionNote(result.brokenCollections, 'write')}` }] };
       }
 
       case 'delete_calendar_event': {

@@ -733,13 +733,14 @@ describe('archive_email is wired to the strict string-array coercer', () => {
 });
 
 // A caller may address the event by its resource url; the confirmation reports the event's
-// UID, which updateCalendarEvent returns, not the caller's own argument.
+// UID, which updateCalendarEvent returns, not the caller's own argument. The record's author
+// wrote that UID, so it is quoted through describeUntrusted.
 describe('update_calendar_event echoes the resolved event id', () => {
-  it('reports result.eventId, not the eventId argument', () => {
+  it('reports result.eventId, not the eventId argument, through describeUntrusted', () => {
     const body = collectCaseBodies().get('update_calendar_event');
     assert.ok(body, 'could not find the update_calendar_event case in src/index.ts');
     const code = body.join('\n');
-    assert.match(code, /Calendar event updated\. Event ID: \$\{result\.eventId\}/);
+    assert.match(code, /Calendar event updated\. Event ID: "\$\{describeUntrusted\(result\.eventId\)\}"/);
   });
 });
 
