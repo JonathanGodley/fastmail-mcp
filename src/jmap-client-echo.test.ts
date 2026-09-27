@@ -256,12 +256,9 @@ describe('a path-confinement refusal bounds and quotes the paths it names', () =
   async function escapeFixture(t: any) {
     const root = await mkdtemp(join(tmpdir(), 'fm-echo-'));
     const allowed = join(root, 'allowed');
-    // A fixed segment length assumes a platform's temp path length, and platforms disagree:
-    // tmpdir() is short on Linux CI (e.g. /tmp/fm-echo-XXXXXX) and long under Windows' AppData
-    // temp, so three fixed-length segments clear the bound on one and fall short on the other.
-    // Deriving the segment length from the actual root length instead makes the total clear
-    // PATH_ECHO_LIMIT by a small, deliberate margin on any platform, while keeping each segment
-    // well under the 255-character filesystem name limit and the whole path comfortably under
+    // Derived from the real root length, because tmpdir() is short on Linux CI and long under
+    // Windows' AppData: fixed segments would clear PATH_ECHO_LIMIT on one and fall short on the
+    // other. Each segment stays under the 255-character name limit and the whole path under
     // Windows' default 260-character MAX_PATH.
     const target = PATH_ECHO_LIMIT + 20;
     const segmentLength = Math.min(255, Math.max(1, Math.ceil((target - root.length - 3) / 3)));
@@ -320,11 +317,10 @@ describe('a path-confinement refusal bounds and quotes the paths it names', () =
 
 // ---------- the OTHER half of what an echo does ----------
 
-// The quoting rule is about one failure: whether a value can close the span around it. It says
-// nothing about the two things the helpers also do — scrub control characters and U+2028/U+2029,
-// and bound the length — and a value reaching a message through NO helper loses both of those
-// however it is quoted. So "rendered bare, into a sentence that single-quotes nothing" was never
-// a reason for a path refusal to be safe; it was a different failure being read as none.
+// The quoting rule covers only whether a value can close the span around it. The helpers also
+// scrub control characters and U+2028/U+2029 and bound the length, and a value reaching a
+// message through NO helper loses both however it is quoted, so a path rendered bare into a
+// sentence that single-quotes nothing is not safe on that account.
 //
 // Nothing here rejects a line separator in a path: `rejectWindowsPathEscapes` covers device
 // namespaces, UNC roots, drive-relative forms and the ADS colon, and `resolve`/`normalize`
