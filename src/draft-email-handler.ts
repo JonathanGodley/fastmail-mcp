@@ -295,8 +295,7 @@ function assertTokensAcceptable(
       const lacks = inA ? b : a;
       throw bad(
         `{{${name}}} is in ${partWord(has.part)} but not in ${partWord(lacks.part)}. ` +
-        'When you supply both parts, place each token in both, or supply only one part and ' +
-        'let the other be derived from it.',
+        'When you supply both parts, place each token in both, or supply only one part.',
       );
     }
   }
