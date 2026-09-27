@@ -2126,8 +2126,9 @@ describe('draft_email — the images a {{quote}} carries', () => {
     assert.match(calls.draft.htmlBody, /wrote:/);
   });
 
-  // An image-only original whose sole reference resolves to nothing has no content to quote at all, so the reply must not open an attribution over an empty
-  // blockquote. The token is removed and the result says why.
+  // An image-only original whose sole reference resolves to nothing has no content to quote
+  // at all, so the reply must not open an attribution over an empty blockquote. The token is
+  // removed and the result says why.
   it('ships no quote at all when an image-only original references a part it does not carry', async () => {
     const original = withInlineImage({
       textBody: [],

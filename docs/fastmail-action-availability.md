@@ -437,6 +437,10 @@ since the 22 August section records bytes only — gave `11:00 AM – 12:00 PM A
 resolves the zone name itself. **This did not measure interoperability**: whether a
 `VTIMEZONE`-less resource resolves the same way in some *other* CalDAV client was never tested.
 
+Also worth recording for the read side: #162 changed only the window filter and the refusals, not the
+create serialiser, which is unchanged since #157 — so that work produced no newly authored bytes to
+view here.
+
 One bound on this whole subsection: a client popup is not a byte-level check. The bytes in the left
 column were verified by the probe's CalDAV `REPORT` fetch-back of the stored resource, and only the
 right column is pixels.
@@ -455,6 +459,8 @@ What is still not authored, and so still not known:
 - **A timed series crossing a DST boundary.** Both DST fixtures here are date-only. Whether a
   weekly 9:00 series holds its wall clock or its offset across a transition is the case that
   matters most for a zone-name-plus-wall-clock reader, and it has not been measured.
+
+These are left explicit rather than blank.
 
 ## The platform: whether the server will hand this one a `VTIMEZONE`
 

@@ -102,7 +102,8 @@ export function createClient({ env } = {}) {
   child.stdin.on('error', () => {});
 
   // No per-request timeout by design: it would abort legitimately slow calls (a
-  // big attachment upload). A caller that wants one races send() against a timer.
+  // big attachment upload). A caller that wants one races send() against a timer. A
+  // live server that never replies hangs the call; Ctrl-C it.
   function send(method, params) {
     // A write to a dead child would hang forever: 'exit' has already drained `pending`.
     if (child.exitCode !== null || child.killed) {

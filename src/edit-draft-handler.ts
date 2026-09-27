@@ -93,7 +93,9 @@ export async function editDraft(
     removeAttachments,
     expandSignature,
     // Passed through UNVALIDATED on purpose: updateDraft checks it behind the body-shape
-    // guards, and a presence check here would jump that refusal order.
+    // guards, and a presence check here would jump that refusal order. The shape guards go
+    // first because they name the shape the caller has to fix before a stale-read complaint
+    // is any use to it.
     bodyHash,
   }, {
     attachmentsEnabled: !!attachDir || allowBlobAttach,
