@@ -104,7 +104,7 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
     return toolJson(emails);
   }
 
-  const simplified: SimplifiedEmail[] = emails.map((e: any) => simplifyEmail(e, { stripQuoted }));
+  const simplified: SimplifiedEmail[] = emails.map((e: any) => simplifyEmail(e, { stripQuoted, htmlFallback: false }));
 
   if (includeBodies) {
     // An HTML-only message yields no bodyText (thread reads never carry HTML), so flag it
