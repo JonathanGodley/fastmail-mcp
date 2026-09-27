@@ -835,7 +835,6 @@ describe("draft_email — mode:'forward' with asAttachment", () => {
   });
 
   it('attaches only the .eml whatever includeOriginalAttachments says', async () => {
-    // The original's files ride inside the .eml, so the flag has nothing left to govern.
     const pdf = { partId: '5', blobId: 'blob-pdf', type: 'application/pdf', name: 'r.pdf', disposition: 'attachment' };
     for (const includeOriginalAttachments of [true, false]) {
       const { client, calls } = spyClient(makeOriginal({ attachments: [pdf] }));
@@ -1019,8 +1018,6 @@ describe('draft_email — {{signature}} expands the FROM identity, not the first
   });
 
   it('refuses a `from` that matches no identity as unverified, before anything is built', async () => {
-    // Refused here rather than left to createDraft, because a body that was nothing but
-    // {{signature}} would otherwise be refused first, blaming a missing signature.
     const { client, calls } = spyClient(makeOriginal(), {
       getIdentities: async () => [{ id: 'a', email: 'first@example.com', textSignature: 'S' }],
     });
@@ -3236,8 +3233,6 @@ describe('draft_email — {{signature}} does not depend on the history landing',
   });
 
   it('refuses, naming the cause, when the html signature displays an embedded image', async () => {
-    // An identity's htmlSignature is a string: the bytes a cid: reference in it points at
-    // are nowhere this server can fetch them from, so the sign-off cannot ship whole.
     const logoIdentity = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' };
     const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [logoIdentity] });
     const message = await messageFrom(() => compose(

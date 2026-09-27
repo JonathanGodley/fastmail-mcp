@@ -78,10 +78,6 @@ describe('editDraft — coercion and delegation', () => {
     assert.equal(calls.update.updates.expandSignature, false);
   });
 
-  // With nothing to upload the hash is NOT checked here. updateDraft owns the refusal order —
-  // the body-shape coupling guards name the shape the caller has to fix, and complaining
-  // about a stale read ahead of that would be no use to it. So the handler's job is to hand
-  // the value through untouched, including when it is absent.
   it('passes bodyHash through to updateDraft without validating it', async () => {
     const { client, calls } = spyClient();
     await editDraft({ emailId: 'd1', textBody: 'Hi', bodyHash: 'bh1-deadbeef' }, client, undefined, false);
@@ -95,8 +91,6 @@ describe('editDraft — coercion and delegation', () => {
     assert.equal(calls.update.updates.textBody, 'Hi');
   });
 
-  // A body edit with attachments and no hash would upload, then be refused, leaving the
-  // uploaded blobs orphaned. The presence check needs no network, so it runs first.
   it('refuses a body edit with no bodyHash before any attachment is uploaded', async () => {
     const { client, calls } = spyClient();
     for (const args of [

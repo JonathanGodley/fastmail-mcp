@@ -1653,8 +1653,6 @@ describe('updateDraft', () => {
     assert.ok(result.notes?.some((n) => /the sending identity has no signature configured/.test(n)));
   });
 
-  // {{quote}} and {{forward}} are stored as typed under the flag, so an escaped spelling of
-  // one is too: it may sit in quoted history the caller handed back and did not write.
   it('keeps the backslash of an escaped {{quote}} or {{forward}} under the flag', async () => {
     mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
     const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);

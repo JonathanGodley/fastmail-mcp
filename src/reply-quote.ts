@@ -179,8 +179,7 @@ export function signatureHtmlBlock(signature: ResolvedSignature | undefined): st
 
 /**
  * The embedded-image (cid:) references the html signature makes. An identity's signature is
- * a string, so no part carries the image any of these names; both compose tools refuse an
- * html sign-off that would display one, rather than store a body pointing at nothing.
+ * a string, so no part carries the image any of these names.
  */
 export function signatureCidRefs(signature: ResolvedSignature | undefined): string[] {
   if (signature?.html === undefined) return [];
