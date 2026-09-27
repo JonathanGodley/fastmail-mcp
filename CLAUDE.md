@@ -2,15 +2,13 @@
 
 @CONTRIBUTING.md
 
-CONTRIBUTING.md carries the rules every contributor follows: documentation ships with the change, the simplified response format, JMAP property consistency and never silently dropping a promised field, the destroy-versus-create rule, the version-bump sites, build and test commands, unit-testable handlers, the Linux CI matrix, and where design rationale lives. What follows is guidance for working in this repo with Claude Code on top of that.
+What follows is guidance for working in this repo with Claude Code, on top of CONTRIBUTING.md.
 
 ## Building and testing, in practice
 
-A live harness run is on-demand proof of the real external path (Fastmail's blob store cannot be meaningfully mocked), never the sole coverage. "Verified once, live" is not "tested going forward." Use `scripts/mcp-harness.mjs` rather than hand-writing a client.
-
 A new pin is proved by a lever that turns it red at that assertion. A lever that trips an earlier assertion proves nothing about a later one. A claim about a set (every call site, every tool, every field) is proved by enumerating the set, never by sampling it.
 
-A guard that reads source as text is proved red by hand, with three levers: delete the pinned sentence from one of the sites it is asserted at; re-word the shared constant so the pinned phrase no longer appears while the site still carries a description; delete a whole property block so the site is gone rather than wrong. Run each lever until the guard fails at the assertion aimed at that case; a lever that trips an earlier assertion, or the vacuity floor, proves nothing about the pin it was meant for. Say in the commit message which levers went red and where.
+A guard that reads source as text is proved red by hand, with three levers: delete the pinned sentence from one of the sites it is asserted at; re-word the shared constant so the pinned phrase no longer appears while the site still carries a description; delete a whole property block so the site is gone rather than wrong. Run each lever until the guard fails at the assertion aimed at that case; the vacuity floor counts as an earlier assertion. Say in the commit message which levers went red and where.
 
 CI is the finish line, not the local suite. Nothing is required to pass before a push lands, so a red `main` is discovered rather than prevented: check the run after pushing (`gh run list --repo JonathanGodley/fastmail-mcp --limit 3`; `--commit $(git rev-parse HEAD)` narrows it to the push, and a short SHA there matches nothing).
 

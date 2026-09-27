@@ -213,7 +213,7 @@ hooks that worktree's branch has, while an absolute path to the main checkout's
 A finding names the file (or message) and line and the rule that matched,
 never the matched value: printing the value would put another copy of the
 thing being protected into terminal scrollback and anything that captures it.
-Open the location named and you will see it. A denylist hit is reported
+A denylist hit is reported
 differently from a shape hit - it means a string you have declared must never
 leave the machine reached a commit or message, so the output says to stop and
 escalate rather than to rewrite and retry.
@@ -237,7 +237,7 @@ each blind spot written down instead of inferred from a filename.
 
 ### What the scanner does not cover
 
-A clean run is a useful signal, not a guarantee. These are its known limits.
+A clean run is a useful signal, not a guarantee.
 
 **It never reads git history.** It only ever looks at the current staged content
 or the current checkout. "Scan clean" says nothing about what is in earlier

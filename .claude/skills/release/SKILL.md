@@ -12,9 +12,9 @@ The dangerous steps (anything that pushes, publishes, or closes a public issue) 
 ## 1. Preconditions
 
 - **The user explicitly asked to release THIS session.** Releases are never automatic. If they did not ask, the job of this skill is to STOP and report the procedure — a speculative or dry-read invocation must never trigger a release.
-- **Large or feature release? Triage first, strongly suggested.** Answer "would cutting now ship a known defect": enumerate the delta since the last tag, re-derive every open issue's claim from the code, and band what blocks the cut vs what ships as a release-note known. Run it before bundling any release carrying more than a handful of commits or any new feature surface; a two-line fix release does not need it.
+- **Large or feature release? Triage first, strongly suggested,** with `/triage-release`. Answer "would cutting now ship a known defect": enumerate the delta since the last tag, re-derive every open issue's claim from the code, and band what blocks the cut vs what ships as a release-note known. Run it before bundling any release carrying more than a handful of commits or any new feature surface; a two-line fix release does not need it.
 - **Confirm what is bundled.** Prefer batching related changes: every shipped change pays the documentation + 3-file version-bump tax, so a cluster amortizes it.
-- **Check upstream drift.** `git fetch upstream && git log --oneline $(git merge-base HEAD upstream/main)..upstream/main`. Releases are the fork's natural cadence, so this is where a growing divergence gets noticed rather than discovered at 97 commits. A two-digit list means schedule a sync — the method is `docs/upstream-sync.md`. This check never blocks a release; it just makes the drift visible while someone is looking.
+- **Check upstream drift.** `git fetch upstream && git log --oneline $(git merge-base HEAD upstream/main)..upstream/main`. A two-digit list means schedule a sync — the method is `docs/upstream-sync.md`. This check never blocks a release; it just makes the drift visible while someone is looking.
 - **Confirm the documentation tax was paid.** Each bundled change must already have shipped its README + tool-description (`src/index.ts`) updates (`CONTRIBUTING.md` "Documentation ships with the change"). A release does not retroactively excuse a missed doc update — if one is outstanding, fix it before tagging.
 
 ## 2. Bump the version — three hand-edited sites, then regenerate the lockfile
@@ -48,7 +48,6 @@ A failure here after the tag is pushed is expensive to unwind — the fix lands 
 
 - Restate the step-1 precondition: the user asked for a release *this session*. Require a fresh explicit yes/no immediately before the first push.
 - Precheck the outward steps: `gh auth status` succeeds, and the new tag does **not** already exist on origin.
-- **Honest residual:** this checklist is prose, not an enforceable interlock. The gate is procedural (precondition + post-checkpoint grouping + a push-time confirm), and that is the whole protection. Treat it as such.
 
 ## 5. Commit, then push (two steps — the push is the irreversible one)
 
@@ -89,12 +88,3 @@ gh issue close <N> --repo JonathanGodley/fastmail-mcp --comment "<cite the relea
 ## 9. Post-release
 
 - Reconnect note: connected MCP clients load `dist/index.js`, so they must reconnect to pick up the new build.
-- Update the fork-status memory.
-
-## Gotchas
-
-- Bare `gh` reaches the fork only via this checkout's `gh repo set-default` → still pass `--repo JonathanGodley/fastmail-mcp` explicitly.
-- A bare `(#N)` in a commit message does NOT auto-close an issue — only `Closes/Fixes/Resolves #N` on a default-branch push does.
-- Tag must be **annotated** (`-a`), not lightweight.
-- Release notes and the tag message must be **codename-free** and consumer-facing.
-- **Batch unless asked otherwise** — bundle related work into one release to amortize the version + doc tax.
