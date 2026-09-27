@@ -65,8 +65,14 @@ describe('reading the sign-off off an identity', () => {
     assert.equal(sigFor([wild], 'anything@example.com')?.text, 'Wild');
   });
 
-  it('refuses NUL and angle brackets in an address a wildcard identity is asked to verify', () => {
-    for (const addr of ['a\u0000b@example.com', 'a<b@example.com', 'a>b@example.com', 'a@example.com\u0000']) {
+  // The positive criterion: each half is printable and non-space, with no control or format
+  // character and none of the characters that bracket, comment or quote in an address.
+  it('refuses control, format and bracketing characters in an address a wildcard identity is asked to verify', () => {
+    for (const addr of [
+      'a\u0000b@example.com', 'a<b@example.com', 'a>b@example.com', 'a@example.com\u0000',
+      'a\u0001b@example.com', 'a\u007fb@example.com', 'a\u202eb@example.com', 'a\u200bb@example.com',
+      'a(c)@example.com', 'a\\b@example.com', 'a@exa\u00admple.com',
+    ]) {
       assert.equal(matchesIdentity('*@example.com', addr), false, JSON.stringify(addr));
     }
     assert.equal(matchesIdentity('*@example.com', 'a.b+c@example.com'), true);

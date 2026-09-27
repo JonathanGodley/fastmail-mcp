@@ -6,6 +6,11 @@ import { isBlank } from './body-format.js';
 // signature to the pure body builders), because a signature picked under a different rule
 // than the one that picks `from` would sign a message with someone else's sign-off.
 
+// One "@" between two halves that are each printable and non-space: no control (\p{Cc}) or
+// format (\p{Cf}) character, and none of the characters that separate, quote, bracket or
+// comment in an address.
+const BARE_ADDR_SPEC = /^[^\s\p{Cc}\p{Cf}@,;"<>()\\]+@[^\s\p{Cc}\p{Cf}@,;"<>()\\]+$/u;
+
 /** Match an email address against an identity, supporting wildcard identities (e.g. *@example.com). */
 export function matchesIdentity(identityEmail: string, address: string): boolean {
   const identity = identityEmail.toLowerCase();
@@ -20,7 +25,7 @@ export function matchesIdentity(identityEmail: string, address: string): boolean
     // Note the pattern admits a BARE addr-spec only — a "Name <a@b.example>" form is
     // rejected on purpose, because the display name is supplied separately and is never
     // part of the value matched here. Do not widen it to accept angle-addr shapes.
-    if (!/^[^\s@,;"<>\0]+@[^\s@,;"<>\0]+$/.test(addr)) return false;
+    if (!BARE_ADDR_SPEC.test(addr)) return false;
     return addr.endsWith(domain);
   }
   return false;
