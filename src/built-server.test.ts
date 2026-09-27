@@ -43,7 +43,8 @@ const FAKE_API_VALUE = 'probe-value-not-a-real-credential';
 
 // `npm test`'s `pretest` builds first, but `tsx --test src/built-server.test.ts` run
 // directly skips it, and a stale dist/ would then pass these tests using the previous
-// build's code. So refuse to run against a stale artifact.
+// build's code. So refuse to run against a stale artifact. It throws inside before() hooks,
+// so a stale dist reports those suites as CANCELLED, not failed.
 function assertDistIsCurrent(): void {
   let built: number;
   try {
@@ -265,7 +266,7 @@ function admittedTypes(declared: any): string[] {
   return [...out].sort();
 }
 
-describe('edit_draft advertises the stringified-array form its handler accepts', () => {
+describe('edit_draft advertises the clearFields enum on its array elements', () => {
   before(() => assertDistIsCurrent());
 
   // The advertised inputSchema of one tool, from a server started with no FASTMAIL_* setting

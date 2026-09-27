@@ -374,7 +374,7 @@ const POOLED_REMEDY_PLACE_IN_HTML =
   'put {{forward}} in htmlBody to embed them, or drop the token and pass asAttachment: true ' +
   'to forward the original whole.';
 
-/** A reply that placed no {{quote}}, so a forgotten token is reported. */
+/** A reply that placed no {{quote}}: a forgotten token would otherwise be silent. */
 const NOTE_REPLY_UNQUOTED =
   'This reply was stored without the original: place {{quote}} in the body to include it.';
 
@@ -486,7 +486,7 @@ function replyAllCc(
 
 /**
  * The bcc a reply carries: the original's own Bcc entries, whole and in order, because that
- * is what pressing Reply in Fastmail's client produces (measured 2026-09-10;
+ * is what pressing Reply in Fastmail's mobile app produces (measured 2026-09-10;
  * docs/fastmail-action-availability.md, "what a reply prefills"). So NOTHING is excluded:
  * not the account's own identities, and not an address the reply's to or cc already names.
  *
