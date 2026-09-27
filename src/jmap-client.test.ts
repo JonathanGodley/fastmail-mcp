@@ -627,7 +627,13 @@ describe('updateDraft', () => {
   });
 
   it('when the mailbox lookup throws: surfaces the orphan + reason, does NOT throw', async () => {
-    mock.method(client, 'getMailboxes', async () => { throw new Error('network down'); });
+    // The first lookup is the Drafts gate before anything is written; the one after the
+    // create is the one that fails here.
+    let lookups = 0;
+    mock.method(client, 'getMailboxes', async () => {
+      if (lookups++ === 0) return MAILBOXES_WITH_TRASH;
+      throw new Error('network down');
+    });
     stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
       if (method === 'Email/get') {
@@ -686,6 +692,40 @@ describe('updateDraft', () => {
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.to, [{ email: 'bob@example.com' }]);
     assert.equal(emailObj.subject, 'Updated');
+  });
+
+  // A superseded draft sits in Trash with `$draft` kept. Editing it would create the
+  // replacement in Trash too, because the replacement carries the old copy's mailboxIds.
+  it('refuses to edit a draft that is not in the Drafts folder, naming where it is', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      DRAFTS_MAILBOX,
+      { id: 'mb-trash', name: 'Trash "old"\nX', role: 'trash' },
+    ]);
+    const trashed = { ...EXISTING_DRAFT, mailboxIds: { 'mb-trash': true } };
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [trashed] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /not in the Drafts folder, so it will not be edited/);
+        // Through describeUntrusted: the name's own quote cannot close the quoted span.
+        assert.match(err.message, /\(it is in: "Trash 'old'X"\)/);
+        assert.equal(err.message.includes('\n'), false, err.message);
+        assert.match(err.message, /Move it back to Drafts with move_email/);
+        return true;
+      },
+    );
+    // Nothing was written: the only request was the draft read.
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  it('edits a draft that is in Drafts alongside another mailbox', async () => {
+    const alsoLabelled = { ...EXISTING_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-archive': true } };
+    mockUpdate(client, alsoLabelled);
+    assert.equal((await client.updateDraft('draft-1', { subject: 'X' })).id, 'draft-2');
   });
 
   it('rejects non-draft email', async () => {
