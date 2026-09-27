@@ -1598,7 +1598,6 @@ describe('canonicalZoneName', () => {
   });
 
   it('never holds more than its limit, even for distinct spellings ICU does resolve', () => {
-    // ICU matches case-insensitively, so every case variant is a distinct resolvable key.
     const base = 'america/argentina/comodrivadavia';
     const letters = [...base].map((c, i) => (/[a-z]/.test(c) ? i : -1)).filter(i => i >= 0);
     for (let n = 0; n < ZONE_CANONICALIZATION_CACHE_LIMIT + 50; n++) {

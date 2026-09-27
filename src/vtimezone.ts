@@ -166,7 +166,6 @@ function toUtcStamp(utcMs: number): string {
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
 }
 
-// Keyed on the canonical name, and only for a zone that resolves, as `zoneOffsetMsAt`'s is.
 const abbreviationFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 export function abbreviationFormatterCacheSize(): number {
@@ -174,7 +173,7 @@ export function abbreviationFormatterCacheSize(): number {
 }
 
 /** ICU's `en-US` short name for `zone` at `utcMs` (e.g. `AEDT`, or `GMT+11` where ICU has no
- * abbreviation for it) — the `TZNAME` value. Cached per zone for the same reason
+ * abbreviation for it) — the `TZNAME` value. Cached per canonical zone for the same reason
  * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times. */
 function zoneAbbreviation(zone: string, utcMs: number): string {
   const key = canonicalZoneName(zone);
