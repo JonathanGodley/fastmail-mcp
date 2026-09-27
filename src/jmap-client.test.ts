@@ -1684,6 +1684,18 @@ describe('updateDraft', () => {
     assert.equal(result.notes?.some((n) => /has no signature configured/.test(n)), false);
   });
 
+  it('keeps the dangling-reference refusal for a cid the caller wrote under the flag', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    await assert.rejects(
+      client.updateDraft('draft-1', {
+        htmlBody: '<p>Thanks.</p><img src="cid:nope">{{signature}}',
+        expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+      }),
+      (e: any) => e instanceof InvalidInputError && /^htmlBody references cid "nope"/.test(e.message),
+    );
+  });
+
   it('refuses, naming the signature, when the html sign-off displays an embedded image', async () => {
     mock.method(client, 'getIdentities', async () => [
       { ...SIGNING_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' },

@@ -106,6 +106,31 @@ describe('editDraft — coercion and delegation', () => {
     assert.equal(calls.update, undefined);
   });
 
+  it('runs the presence check exactly when an uploading call writes or clears a body', async () => {
+    const refused = [
+      { emailId: 'd1', textBody: 'Hi' },
+      { emailId: 'd1', clearFields: ['htmlBody'] },
+    ];
+    for (const args of refused) {
+      const { client, calls } = spyClient();
+      await assert.rejects(
+        () => editDraft({ ...args, attachments: [{ path: 'a.pdf' }] }, client, '/attach/root', false),
+        (e: unknown) => e instanceof InvalidInputError && /needs bodyHash/.test((e as Error).message),
+      );
+      assert.equal(calls.upload, undefined);
+    }
+    const passed = [
+      { emailId: 'd1', clearFields: ['cc'] },
+      { emailId: 'd1', textBody: 'Hi', bodyHash: 'bh1-deadbeef' },
+    ];
+    for (const args of passed) {
+      const { client, calls } = spyClient();
+      await editDraft({ ...args, attachments: [{ path: 'a.pdf' }] }, client, '/attach/root', false);
+      assert.ok(calls.upload);
+      assert.ok(calls.update);
+    }
+  });
+
   it('requires an emailId', async () => {
     const { client } = spyClient();
     await assert.rejects(

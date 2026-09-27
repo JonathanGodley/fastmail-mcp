@@ -309,7 +309,7 @@ describe('draft_email — token refusals, decided before anything is built', () 
       client,
     ));
     assert.match(message, /does not apply to an asAttachment forward/);
-    assert.match(message, /To write braces as text, escape them/);
+    assert.match(message, /drop asAttachment to forward inline\. To write braces as text, escape them/);
   });
 
   it('refuses {{forward}} alongside asAttachment: the original already rides whole', async () => {
@@ -1051,6 +1051,14 @@ describe('draft_email — {{signature}} expands the FROM identity, not the first
       assert.equal(calls.upload, undefined);
       assert.equal(calls.draft, undefined);
     }
+  });
+
+  it('skips identity entries with no email when checking a `from`', async () => {
+    const { client, calls } = spyClient(makeOriginal(), {
+      getIdentities: async () => [null, { id: 'x' }, SIGNED_IDENTITY] as any,
+    });
+    await compose({ mode: 'new', from: 'me@example.com', to: ['sam@example.com'], textBody: 'hi' }, client);
+    assert.equal(calls.draft.from, 'me@example.com');
   });
 
   it('keeps the wildcard-pattern refusal for a `from` that IS the pattern', async () => {
@@ -3242,11 +3250,35 @@ describe('draft_email — {{signature}} does not depend on the history landing',
       client,
       '/tmp/attach',
     ));
-    assert.match(message, /signature/);
-    assert.match(message, /embedded image "logo"/);
-    assert.match(message, /write the sign-off/i);
+    assert.equal(
+      message,
+      "MCP error -32602: The sending identity's signature displays an embedded image \"logo\", " +
+      "and nothing in this call supplies it: the identity holds the signature's html but not " +
+      'the image. Write the sign-off into htmlBody yourself in place of {{signature}}, or remove ' +
+      "the embedded image from the identity's signature in Fastmail's settings.",
+    );
     assert.equal(calls.upload, undefined);
     assert.equal(calls.draft, undefined);
+  });
+
+  it('places that signature when an attachments item supplies its cid', async () => {
+    const logoIdentity = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' };
+    const { client, calls } = spyClient(makeOriginal(), {
+      getIdentities: async () => [logoIdentity],
+      uploadAttachments: async (specs) => {
+        calls.upload = { specs };
+        return [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'logo' }];
+      },
+    });
+    await compose(
+      {
+        mode: 'new', to: ['sam@example.com'], htmlBody: '<p>hi</p>{{signature}}',
+        attachments: [{ path: 'logo.png', cid: 'logo' }, { path: 'a.pdf' }],
+      },
+      client,
+      '/tmp/attach',
+    );
+    assert.match(calls.draft.htmlBody, /<img src="cid:logo">/);
   });
 
   it('still signs a text-only message from that identity, which ships no image', async () => {
@@ -3285,6 +3317,7 @@ describe('draft_email — {{signature}} does not depend on the history landing',
     ));
     for (const message of [onNew, onReply, onAttachmentForward]) {
       assert.match(message, /empty after expansion/);
+      assert.match(message, /the result says so\.$/);
       assert.doesNotMatch(message, /asAttachment|\{\{forward\}\}/);
     }
     assert.match(onForward, /drop \{\{forward\}\} and pass asAttachment:true/);

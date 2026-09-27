@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildForwardBlocks, buildQuoteBlocks } from './reply-quote.js';
+import { buildForwardBlocks, buildQuoteBlocks, signatureCidRefs } from './reply-quote.js';
 
 function makeOriginal(opts: {
   text?: string; html?: string; name?: string; email?: string;
@@ -340,5 +340,16 @@ describe('signatureBlock — which form a part gets, and when it gets none', () 
       signatureBlock(MARKUP_ONLY_SIG, 'htmlBody', true),
       { available: true, content: '<div><div><br></div></div>' },
     );
+  });
+});
+
+describe('signatureCidRefs', () => {
+  it('reads the embedded-image references out of the html signature', () => {
+    assert.deepEqual(signatureCidRefs({ html: '<div>R</div><img src="cid:logo">' }), ['logo']);
+  });
+
+  it('is empty for no signature, and for a text-only one', () => {
+    assert.deepEqual(signatureCidRefs(undefined), []);
+    assert.deepEqual(signatureCidRefs({ text: 'Regards' }), []);
   });
 });
