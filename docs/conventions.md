@@ -186,7 +186,7 @@ than one thing ([#101](https://github.com/JonathanGodley/fastmail-mcp/issues/101
 
 **One rule, in one sentence: a url ADDRESSES exactly one thing; a name merely NAMES whatever
 carries it.** So an identifier that resolves to several records is refused rather than guessed
-between, and the escape hatch is always the url. It applies at two levels — an `eventId` naming
+between, and the escape hatch is the url, with one exception for events stated below. It applies at two levels — an `eventId` naming
 two events, and a `calendarId` naming two calendars — and the levels differ only in what a
 *read* is allowed to do, for the reason stated under each.
 
@@ -208,18 +208,25 @@ two-copy result differs by tool, and the split is the whole convention:
   testable promise rather than an accident), sets `otherCopies` on its result, and appends
   `buildAmbiguousEventNote`'s trailing line.
 
-**Addressing a record is not naming it, and only the first is ambiguous.** Both forms of
-`eventId` are always tried, so a record whose UID literally spells another record's resource
-`url` puts two records in one result — and if that counted as an ambiguity, the refusal would
-tell a caller who had passed an exact address to "pass the `url` of the copy you mean", which
-is what they just did. There is no next call, and the escape hatch the whole convention rests
-on closes. So the disambiguation is made on the RESULT rather than on the look of the string:
-where a match's own `url` is one the lookup resolved from the caller's text, the caller
-**addressed** that record. At most one match can be, since a resource url resolves to a single
-href. That match leads the order, the writes act on it instead of refusing, and the read's
-trailing note says which record they will touch rather than announcing a refusal that will not
-come. A url-shaped id with no resource at that address is unaffected: nothing is addressed, and
-it resolves by UID exactly as any other id does.
+**Addressing a record is not naming it.** Both forms of `eventId` are always tried, so a
+record whose UID literally spells another record's resource `url` puts two records in one
+result. The disambiguation is made on the RESULT rather than on the look of the string: where a
+match's own `url` is one the lookup resolved from the caller's text, the caller **addressed**
+that record. At most one match can be, since a resource url resolves to a single href. That
+match leads the order, and the writes act on it, with one exception.
+
+**But the writes refuse an address that is also another record's UID.** Where any other
+match's UID is the caller's string, `list_calendar_events` shows that record's id as this very
+url, so a caller passing it back may mean either, and acting on the addressed record would patch
+or destroy an event never shown under that id. That holds even when the addressed record's own
+UID is the same url: two rows then list one id. `addressCollisionError` refuses, names both
+records' urls, and quotes the addressed record's own UID where that UID reaches it alone; the
+other record's url reaches that one. Where it does not (no UID, the url itself, or a UID another
+record also holds, which the ambiguity refusal would then refuse in turn), the refusal offers no
+id rather than one that loops, and names the Fastmail web interface. The url is
+therefore not an escape hatch in this one case, and saying "pass the url" would send the
+caller back to the id they passed. A url-shaped id with no resource at that address is
+unaffected: nothing is addressed, and it resolves by UID exactly as any other id does.
 
 **Why they differ, stated so it is not read as an inconsistency.** The fail-closed rule is
 about a caller mistaking a wrong outcome for a legitimate one, and a read cannot produce a
@@ -250,8 +257,9 @@ requires to protect them (see [Untrusted values in prose](#untrusted-values-in-p
 **The accepted consequence, recorded rather than mitigated.** Whoever sends this account an
 invitation chooses the `UID` it arrives under, so a stranger who knows an event's id can freeze
 its writes by minting a duplicate in a shared calendar. The refusal is still the right answer —
-the alternative is a destructive call that guesses — and the `url` form is the guaranteed way
-through, which is why it is named on the tool surface and not merely in the error.
+the alternative is a destructive call that guesses — and the `url` form is the way through,
+which is why it is named on the tool surface and not merely in the error. It is not guaranteed:
+a stranger who also mints a record whose UID is the event's url closes that route too.
 
 #### An ambiguous `calendarId`: the read refuses too
 
@@ -1957,12 +1965,12 @@ rejected rather than silently ignored (below).
    `timeZone` was not supplied, preserved byte-for-byte: an update that touches only one side of an already-zoned event keeps the
    other side's zone without the caller having to re-state it.
 3. `defaultZone` — the account's configured zone (`getDefaultTimezone()`, `resolveUsableTimezone`
-   gated) — **create only**. Also canonicalised: `resolveUsableTimezone` returns the SAME
+   gated) — always on create; on update, unless the stored `DTSTART` is floating. Also canonicalised: `resolveUsableTimezone` returns the SAME
    `canonicalZoneName` spelling `validateCallerTimezone` does, so the identical operator-configured
    string ends up as the identical written TZID regardless of which of the two paths supplied it.
 4. floating — no `TZID` at all. Unreachable on create (step 3 always supplies a zone); on
-   update, what a designator-less value gets when neither a `timeZone` nor a stored `TZID`
-   names a zone.
+   update, what a designator-less value gets on an event whose stored `DTSTART` is floating,
+   when neither a `timeZone` nor a stored `TZID` names a zone.
 
 **The write is canonicalised; the read is not, and that is a real round-trip asymmetry.** A read
 emits a stored `TZID` verbatim (see "The read path carries the zone name" above) - a stored `US/Pacific` reads
@@ -1989,11 +1997,14 @@ rather than a silently-different zone.
 instant for every reader", is a worse default than the configured zone for the overwhelming
 majority of events a caller creates for themselves, so a designator-less `create_calendar_event`
 call writes the configured zone unless `timeZone` says otherwise (#157).
-**Update never defaults**, on purpose: unlike create, an update's untouched side may already
-carry a real, meaningful `TZID` — quietly overwriting it with the configured zone the moment a
-caller edits the *other* side would be a silent, unrequested rewrite of data the caller never
-asked to touch. So omitting `timeZone` on update lands on step 2 or step 4, and reaching the
-configured zone requires naming it.
+**Update defaults only where the event says nothing**, on purpose: an update's untouched side
+may already carry a real, meaningful `TZID`, and quietly overwriting it with the configured zone
+the moment a caller edits the *other* side would be a silent, unrequested rewrite. So a stored
+`TZID` is inherited first. Where there is none, a date or time given without a zone is read in
+the configured zone, as everywhere else, with one exception: on an event whose stored `DTSTART`
+is itself floating, the new value stays floating, which keeps that event's own form rather than
+converting it. On a UTC or all-day event the value is written with the configured `TZID`, never
+floating; a single-sided change then meets the frame check against the stored side.
 
 **`timeZone` provenance (`tzidSource`) exists so a rejection never misattributes a zone the
 caller didn't choose.** `describeDateProperty` threads `'caller' | 'stored' | 'default'`
@@ -2033,6 +2044,16 @@ error text says "applied because you named none" for a `'default'` source instea
   match, is a shorthand rejection. The comparison against `"UTC"` is case-insensitive
   (`"utc"`/`"Utc"`/`"UTC"` all pass) - it is the rule's one deliberate exception, not an
   oversight the rule forgot to close.
+
+  **`Etc/GMT±N` is accepted, and shown with its real offset.** The offset-shaped denylist
+  (`GMT+10`, `UTC+10`, a leading sign or digit) must not reach these: they are real IANA
+  names, slash-qualified, already ICU-canonical, and the sign comes after the name rather than
+  at its start, so someone may use one on purpose. But their sign is POSIX, the inverse of the
+  offset: `Etc/GMT+10` is UTC-10:00. So wherever this server shows one - a write confirmation,
+  a start/end refusal (`describeFrame`), `describeTimezone`'s configured-zone text, and the tool
+  descriptions' configured zone - `etcGmtOffsetNote` (`src/coerce.ts`) appends the real offset.
+  A read's `timeZone`/`endTimeZone` stays the bare name, since a caller passes it back as
+  `timeZone`; `buildEtcGmtZoneNote` adds a trailing `Note:` line instead.
 - **`timeZone` on an update that touches neither `start` nor `end`** — `timeZone` alone has
   nothing to qualify (there is no designator-less value in the call at all), so this is rejected
   before any patching happens, naming the fix: re-send `start` and/or `end`.
@@ -2157,8 +2178,10 @@ for free from `new Date()` refusing `25:00:00`, and the calendar pair reads the 
 itself with a shape-only pattern and hands them to `Date.UTC`, which **rolls** rather than
 refusing: `2026-08-12T99:99:99` would silently become a window starting three and a half days
 later, while `create_calendar_event` refused the same value on a write.
-`isWallClockInRange` keeps the parity (`24:00:00` is deliberately allowed, because the
-ECMAScript date format allows it and the UTC coercion takes it). When you add a value the two
+`isWallClockInRange` keeps the parity, except that `24:00:00` is deliberately allowed on the
+window, because the ECMAScript date format allows it and the UTC coercion takes it; the window
+reads it as midnight starting the next day. The writes refuse it (`validateAndFormatICalDate`),
+because RFC 5545 §3.3.12 has no hour 24 and the floating form would be written verbatim. When you add a value the two
 sides read differently, check the divergence rather than assuming the shared function covers
 it.
 
