@@ -461,6 +461,19 @@ function noteMintedDropped(names: (string | null | undefined)[], total: number):
   );
 }
 
+/**
+ * The forward counterpart: an image the forwarded block displayed that the expanded body no
+ * longer references rides as a regular attachment rather than being lost.
+ */
+function noteForwardUnreferenced(names: (string | null | undefined)[], total: number): string {
+  const listed = describePartNames(names, total);
+  return (
+    `${total} image(s) the forwarded original displayed ${listed ? `(${listed}) ` : ''}` +
+    'ride as regular attachments: after expansion no body written by this call references ' +
+    'them. A token placed inside a comment or an attribute is the usual cause.'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Forward-mode hygiene on values taken from the forwarded message
 // ---------------------------------------------------------------------------
@@ -942,8 +955,31 @@ export async function composeDraftEmail(
     if (isSettableMessageId(originalMessageId)) params.forwardedMessageId = [originalMessageId];
   }
 
+  // A minted part that nothing references AFTER expansion is dropped before assembly, and
+  // the result names it: a token placed inside a comment or an attribute expands there, so
+  // the block is in the body but its image references are not live. Decided here, before
+  // anything is recorded as embedded, so a dropped image is never also reported as embedded,
+  // and a forward carries it as an attachment instead of losing it.
+  const liveRefs = new Set(
+    expandedHtml ? extractLiveCidRefs(expandedHtml) : [],
+  );
+  const droppedMinted = quoteImages.minted.filter((p) => !liveRefs.has(p.cid));
+  const droppedSources = new Set(
+    quoteImages.mappings.filter((m) => !liveRefs.has(m.cid)).map((m) => m.source),
+  );
+  const forwardReferenced = new Set(quoteImages.resolvedParts);
+  if (droppedMinted.length > 0) {
+    quoteImages = {
+      ...quoteImages,
+      minted: quoteImages.minted.filter((p) => liveRefs.has(p.cid)),
+      mappings: quoteImages.mappings.filter((m) => liveRefs.has(m.cid)),
+      resolvedParts: quoteImages.resolvedParts.filter((p) => !droppedSources.has(p)),
+    };
+  }
+
   const carried: AttachmentPart[] = [];
   const pooled: CidPart[] = [];
+  const droppedCarried: CidPart[] = [];
   const attachedFiles: CidPart[] = [];
   const notIncluded: CidPart[] = [];
 
@@ -973,7 +1009,6 @@ export async function composeDraftEmail(
     // An image the forwarded block displays is BODY CONTENT and is carried whatever
     // includeOriginalAttachments says; the flag governs the original's FILES.
     const embedded = new Set(quoteImages.mappings.map((m) => m.source));
-    const referenced = new Set(quoteImages.resolvedParts);
     for (const entry of forwardSourceParts) {
       if (embedded.has(entry.part)) continue;
       if (!includeOriginalAttachments) {
@@ -988,27 +1023,20 @@ export async function composeDraftEmail(
           : (entry.part as any).disposition;
       }
       carried.push(part);
+      if (droppedSources.has(entry.part)) {
+        droppedCarried.push(entry.part);
+        continue;
+      }
       const bodyMedia = entry.inBodyList
         || ((entry.part as any)?.disposition === 'inline' && !!entry.part?.cid);
-      if (referenced.has(entry.part) || bodyMedia) pooled.push(entry.part);
+      if (forwardReferenced.has(entry.part) || bodyMedia) pooled.push(entry.part);
       else attachedFiles.push(entry.part);
     }
   }
 
   const ledger = new InlineNoteLedger();
   const carry = recordQuoteImages(ledger, quoteImages, mode === 'forward' ? 'forward' : 'reply');
-
-  // A minted part that nothing references AFTER expansion is dropped before assembly, and
-  // the result names it. New behaviour, and reachable from caller input for the first time:
-  // a token placed inside a comment or an attribute expands there, so the block is in the
-  // body but its image references are not live. The old path for an unreferenced minted part
-  // was checkInlineClosure's second arm THROWING, which is the wrong answer for something a
-  // caller can cause.
-  const liveRefs = new Set(
-    expandedHtml ? extractLiveCidRefs(expandedHtml) : [],
-  );
-  const keptMinted = carry.minted.filter((p) => !!p.cid && liveRefs.has(p.cid));
-  const droppedMinted = carry.minted.filter((p) => !keptMinted.includes(p));
+  const keptMinted = carry.minted;
 
   const uploaded = specs?.length
     ? await client.uploadAttachments(specs, attachDir, allowBlobAttach, {
@@ -1066,8 +1094,11 @@ export async function composeDraftEmail(
       // else the shared "re-run with asAttachment" remedy is the right one.
       ...(forwardTextFormOnly && { pooledRemedy: POOLED_REMEDY_PLACE_IN_HTML }),
     }),
-    ...(droppedMinted.length > 0
+    ...(mode === 'reply' && droppedMinted.length > 0
       ? [noteMintedDropped(droppedMinted.map((p) => p.name), droppedMinted.length)]
+      : []),
+    ...(droppedCarried.length > 0
+      ? [noteForwardUnreferenced(droppedCarried.map((p) => p.name), droppedCarried.length)]
       : []),
     ...await reportAuthoredInlineImages({
       uploaded,

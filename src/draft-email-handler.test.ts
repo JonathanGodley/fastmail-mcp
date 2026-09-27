@@ -518,6 +518,28 @@ describe('draft_email — the authored-image plan reads PRE-expansion, the closu
       r.notes!.some((n) => /were dropped: after expansion no body written by this call references them/.test(n)),
       JSON.stringify(r.notes),
     );
+    assert.ok(r.notes!.every((n) => !/embeds/.test(n)), JSON.stringify(r.notes));
+  });
+
+  it('carries a forwarded image the expanded body does not reference as an attachment, and says so once', async () => {
+    const { client, calls } = spyClient(withInlineImage());
+    const r = await compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        htmlBody: '<p>hi</p><!-- {{forward}} -->',
+      },
+      client,
+    );
+    const carried = (calls.draft.attachments ?? []).filter((p: any) => p.blobId === 'blob-png');
+    assert.equal(carried.length, 1, JSON.stringify(calls.draft.attachments));
+    assert.equal(carried[0].disposition, 'attachment');
+    assert.equal(carried[0].cid, undefined);
+    assert.ok(r.notes!.every((n) => !/embeds/.test(n) && !/were dropped/.test(n)), JSON.stringify(r.notes));
+    assert.equal(r.notes!.filter((n) => /pic\.png/.test(n)).length, 1, JSON.stringify(r.notes));
+    assert.ok(
+      r.notes!.some((n) => /ride as regular attachments.*inside a comment or an attribute/s.test(n)),
+      JSON.stringify(r.notes),
+    );
   });
 });
 
