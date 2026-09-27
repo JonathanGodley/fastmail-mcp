@@ -1962,12 +1962,12 @@ rejected rather than silently ignored (below).
    `timeZone` was not supplied, preserved byte-for-byte: an update that touches only one side of an already-zoned event keeps the
    other side's zone without the caller having to re-state it.
 3. `defaultZone` — the account's configured zone (`getDefaultTimezone()`, `resolveUsableTimezone`
-   gated) — **create only**. Also canonicalised: `resolveUsableTimezone` returns the SAME
+   gated) — always on create; on update, unless the stored `DTSTART` is floating. Also canonicalised: `resolveUsableTimezone` returns the SAME
    `canonicalZoneName` spelling `validateCallerTimezone` does, so the identical operator-configured
    string ends up as the identical written TZID regardless of which of the two paths supplied it.
 4. floating — no `TZID` at all. Unreachable on create (step 3 always supplies a zone); on
-   update, what a designator-less value gets when neither a `timeZone` nor a stored `TZID`
-   names a zone.
+   update, what a designator-less value gets on an event whose stored `DTSTART` is floating,
+   when neither a `timeZone` nor a stored `TZID` names a zone.
 
 **The write is canonicalised; the read is not, and that is a real round-trip asymmetry.** A read
 emits a stored `TZID` verbatim (see "The read path carries the zone name" above) - a stored `US/Pacific` reads
