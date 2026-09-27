@@ -22,10 +22,8 @@
 // Exit code 1 on any finding, and also on any file the scanner could not read:
 // a gate that cannot see a file reports that rather than reporting clean.
 //
-// Findings name the location and the rule, never the matched value. Printing
-// the value would put another copy of the thing being protected into terminal
-// scrollback and session transcripts; whoever wrote the text can see it at the
-// location given.
+// Findings name the location and the rule, never the matched value, so no
+// second copy of it reaches scrollback or a transcript.
 //
 // The limits of what this covers (git history, untracked files, build output,
 // the exempt-domain list, the marker's line-total reach, what a push scan can
@@ -41,9 +39,8 @@ const PRAGMA = 'allowlist-secret';
 // than files this repo tracks.
 const MAX_BUFFER = 64 * 1024 * 1024;
 
-// Paths never scanned: vendored code, build output, the lockfile, the packed
-// bundle, and this scanner's own pattern definitions. These are policy
-// exclusions - deliberate, listed here, and counted in the run summary.
+// Policy exclusions, counted in the run summary. This file is excluded for its
+// own pattern definitions.
 const IGNORE = [
   /^node_modules\//,
   /^dist\//,
@@ -53,36 +50,27 @@ const IGNORE = [
   /(^|\/)scan-secrets\.mjs$/,
 ];
 
-// Tracked files that are legitimately binary and therefore cannot be scanned.
-// Each entry is an exact repo-relative path and is a named hole in the gate's
-// coverage, which is why they are declared here one at a time instead of being
-// waved through by a filename or content heuristic. Nothing tracked in this
-// repo is binary today, so the list is empty; adding a binary file means adding
-// its path here, and the scan fails until you do.
+// Tracked files that are legitimately binary. Each exact repo-relative path is
+// a named hole in the gate's coverage, declared one at a time rather than waved
+// through by a filename or content heuristic; an undeclared binary fails the scan.
 const BINARY_ALLOWANCES = new Set([]);
 
-// Domains considered non-personal placeholders/services. An email on any other
-// domain is flagged as possible real PII. This list is intentionally generic -
-// it names no personal domains.
 // RFC 2606 / RFC 6761 reserve these top-level domains so they can never be
-// delegated. An address under one of them cannot belong to a real person, so
-// matching on the TLD is not a blind spot the way listing a registered domain
-// would be - it closes the whole space rather than one name at a time.
+// delegated: exempting one closes the whole space, with no blind spot.
 const RESERVED_TLDS = ['.example', '.invalid', '.test', '.localhost'];
 
-// Entries here are exempt by NAME, which means the scanner is permanently blind
-// to a genuine address at that domain. Keep the list to names that cannot
-// plausibly carry one, and prefer moving a fixture under a RESERVED_TLDS suffix
-// over adding to it.
+// Non-personal placeholder and service domains; an email on any other domain is
+// flagged. Entries are exempt by NAME, so the scanner is permanently blind to a
+// genuine address at one: keep to names that cannot plausibly carry one (never a
+// personal domain), and prefer moving a fixture under a RESERVED_TLDS suffix.
 const SAFE_EMAIL_DOMAINS = new Set([
   'example.com', 'example.org', 'example.net', 'localhost',
   'github.com', 'noreply.github.com', 'users.noreply.github.com',
   'fastmail.com', 'api.fastmail.com', 'caldav.fastmail.com',
   'www.fastmailusercontent.com', 'fastmailusercontent.com',
   'anthropic.com',
-  // Adversary placeholders that have to read as a real-looking hostile domain
-  // for the fixture to mean anything. Accepted blind spot, recorded in
-  // CONTRIBUTING.md.
+  // Adversary placeholders that must read as real hostile domains. Accepted
+  // blind spot, recorded in CONTRIBUTING.md.
   'evil.com', 'other.com',
 ]);
 
@@ -173,15 +161,9 @@ function gitConfig(key) {
   }
 }
 
-// Local denylists: one literal string per line, case-insensitive substring
-// match, never committed. Two sources, both optional:
-//   - .secret-scan-local.txt in the repo root (gitignored), the per-clone file
-//     described in CONTRIBUTING.md;
-//   - the file named by `git config secretscan.denylist`, so one list kept
-//     outside every repo can be shared with other tooling on the machine and
-//     with every worktree of this clone (local git config is shared by them).
-// A source that is configured but cannot be read fails the run: a gate that
-// cannot see its own list must say so rather than scan without it.
+// Local denylists; the format and both sources are in CONTRIBUTING.md. A source
+// that is configured but cannot be read fails the run rather than scanning
+// without it.
 function loadLocalDenylist() {
   const sources = [];
   if (existsSync('.secret-scan-local.txt')) sources.push('.secret-scan-local.txt');
@@ -206,9 +188,8 @@ function loadLocalDenylist() {
   return entries;
 }
 
-// git quotes paths containing non-ASCII or unusual characters in its normal
-// output, which turns them into names that do not exist on disk. The -z form
-// emits raw NUL-separated paths instead, so no path can be dropped or mangled.
+// Without -z, git quotes non-ASCII or unusual paths into names that do not
+// exist on disk.
 function gitPaths(args) {
   const out = git([...args, '-z']).toString('utf8');
   const seen = new Set();
@@ -216,10 +197,6 @@ function gitPaths(args) {
   for (const path of out.split('\0')) if (path) seen.add(path);
   return [...seen];
 }
-
-// ---------------------------------------------------------------------------
-// Scanning
-// ---------------------------------------------------------------------------
 
 // Scan one body of text line by line. `where(lineNo)` labels a finding;
 // `allowPragma` enables the allowlist-secret marker, which only makes sense
@@ -260,10 +237,6 @@ function scanText(text, where, { allowPragma }, denylist, findings) {
     for (const c of candidates) findings.push({ where: where(i + 1), rule: c.rule, denylist: !!c.denylist });
   });
 }
-
-// ---------------------------------------------------------------------------
-// What to scan
-// ---------------------------------------------------------------------------
 
 // Returns the bytes to scan, or a reason string explaining why they could not
 // be read. Staged mode reads the index blob rather than the working tree, so
@@ -323,10 +296,6 @@ function prePushTargets(stdinText) {
   return { commits: [...commits], tags };
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
 const denylist = loadLocalDenylist();
 const findings = [];
 const skipped = [];
@@ -370,11 +339,8 @@ const mode = process.argv[2];
 if (mode === '--all') {
   for (const file of gitPaths(['ls-files'])) scanFile(file, { staged: false });
 } else if (mode === '--staged') {
-  // A staged deletion (D) leaves no content in the commit, so there is
-  // nothing to scan; every other status does put content at a path. R and C
-  // name the destination path only, which is the content being committed.
-  // Unmerged paths (U) are excluded because git refuses to commit them at
-  // all - once resolved and staged they reappear as A or M.
+  // D leaves no content to scan; R and C name the destination, which is what is
+  // committed; U cannot be committed, and reappears as A or M once resolved.
   for (const file of gitPaths(['diff', '--cached', '--name-only', '--diff-filter=ACMRTC'])) {
     scanFile(file, { staged: true });
   }

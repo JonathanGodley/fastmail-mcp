@@ -15,7 +15,7 @@ is its own section below.
 ## Confinement is always on, never bypassable
 
 Path confinement is lexical plus symlink/realpath-safe and is permanently on. There is
-no disable flag. The write side is `safeWritePath` (`src/jmap-client.ts:1352`): it
+no disable flag. The write side is `safeWritePath` (`src/jmap-client.ts`): it
 lexically pre-checks, realpaths the allowed directory, walks up to the longest existing
 ancestor, verifies that ancestor lives under the canonical allowed root, and refuses to
 overwrite an existing symlink at the target.
@@ -23,9 +23,7 @@ overwrite an existing symlink at the target.
 Scope is widened by configuration, not by a bypass. You set the allowed directory as
 broadly as you like (a configurable `FASTMAIL_DOWNLOAD_DIR`, even a drive root); per-call
 absolute paths are honoured within that root and stay symlink-safe. "I want anywhere"
-is an explicit config choice, not a `FASTMAIL_ALLOW_ANY_PATH` flag. This is the same
-conclusion upstream reached when they rejected a bypass flag in favour of a configurable
-dir.
+is an explicit config choice, not a `FASTMAIL_ALLOW_ANY_PATH` flag.
 
 ## Reads are an exfiltration vector
 
@@ -72,7 +70,7 @@ derived from message content — `download_attachment` writes only where the cal
 `path` says, under the confinement rules above, and there is no "save with the sender's
 filename" default. That is what keeps a hostile `name` from being a path decision at all.
 
-## The read-shaped `safeReadPath` (built, issue #1)
+## The read-shaped `safeReadPath` (#1)
 
 The attachment-send feature reads a local file and emails it out, so it needs a
 read-shaped guard distinct from the write-shaped `safeWritePath` (which `mkdir -p`s the
@@ -125,7 +123,7 @@ without reading a byte off disk, so no path guard is in play at all:
   image the body it reproduces displays. There is no ceiling on how many, and none on how
   large: the parts are re-referenced by `blobId` rather than uploaded, so
   `MAX_ATTACHMENT_BYTES` — which caps only local reads — never applies (same footing as the
-  forward carry sizes above). Fastmail's own message-size limit is the only bound,
+  forward carry sizes below). Fastmail's own message-size limit is the only bound,
   and an oversized send fails loudly server-side. Not capped because a cap would silently
   mangle the one thing the feature exists to preserve, and because the caller already chose
   to quote or forward that specific message.
@@ -247,8 +245,7 @@ threaded into the refusal builders is the combination, not the attach directory 
 
 The draft-first surface is built so that one named verb transmits: `send_draft`. That is
 true of everything a caller *composes*, and it is the basis on which a name-based
-permission system can gate a single tool. It is not true of the account as a whole, and the
-exception is worth stating where someone setting up that gate will read it.
+permission system can gate a single tool. It is not true of the account as a whole.
 
 Naming attendees on a calendar event causes mail to be sent. When the event is written the
 server emails each attendee an invitation from this account; deleting that event later
@@ -271,8 +268,7 @@ the tool's purpose includes inviting people. So the control is disclosure: the t
 description says plainly that naming an attendee emails them, and the parameter is optional
 — an event written without `participants` notifies nobody. An operator who needs the
 guarantee that nothing leaves the account has to deny `create_calendar_event` and
-`update_calendar_event` alongside `send_draft`, and that requirement is stated here because
-the alternative is an operator believing one denial covers it.
+`update_calendar_event` alongside `send_draft`.
 
 ## Attaching in-account content is its own opt-in (`FASTMAIL_ALLOW_BLOB_ATTACH`)
 
@@ -303,8 +299,7 @@ a blob-attached part carries neither, so nothing on the sent message says where 
 from. The honest statement is therefore *equal reach, weaker after-the-fact detectability* —
 not "no new capability".
 
-**`blobId` reaches further than an attachment listing, and this is stated because it is easy
-to get wrong.** The whole-message `blobId` is in `EMAIL_PROPERTIES_COMPACT`: it is emitted in
+**`blobId` reaches further than an attachment listing.** The whole-message `blobId` is in `EMAIL_PROPERTIES_COMPACT`: it is emitted in
 the DEFAULT output of every list, search and get, with no `raw` needed. So with the gate open,
 a caller holding ordinary read output can attach a **complete raw RFC822 message** — the same
 bytes an `asAttachment` forward produces, with the full transport-header and
@@ -347,14 +342,11 @@ content into outgoing mail addressed to arbitrary recipients under the user's ow
 prompt-injected agent could use it to exfiltrate the content of any message in the account by
 quoting it into a reply it sends to an attacker-chosen address.
 
-**The reply path now moves BYTES, not only text (#13).** Before embedded-image support, a
-reply carried zero parts of the original — the quote was text and markup, and an embedded
-image was simply lost. It now carries the image parts the quoted body displays, re-referenced
-from the account's own blob store, so a reply can put binary content in front of recipients
-that the caller never attached and this server never read off disk. `FASTMAIL_ATTACH_DIR`
-does not gate it: that opt-in governs reading local files, and nothing local is read here.
-This is a genuine widening of the primitive above and is called out as its own line rather
-than folded into it. The escape is simply not writing `{{quote}}`: nothing is quoted that the
+**The reply path moves BYTES, not only text (#13).** It carries the image parts the quoted
+body displays, re-referenced from the account's own blob store, so a reply can put binary
+content in front of recipients that the caller never attached and this server never read off
+disk. `FASTMAIL_ATTACH_DIR` does not gate it: that opt-in governs reading local files, and
+nothing local is read here. The escape is simply not writing `{{quote}}`: nothing is quoted that the
 caller did not place, so a reply whose body omits the token carries no part of the original
 at all, images included.
 
@@ -364,10 +356,9 @@ re-resolved from the draft's `In-Reply-To`** (an attacker-controllable header), 
 confused-deputy / quote-spoofing surface from that direction, and there is **no cross-account
 reach** (the fetch is scoped to `session.accountId`).
 
-The primitive has exactly **one entry point**, and that is a narrowing worth recording: an
-earlier `edit_draft` could also take an `originalEmailId`, to rebuild a quote it judged an
-edit had dropped. It no longer fetches anything — it stores the body it is handed — so
-`draft_email` is now the only tool that reads one message into another. The
+The primitive has exactly **one entry point**: `draft_email` is the only tool that reads one
+message into another, since `edit_draft` takes no `originalEmailId` and stores the body it is
+handed. The
 embedded html is run through the quote sanitizer (script/style/handlers/unscoped attributes
 stripped, schemes pinned) — a safety floor for re-sending under the user's `From`, not a
 privacy control. Documented here as an accepted residual: the mitigation for misuse is the
@@ -403,8 +394,7 @@ accident are 2^-128; a forger has to try. When such a draft is later rebuilt (an
 that rewrites or clears the body), the classifier treats that part as server-managed, so an
 unreferenced one is **deleted rather than degraded to an attachment**. What a forger achieves
 is therefore the removal of their own content from a draft, and the bytes survive in Trash
-(#65) either way. Accepted at those odds, with the walk written out here so the next reader
-does not have to rederive why the safe direction is the deleting one. The same reasoning is
+(#65) either way. Accepted at those odds. The same reasoning is
 why a foreign Content-ID of that shape is **never carried verbatim**: parts pooled onto a
 forward have their Content-ID stripped entirely, so a planted identifier cannot ride into a
 message this server composed.
@@ -453,20 +443,18 @@ overlooked:
 - **Why not strip:** removing the header at send would mean recreating the message
   before submission (JMAP emails are immutable), turning every send into a
   destroy+recreate with its own failure modes, solely to withhold a value with no
-  disclosure weight. The cure was strictly worse than the disease.
+  disclosure weight.
 
 ## Mailbox resolution + default Trash/Spam exclusion (accepted residuals)
 
-The read surface gained one `mailbox` param (id/role/name) resolved **exactly** across the
+The read surface takes one `mailbox` param (id/role/name) resolved **exactly** across the
 read + single-mailbox-write tools, and `search_emails`/`list_emails` hide Trash and Spam by
-default with a hidden-count note. Several residuals are accepted here, framed honestly rather
-than overclaimed:
+default with a hidden-count note. The accepted residuals:
 
 - **The default Trash/Spam exclusion is a product/noise default — NO security property is
   claimed.** It is *not* an anti-prompt-injection control: an injected agent simply passes
-  `includeSpam:true` (or reads Spam via `list_emails mailbox:"junk"`). Treating it as a
-  security boundary would be the same overclaim as "redaction neutralizes the oracle" — so it
-  isn't claimed. The `includeTrash`/`includeSpam` descriptions stay plain (no injection caution).
+  `includeSpam:true` (or reads Spam via `list_emails mailbox:"junk"`). The
+  `includeTrash`/`includeSpam` descriptions stay plain (no injection caution).
 - **The hidden-count note is TRANSPARENCY for a cooperative reader, not an injection control.**
   `get_mailbox_stats mailbox:"junk"` returns Trash/Spam totals directly with zero friction, and
   `list_emails mailbox:"trash"` reads them outright — so a determined/injected agent
@@ -490,27 +478,26 @@ than overclaimed:
   default ids only (see `docs/conventions.md`). The one honest caveat is scope, not security:
   the parameter maps to JMAP's solely-in `inMailboxOtherThan`, so it hides less than its name
   suggests — a message cross-filed outside the excluded set still comes back.
-- **Exact resolution hardens *mis-resolution*, NOT deliberate steering.** Switching every
-  read/delete/move target from substring (a role lookup that fell back to a substring of the
-  mailbox NAME, which could mis-hit e.g. a custom "Junk mail rules" mailbox and silently hide real
-  mail; that helper has since been deleted, and nothing here resolves a role any other way) to exact id/role/
-  name/path removes *fuzzy* mis-targeting. It does **not** close *deliberate* steering: an injected
+- **Exact resolution hardens *mis-resolution*, NOT deliberate steering.** Resolving every
+  read/delete/move target by exact id/role/name/path, never by substring (a substring of the
+  mailbox NAME could mis-hit e.g. a custom "Junk mail rules" mailbox and silently hide real
+  mail), removes *fuzzy* mis-targeting. It does **not** close *deliberate* steering: an injected
   agent with `move_email`/`bulk_move` access can still aim mail at `"trash"`/`"Archive"` by exact
   name. Move-to-any stays open **by design** (a move-target restriction is tracked as fork #43).
   Name/role resolution also **lowers the steering bar** from "must know a valid opaque id (needs a
   prior `list_mailboxes`)" to "blind one-shot by literal name" — a real, if modest, escalation.
   **The label tools join this class (#50):** `add_labels`/`remove_labels`/`bulk_add_labels`/
-  `bulk_remove_labels` now resolve their `mailboxes` arrays by exact id/role/name/path too, so an
+  `bulk_remove_labels` resolve their `mailboxes` arrays by exact id/role/name/path too, so an
   injected agent can label a message into e.g. `"trash"` blind-one-shot-by-name, the same modest
   escalation as move. Accepted on the same footing; not a new capability class.
 - **The path form (#27), and the collision it made reachable on write paths.**
   A root-anchored path is still exact matching over mailboxes a bare name could already reach, so
   it mostly just disambiguates. But the tie rule (**an exact flat name wins over reading the same
-  text as a path**) had a real consequence on write paths: if a top-level folder is literally
-  named `A/B` while a real `A > B` nesting also exists, `move_email targetMailbox:"A/B"` filed the
-  message into the flat folder, silently, even though the same text describes the nesting — and
-  anyone who can create a folder can set that collision up, so treat it as reachable by a caller
-  who wants it. **That silent resolution is now refused**: a reference matching one flat name AND
+  text as a path**) would have a real consequence on write paths: if a top-level folder is
+  literally named `A/B` while a real `A > B` nesting also exists, it would file
+  `move_email targetMailbox:"A/B"` into the flat folder, silently, even though the same text
+  describes the nesting — and anyone who can create a folder can set that collision up, so treat
+  it as reachable by a caller who wants it. **So that case is refused**: a reference matching one flat name AND
   a *different* mailbox by path is rejected as ambiguous, naming both with their ids, so the write
   does not land anywhere until the caller picks one. The tie-break survives only where nothing
   else answers to the same text, which is what keeps a folder whose own name contains the
@@ -533,22 +520,20 @@ than overclaimed:
   the folder, but Archive is where it wanted the mail anyway. As a way of *getting mail out of the
   Inbox* it adds no capability `move_email` (`targetMailbox:"archive"`) did not already have; it is
   the same concealment at a lower bar. It is **not** capability-identical in where the mail ends up,
-  and that difference cuts against it — see the amendment below. Accepted on the same footing as
+  and that difference cuts against it — see the #104 bullet below. Accepted on the same footing as
   move-to-any, and for the same reason: the restriction that would change it is the deferred
   move-target guard (fork #43), not a disclosure note.
-  - **Two amendments from the Fastmail-parity rewrite (#104), and the first one makes concealment
-    worse.** `archive_email` no longer moves mail into Archive in the general case — it removes the
-    Inbox membership and leaves the message wherever else it was filed. Under the old behaviour
-    every message an injected sweep touched landed in one folder, so recovery was "enumerate
-    Archive". Now a swept Inbox+label message leaves the Inbox and arrives nowhere new, and **the
-    affected set is no longer enumerable from anywhere.** That is a genuine loss and is recorded as
-    a **new accepted residual**, on the same footing as the concealment above: what would change it
-    is a disclosure mechanism or the #43 guard, neither of which exists yet.
-  - The tool now returns a per-message report naming each id's outcome and its resulting filing.
-    That is **cooperative-reader transparency only** and does not close the bullet above: it is
-    read by the agent, not by the user, and this document's own precedent settles the point — "the
-    hidden-count note is TRANSPARENCY for a cooperative reader, not an injection control." An
-    injected agent simply does not relay it.
+  - **Fastmail parity (#104) makes concealment worse.** `archive_email` does not move mail into
+    Archive in the general case — it removes the Inbox membership and leaves the message wherever
+    else it was filed. A move into Archive would leave every message an injected sweep touched in
+    one folder, so recovery would be "enumerate Archive"; instead a swept Inbox+label message
+    leaves the Inbox and arrives nowhere new, and **the affected set is not enumerable from
+    anywhere.** That is a genuine loss, accepted on the same footing as the concealment above:
+    what would change it is a disclosure mechanism or the #43 guard, neither of which exists yet.
+  - The tool returns a per-message report naming each id's outcome and its resulting filing.
+    That is **cooperative-reader transparency only**, like the hidden-count note, and does not
+    close the bullet above: it is read by the agent, not by the user, and an injected agent simply
+    does not relay it.
   - The refusal set (`trash`, `junk`, `drafts`, `scheduled`, `sent`, `snoozed`) narrows what the
     verb can touch, but claim nothing for it as a control: it is parity with the client, and every
     one of those messages remains reachable through `move_email`.
@@ -567,8 +552,8 @@ than overclaimed:
 - **Resolver error message is an information oracle, reachable account-wide.** A bad `mailbox`/
   `targetMailbox`/`mailboxes` to *any* swept tool (search, list, stats, move, compose, labels)
   reflects the caller's input and a capped list of mailbox **paths** reachable by the configured
-  token - since #27 these are full paths rather than bare names, so the oracle now also discloses
-  the *shape* of the folder tree (which folder nests under which), not just the set of names. That
+  token - these are full paths (#27), so the oracle also discloses the *shape* of the folder
+  tree (which folder nests under which), not just the set of names. That
   is a slightly richer disclosure of the same material, accepted for the same reason: it is what
   makes the error recoverable, and it is the caller's own reachable tree. The real boundary is the
   token's reach, not "the user's own account" — a delegated/scoped token sees only its slice. Every value the message reflects - the caller's
@@ -585,8 +570,7 @@ than overclaimed:
   returning data. Accepted; "resolvable" is defined as "matches some `mailbox.id`/role/name, or a
   path built from that same fetched list."
 - **Per-message id-existence is a distinct oracle class.** A not-found id on `get_email`,
-  `get_thread`, or `originalEmailId` now returns `InvalidParams` (a crisper signal than the prior
-  `InternalError`), so it confirms whether a given *message/thread id* exists. This is a different
+  `get_thread`, or `originalEmailId` returns `InvalidParams`, so it confirms whether a given *message/thread id* exists. This is a different
   class from the mailbox-resolver oracle above (which reflects the reachable mailbox *tree*) — it is
   per-message existence, and is likewise bounded by the **token's reach**, not "the user's own
   account." Accepted on the same footing: recoverability is the point, and it is dominated by the
@@ -594,7 +578,7 @@ than overclaimed:
   these tools lacked. `download_attachment` is on the same footing and says so: a bad
   `emailId`/`attachmentId` there is `InvalidParams` naming what to pass instead, because
   `get_email_attachments` enumerates the same parts on request for the same caller.
-- **The same per-id oracle now extends to calendar events and contacts.** `update_calendar_event`,
+- **The same per-id oracle extends to calendar events and contacts.** `update_calendar_event`,
   `delete_calendar_event`, `update_contact` and `delete_contact` return `InvalidParams` for an id
   that resolves to nothing, so each confirms whether that event or contact exists. `create_calendar_event`
   does the same for a `calendarId`. Accepted on exactly the footing above: every one of these ids is
@@ -691,7 +675,7 @@ client the production path builds carries the option, and that the option still 
 
 ## Credential logging is suppressed at the source (`DEBUG` and tsdav)
 
-**Operator-visible behaviour: setting `DEBUG` no longer produces any tsdav output.** Every
+**Operator-visible behaviour: setting `DEBUG` produces no tsdav output.** Every
 other package's `DEBUG` logging is untouched, including under `DEBUG=*`. This is deliberate
 and is not a knob.
 

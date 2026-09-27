@@ -1,23 +1,16 @@
 // What this probe settles
 // -----------------------
-// `docs/conventions.md` and the #162 close-out both record that Fastmail's CalDAV server
-// (Cyrus) strips `RDATE` from an `<C:expand>`-ed block the way `calendar-expand.probe.mjs`
-// MEASURED that it strips `RRULE`. The RRULE half is observed; the RDATE half was read off the
-// Cyrus source and never observed — nothing in `scripts/probes/` looked at `RDATE` under
-// `<C:expand>` at all. This probe is that observation (#165).
+// Does Fastmail's CalDAV server (Cyrus) strip `RDATE` from an `<C:expand>`-ed block the way
+// `calendar-expand.probe.mjs` MEASURED that it strips `RRULE`? This probe observes it (#165).
 //
 // It is load-bearing in two places:
 //
 //   - the recurrence guard in `eventIntersectsWindow`'s caller (`getCalendarEvents`) keeps any
-//     block still carrying `RRULE` *or* `RDATE`, on the grounds that such a block is an
-//     unexpanded master whose original DTSTART must not be judged against the window. If the
-//     server does NOT strip `RDATE` under expand, that guard fires on every expanded
-//     occurrence of an RDATE-listed series and the window filter stops filtering them at all;
-//   - `update_calendar_event` / `delete_calendar_event` refuse a series that recurs only by
-//     `RDATE` (`isRecurringSeriesResource`). That refusal reads the UNEXPANDED master, so it is
-//     unaffected by the strip either way — but the read path's `recurrenceDates` field is
-//     documented as "expected to be absent on the ordinary listing path" on the strength of
-//     the same unmeasured claim.
+//     block still carrying `RRULE` *or* `RDATE` as an unexpanded master. If the server did NOT
+//     strip `RDATE` under expand, that guard would fire on every expanded occurrence of an
+//     RDATE-listed series and the window filter would stop filtering them;
+//   - the read path's `recurrenceDates` field is documented as "expected to be absent on the
+//     ordinary listing path" on the strength of the same claim.
 //
 // WHAT IS MEASURED, and how to read a result. Four queries against a temporary collection
 // holding three synthetic series:
@@ -34,12 +27,12 @@
 //                                  showed the filter and the expansion can disagree, so the two
 //                                  halves are asked separately.)
 //
-// TWO RESULTS, and the second was not what the repo had recorded.
+// TWO RESULTS.
 //
 //   THE STRIP IS CONFIRMED (Q2). An `<C:expand>`-ed RDATE-only series comes back as one VEVENT
 //   per occurrence with no RDATE line anywhere, RECURRENCE-ID set on every block after the
 //   first and absent on the first — the same shape `calendar-expand.probe.mjs` measured for
-//   RRULE. `docs/conventions.md` no longer calls that half derived.
+//   RRULE.
 //
 //   THE TIME-RANGE FILTER DOES NOT WALK RDATEs (Q3/Q4, and the diagnostic windows). A window
 //   that covers an RDATE occurrence but NOT the series DTSTART matches the resource not at all,
@@ -48,7 +41,7 @@
 //   does index: `narrowDtstart` (covers DTSTART only) matches, `betweenOccurrences` (covers no
 //   occurrence at all, but lies between DTSTART and the last RDATE) does not. So the indexed
 //   span for an RDATE-only resource is DTSTART..DTSTART+DURATION, and the RDATEs are invisible
-//   to the filter. The repo had assumed the filter walks every occurrence.
+//   to the filter.
 //
 //   The Cyrus source says why, and the two halves genuinely use different walkers:
 //   `<C:expand>` (http_caldav.c, `expand_cb`) runs Cyrus's own `icalcomponent_myforeach`
@@ -58,32 +51,24 @@
 //   `icalcomponent_foreach_recurrence`, which in Fastmail's build does not reach them.
 //
 // BOTH RDATE SERIALISATIONS ARE MEASURED, because "two RDATE lines" and "one comma-joined
-// RDATE line" are the same property set to a parser but not necessarily to an indexer: the
-// fixtures carry one of each and every check below runs per form, so a form-specific result
-// reports as a divergence between the two rather than as a single ambiguous number.
+// RDATE line" are the same property set to a parser but not necessarily to an indexer. Every
+// check runs per form, so a form-specific result reports as a divergence between the two.
 //
 // Every check below asserts the platform behaviour this probe MEASURED, the way
 // `calendar-window-frames.probe.mjs` asserts the UTC-day fact. PASS means the platform still
 // behaves as recorded here; FAIL means it has CHANGED, at which point the guard design resting
 // on these facts needs re-deciding rather than the probe re-tuned.
 //
-// WHY RAW CALDAV. This measures the platform, not our parsing, so it talks HTTP directly and
-// builds the same XML tsdav builds for `fetchCalendarObjects` with `timeRange` + `expand` — a
-// calendar-query REPORT at Depth 1 asking for d:getetag and a c:calendar-data carrying
-// c:expand, filtered VCALENDAR > VEVENT > c:time-range, both ranges written as the same UTC
-// basic-format instants. Raw PUT is likewise not a shortcut: `create_calendar_event` has no
-// RDATE parameter, so this server cannot author the RDATE-only fixture at all.
+// WHY RAW CALDAV. This measures the platform, not our parsing, so it sends the same XML tsdav
+// builds for `fetchCalendarObjects` with `timeRange` + `expand`. Raw PUT is needed too:
+// `create_calendar_event` has no RDATE parameter.
 //
-// FIXTURES AND CLEANUP. Three synthetic series — an RDATE-only one written as a single
-// comma-joined RDATE line, the same series written as one RDATE property per line, and an RRULE
-// control that reproduces the known RRULE measurement in the same run — are written into a
-// temporary calendar created by MKCALENDAR, out in July 2027 so nothing real shares the window
-// (the frames probe uses June 2027; these deliberately do not collide). None carries an ATTENDEE
-// or an ORGANIZER: a participant would make the server send real iTIP mail (see the README).
-// If MKCALENDAR fails this probe STOPS — it does not fall back to an existing calendar, because
-// the fixtures are writes into a live personal account. The finally block deletes the whole
-// collection, which removes every fixture in one request, then PROPFINDs to confirm it is gone.
-// Each run mints its own collection name, so a re-run never needs a manual delete first.
+// FIXTURES AND CLEANUP. Three synthetic series (RDATE comma-joined, RDATE one per line, and an
+// RRULE control) go into a temporary calendar created by MKCALENDAR, in July 2027 so nothing
+// real shares the window (the frames probe uses June 2027). None carries an ATTENDEE or an
+// ORGANIZER: a participant would make the server send real iTIP mail (see the README). If
+// MKCALENDAR fails this probe STOPS rather than writing into an existing calendar. The finally
+// block deletes the whole collection, then PROPFINDs to confirm it is gone.
 //
 // Run: python scripts/probes/run-probe.py calendar-rdate-expand.probe.mjs
 
@@ -101,23 +86,17 @@ if (!USERNAME || !PASSWORD) {
 const ROOT = 'https://caldav.fastmail.com/dav/';
 const AUTH = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
 
-// Every CalDAV href on this server embeds the account's own address, and this probe prints
-// whole calendar-data blobs. Nothing printed is allowed to carry a real address: probe output
-// gets pasted into issues. The second rule catches the fixtures' own `@probe.invalid` UIDs too,
-// which is a legibility cost worth paying — each blob is printed under a label that says which
-// fixture it is.
+// Every CalDAV href embeds the account's own address, and probe output gets pasted into issues.
+// The email rule also redacts the fixtures' own `@probe.invalid` UIDs; each blob is printed
+// under a label naming its fixture instead.
 const redact = s => String(s)
   .split(USERNAME).join('<account>')
   .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>');
 
-// The zone the fixtures are written in and the zone this deployment runs in. Hard-coded rather
-// than read from the environment because the fixtures' VTIMEZONE has to match it.
+// Hard-coded rather than read from the environment: the fixtures' VTIMEZONE has to match it.
 const ZONE = 'Australia/Sydney';
 
-// ---------------------------------------------------------------------------
-// Wall clock -> instant, in ZONE. Two passes: sample the offset at the naive guess, then
-// re-check at the instant that lands on. Enough for dates nowhere near a transition.
-// ---------------------------------------------------------------------------
+// Wall clock -> instant, in ZONE. Two passes: enough for dates nowhere near a transition.
 function offsetMsAt(zone, utcMs) {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', {
@@ -140,10 +119,7 @@ const wallToUtcIso = (...a) => new Date(wallToUtcMs(...a)).toISOString().replace
 // tsdav's spelling of a time-range bound: UTC basic format, seconds precision.
 const davInstant = iso => `${new Date(iso).toISOString().slice(0, 19).replace(/[-:.]/g, '')}Z`;
 
-// ---------------------------------------------------------------------------
-// Minimal HTTP + XML plumbing. Regex parsing is enough for a probe against one known server;
-// every matcher tolerates any namespace prefix because Cyrus picks its own.
-// ---------------------------------------------------------------------------
+// Every XML matcher tolerates any namespace prefix because Cyrus picks its own.
 async function dav(method, url, { body, headers = {} } = {}) {
   const res = await fetch(url, {
     method,
@@ -189,9 +165,6 @@ const calendarQueryXml = (startIso, endIso, expand) =>
   `<c:time-range start="${davInstant(startIso)}" end="${davInstant(endIso)}"/>` +
   `</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`;
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
 const STAMP = Date.now();
 const uid = kind => `probe-165-${kind}-${STAMP}@probe.invalid`;
 
@@ -260,8 +233,7 @@ const FIXTURES = [
       'BEGIN:VEVENT', `UID:${uid('rdatelines')}`, `DTSTAMP:${DTSTAMP}`,
       `DTSTART;TZID=${ZONE}:20270714T090000`,
       'DURATION:PT1H',
-      // The one difference from the fixture above: RFC 5545 §3.8.5.2 allows either spelling,
-      // and a parser sees the same property set either way — but an INDEXER need not.
+      // The one difference from the fixture above (RFC 5545 §3.8.5.2 allows either spelling).
       `RDATE;TZID=${ZONE}:20270721T090000`,
       `RDATE;TZID=${ZONE}:20270804T090000`,
       'SUMMARY:probe-165 RDATE-only series, one per line', 'END:VEVENT', 'END:VCALENDAR',
@@ -284,22 +256,15 @@ const FIXTURES = [
   },
 ];
 
-// The two RDATE serialisations, which every check runs over so a form-specific result reports
-// as a divergence between them rather than as one ambiguous number.
 const RDATE_KINDS = ['rdate', 'rdateLines'];
 
-// ---------------------------------------------------------------------------
-// Windows. Each names the question it stands for.
-// ---------------------------------------------------------------------------
 const WINDOWS = {
   wide: {
     label: `wide: local 2027-07-01 .. 2027-08-31 in ${ZONE} (covers every occurrence of both series)`,
     start: wallToUtcIso(2027, 7, 1, 0),
     end: wallToUtcIso(2027, 8, 31, 0),
   },
-  // Named for the RDATE VALUE it covers, not for the occurrence's position in the series: this
-  // is the first of the two listed RDATEs, which is the series' SECOND occurrence overall
-  // (the first being the DTSTART itself).
+  // Named for the RDATE VALUE it covers: the first listed RDATE is the series' SECOND occurrence.
   narrowFirstRdateValue: {
     label: `narrow: local 2027-07-21 08:00..10:00 in ${ZONE} (only the first RDATE value — the series' second occurrence)`,
     start: wallToUtcIso(2027, 7, 21, 8),
@@ -319,17 +284,10 @@ const WINDOWS = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// iCalendar reading. Whole content lines only, the same discipline src/caldav-client.ts uses:
-// U+2028/U+2029/bare CR are inert characters inside a value, not line breaks.
-//
-// This deliberately does NOT unfold (RFC 5545 §3.1). It does not need to: a fold breaks a long
-// line at a 75-octet boundary and the CONTINUATION starts with a space or tab, so the property
-// NAME always survives on the first physical line — every question asked here is "does a line
-// begin with RDATE / RRULE / DTSTART / RECURRENCE-ID", which that first line answers. A folded
-// continuation can never be mistaken for a property line, because it starts with whitespace.
-// (The one thing unfolding would buy is a complete VALUE for a very long RDATE list; the checks
-// here count and locate properties rather than parse a full list, so it buys nothing.)
+// Whole content lines only, as src/caldav-client.ts does: U+2028/U+2029/bare CR are inert
+// characters inside a value, not line breaks. Deliberately does NOT unfold (RFC 5545 §3.1): a
+// continuation starts with whitespace, so the property NAME survives on the first physical line,
+// and every check here asks only which property a line begins with.
 const contentLines = blob => blob.split(/\r\n|\n/).map(l => l.replace(/\r$/, ''));
 
 /** Split a VCALENDAR blob into its VEVENT blocks (arrays of content lines). */
@@ -356,10 +314,9 @@ const propParams = (block, key) => {
 };
 
 /**
- * A date-time content line -> UTC ms, so occurrences can be compared whatever form the server
- * hands them back in. Three forms are possible and the frames probe measured which one Cyrus
- * actually emits after expansion (a bare Z instant); the other two are read anyway so a change
- * in the platform reports as a mismatch rather than as an unparseable line.
+ * A date-time content line -> UTC ms. The frames probe measured that Cyrus emits a bare Z
+ * instant after expansion; the other two forms are read so a platform change reports as a
+ * mismatch rather than as an unparseable line.
  */
 function lineToUtcMs(line) {
   if (!line) return undefined;
@@ -380,16 +337,11 @@ const occurrenceMs = o => wallToUtcMs(o.y, o.mo, o.d, o.h);
 const asIso = ms => (ms === undefined ? '(unparsed)' : new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z'));
 
 /**
- * Every instant an RDATE property names, whatever serialisation carried it. RFC 5545 §3.8.5.2
- * allows both one comma-joined value list and one property per line, so the two fixtures here
- * differ in their RDATE LINES by construction — comparing lines across the forms would compare
- * the very thing they were built to differ on. The instants are what both forms share.
+ * Every instant an RDATE property names, whatever serialisation carried it: the two fixtures
+ * differ in their RDATE LINES by construction, and the instants are what both share.
  *
- * Only the date-time forms `lineToUtcMs` reads are handled: a UTC `Z` instant, a floating value,
- * and a TZID naming this probe's own ZONE. `VALUE=DATE` (an all-day RDATE), `VALUE=PERIOD` (a
- * start/duration pair) and a TZID naming any other zone all come back `undefined`. None of the
- * fixtures uses them, and the per-form check below fails loudly if one ever appears — an
- * unparsed value must never reach the profile, where `undefined` serialises to `null` in both
+ * `VALUE=DATE`, `VALUE=PERIOD` and a TZID naming any other zone come back `undefined`. The Q1
+ * check fails loudly if one appears: in the profile `undefined` serialises to `null` in both
  * forms and would let the forms-agree check pass on nothing.
  */
 const rdateInstantsIn = block =>
@@ -419,7 +371,6 @@ function describe(blob) {
   };
 }
 
-// ---------------------------------------------------------------------------
 const { check, failures } = makeChecker();
 
 let tempCalendarUrl = null;   // set only once MKCALENDAR has succeeded
@@ -589,13 +540,8 @@ try {
   }
 
   // --- Q3/Q4: the filter does NOT walk RDATEs -----------------------------------------------
-  // MEASURED, and it is not what the repo had recorded. The window below covers the first RDATE
-  // VALUE — the series' second occurrence — and nothing else. The RRULE control has an
-  // occurrence at the IDENTICAL instant,
-  // so it is the discriminator: it separates "the server does not walk RDATEs when filtering"
-  // from "this window is aimed wrong". The assertions encode the measurement, so a future run
-  // FAILING here means Fastmail's build CHANGED — at which point the read path's window
-  // handling is worth re-deciding, not this probe re-tuned.
+  // The RRULE control has an occurrence at the IDENTICAL instant, so it separates "the server
+  // does not walk RDATEs when filtering" from "this window is aimed wrong".
   console.log('\n--- Q3: narrow window over ONE RDATE occurrence, WITH expand ---');
   const q3 = await query(calendarUrl, WINDOWS.narrowFirstRdateValue, true);
   const d3 = Object.fromEntries(FIXTURES.map(f => [f.kind, q3.seen.get(f.kind) && describe(q3.seen.get(f.kind))]));
@@ -643,15 +589,8 @@ try {
   );
 
   // --- Which span does the filter index for an RDATE-only resource? -----------------------
-  // The two windows below carry NO assertion of their own beyond the span conclusion: each
-  // exists to discriminate one alternative explanation of Q3/Q4.
-  //   narrowDtstart      covers the series DTSTART and no other occurrence. If the resource
-  //                      matches here but not on an RDATE occurrence, the filter is reading
-  //                      DTSTART rather than being blind to the resource altogether.
-  //   betweenOccurrences covers NO occurrence at all, but lies between DTSTART and the last
-  //                      RDATE. If the resource matched here, the filter would be indexing the
-  //                      whole DTSTART..last-RDATE span; it does not, so the indexed span is
-  //                      DTSTART..DTSTART+DURATION and stops there.
+  //   narrowDtstart      a match here rules out the filter being blind to the resource.
+  //   betweenOccurrences a match here would mean the whole DTSTART..last-RDATE span is indexed.
   console.log('\n--- what span the time-range filter indexes for an RDATE-only resource ---');
   const span = {};
   for (const key of ['narrowDtstart', 'betweenOccurrences']) {
@@ -680,20 +619,11 @@ try {
       `expand=${span.betweenOccurrences.expand.hrefs.has(kind)} plain=${span.betweenOccurrences.plain.hrefs.has(kind)}`,
     );
   }
-  // If the two serialisations ever diverge, that is the headline, so say it in one line — and
-  // the line has to cover EVERY fact measured per form, not just the narrow-window pair. A
-  // summary that compared only Q3/Q4 would report "identical" while the forms disagreed about
-  // the expand strip or about either span window, which is the opposite of what it promises.
-  //
-  // Three rules keep it honest as the probe grows. Every query the forms are measured under gets
-  // a field, Q1 (the STORED form, before any expansion) included — otherwise the summary could
-  // call the forms identical while the server had rewritten one of them on the way in. Each
-  // field holds ONE observation: a pair of window results combined with && or || collapses to
-  // the same value for genuinely different outcomes, so the four span results are four fields.
-  // And no field may encode the serialisation itself: an RDATE LINE COUNT is 1 for the
-  // comma-joined fixture and 2 for the one-per-line fixture by construction, so a profile
-  // carrying it could never report agreement. Per-form storage integrity is checked separately
-  // above; what belongs here is the parsed instants, which both forms share.
+  // One line for whether the two serialisations diverge, covering EVERY fact measured per form.
+  // Three rules as the probe grows: every query gets a field, Q1 (the STORED form) included;
+  // each field holds ONE observation, because results combined with && or || collapse
+  // different outcomes to one value; and no field may encode the serialisation itself (an RDATE
+  // LINE COUNT differs by construction, so the profile could never agree).
   const formsProfile = k => JSON.stringify({
     q1Returned: !!d1[k],
     q1AnyRdate: d1[k]?.anyRdate ?? null,
@@ -738,14 +668,9 @@ try {
 } catch (err) {
   check('probe ran to completion', false, redact(err?.message ?? String(err)));
 } finally {
-  // Deleting the collection removes every fixture in one request. The PROPFIND afterwards is
-  // the only thing that proves it: a DELETE that returns 2xx and leaves the collection standing
-  // would otherwise go unnoticed, and this probe writes into a live personal account.
-  //
-  // The whole block is guarded. A network failure in the DELETE or the PROPFIND would otherwise
-  // escape the finally: it would REPLACE whatever error brought us here, skip the process.exit
-  // below, and suppress the one line naming the collection someone now has to remove by hand —
-  // the exact moment that line matters most.
+  // The PROPFIND proves the DELETE: a 2xx that leaves the collection standing would otherwise
+  // go unnoticed. Guarded, so a network failure here cannot replace the error that brought us
+  // here or skip the line naming what to remove by hand.
   try {
     if (tempCalendarUrl) {
       const del = await dav('DELETE', tempCalendarUrl);
@@ -761,8 +686,7 @@ try {
       }
     }
   } catch (err) {
-    // Reaching here means tempCalendarUrl was set: nothing in the try block runs until it is,
-    // so with no collection created there is nothing here that can throw.
+    // Reaching here means tempCalendarUrl was set: nothing in the try block runs until it is.
     console.log(`\nCleanup FAILED: ${redact(err?.message ?? String(err))}`);
     console.log(`  ⚠ DELETE MANUALLY: ${redact(tempCalendarUrl)}`);
     process.exit(1);

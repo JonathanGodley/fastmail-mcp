@@ -58,12 +58,10 @@ function stubMakeRequest(client: JmapClient, response: any) {
 // ---------- tests ----------
 
 // Every throwing set-error site routes through throwSingleSetError, so the same JMAP
-// reason means the same MCP error code wherever it surfaces. The draft-lifecycle
-// notCreated throws were the exception for a while: a create rejected for
-// invalidProperties reported a server bug while the identical failure on a contact
-// reported a caller-fixable one. The behavioural cases below pin the create path; the
-// source check pins the other two, which need a whole draft lifecycle to reach and would
-// otherwise be guarded by nothing.
+// reason means the same MCP error code wherever it surfaces. The behavioural cases below
+// pin the draft-lifecycle create path; the source check pins the other two notCreated
+// throws, which need a whole draft lifecycle to reach and would otherwise be guarded by
+// nothing.
 describe('draft-lifecycle set errors are classified, not just described', () => {
   let client: JmapClient;
 
@@ -133,7 +131,6 @@ describe('createDraft', () => {
     client = makeClient();
   });
 
-  // 1. Happy path
   it('returns email ID on success', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -145,7 +142,6 @@ describe('createDraft', () => {
     assert.equal(id, 'email-42');
   });
 
-  // 2. Correct JMAP request structure
   it('sends correct JMAP request structure', async () => {
     const makeReq = stubRequests(client, async () => ({
       methodResponses: [
@@ -158,19 +154,15 @@ describe('createDraft', () => {
     assert.equal(makeReq.mock.calls.length, 1);
     const request = callArguments(makeReq)[0];
 
-    // capabilities
     assert.deepEqual(request.using, [
       'urn:ietf:params:jmap:core',
       'urn:ietf:params:jmap:mail',
     ]);
 
-    // method
     assert.equal(request.methodCalls[0][0], 'Email/set');
 
-    // accountId
     assert.equal(request.methodCalls[0][1].accountId, ACCOUNT_ID);
 
-    // email object shape
     const emailObj = request.methodCalls[0][1].create.draft;
     assert.equal(emailObj.subject, 'Test');
     assert.deepEqual(emailObj.from, [{ name: 'Test User', email: 'me@example.com' }]);
@@ -178,7 +170,6 @@ describe('createDraft', () => {
     assert.equal(emailObj.mailboxIds[DRAFTS_MAILBOX.id], true);
   });
 
-  // 3. Bug 1 regression — JMAP method-level error throws
   it('throws on JMAP method-level error', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -196,7 +187,6 @@ describe('createDraft', () => {
     );
   });
 
-  // 4. Bug 2 regression — notCreated includes server type + description
   it('throws with server-provided error details from notCreated', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -225,7 +215,6 @@ describe('createDraft', () => {
     );
   });
 
-  // 5. Bug 3 regression — missing created.draft.id throws
   it('throws when created.draft.id is missing', async () => {
     stubMakeRequest(client, {
       methodResponses: [
@@ -245,7 +234,6 @@ describe('createDraft', () => {
     );
   });
 
-  // 6. Validation — empty input throws
   it('throws when no meaningful fields are provided', async () => {
     await assert.rejects(
       () => client.createDraft({}),
@@ -256,7 +244,6 @@ describe('createDraft', () => {
     );
   });
 
-  // 7. Custom from address used correctly
   it('uses custom from address when provided', async () => {
     const altIdentity = { id: 'id-2', name: 'Alias User', email: 'alias@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [IDENTITY, altIdentity]);
@@ -273,7 +260,6 @@ describe('createDraft', () => {
     assert.deepEqual(emailObj.from, [{ name: 'Alias User', email: 'alias@example.com' }]);
   });
 
-  // 8. Invalid from address throws
   it('throws when from address is not a verified identity', async () => {
     await assert.rejects(
       () => client.createDraft({ subject: 'Hi', from: 'nobody@example.com' }),
@@ -284,7 +270,6 @@ describe('createDraft', () => {
     );
   });
 
-  // 8b. Wildcard identity matches concrete from address
   it('matches wildcard identity for from address', async () => {
     const wildcardIdentity = { id: 'id-wild', name: 'Wild User', email: '*@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
@@ -301,7 +286,6 @@ describe('createDraft', () => {
     assert.deepEqual(emailObj.from, [{ name: 'Wild User', email: 'work@example.com' }]);
   });
 
-  // 8c. Bare @ rejected (no local part)
   it('rejects bare @ address against wildcard identity', async () => {
     const wildcardIdentity = { id: 'id-wild', email: '*@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
@@ -315,7 +299,6 @@ describe('createDraft', () => {
     );
   });
 
-  // 8d. Wildcard identity does not match different domain
   it('rejects from address that does not match wildcard domain', async () => {
     const wildcardIdentity = { id: 'id-wild', email: '*@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
@@ -329,7 +312,7 @@ describe('createDraft', () => {
     );
   });
 
-  // 8e. Composite/injection from-string rejected even though it ends in the wildcard domain
+  // The injected string ends in the wildcard domain, so a suffix match alone would accept it.
   it('rejects a composite from address against a wildcard identity', async () => {
     const wildcardIdentity = { id: 'id-wild', email: '*@example.com', mayDelete: true };
     mock.method(client, 'getIdentities', async () => [wildcardIdentity]);
@@ -356,7 +339,6 @@ describe('createDraft', () => {
     );
   });
 
-  // 9. Provided mailbox (id/role/name) resolved against the mailbox list
   it('saves into the provided mailbox, resolved against the mailbox list', async () => {
     mock.method(client, 'getMailboxes', async () => [
       DRAFTS_MAILBOX,
@@ -369,7 +351,6 @@ describe('createDraft', () => {
       ],
     }));
 
-    // Resolve by name -> the custom mailbox's id.
     await client.createDraft({ subject: 'Custom', mailbox: 'Project X' });
 
     const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
@@ -423,7 +404,6 @@ describe('createDraft', () => {
     assert.equal(callArguments(makeReq)[0].methodCalls[0][1].create.draft.mailboxIds['mb-d'], true);
   });
 
-  // 10. HTML body constructed correctly
   it('derives a text/plain fallback for an html-only draft', async () => {
     const makeReq = stubRequests(client, async () => ({
       methodResponses: [
@@ -435,7 +415,6 @@ describe('createDraft', () => {
 
     const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.htmlBody, [{ partId: 'html', type: 'text/html' }]);
-    // The fallback is auto-generated as a readable text/plain alternative from the html.
     assert.deepEqual(emailObj.textBody, [{ partId: 'text', type: 'text/plain' }]);
     assert.equal(emailObj.bodyValues.html.value, '<p>Hello</p>');
     assert.match(emailObj.bodyValues.text.value, /Hello/);
@@ -484,7 +463,6 @@ const MAILBOXES_WITH_TRASH = [
 
 // Wire makeRequest for create-then-dispose: Email/get returns the fixture; the create-only
 // Email/set returns a created id; the update-only Email/set moves the old draft to Trash.
-// Returns the makeRequest mock.
 function mockUpdate(client: JmapClient, fixture: any, mailboxes: any[] = MAILBOXES_WITH_TRASH) {
   mock.method(client, 'getMailboxes', async () => mailboxes);
   return stubRequests(client, async (req: any) => {
@@ -705,7 +683,6 @@ describe('updateDraft', () => {
 
     await client.updateDraft('draft-1', { subject: 'Updated' });
 
-    // The create call should keep existing to address
     const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
     assert.deepEqual(emailObj.to, [{ email: 'bob@example.com' }]);
     assert.equal(emailObj.subject, 'Updated');
@@ -757,7 +734,7 @@ describe('updateDraft', () => {
     );
   });
 
-  // Body-extraction correctness (the `|| true` bug). Fixtures mirror real Fastmail
+  // Body extraction. Fixtures mirror real Fastmail
   // shapes captured live: a single-format draft aliases its one part into BOTH the
   // textBody and htmlBody lists; a dual-format draft has two distinct typed parts.
   // Assertions are on the recreate OUTPUT, whose bodyValues are re-keyed to 'text'/'html'.
@@ -1029,9 +1006,7 @@ describe('updateDraft', () => {
   });
 
   it('rejects clearing textBody alone on a dual-body draft (text fallback is auto-managed)', async () => {
-    // Was: dropped the text part. Now the text fallback is managed automatically, so
-    // clearing it while htmlBody survives is rejected (use clearFields:['htmlBody'] for
-    // a plain-text email instead).
+    // The caller's route to a plain-text email is clearFields:['htmlBody'].
     mockUpdate(client, RICH_DRAFT);
     await assert.rejects(
       () => client.updateDraft('draft-1', { clearFields: ['textBody'] }),
@@ -1117,7 +1092,6 @@ describe('updateDraft', () => {
     const draft = draftFromCall(makeReq);
     assert.deepEqual(draft.inReplyTo, ['<orig@example.com>']);
     assert.deepEqual(draft.references, ['<root@example.com>', '<orig@example.com>']);
-    // keywords merged: $draft preserved alongside $flagged and the custom label
     assert.equal(draft.keywords.$draft, true);
     assert.equal(draft.keywords.$flagged, true);
     assert.equal(draft.keywords['custom-label'], true);
@@ -1220,15 +1194,13 @@ describe('updateDraft', () => {
 
   // ---- body edits: stored as written, proved by a hash (#37/#42's guard replaced) ----
   //
-  // What lived here was a quote-preservation guard: the stored body was scanned for a quote
-  // marker, an edit that would drop one was refused, and a kept quote was rebuilt from the
-  // original message. All of it is gone. This tool now stores the body it is handed byte for
-  // byte — a quote survives an edit because the caller handed it back, and vanishes because
-  // the caller did not, with no challenge either way.
+  // There is deliberately no quote-preservation guard. This tool stores the body it is
+  // handed byte for byte — a quote survives an edit because the caller handed it back, and
+  // vanishes because the caller did not, with no challenge either way.
   //
-  // What replaces it is narrower and mechanical: a body edit must carry the `bodyHash` of
-  // the read it was written against. That proves the caller SAW the body it is replacing; it
-  // never proves the caller kept any of it. So these fixtures keep the raw Fastmail reply
+  // A body edit must instead carry the `bodyHash` of the read it was written against. That
+  // proves the caller SAW the body it is replacing; it never proves the caller kept any of
+  // it. So these fixtures keep the raw Fastmail reply
   // shapes, because "a body with a quote in it is stored with the quote in it, unchanged" is
   // exactly the property to pin. Captured from a live store/fetch round-trip (2026-06-28)
   // and trimmed; the quoted lines carry synthetic content, because nothing reads them.
@@ -1322,8 +1294,8 @@ describe('updateDraft', () => {
     assert.deepEqual(result.notes, undefined);
   });
 
-  // The behaviour the old guard existed to prevent, now allowed on purpose: the caller is
-  // handed the body, so dropping the quote is the caller's edit, not a loss to challenge.
+  // Allowed on purpose: the caller is handed the body, so dropping the quote is the
+  // caller's edit, not a loss to challenge.
   it('drops a quote the caller did not hand back, with no challenge and no note', async () => {
     const makeReq = mockBodyEdit(client, DUAL_REPLY);
     const result = await client.updateDraft('draft-1', {
@@ -1359,9 +1331,8 @@ describe('updateDraft', () => {
   });
 
   it('never fetches the message a reply draft answers', async () => {
-    // The rebuild path used to read it on every kept edit. Nothing does now, and a tool that
-    // stores what it is handed has no reason to: the assertion is that no Email/get in the
-    // whole exchange names anything but the draft and its replacement.
+    // A tool that stores what it is handed has no reason to read the original, so no
+    // Email/get in the whole exchange may name anything but the draft and its replacement.
     const makeReq = mockBodyEdit(client, DUAL_REPLY);
     await client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: hashOf(DUAL_REPLY) });
     for (const call of makeReq.mock.calls) {
@@ -1510,8 +1481,7 @@ describe('updateDraft', () => {
   });
 
   // The saved body is judged by the READ side's rule, so a shape get_email refuses to hash
-  // is one edit_draft refuses to hash too. Before, this draft got a hash here and "recreate
-  // the draft" from the very next read of the same saved object.
+  // is one edit_draft refuses to hash too.
   it('withholds the hash when the saved draft carries a body part no read returns', async () => {
     const mismatched = { ...REPLY_BASE, id: 'draft-2',
       textBody: [{ partId: 'text', type: 'text/plain' }, { partId: 'stray', type: 'text/html' }],
@@ -1528,8 +1498,7 @@ describe('updateDraft', () => {
   });
 
   // The other half of the same routing: an empty saved part set is a body, not a degraded
-  // read. get_email hashes it, so this does too — the old predicate reported it as the
-  // server having flagged truncation, which it had not.
+  // read. get_email hashes it, so this does too.
   it('issues the hash when the saved draft comes back with no body parts at all', async () => {
     const empty = { ...REPLY_BASE, id: 'draft-2', textBody: [], htmlBody: [], bodyValues: {} };
     mockBodyEdit(client, TEXT_ONLY_REPLY, empty);
@@ -1714,8 +1683,8 @@ describe('updateDraft', () => {
 
   // -- a {{…}} spelling that expands to nothing --
   // edit_draft stores the body as written, so a mistyped token ships with its braces showing.
-  // The compose tool reports these on its receipt; this tool said nothing, on the tool where
-  // the caller is likelier to mistype one because it is hand-editing an existing body.
+  // Reported here as the compose tool reports them on its receipt; the caller is likelier to
+  // mistype one here, because it is hand-editing an existing body.
 
   it('reports a {{…}} spelling this edit introduced, which is not a token and ships as written', async () => {
     const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
@@ -1879,7 +1848,7 @@ describe('updateDraft', () => {
     assert.ok(result.notes?.some((n) => /an escaped token spelling the stored body did not/.test(n)));
   });
 
-  // The converse, and the half the description used to state unconditionally. The escape
+  // The converse. The escape
   // notes are keyed on a COUNT RISE against the stored bytes, exactly as the {{signature}}
   // note is, so an escape the body handed back already carried ships in silence — otherwise
   // the original author's text would be reported back on every edit of that draft forever.
@@ -1893,7 +1862,6 @@ describe('updateDraft', () => {
     assert.equal(createdDraft(makeReq).bodyValues.html.value, stored);
     assert.equal((result.notes ?? []).some((n) => /an escaped token spelling/.test(n)), false);
   });
-
 
   // A near-miss is REPORTED here rather than refused, which is the opposite of draft_email.
   // The body may be a foreign one handed back, so a refusal keyed on its text could be
@@ -2193,13 +2161,11 @@ describe('sendDraft', () => {
     const { submissionId } = await client.sendDraft('draft-1');
     assert.equal(submissionId, 'sub-1');
 
-    // Verify submission call structure
     const submitCall = callArguments(makeReq, 1)[0];
     assert.equal(submitCall.methodCalls[0][0], 'EmailSubmission/set');
     assert.equal(submitCall.methodCalls[0][1].create.submission.emailId, 'draft-1');
     assert.equal(submitCall.methodCalls[0][1].create.submission.identityId, IDENTITY.id);
 
-    // Verify envelope has all recipients (to + cc)
     const rcptTo = submitCall.methodCalls[0][1].create.submission.envelope.rcptTo;
     assert.equal(rcptTo.length, 2);
     assert.deepEqual(rcptTo[0], { email: 'bob@example.com' });
@@ -2506,10 +2472,8 @@ describe('sendDraft', () => {
   // The array row is also where `typeof [] === 'object'` is covered. An array read as a map
   // would be walked by Object.keys into INDICES whose values are the ELEMENTS rather than
   // `true`, so the listing would drop them all and the refusal would name no location while
-  // still offering a move_email repair; it now cannot reach the sentence that lists
-  // locations at all, so the shape is
-  // pinned HERE rather than by a separate test asserting that an index is absent from a
-  // message which has no location list to put one in.
+  // still offering a move_email repair. This refusal has no location list for an index to
+  // appear in, so the shape is pinned HERE rather than by a separate test.
   const UNREADABLE_FILINGS: [string, any][] = [
     ['array-shaped', ['mb-archive']],
     ['a bare string', 'mb-archive'],
@@ -2807,8 +2771,7 @@ describe('sendDraft', () => {
   });
 
   // A part that declares no content type is displayed by whichever list carries it, so an
-  // empty one renders blank exactly as an empty typed part does. Nothing saw it before,
-  // because the guard selected a part by matching its type.
+  // empty one renders blank exactly as an empty typed part does.
   it('rejects a draft whose only body part declares no content type and is blank', async () => {
     const typelessBlank = {
       ...SENDABLE_DRAFT,
@@ -3025,7 +2988,6 @@ describe('searchEmails', () => {
     }));
     await client.searchEmails({ query: 'quarterly', limit: 10, excludeDrafts: true });
     const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
-    // text in the base, $draft as its own keyword condition, AND-wrapped.
     assert.equal(filter.operator, 'AND');
     assert.ok(filter.conditions.some((c: any) => c.text === 'quarterly'));
     assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$draft'));
@@ -3235,7 +3197,6 @@ describe('safeWritePath (symlink escapes)', () => {
       const outside = join(root, 'outside');
       await fsMkdir(allowed, { recursive: true });
       await fsMkdir(outside, { recursive: true });
-      // Symlink inside allowed pointing to outside.
       // Symlink creation requires elevated privileges on Windows; skip where unavailable.
       try {
         await symlink(outside, join(allowed, 'escape'));
@@ -3381,10 +3342,9 @@ describe('sender name parsing — createDraft', () => {
   });
 
   it('reads the name-less angle form as a bare address, and no longer refuses it', async () => {
-    // The accepted consequence of parsing before matching: `<addr>` used to reach
-    // matchesIdentity whole and be refused as unverified, because a wildcard identity
-    // deliberately matches a bare addr-spec only. It now parses to an address with no name,
-    // so it behaves exactly as that bare address does.
+    // The accepted consequence of parsing before matching: a wildcard identity deliberately
+    // matches a bare addr-spec only, and `<addr>` parses to an address with no name, so it
+    // behaves exactly as that bare address does.
     const makeReq = stubCreate(client);
 
     await client.createDraft({ subject: 'Hi', from: '<ops@example.com>' });
@@ -3394,7 +3354,7 @@ describe('sender name parsing — createDraft', () => {
   });
 
   it('still refuses a named from whose ADDRESS matches no identity', async () => {
-    // The name half is never validated; the address half is checked exactly as before.
+    // The name half is never validated; the address half is checked as a bare from's is.
     stubCreate(client);
 
     await assert.rejects(
@@ -3616,8 +3576,8 @@ describe('createDraft wildcard identity', () => {
   // is omitted. A caller who passes the pattern itself gets past it, and then past the
   // identity match too — matchesIdentity opens with a plain equality test, so
   // `*@example.com` matches the `*@example.com` identity it came from and reads as verified.
-  // The pattern was written into the stored draft's From header; send_draft refused it later,
-  // so nothing was transmitted, but the draft was stored wrong with nothing said at write.
+  // Without this refusal the pattern lands in the stored draft's From header, with nothing
+  // said until send_draft refuses it.
   for (const passed of ['*@example.com', 'Ops <*@example.com>']) {
     it(`refuses the wildcard pattern passed as from: ${passed}`, async () => {
       const makeReq = stubRequests(client, async () => ({
@@ -3819,9 +3779,9 @@ describe('updateDraft wildcard identity', () => {
     assert.deepEqual(emailObj.from, [{ name: 'Alex Example', email: 'work@example.com' }]);
   });
 
-  // The passed value, the same hole createDraft had: the arm below fires only when the edit
-  // passes no `from`, so a caller passing the pattern went straight past it and past the
-  // identity match, and the recreated draft stored the pattern in its From header.
+  // The passed value, as on createDraft: the arm below fires only when the edit passes no
+  // `from`, so without this refusal a caller passing the pattern gets past it and past the
+  // identity match, and the recreated draft stores the pattern in its From header.
   for (const passed of ['*@example.com', 'Ops <*@example.com>']) {
     it(`refuses the wildcard pattern passed as from on an edit: ${passed}`, async () => {
       const existingWild = { ...EXISTING_DRAFT, from: [{ email: 'work@example.com' }] };
@@ -3927,8 +3887,8 @@ describe('updateDraft wildcard identity', () => {
     assert.deepEqual(emailObj.from, [{ name: null, email: 'someone@other.test' }]);
   });
 
-  // Both fixtures above are nameless drafts, so they stayed green under the old precedence
-  // too and don't pin #152 for the wildcard-identity path specifically. This one does.
+  // Both fixtures above are nameless drafts, so they pass under either name precedence and
+  // don't pin #152 for the wildcard-identity path specifically. This one does.
   it('keeps the draft\'s own name over a wildcard identity on a metadata-only edit (#152)', async () => {
     const namedWild = { ...EXISTING_DRAFT, from: [{ name: 'Work Sender', email: 'work@example.com' }] };
     const makeReq = stubRequests(client, async (req: any) => {
@@ -3947,9 +3907,9 @@ describe('updateDraft wildcard identity', () => {
 
 // ---------- updateDraft display-name resolution (#152) ----------
 //
-// Reversed precedence: the name the stored draft already carries against the address being
-// written wins over the verified identity's configured name, which is now only a fallback
-// for a draft that carries none. See writtenFromName in src/jmap-client.ts.
+// The name the stored draft already carries against the address being written wins over
+// the verified identity's configured name, which is only a fallback for a draft that
+// carries none. See writtenFromName in src/jmap-client.ts.
 describe('updateDraft display name resolution', () => {
   let client: JmapClient;
 
@@ -4639,7 +4599,6 @@ describe('updateDraft attachments', () => {
 
   const NEW_PART = { blobId: 'new-blob', type: 'application/pdf', name: 'new.pdf', disposition: 'attachment' };
 
-  // One carried PDF attachment (blob-att / doc.pdf), no inline parts.
   const DRAFT_ONE_ATT = {
     ...EXISTING_DRAFT,
     attachments: [{ blobId: 'blob-att', type: 'application/pdf', name: 'doc.pdf', disposition: 'attachment', cid: null, partId: '3', size: 1234 }],
@@ -4737,7 +4696,6 @@ describe('updateDraft attachments', () => {
     };
     const makeReq = mockUpdate(client, mixedDraft);
     await client.updateDraft('draft-1', { removeAttachments: ['real.pdf'] });
-    // The null-named one survives; the named one is gone.
     assert.deepEqual(draftFromCall(makeReq).attachments, [
       { blobId: 'b-null', type: 'application/octet-stream', disposition: 'attachment' },
     ]);
@@ -5119,10 +5077,9 @@ describe('updateDraft embedded images (#13)', () => {
     );
   });
 
-  // Narrowed to AUTHORING one. A minted identifier is durable now — it survives an edit for
-  // as long as the body keeps referencing it — so the two halves are a matched pair and the
-  // pair is what pins the rule: naming a part the draft does not carry is refused, naming one
-  // it does is the ordinary read-edit-write shape. Refusing both would refuse the first edit
+  // A minted identifier survives an edit for as long as the body keeps referencing it, so
+  // the two halves are a matched pair and the pair is what pins the rule: naming a part the
+  // draft does not carry is refused, naming one it does is the ordinary read-edit-write shape. Refusing both would refuse the first edit
   // of every image-bearing draft this server made.
   it('refuses a caller reference AUTHORING a server-managed identifier the draft has no part for', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []));
@@ -5347,9 +5304,8 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
     assert.deepEqual(draft.inReplyTo, ['orig-msg@example.com']);
   });
 
-  // De-forwarding is now an explicit act — clearFields:['forwardedMessageId'] — rather than
-  // something a body rewrite inferred. The pointer still follows the marking it refines: a
-  // draft that no longer forwards anything has no instance to name.
+  // De-forwarding is an explicit act, clearFields:['forwardedMessageId']. The pointer follows
+  // the marking it refines: a draft that no longer forwards anything has no instance to name.
   it('DROPS the header with the forward marking when the caller clears forwardedMessageId (a de-forward)', async () => {
     const makeReq = mockSrcUpdate(client, FORWARD_WITH_SRC);
     await client.updateDraft('fdraft-1', { clearFields: ['forwardedMessageId'] });

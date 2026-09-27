@@ -55,12 +55,8 @@ import { defaultCalendarMultiGet, makeMockDAVClient } from './testing/caldav-moc
 // The calendar window's local-day resolution reads the deployment's configured zone from
 // the single place it is stored, so a test that asserts on a window has to pin that zone.
 import { setDefaultTimezone } from './email-formatter.js';
-// For the timeZone/endTimeZone serialisation check: `toolJson` is the seam get_calendar_event
-// renders through, `formatQueryResult` is the one list_calendar_events renders through.
 import { toolJson, isUsableTimezone, resolveCalendarInstantMs, InvalidInputError } from './coerce.js';
 import { buildBrokenCollectionNote, formatQueryResult } from './response-formatters.js';
-// For hand-computing the exact block regenerateVTimezones should produce, so a structural test
-// can assert byte-for-byte equality rather than a handful of substring checks.
 import { generateVTimezone } from './vtimezone.js';
 import { foldICalLine } from './ical-fold.js';
 
@@ -75,12 +71,11 @@ type UpdateObjectParams = Parameters<DAVClient['updateCalendarObject']>[0];
 type CreateObjectParams = Parameters<DAVClient['createCalendarObject']>[0];
 type DeleteObjectParams = Parameters<DAVClient['deleteCalendarObject']>[0];
 
-// A stand-in etag for a fixture that predates the rule requiring one. A lookup resolves a copy
-// only when the resource came back whole - url, payload AND etag - because the etag is the write
-// path's `If-Match` and tsdav sends a delete with no `If-Match` at all when it is missing (#137).
-// A real CalDAV server returns `getetag` on every resource it describes, so a fixture without one
-// describes a server that does not exist; `withEtags` supplies it rather than each fixture
-// restating it. Tests that are ABOUT the missing-etag case build their objects without this.
+// A lookup resolves a copy only when the resource came back whole - url, payload AND etag -
+// because the etag is the write path's `If-Match` and tsdav sends a delete with no `If-Match` at
+// all when it is missing (#137). A real CalDAV server returns `getetag` on every resource, so
+// `withEtags` supplies one. Tests that are ABOUT the missing-etag case build their objects
+// without it.
 const FIXTURE_ETAG = '"fixture-etag"';
 
 function withEtags<T extends object>(objects: T[]): Array<T & { etag: string }> {
@@ -871,7 +866,6 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
 
   function createMockedClient(calendarObjects: Array<{ data: string; url: string }>) {
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
-    // Override the private getClient method to return a mock DAVClient
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(calendarObjects)),
     });
@@ -924,11 +918,6 @@ describe('CalDAVCalendarClient.getCalendarEvents', () => {
   });
 
   it('sends a 31-day window from local today, expanded, when no dates are provided (#142)', async () => {
-    // A call naming neither bound used to go out with NO time range, and therefore with no
-    // `expand` either — tsdav drops `<C:expand>` without one. So the call most likely to be
-    // asked "what is on?" was the one call answering with series masters at their original
-    // DTSTART, and the only alternative was an open-ended expansion nobody can bound.
-    //
     // The clock is INJECTED and the zone PINNED, because a default window computed from the
     // real clock could only be asserted against a value this test recomputed the same way.
     setDefaultTimezone('Australia/Sydney');
@@ -979,12 +968,10 @@ describe('validateAndFormatICalDate', () => {
   });
 
   it('accepts and normalizes positive offset to UTC', () => {
-    // 2026-04-18T10:00:00+02:00 = 2026-04-18T08:00:00Z
     assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00+02:00', 'start'), '20260418T080000Z');
   });
 
   it('accepts and normalizes negative offset to UTC', () => {
-    // 2026-04-18T10:00:00-05:00 = 2026-04-18T15:00:00Z
     assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00-05:00', 'start'), '20260418T150000Z');
   });
 
@@ -1140,9 +1127,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent', () => {
   });
 
   it('classes a not-found id as caller-fixable input, not a server fault', async () => {
-    // The message assertion above passes under either class. A wrong event id is
-    // something the caller corrects and re-sends, so the class has to say so:
-    // InvalidInputError maps to InvalidParams, a plain Error to InternalError.
+    // Pins the class, which the message assertion above cannot: a wrong event id is
+    // caller-fixable (InvalidInputError maps to InvalidParams, a plain Error to InternalError).
     const { client } = createMockedClientWithUpdateDelete([]);
     await assert.rejects(
       () => client.updateCalendarEvent('nonexistent@fm', { title: 'X' }),
@@ -1249,7 +1235,7 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
     assert.equal(event.title, 'Findable');
   });
 
-  // #102: parseICalValue no longer trims, so a stored UID with padding around it must be
+  // #102: parseICalValue does not trim, so a stored UID with padding around it must be
   // trimmed at ITS OWN call sites (the same exact-match category as the TZID substring
   // check) or a caller can no longer find the event by its real, unpadded id.
   it('finds an event by its unpadded id when the stored UID line carries padding', async () => {
@@ -1270,9 +1256,9 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
 
   it('returns the STORED start and its zone exactly as written, unexpanded', async () => {
     // This is the call that reads a resource rather than a window over one, so it is the only
-    // one that can promise the stored property back verbatim. `list_calendar_events` used to
-    // share that promise on a bounds-free call; it no longer has one (#142), and its rows are
-    // expansion output, which the server normalises to UTC instants and strips the RRULE from.
+    // one that can promise the stored property back verbatim. `list_calendar_events` rows are
+    // expansion output (#142), which the server normalises to UTC instants and strips the RRULE
+    // from.
     setDefaultTimezone('America/New_York');
     try {
       const ical = [
@@ -1311,9 +1297,8 @@ describe('CalDAVCalendarClient.getCalendarEventById', () => {
   });
 
   it('throws InvalidInputError for a not-found id so the boundary maps it to InvalidParams', async () => {
-    // A wrong event id is caller-fixable, so it must not surface as InternalError
-    // ("server-side, a bare retry might work"). The message assertion above passes
-    // under either class; this one pins the class.
+    // Pins the class, which the message assertion above cannot: a wrong event id is
+    // caller-fixable.
     const { client } = createMockedClientWithObjects([]);
     await assert.rejects(
       () => client.getCalendarEventById('nonexistent@fm'),
@@ -1334,8 +1319,7 @@ describe('CalDAVCalendarClient event lookup', () => {
   // older fixtures use, because the url form of an event id is resolved by MATCHING it against
   // a discovered calendar — on origin AND path segments — rather than by fetching what the
   // caller typed. Neither half of that comparison exists for a bare relative path, so a
-  // shorthand fixture cannot exercise the confinement at all. Invented host, per the fixture
-  // rule the home-listing block above states: no account value belongs in a test.
+  // shorthand fixture cannot exercise the confinement at all.
   const PERSONAL_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
   const WORK_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/work/';
   const TASKS_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/tasks/';
@@ -1370,9 +1354,7 @@ describe('CalDAVCalendarClient event lookup', () => {
    * scripts/probes/calendar-uid-query.probe.mjs) — and an ADDRESSED fetch returns whichever of
    * them sit at the urls asked for.
    *
-   * A call carrying NEITHER is answered with the whole collection, which is what the unfiltered
-   * full scan used to ask for. That is deliberate: it lets a test written against this fake run
-   * unchanged on the code before and after the targeted query landed.
+   * A call carrying NEITHER is answered with the whole collection.
    */
   function makeObjectStore(byCalendarUrl: Record<string, StoredObject[]>) {
     return mock.fn(async (params: FetchObjectsParams) => {
@@ -1755,15 +1737,9 @@ describe('CalDAVCalendarClient event lookup', () => {
     }
   });
 
-  // A calendar with no display name still has to be nameable, or the refusal lists a copy the
-  // caller cannot tell from the others. The url is the fallback because it is the one thing a
-  // collection always has. It is PADDED here because a url is server-authored text arriving in
-  // a multistatus href, and an untrimmed one would put the padding inside the quoted span the
-  // message renders it in.
   // The caller's OWN id is echoed at CALENDAR_URL_ECHO_LIMIT — the bound eventNotFoundError uses
   // for the same value — and not at the ambiguity's copy bound, whose stated reason is about one
-  // COPY's calendar and url. Nothing measured that: reverting this echo to the copy bound changed
-  // no test, because every other fixture here uses an id far too short to reach either.
+  // COPY's calendar and url. Every other fixture here uses an id too short to reach either bound.
   it('bounds the caller id it echoes at the calendar url bound, not the wider copy bound', async () => {
     const longId = `dup@fm${'p'.repeat(400)}`;
     const { client } = makeLookupClient(twoCalendars, {
@@ -1783,6 +1759,11 @@ describe('CalDAVCalendarClient event lookup', () => {
     );
   });
 
+  // A calendar with no display name still has to be nameable, or the refusal lists a copy the
+  // caller cannot tell from the others. The url is the fallback because it is the one thing a
+  // collection always has. It is PADDED here because a url is server-authored text arriving in
+  // a multistatus href, and an untrimmed one would put the padding inside the quoted span the
+  // message renders it in.
   it('names a copy by its collection url, trimmed, when the calendar has no display name', async () => {
     const padded = `  ${PERSONAL_URL}  `;
     const { client } = makeLookupClient(
@@ -1976,8 +1957,7 @@ describe('CalDAVCalendarClient event lookup', () => {
   it('reads a 404 or a 410 on the addressed fetch as no copy there', async () => {
     // BOTH statuses, because both are in the swallowed class and only one of them is the case
     // anyone thinks of. A 410 is what a server says about a resource it knows was deleted, which
-    // is exactly the "url of an event since removed" this swallow exists for — and with only the
-    // 404 pinned, dropping 410 from the classifier changed nothing any test could see.
+    // is exactly the "url of an event since removed" this swallow exists for.
     for (const status of ['404 Not Found', '410 Gone']) {
       const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
       const fetchCalendarObjects = mock.fn(async (params: FetchObjectsParams) => {
@@ -2133,7 +2113,7 @@ describe('CalDAVCalendarClient event lookup', () => {
 
 
 // ============================================================
-// New tests for calendar attendee support & non-destructive updates
+// Calendar attendee support & non-destructive updates
 // ============================================================
 
 describe('findValueBoundary', () => {
@@ -2196,9 +2176,8 @@ describe('extractTzidParam', () => {
 });
 
 describe('formatDateTimeProperty tzidSource (#157)', () => {
-  // #102: nothing pinned that an INHERITED TZID reports tzidSource 'stored' specifically
-  // (as opposed to 'caller' or 'default') — every current consumer of the field only
-  // branches on `=== 'default'`, so these two sites are the only place 'stored' is checkable.
+  // #102: every consumer of tzidSource branches only on `=== 'default'`, so these two tests
+  // are the only place 'stored' (as opposed to 'caller' or 'default') is checked.
   it('reports tzidSource "stored" when the property\'s OWN TZID is preserved', () => {
     const originalVevent = [
       'BEGIN:VEVENT',
@@ -2759,7 +2738,6 @@ describe('removeExceptionVEvents', () => {
       'END:VCALENDAR',
     ].join('\n');
 
-    // Only orphan the April 8 exception
     const orphaned = [new Date('2026-04-08T10:00:00Z')];
     const result = removeExceptionVEvents(data, orphaned);
     assert.ok(result.includes('SUMMARY:Master'));
@@ -3003,7 +2981,6 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('SUMMARY:New Title'));
-    // Preserved properties
     assert.ok(updatedData.includes('ATTENDEE;CN=Alice'));
     assert.ok(updatedData.includes('ATTENDEE;CN=Bob'));
     assert.ok(updatedData.includes('ORGANIZER;CN=Boss'));
@@ -3021,7 +2998,6 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     await client.updateCalendarEvent('evt2@fm', { title: 'New Title' });
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
-    // Original DTSTART with TZID should be preserved exactly
     assert.ok(updatedData.includes('DTSTART;TZID=Europe/Rome:20260401T100000'));
   });
 
@@ -3143,10 +3119,8 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
   });
 
   it('empty title throws InvalidInputError so the index maps calendar input to InvalidParams (#41 collateral)', async () => {
-    // The calendar tools share requireNonEmpty from coerce.ts, so the #41 reclassification
-    // reaches them for free — pin it so it can't silently regress back to InternalError.
-    // The message-regex assertion above passes under either error class; this one is what
-    // actually holds the validators to coerce.ts rather than a local plain-Error copy.
+    // Pins the class, which the message assertion above cannot: it holds the calendar tools to
+    // coerce.ts's requireNonEmpty (#41) rather than a local plain-Error copy.
     const ical = makeRichIcal('evtA@fm');
     const { client, mockDAVClient } = createMockedPatchClient([{ data: ical, url: '/cal/evtA.ics' }]);
     await assert.rejects(
@@ -3181,7 +3155,6 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(!updatedData.includes('LOCATION:'));
-    // Other content untouched
     assert.ok(updatedData.includes('SUMMARY:Original Title'));
     assert.ok(updatedData.includes('DESCRIPTION:Original description'));
   });
@@ -3327,7 +3300,6 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
       'END:VCALENDAR',
     ].join('\r\n');
     const objects = [{ data: noOrganizerIcal, url: '/cal/noorg2.ics' }];
-    // Use non-email username
     const client = new CalDAVCalendarClient({ username: 'not-an-email', password: 'test' });
     const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
       fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => withEtags(objects)),
@@ -3496,7 +3468,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('DESCRIPTION:New description'));
-    assert.ok(updatedData.includes('SUMMARY:Original Title')); // Other fields preserved
+    assert.ok(updatedData.includes('SUMMARY:Original Title'));
   });
 
   it('updates DTSTAMP and LAST-MODIFIED', async () => {
@@ -3508,7 +3480,6 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     const updatedData = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
     assert.ok(updatedData.includes('LAST-MODIFIED:'));
-    // DTSTAMP should be updated (not the original)
     assert.ok(!updatedData.includes('DTSTAMP:20260401T000000Z'));
   });
 
@@ -3934,8 +3905,6 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(forDelete.mockDAVClient.deleteCalendarObject.mock.calls.length, 1);
   });
 
-  // The resource is what decides, so a series with no SUMMARY still refuses — it just names
-  // the id the caller passed instead of a title.
   // The refusal opens with the stored SUMMARY, unescaped — so an iCal `\n` in the title of an
   // event this account did not write (an invitation's, say) arrives as a real newline and the
   // sentence it forges reads as the server's own. The echo is what closes that; this is the
@@ -3959,6 +3928,8 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
 
+  // The resource is what decides, so a series with no SUMMARY still refuses — it just names
+  // the id the caller passed instead of a title.
   it('falls back to the event id when the series has no title', async () => {
     const untitled = makeRecurringIcal().replace('SUMMARY:Weekly Meeting\r\n', '');
     const { client } = createMockedRecurringClient(untitled);
@@ -4117,9 +4088,7 @@ describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
     });
 
     const ical = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
-    // Should use DQUOTE quoting: CN="Doe, Alice"
     assert.ok(ical.includes('CN="Doe, Alice"'));
-    // Should NOT use backslash escaping: CN=Doe\, Alice
     assert.ok(!ical.includes('CN=Doe\\, Alice'));
   });
 
@@ -4188,7 +4157,6 @@ describe('CRLF vs LF line ending preservation', () => {
   it('foldICalLine with wrong lineEnding produces consistent output', () => {
     // Simulate a caller using CRLF fold on what will be inserted into LF document
     const folded = foldICalLine('DESCRIPTION:' + 'x'.repeat(80), '\r\n');
-    // The fold itself should use CRLF consistently
     assert.ok(folded.includes('\r\n'));
     // When replaceICalProperty re-splits and re-joins with LF, CRLF folds are preserved
     // inside the replacement line — this is the caller's responsibility to match
@@ -4338,8 +4306,6 @@ describe('Additional plan-required updateCalendarEvent tests', () => {
     );
   });
 });
-
-// ---------- v1.11.0 review fixes ----------
 
 describe('escapeICalText control-character hardening', () => {
   it('escapes a bare CR as \\n instead of passing it through', () => {
@@ -4621,8 +4587,6 @@ describe('removeOrphanedVTimezones counts only real TZID parameters', () => {
   });
 });
 
-// ---------- v1.11.1 security fixes ----------
-
 describe('updateCalendarEvent — a hostile recurrence rule is never expanded', () => {
   function mockClient(icalData: string) {
     const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
@@ -4859,14 +4823,10 @@ describe('ORGANIZER display name comes from the client config', () => {
 // ---------- DTSTART/DTEND time-frame and ordering agreement ----------
 
 describe('createCalendarEvent start/end frame and ordering agreement', () => {
-  // create defaults a designator-less value to the configured zone (#157) — pinned so the
-  // 'names both values and both forms' and 'writes a designator-less pair in the configured
-  // zone' tests below see a deterministic zone name regardless of the machine/CI environment
-  // running them. Pinned to America/New_York specifically, not just "a fixed zone": this
-  // machine's own host zone (Intl.DateTimeFormat().resolvedOptions().timeZone) is
-  // Australia/Sydney, so pinning to Australia/Sydney here could not tell "read the configured
-  // zone" apart from "silently fell back to the host zone" — a real regression to the host-zone
-  // fallback would leave these assertions green.
+  // create defaults a designator-less value to the configured zone (#157), so the zone is
+  // pinned for a deterministic name on any machine. America/New_York, not Australia/Sydney: the
+  // dev host's own zone is Sydney, where a regression to the host-zone fallback would leave
+  // these assertions green.
   before(() => setDefaultTimezone('America/New_York'));
   after(() => setDefaultTimezone(undefined));
 
@@ -5005,13 +4965,11 @@ describe('createCalendarEvent start/end frame and ordering agreement', () => {
   });
 });
 
-// The serialization path used to parse the caller's start/end itself and hand anything it
-// did not recognise to `new Date()`, whose legacy fallback parser accepts a great deal and
-// resolves it against the SERVER's time zone. A create call therefore had no single
-// meaning: the same arguments produced a different day depending on where the server ran,
-// and an impossible day was rolled quietly into the next month. Every case below reaches
-// the write path — none of them is stopped by the shape guard the update path applies
-// before it — so they are the evidence for validating the value in one place.
+// Handed to `new Date()`, whose legacy fallback parser accepts a great deal and resolves it
+// against the SERVER's time zone, each of these would produce a different day depending on
+// where the server ran, and an impossible day would roll quietly into the next month. Every
+// case below reaches the write path — none of them is stopped by the shape guard the update
+// path applies before it — so they are the evidence for validating the value in one place.
 describe('createCalendarEvent rejects date spellings that would be resolved by guesswork', () => {
   function createMockedCreateClient() {
     const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
@@ -5435,25 +5393,14 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
   });
 });
 
-// TRANSP ON THE WRITE PATHS: create picks a default, update never does (#195).
+// TRANSP ON THE WRITE PATHS: create picks a default, update never does (#195). The rule and the
+// measured Fastmail client behaviour behind it are in docs/conventions.md ("Free/busy crosses
+// four tools") and docs/fastmail-action-availability.md.
 //
-// An all-day event created here must not block the account's free/busy for the whole day. RFC
-// 5545 §3.8.2.7 defaults an absent TRANSP to OPAQUE, so writing nothing means "busy" — and the
-// Fastmail client writes TRANSP:TRANSPARENT on every all-day event it authors, which its event
-// editor confirms is a deliberate default rather than an artifact (the busy/free control
-// defaults to free on an all-day event and to busy on a timed one). A timed event therefore
-// needs no property at all: the RFC default is already what the client means.
-//
-// THE UPDATE PATH TAKES NO SUCH DECISION, and the tests below say so from every direction it
-// could be reached: converting a timed event to all-day, editing an all-day event that carries
-// no TRANSP, editing one that carries TRANSP:OPAQUE, and converting an all-day event back to
-// timed hours all leave the property exactly as stored. The reason is the same §3.8.2.7 that
-// motivates create's default, read the other way round: absent and OPAQUE are two spellings of
-// ONE state, so an event with no TRANSP is not silent about free/busy — it says busy. There is
-// no gap for an update to fill, and writing TRANSPARENT over it because the caller edited the
-// dates would overwrite a value rather than supply a missing one. Create is different only
-// because it is choosing an initial value where no prior one exists. A caller who wants the
-// value changed says so with `transparency` (#194), which the suite after this one covers.
+// The update tests reach it from every direction: timed to all-day, an all-day event with no
+// TRANSP, one with TRANSP:OPAQUE, and all-day back to timed all leave the property as stored.
+// Absent and OPAQUE are two spellings of ONE state (RFC 5545 §3.8.2.7), so an event with no
+// TRANSP already says busy and there is no gap for an update to fill.
 describe('TRANSP: create writes an all-day event free, update leaves it alone (#195)', () => {
   function createClient() {
     const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });
@@ -5534,8 +5481,7 @@ describe('TRANSP: create writes an all-day event free, update leaves it alone (#
   it('an update leaves a stored TRANSP:OPAQUE on an all-day event alone', async () => {
     // Someone marked this all-day event busy in a client that stores the property explicitly.
     // Writing TRANSPARENT over it would reverse their choice — and so would writing it over the
-    // event in the test above, which says the same thing in the other legal spelling. This test
-    // now holds for the general reason rather than because of a guard keyed on the absence.
+    // event in the test above, which says the same thing in the other legal spelling.
     const busyAllDay = storedEvent('busy@fm', [
       'DTSTART;VALUE=DATE:20261003', 'DTEND;VALUE=DATE:20261006', 'TRANSP:OPAQUE',
     ]);
@@ -5556,8 +5502,7 @@ describe('TRANSP: create writes an all-day event free, update leaves it alone (#
   });
 
   it('an update converting an all-day event to timed leaves its TRANSP:TRANSPARENT in place', async () => {
-    // The reverse flip, and no longer a special case: this is the same rule as the three tests
-    // above, which is the point of pinning it. The converted event is a real meeting that still
+    // The reverse flip, under the same rule as the three tests above. The converted event is a real meeting that still
     // shows this account as free, and that is the caller's to change — `transparency: 'busy'`
     // in the same call as the new hours (#194) does it, and the transparency suite below pins
     // that. What an update must not do is decide it for them off the back of a date edit.
@@ -5730,7 +5675,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
     });
 
     it('bounds and neutralises the refused value rather than interpolating it raw', async () => {
-      // #190's rule, applied to the newest untrusted value in this file. A paragraph separator
+      // #190's rule, applied to this untrusted value. A paragraph separator
       // would otherwise split the refusal into what reads as a second sentence from the server,
       // and an unbounded value would let the caller choose the length of the error.
       const hostile = `x y${'z'.repeat(400)}`;
@@ -5825,8 +5770,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
     });
 
     it('clears description without touching transparency', async () => {
-      // The clear loop is shared, and this commit widened its field map. This pins the entry
-      // that was already there against the one being added beside it.
+      // The clear loop is shared across fields, so clearing one must leave its neighbour alone.
       const full = storedEvent('desc@fm', [
         'DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'DESCRIPTION:Notes', 'TRANSP:TRANSPARENT',
       ]);
@@ -5935,9 +5879,9 @@ describe('transparency: busy and free as caller values (#194)', () => {
     });
 
     it('get_calendar_event still returns participants alongside the new field', async () => {
-      // The option this commit added rides in the same object literal as includeParticipants,
-      // so this pins that the older half is still asked for on the tool's own path — the
-      // existing participant coverage calls parseCalendarObject directly and would not notice.
+      // The transparency option rides in the same object literal as includeParticipants, so
+      // this pins that participants are still asked for on the tool's own path — the participant
+      // coverage elsewhere calls parseCalendarObject directly and would not notice.
       const withPeople = storedEvent('who@fm', [
         'DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z',
         'ATTENDEE;CN=Alice;PARTSTAT=ACCEPTED:mailto:alice@example.com',
@@ -5997,8 +5941,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
     });
 
     it('serialises transparency through the seam each tool renders with', async () => {
-      // The response format is unchanged by this work: `transparency` is an ordinary field in
-      // the compact JSON, per docs/conventions.md. Asserting on the rendered text rather than
+      // `transparency` is an ordinary field in the compact JSON, per docs/conventions.md. Asserting on the rendered text rather than
       // the object is what proves the field survives the serialisation seam rather than
       // stopping at the parser.
       const free = storedEvent('ser@fm', ['DTSTART:20261003T090000Z', 'DTEND:20261003T100000Z', 'TRANSP:TRANSPARENT']);
@@ -6251,16 +6194,11 @@ describe('timeZone parameter (#157)', () => {
     });
 
     it('omitting timeZone never defaults — a designator-less value still inherits the stored TZID, not the configured default', async () => {
-      // A dedicated fixture, not the shared ZONED above: this describe block previously ran
-      // with no configured-zone pin at all, so the configured default fell back to whatever
-      // zone the test host itself is in — which, on this repo's dev host, is Australia/Sydney,
-      // the same spelling ZONED's stored TZID uses. "Inherits the stored TZID" and "falls back
-      // to the configured/host default" then wrote the identical TZID, so this test could not
-      // tell the two apart (confirmed by temporarily making update default an omitted zone to
-      // the configured zone, the way create does: 8 other tests failed, and this was not one
-      // of them). Pinning the block to America/New_York and storing this fixture in
-      // Europe/London — a third zone, matching neither — closes that gap: either wrong
-      // fallback now writes a TZID this assertion does not expect.
+      // A dedicated fixture, not the shared ZONED above: ZONED's stored TZID is Australia/Sydney,
+      // the dev host's own zone, so "inherits the stored TZID" and "falls back to the host
+      // default" would write the identical TZID. Stored in Europe/London, matching neither that
+      // nor the block's America/New_York pin, either wrong fallback writes a TZID this assertion
+      // does not expect.
       const inheritZoned = storedEvent('tz-inherit@fm', 'DTSTART;TZID=Europe/London:20260321T090000', 'DTEND;TZID=Europe/London:20260321T100000');
       const { client, mockDAVClient } = updateClient(inheritZoned);
       await client.updateCalendarEvent('tz-inherit@fm', { start: '2026-03-21T09:30:00' });
@@ -6349,10 +6287,8 @@ describe('timeZone parameter (#157)', () => {
     it('does not fire when the untouched side is stored in the SAME zone, differently spelled', async () => {
       // 'australia/sydney' (lowercase) names the same zone as the stored 'Australia/Sydney'
       // (zoneNamesEqual is case-insensitive), so this is not the two-zone shape the stranding
-      // check exists to catch. What actually lands on the wire is the CANONICAL name ICU
-      // resolves 'australia/sydney' to, not the caller's lowercase spelling — canonicalization
-      // happens before the write, so asserting the raw input here would be asserting a value
-      // this code path no longer produces.
+      // check exists to catch. What lands on the wire is the CANONICAL name ICU resolves
+      // 'australia/sydney' to, not the caller's lowercase spelling.
       const { client, mockDAVClient } = updateClient(ZONED);
       await client.updateCalendarEvent('tz@fm', { start: '2026-03-21T09:00:00', timeZone: 'australia/sydney' });
       const written = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
@@ -6360,9 +6296,9 @@ describe('timeZone parameter (#157)', () => {
     });
 
     it('a differently-spelled same zone does NOT stand down the ordering check (backwards pair rejected)', async () => {
-      // Before the fix this compared TZIDs with raw !==, so 'Australia/Sydney' vs
-      // 'australia/sydney' read as two DIFFERENT zones and stood the ordering check down —
-      // silently accepting a backwards pair as a "flight lands elsewhere" shape it is not.
+      // Compared with raw !==, 'Australia/Sydney' vs 'australia/sydney' read as two DIFFERENT
+      // zones and stood the ordering check down — silently accepting a backwards pair as a
+      // "flight lands elsewhere" shape it is not.
       const { client, mockDAVClient } = updateClient(ZONED);
       await assert.rejects(
         // Stored start is 19:00; an end of 08:00 the same day, in the "same" zone under a
@@ -6430,15 +6366,12 @@ describe('timeZone parameter (#157)', () => {
       assert.ok(written.includes('DTSTART;TZID=Australia/Sydney:20260321T090000'));
     });
 
-    // zoneNamesEqual used to compare TZIDs with raw string equality, so a stored TZID that
-    // named the same zone through an ICU link/alias spelling — not just a different case —
-    // read as a DIFFERENT zone from a caller's re-affirmed spelling. That produced a false
-    // "stranded two-zone event" rejection on an ordinary read-modify-write: reading a stored
-    // 'NZ' TZID off this server (the read side emits it verbatim — #139 — since it was written
-    // by some other client) and then re-zoning the touched side to the equivalent canonical
-    // name. The caller cannot pass 'NZ' itself here any more (#157 amendment rejects bare
-    // shorthand on write), so this exercises the canonical spelling a caller is now required to
-    // send — 'Pacific/Auckland' — against a STORED side that still carries the raw alias.
+    // A stored TZID naming the same zone through an ICU link/alias spelling must read as the
+    // same zone as the caller's canonical one, or an ordinary read-modify-write is refused as a
+    // "stranded two-zone event": 'NZ', written by some other client, is read back verbatim
+    // (#139) and the caller re-zones the touched side to the equivalent canonical name. The
+    // caller cannot pass 'NZ' itself (#157 rejects bare shorthand on write), so the alias sits on
+    // the STORED side and the caller sends 'Pacific/Auckland'.
     it('recognises the stranded side as the SAME zone through a link/alias spelling ("NZ" == "Pacific/Auckland")', async () => {
       const nzZoned = storedEvent('nz-tz@fm', 'DTSTART;TZID=NZ:20260320T190000', 'DTEND;TZID=NZ:20260321T200000');
       const { client, mockDAVClient } = updateClient(nzZoned);
@@ -6457,10 +6390,8 @@ describe('timeZone parameter (#157)', () => {
 
     // Recognising 'NZ' and 'Pacific/Auckland' as the same zone is not a one-way relaxation:
     // validateDateConsistency's own "different zones, flight lands elsewhere" allowance
-    // (#140) reads through the identical zoneNamesEqual, so a pair that used to look
-    // cross-zone (and so skipped ordering entirely) is now ordering-checked like any
-    // same-zone pair — and a genuinely backwards alias pair is still rejected, not silently
-    // written. More checking, not less.
+    // (#140) reads through the identical zoneNamesEqual, so an alias pair is ordering-checked
+    // like any same-zone pair and a genuinely backwards one is rejected, not silently written.
     it('an alias pair that clears the stranding check is still ordering-checked, and a backwards one is rejected', async () => {
       const nzZoned = storedEvent('nz-order@fm', 'DTSTART;TZID=NZ:20260320T190000', 'DTEND;TZID=NZ:20260321T080000');
       const { client, mockDAVClient } = updateClient(nzZoned);
@@ -7766,11 +7697,10 @@ describe('CalDAV requests refuse to follow redirects', () => {
   });
 });
 
-// A failed CalDAV login used to still cache the unauthenticated client (getClient()
-// assigned `this.client` before awaiting login()), so every later call took the
-// `if (this.client)` fast path and failed downstream inside tsdav with a bare "no
-// account for fetchCalendars" instead of the real auth error (#143). getClient() now
-// only caches the client once login() has resolved.
+// getClient() caches the client only once login() has resolved. Assigning `this.client`
+// before awaiting login() sent every later call down the `if (this.client)` fast path, to
+// fail inside tsdav with a bare "no account for fetchCalendars" instead of the real auth
+// error (#143).
 describe('CalDAV login failure is not cached (#143)', () => {
   it('does not cache the client after a failed login, so a second call retries the login and surfaces the auth error again', async () => {
     const realLogin = DAVClient.prototype.login;
@@ -7785,14 +7715,9 @@ describe('CalDAV login failure is not cached (#143)', () => {
       const isAuthError = (err: unknown) =>
         err instanceof Error && err.message.includes('CalDAV login failed') && err.message.includes('app password');
 
-      // getClient() is private; going through a public method would make this
-      // depend on that method's own behaviour as well as getClient()'s.
       await assert.rejects((wrapper as any).getClient(), isAuthError);
       assert.equal(loginMock.mock.calls.length, 1, 'expected the first call to attempt exactly one login');
 
-      // The bug: this second call used to return the client cached by the first
-      // (failed) call instead of retrying, so it never reached login() again and
-      // instead failed later, downstream, with a different and less useful message.
       await assert.rejects(
         (wrapper as any).getClient(),
         isAuthError,
@@ -8201,12 +8126,10 @@ describe('eventIntersectsWindow', () => {
   });
 
   it('DROPS a zone-free value just outside the window, which the old margin kept (#162)', () => {
-    // THIS ASSERTION USED TO BE `true`. The filter granted any designator-less value fourteen
-    // hours of slack on both edges, so a value one morning past the window survived it and the
-    // caller saw a row outside the days they asked about. That margin now widens the range
-    // REQUESTED of the server instead, where it does work a filter cannot do, and what comes
-    // back is judged exactly: resolved in the configured zone, 10 March 08:00 is past a window
-    // that ends at midnight on the 10th.
+    // The fourteen-hour margin widens the range REQUESTED of the server, where it does work a
+    // filter cannot do; slack in the filter would show the caller a row outside the days they
+    // asked about. What comes back is judged exactly: resolved in the configured zone, 10 March
+    // 08:00 is past a window that ends at midnight on the 10th.
     assert.equal(
       eventIntersectsWindow({ start: '2027-03-10T08:00:00', end: '2027-03-10T09:00:00' }, WINDOW_START, WINDOW_END, 'UTC'),
       false,
@@ -8399,9 +8322,8 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
   }
 
   it('queries every calendar before slicing, so limit is a genuine earliest-N', async () => {
-    // The first calendar alone satisfies the limit. Under the old early break the later
-    // calendars were never read at all, so an earlier event in one of them could not appear
-    // and nothing said so.
+    // The first calendar alone satisfies the limit. An early break would never read the later
+    // calendars, so an earlier event in one of them could not appear and nothing would say so.
     const byCalendar: Record<string, Array<{ data: string; url: string }>> = {
       '/cal/a/': [
         { data: makeIcal('a1@fm', 'A late', '20260325T200000Z'), url: '/a1.ics' },
@@ -8832,10 +8754,8 @@ describe('CalDAVCalendarClient calendar discovery failures', () => {
 });
 
 // A broken entry inside the calendar home's own listing (#136). Every fixture here is RAW
-// multistatus XML run through tsdav's real parser: the entry the detection has to catch is one
-// the library DROPS from its calendar list (it keeps only entries that still look like
-// calendars), so a fixture of hand-shaped DAVCalendar objects could not contain the case at all
-// — which is precisely how the failure used to go unnoticed.
+// multistatus XML run through tsdav's real parser, for the reason given above
+// HOME_LISTING_HOME_URL: tsdav drops the broken entry from its calendar list.
 describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
   const EVENT_ICAL = [
     'BEGIN:VCALENDAR',
@@ -9403,9 +9323,9 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
         assert.ok(!err.message.includes('…and'), err.message);
         // The paths are separated, so five cannot read as one.
         assert.ok(err.message.includes(`"${brokenUrl(0)}", "${brokenUrl(1)}"`), err.message);
-        // PAST THE SUBJECT LINE: every pronoun downstream of it agrees in number too. Both
-        // copies of this wording once said "5 collections … The failure destroyed ITS name",
-        // which reads as one collection and undercounts what was lost.
+        // PAST THE SUBJECT LINE: every pronoun downstream of it agrees in number too. "5
+        // collections … The failure destroyed ITS name" reads as one collection and undercounts
+        // what was lost.
         assert.ok(
           err.message.includes(
             `"${brokenUrl(4)}". The failure destroyed their names and their types, `
@@ -9665,11 +9585,9 @@ describe('findBrokenCalendarHomeCollections', () => {
 // so the markers that bound a VEVENT have to be line-anchored or the payload can name its own
 // boundaries. Calendar content here is authored by anyone who can send an invitation.
 describe('VEVENT splitting is line-anchored against folded content', () => {
-  // A DESCRIPTION folded so the continuation line begins with the literal END:VEVENT text.
+  // A DESCRIPTION whose folded continuation lines carry the two component markers.
   // Deterministic to construct: libical folds at a fixed octet count, so a description padded
-  // to the right length puts the fold exactly there.
-  // A DESCRIPTION whose folded continuation lines carry the two component markers. The
-  // property order is the attacker's to choose, so the real SUMMARY and DTSTART sit AFTER
+  // to the right length puts the fold exactly there. The property order is the attacker's to choose, so the real SUMMARY and DTSTART sit AFTER
   // them: unanchored, the payload's own text ends the component early and starts a second
   // one, and the real event's properties land in the phantom.
   const FOLDED_TERMINATOR = [
@@ -9843,10 +9761,8 @@ describe('non-RFC line terminators inside a value are text, not structure', () =
   }
 
   // The presence test itself, asserted directly rather than through a reader that was never
-  // `/m`-based. The RRULE / RDATE / ORGANIZER / ATTENDEE gates on the write path all go through
-  // hasICalProperty, and it is the ONLY thing they go through \u2014 an earlier version of this
-  // test drove parseAllICalProperties instead, which passed identically before and after the
-  // fix and left every one of those gates unpinned. All four are also driven end to end through
+  // `/m`-based: the RRULE / RDATE / ORGANIZER / ATTENDEE gates on the write path all go through
+  // hasICalProperty and nothing else. All four are also driven end to end through
   // updateCalendarEvent: ORGANIZER and ATTENDEE in the patch-based suite, because they steer the
   // patch, and the recurrence markers in the refusal suite ("does not treat an RRULE forged
   // inside a SUMMARY as a recurrence", and its RDATE pair), because a marker the gate reads as
@@ -9867,7 +9783,7 @@ describe('non-RFC line terminators inside a value are text, not structure', () =
       for (const key of ['RRULE', 'RDATE', 'ORGANIZER', 'ATTENDEE']) {
         assert.equal(hasICalProperty(vevent, key), false, `${key} was read out of a value`);
       }
-      // \u2026and a real one on its own line is still found, so the guard cannot be "fixed" into
+      // And a real one on its own line is still found, so the guard cannot be "fixed" into
       // never matching.
       const real = vevent.replace(
         'UID:e@fm',
@@ -10057,7 +9973,7 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
   });
 
   it('saturates a CALLER-NAMED bound too, and says that it did', async () => {
-    // The saturation used to cover the invented half only. A caller bound is not immune: it
+    // Saturation covers a caller bound as well as the invented half: a caller bound
     // resolves through a zone, so an offset alone pushes `9999-12-31` over the end of the
     // four-digit-year range and tsdav answered a caller-fixable argument with a plain Error.
     setDefaultTimezone('America/New_York');
@@ -10076,11 +9992,10 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
     }
   });
 
-  // The other end, which had no coverage: a zone AHEAD of UTC pushes an early date off the
-  // bottom the same way a zone behind it pushes a late one off the top. The clamp carries the
-  // EDGE because the disclosure is an opposite statement at each end — knowing only the top
-  // one, the note told this caller their startDate had "resolved past the LAST date this
-  // server can express".
+  // A zone AHEAD of UTC pushes an early date off the bottom the same way a zone behind it
+  // pushes a late one off the top. The clamp carries the EDGE because the disclosure is an
+  // opposite statement at each end — knowing only the top one, the note told this caller their
+  // startDate had "resolved past the LAST date this server can express".
   it('saturates a caller-named bound at the EARLIEST edge, and says which edge that was', async () => {
     const { client, mockDAVClient } = mockedClient();
     const { windowClamp } = await client.getCalendarEvents(undefined, 50, '0000-01-01', '0001-01-01');
@@ -10093,11 +10008,9 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
   });
 
   it('rejects a one-sided window that saturation collapses to zero length', async () => {
-    // The inversion check used to be the `else if` alternative to the clamp, so a one-sided
-    // window never reached it — and the comment beside it claimed a single bound "is clamped
-    // above, never inverted". Saturation makes that false: a startDate on the last
-    // representable instant leaves the invented month nowhere to go, and tsdav answered
-    // with a plain Error (InternalError) over what is a caller-fixable bound.
+    // A one-sided window can invert too, so the inversion check is not an alternative to the
+    // clamp: a startDate on the last representable instant leaves the invented month nowhere
+    // to go, and tsdav answered with a plain Error (InternalError) over a caller-fixable bound.
     const { client, mockDAVClient } = mockedClient();
     await assert.rejects(
       () => client.getCalendarEvents(undefined, 50, '9999-12-31T23:59:59Z'),
@@ -10270,14 +10183,9 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
 
   // End-to-end wiring check for #139: the configured zone must reach the parser as an injected
   // parameter and drive the omit-when-same rule for real, not just when `configuredZone` is
-  // passed directly to `parseCalendarObject`. This test overrides the describe block's own
-  // `Australia/Sydney` pin to `America/New_York` for its own duration: on the machine this was
-  // written on, `Intl.DateTimeFormat().resolvedOptions().timeZone` (the host's own zone) is
-  // ALSO `Australia/Sydney`, so a pin of `Australia/Sydney` here could not tell "read the
-  // configured zone" apart from "silently fell back to the host zone" — a real production
-  // regression to the host-zone fallback would leave this test green. `America/New_York` is
-  // not this host's zone, so the omit-when-same fixture only omits if the configured value was
-  // genuinely read.
+  // passed directly to `parseCalendarObject`. This test overrides the describe block's
+  // `Australia/Sydney` pin to `America/New_York`, because Sydney is also the dev host's own
+  // zone, where a regression to the host-zone fallback would leave this green.
   it('wires the pinned configured zone through to timeZone omit-when-same and emit-when-different', async () => {
     setDefaultTimezone('America/New_York');
     try {
@@ -10306,9 +10214,8 @@ describe('CalDAVCalendarClient.getCalendarEvents argument and bound edges', () =
         { data: differentZone, url: '/cal/different.ics' },
       ]);
       // The window is named as instants and wide enough to hold both fixtures whichever zone
-      // each is written in. It is here because there is no bounds-free listing any more
-      // (#142) and the default window would put these 2026 fixtures out of range; the subject
-      // is still which ZONE the parser was handed, not which days were searched.
+      // each is written in, because the default window (#142) would put these 2026 fixtures out
+      // of range; the subject is which ZONE the parser was handed, not which days were searched.
       const { events } = await client.getCalendarEvents(
         undefined, 50, '2026-03-19T00:00:00Z', '2026-03-22T00:00:00Z',
       );
@@ -10455,8 +10362,7 @@ describe('unwrapDisplayName', () => {
   // itself (`props?.displayname?._cdata ?? props?.displayname`) and its `textFn` replaces an
   // element with its text, so neither key survives to reach this function. They are covered
   // because the helper handles them if that read ever changes, NOT as evidence that a server
-  // can produce them. Building a fixture on these believing them reachable is the mistake
-  // that made the first version of this fix claim a bug that cannot happen.
+  // can produce them.
   it('unwraps the CDATA and text-node shapes if tsdav ever stops flattening them', () => {
     assert.equal(unwrapDisplayName({ _attributes: { 'xmlns:d': 'DAV:' }, _cdata: 'Shared' }), 'Shared');
     assert.equal(unwrapDisplayName({ _text: 'Shared' }), 'Shared');
@@ -10513,13 +10419,11 @@ describe('calendar display names that are not strings', () => {
   });
 
   it('still hides the task collection, which the unwrap must not disturb', async () => {
-    // NOT a bug fix, and deliberately not written as one. There is no reachable input where
-    // the raw comparison and the unwrapped one disagree here: the hidden name arrives as a
-    // plain string, and every other shape tsdav can produce ({}, {_attributes}, a number, a
-    // boolean, an array) fails to equal it either way. A padded name is not reachable either
-    // — xml-js parses with `trim: true`, which trims plain text and CDATA alike. The unwrap
-    // at this filter buys consistency with every other read of the field; this test is the
-    // regression guard that it did not cost the behaviour that was already correct.
+    // A regression guard, not a bug fix: no reachable input makes the raw comparison and the
+    // unwrapped one disagree here. The hidden name arrives as a plain string, every other shape
+    // tsdav can produce ({}, {_attributes}, a number, a boolean, an array) fails to equal it
+    // either way, and xml-js's `trim: true` rules out a padded name. The unwrap is here for
+    // consistency with every other read of the field.
     const client = new CalDAVCalendarClient({ username: 'me@example.invalid', password: 'test' });
     (client as any).client = makeMockDAVClient(
       [
@@ -10592,13 +10496,10 @@ describe('calendar display names that are not strings', () => {
   });
 
   it('names a nameless calendar by its URL in the not-found error, WHOLE', async () => {
-    // Two defects, and the second only shows on a realistic URL. The name list first dropped
-    // anything unwrapping to undefined, so the message under-reported what the caller could
-    // name. Listing the URL then echoed it through the default 60-character limit, which
-    // truncates every real Fastmail collection URL — the prefix alone is 47 characters — and
-    // a truncated URL pasted back earns the same error again with nothing saying it was cut.
-    // The whole point of listing it is that it is a calendarId that RESOLVES, so the fixture
-    // is a full-length URL rather than the short synthetic path that cannot reach the bug.
+    // A nameless calendar is listed by its URL, so the message names every calendar the caller
+    // can pass. The fixture is a full-length URL because the default 60-character echo limit
+    // truncates every real Fastmail collection URL — the prefix alone is 47 characters — and a
+    // truncated URL pasted back earns the same error again with nothing saying it was cut.
     const namelessUrl = 'https://caldav.fastmail.com/dav/calendars/user/user@example.invalid/a1b2c3d4e5f6/';
     assert.ok(namelessUrl.length > 60, 'fixture must exceed the default echo limit to test it');
 
@@ -10695,8 +10596,6 @@ describe('calendar display names that are not strings', () => {
 // personal one, can carry a name an existing calendar already has — and nothing in CalDAV
 // stops it. So a caller's name can resolve to two collections, and the read path used to
 // answer from BOTH while the write path silently took the FIRST. Both now refuse.
-//
-// Invented host, invented names: no account value belongs in a fixture.
 describe('a calendarId that names more than one calendar (#173)', () => {
   const WORK_ONE = 'https://caldav.example.invalid/dav/calendars/user/probe/work-one/';
   const WORK_TWO = 'https://caldav.example.invalid/dav/calendars/user/probe/work-two/';
@@ -11170,8 +11069,7 @@ describe('a stored date value rendered into a refusal (#190)', () => {
     assert.match(message, /pass an end one day later/, message);
   });
 
-  // Parsing the stored value is NOT the whole of the check, and testing only the parse is what
-  // made the guard above look complete when it was not. The arithmetic itself can leave the
+  // Parsing the stored value is NOT the whole of the check. The arithmetic itself can leave the
   // year outside the four-digit ISO range: `toISOString` then renders an EXPANDED year
   // (`+010000-01-01T…`), which `.slice(0, 10)` cuts to `+010000-01` — offered to the caller as
   // a date to paste back, and not one — and one day further still it throws outright. All of
