@@ -1407,6 +1407,21 @@ describe('coerceCalendarWindowEnd (#64)', () => {
   });
 });
 
+describe('the calendar window refusal names the spellings the parser accepts', () => {
+  it('lists the no-seconds, fractional, lowercase-z and colon-less forms, each accepted', () => {
+    let message = '';
+    try {
+      coerceCalendarWindowStart('2026/08/12', 'startDate', 'UTC');
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    for (const example of ['2026-08-12T14:30:00Z', '2026-08-12T14:30:00+10:00', '2026-08-12T14:30Z', '2026-08-12T14:30:00.5Z', '2026-08-12T14:30:00z', '2026-08-12T14:30:00+1000']) {
+      assert.ok(message.includes(example), `the refusal should name ${example}: ${message}`);
+      assert.ok(coerceCalendarWindowStart(example, 'startDate', 'UTC'), `${example} should be accepted`);
+    }
+  });
+});
+
 // A calendar window's DAY is a local day (#138). Every zone here is injected, and two of
 // them are chosen so a sign error cannot hide: Sydney is ahead of UTC, New York behind it,
 // so a start that should move BACKWARD in one must move FORWARD in the other.

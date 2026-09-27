@@ -40,6 +40,7 @@ import {
   CALENDAR_NAME_LIST_CAP,
   AMBIGUOUS_COPY_URL_ECHO_LIMIT,
   LOGIN_FAILURE_ECHO_LIMIT,
+  CALENDAR_UID_ECHO_LIMIT,
   isBrokenCalendarHomeEntry,
   findBrokenCalendarHomeCollections,
 } from './caldav-client.js';
@@ -516,6 +517,37 @@ describe('timeZone / endTimeZone (#139)', () => {
     ].join('\r\n');
     const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
     assert.equal(event.timeZone, undefined);
+  });
+
+  it('omits timeZone and endTimeZone for a Z-designated value that also carries a TZID', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:utc-tzid@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000Z',
+      'DTEND;TZID=Asia/Tokyo:20260320T093000Z',
+      'SUMMARY:Malformed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.match(event.start ?? '', /Z$/, 'start keeps its Z');
+    assert.equal(event.timeZone, undefined, 'a Z start never carries timeZone');
+    assert.equal(event.endTimeZone, undefined, 'a Z end never carries endTimeZone');
+  });
+
+  it('treats only a TRAILING Z as the UTC designator on a TZID line', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:mid-z@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320TZ083000',
+      'SUMMARY:Malformed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
+    assert.equal(event.timeZone, 'Pacific/Auckland');
   });
 
   it('omits timeZone for a date-only (all-day) value', () => {
@@ -1389,7 +1421,7 @@ describe('CalDAVCalendarClient event lookup', () => {
     [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url: PERSONAL_URL + 'solo.ics', etag: '"etag-solo"' }],
   });
 
-  // The handler's own guard is falsy-only, so a whitespace-only id used to reach the lookup and
+  // The handler's own guard tests presence only, so a whitespace-only id used to reach the lookup and
   // come back as "Calendar event not found" — an answer about the account, for a call that never
   // named an event. Rejected here, in the client, so all three tools inherit it.
   it('rejects an eventId that is only whitespace, before any query is built', async () => {
@@ -1413,6 +1445,53 @@ describe('CalDAVCalendarClient event lookup', () => {
         },
       );
       assert.equal(fetchCalendarObjects.mock.callCount(), 0);
+    }
+  });
+
+  // A lenient client can send `123` for `"123"`. Refused naming the type, as a non-string id in
+  // `coerceStringArrayStrict` is: a large number's String() is not the digits the caller meant.
+  it('rejects a non-string eventId by its type, before any query is built', async () => {
+    const numeric = 123 as unknown as string;
+    for (const call of [
+      (c: CalDAVCalendarClient) => c.getCalendarEventById(numeric),
+      (c: CalDAVCalendarClient) => c.updateCalendarEvent(numeric, { title: 'X' }),
+      (c: CalDAVCalendarClient) => c.deleteCalendarEvent(numeric),
+    ]) {
+      const { client, fetchCalendarObjects } = makeLookupClient(
+        [{ displayName: 'Personal', url: PERSONAL_URL }],
+        onePersonalEvent(),
+      );
+      await assert.rejects(
+        () => call(client),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, /eventId must be a string; received number\. Pass an event id or url from list_calendar_events/);
+          return true;
+        },
+      );
+      assert.equal(fetchCalendarObjects.mock.callCount(), 0);
+    }
+  });
+
+  it('resolves by UID a resource whose url does not parse as a url', async () => {
+    const { client } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], {
+      [PERSONAL_URL]: [{ data: eventIcal('odd-url@fm', 'Odd'), url: 'http://[', etag: '"e"' }],
+    });
+    const { event } = await client.getCalendarEventById('odd-url@fm');
+    assert.equal(event.title, 'Odd');
+  });
+
+  it('names an array eventId as an array, and still calls a null one empty', async () => {
+    const { client } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], onePersonalEvent());
+    await assert.rejects(
+      () => client.getCalendarEventById([] as unknown as string),
+      /eventId must be a string; received array\./,
+    );
+    for (const absent of [null, undefined]) {
+      await assert.rejects(
+        () => client.getCalendarEventById(absent as unknown as string),
+        /eventId cannot be empty; pass an event id or url from list_calendar_events/,
+      );
     }
   });
 
@@ -1905,6 +1984,32 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal(delCalls.length, 1);
     assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
   });
+
+  // The store below models tsdav and the server (see addressComparisonKey), so the url that comes back carries
+  // neither a fragment nor a query; an address is still an address when spelled with either.
+  for (const suffix of ['#frag', '?q=1']) {
+    it(`counts a url spelled with "${suffix}" as addressing that record`, async () => {
+      const realUrl = PERSONAL_URL + 'real.ics';
+      const spelled = realUrl + suffix;
+      // A decoy whose UID is the caller's exact string, so only addressing can break the tie.
+      const stored: Record<string, StoredObject[]> = {
+        [WORK_URL]: [{ data: eventIcal(spelled, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
+        [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
+      };
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
+      const store = makeObjectStore(stored);
+      mockDAVClient.fetchCalendarObjects = mock.fn(async (params: FetchObjectsParams) => {
+        const objectUrls = (params as { objectUrls?: string[] }).objectUrls;
+        if (!objectUrls) return store(params);
+        return store({ ...params, objectUrls: objectUrls.map(u => u.replace(/[?#].*$/, '')) } as FetchObjectsParams);
+      });
+
+      await client.deleteCalendarEvent(spelled);
+      const delCalls = mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
+      assert.equal(delCalls.length, 1);
+      assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
+    });
+  }
 
   // The other side of the rule, so it is not read as "a url-shaped id always wins". Where the
   // string is url-shaped but names no resource in this account, nothing was addressed and the
@@ -2970,6 +3075,38 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     const result = await client.updateCalendarEvent('padded-uid', { title: 'New Title' });
 
     assert.equal(result.eventId, 'padded-uid');
+  });
+
+  it('echoes a UID longer than 64 code points whole at CALENDAR_UID_ECHO_LIMIT', () => {
+    const uid = '040000008200E00074C5B7101A82E008' + 'A'.repeat(150);
+    assert.equal(describeUntrustedAt(uid, CALENDAR_UID_ECHO_LIMIT), uid);
+  });
+
+  it('returns the stored UID when the event was addressed by its url', async () => {
+    const objects = [{ data: makeRichIcal('by-url@fm'), url: '/cal/personal/by-url.ics' }];
+    const { client } = createMockedPatchClient(objects);
+
+    const result = await client.updateCalendarEvent('/cal/personal/by-url.ics', { title: 'New Title' });
+
+    assert.equal(result.eventId, 'by-url@fm');
+  });
+
+  it('treats a stored Z value that also carries a TZID as UTC when checking a new start', async () => {
+    const ical = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:z-tzid@fm',
+      'DTSTART;TZID=Pacific/Auckland:20260320T083000Z',
+      'DTEND;TZID=Asia/Tokyo:20260320T093000Z',
+      'SUMMARY:Malformed',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const { client, mockDAVClient } = createMockedPatchClient([{ data: ical, url: '/cal/personal/z-tzid.ics' }]);
+
+    await client.updateCalendarEvent('z-tzid@fm', { start: '2026-03-20T07:00:00Z' });
+
+    assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 1);
   });
 
   it('preserves unknown properties when updating title only', async () => {
@@ -6671,6 +6808,15 @@ describe('VTIMEZONE embedding (#166)', () => {
   });
 
   describe('regenerateVTimezones — span computation and block replacement (#166)', () => {
+    it('generates no block for a Z value that also carries a TZID', () => {
+      const data = [
+        'BEGIN:VCALENDAR', 'BEGIN:VEVENT',
+        'UID:z-tzid@fm', 'DTSTART;TZID=Pacific/Auckland:20260320T083000Z',
+        'DTEND;TZID=Asia/Tokyo:20260320T093000Z', 'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n');
+      assert.ok(!regenerateVTimezones(data, '\r\n').includes('BEGIN:VTIMEZONE'));
+    });
+
     it('computes the span from BOTH DTSTART and DTEND, not just one, when they straddle a DST transition', () => {
       // Sydney's own 2026 October transition (STANDARD +1000 -> DAYLIGHT +1100 at
       // 2026-10-04T02:00 local, per src/vtimezone.test.ts). DTSTART sits before it, DTEND

@@ -1547,12 +1547,14 @@ function describeDateProperty(rawLine: string, displayOverride?: string, tzidSou
   if (isDateOnlyProperty(line) || /^\d{8}$/.test(value)) {
     return { frame: 'date', value, display };
   }
+  // Before the TZID test: a malformed `;TZID=X:...Z` line names a UTC instant, and the read
+  // reports it as one, so every consumer here must too.
+  if (/Z$/.test(value)) {
+    return { frame: 'utc', value, display };
+  }
   const storedTzid = extractTzidParam(params);
   if (storedTzid !== undefined) {
     return { frame: 'zoned', tzid: storedTzid.replace(/^"|"$/g, ''), tzidSource: tzidSourceOverride, value, display };
-  }
-  if (/Z$/.test(value)) {
-    return { frame: 'utc', value, display };
   }
   return { frame: 'floating', value, display };
 }
@@ -2118,6 +2120,13 @@ export const AMBIGUOUS_COPY_LIST_CAP = 12;
 export const AMBIGUOUS_COPY_URL_ECHO_LIMIT = 320;
 
 /**
+ * The bound on a stored UID echoed as an id to pass back. Nothing caps a UID's length, and
+ * Exchange-generated ones run past 100 hex characters, so 320 keeps every real UID whole while
+ * a hostile one still cannot fill the reply.
+ */
+export const CALENDAR_UID_ECHO_LIMIT = 320;
+
+/**
  * The bound on tsdav's own text inside the login refusal (#182).
  *
  * Wider than `describeUntrusted`'s 64 default because the status code sits at the END of
@@ -2217,6 +2226,19 @@ function resolveEventUrlTargets(
 }
 
 /**
+ * An href as compared to decide whether a resource was ADDRESSED. The fragment and query are
+ * dropped from both sides: tsdav never sends a fragment, and a server may answer a query with
+ * the resource's own href, so either would stop the caller's spelling matching what came back.
+ */
+function addressComparisonKey(url: string): string {
+  const parsed = resolveCollectionUrl(url, CALDAV_URL_MATCH_BASE);
+  if (parsed === undefined) return url;
+  parsed.hash = '';
+  parsed.search = '';
+  return parsed.href;
+}
+
+/**
  * Taken from tsdav's own signature so an upgrade that changes the shape surfaces here.
  */
 type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjects']>[0]['filters']>;
@@ -2295,8 +2317,9 @@ interface CalendarObjectLookup {
  * and a plain Error would read as InternalError for a value only the caller can fix, so the
  * argument is refused instead.
  *
- * DELIBERATELY NOT HERE, because each is sendable: tab, CR and LF (legal `Char`, so the id just
- * comes back not-found); U+FDD0-U+FDEF (admitted by XML 1.0); lone surrogates (MEASURED:
+ * DELIBERATELY NOT HERE, because each is sendable: tab, CR and LF (legal `Char`: trimmed off the
+ * ends of either form, inside a UID they come back not-found, and the url form's URL parser
+ * strips them); U+FDD0-U+FDEF (admitted by XML 1.0); lone surrogates (MEASURED:
  * `TextEncoder` repairs them to U+FFFD).
  */
 const XML_UNSENDABLE_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
@@ -3316,7 +3339,13 @@ export class CalDAVCalendarClient {
    * be url-shaped, and dispatching would make that event unfindable by its own id.
    */
   private async findCalendarObjectByUID(eventId: string): Promise<CalendarObjectLookup> {
-    // Here, not in the handler, whose guard is falsy-only; all three tools inherit it.
+    // Here, not in the handler, whose guard tests presence only; all three tools inherit it.
+    if (eventId != null && typeof eventId !== 'string') {
+      throw new InvalidInputError(
+        `eventId must be a string; received ${Array.isArray(eventId) ? 'array' : typeof eventId}. `
+        + 'Pass an event id or url from list_calendar_events.',
+      );
+    }
     const wanted = requireNonEmpty(eventId, 'eventId', 'pass an event id or url from list_calendar_events');
     if (XML_UNSENDABLE_CHARS.test(wanted)) {
       throw new InvalidInputError(
@@ -3343,7 +3372,7 @@ export class CalDAVCalendarClient {
     };
 
     const urlTargets = resolveEventUrlTargets(wanted, selectable);
-    const addressedHrefs = new Set(urlTargets.map(t => t.objectUrl));
+    const addressedHrefs = new Set(urlTargets.map(t => addressComparisonKey(t.objectUrl)));
 
     // No early exit: a UID is unique per collection, not per account (#101).
     for (const calendar of selectable) {
@@ -3384,7 +3413,7 @@ export class CalDAVCalendarClient {
 
     // The addressed copy LEADS (see CalendarObjectLookup); every other order is untouched.
     // `> 0` only skips a no-op, so it is indistinguishable from `>= 0` by any test.
-    const addressedIndex = matches.findIndex(m => addressedHrefs.has(m.object.url));
+    const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 
     return { matches, addressed: addressedIndex !== -1, brokenCollections };
