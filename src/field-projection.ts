@@ -1,5 +1,6 @@
 import { InvalidInputError, coerceStringArray, describeUntrustedAt } from './coerce.js';
 import type { SimplifiedEmail } from './email-formatter.js';
+import { joinCapped } from './jmap-client.js';
 
 // Caller-directed output projection for the email read tools (#69, #79). A 66-message
 // sweep measured 84KB, of which the five fields the caller wanted were 18%.
@@ -116,7 +117,7 @@ export function parseEmailFields(value: unknown, options?: { raw?: boolean }): S
 
   if (unknown.length > 0) {
     throw new InvalidInputError(
-      `Unknown field name(s) in fields: ${unknown.join(', ')}. ${validFieldList()}`,
+      `Unknown field name(s) in fields: ${joinCapped(unknown)}. ${validFieldList()}`,
     );
   }
 

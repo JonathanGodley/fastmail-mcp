@@ -2256,7 +2256,7 @@ describe('echo-quoting convention', () => {
   // so leaving a helper off it silently narrows the scan rather than excusing a site.
   const ECHO_HELPERS = [
     'echoCallerText', 'describeUntrusted', 'describeUntrustedAt', 'describePart', 'echoPath',
-    'echoRecipients',
+    'echoRecipients', 'echoField',
   ];
 
   // Recursive, so the claim the helpers' doc comments make — a bad render fails this guard

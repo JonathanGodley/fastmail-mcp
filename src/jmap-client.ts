@@ -1035,7 +1035,7 @@ function formatMailboxUnwalkable(input: string, id: string): string {
 
 // Join a capped list and SAY when it was capped: a truncated list with no tail reads as a
 // complete one.
-function joinCapped(items: string[], separator = ', '): string {
+export function joinCapped(items: string[], separator = ', '): string {
   const shown = items.slice(0, MAILBOX_LIST_CAP);
   const listed = shown.join(separator);
   return items.length > shown.length ? `${listed}${separator}…and ${items.length - shown.length} more` : listed;

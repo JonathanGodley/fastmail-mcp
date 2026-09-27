@@ -141,6 +141,19 @@ describe('parseEmailFields', () => {
     );
   });
 
+  it('caps how many unknown names it lists, and says how many more there were', () => {
+    const many = Array.from({ length: 45 }, (_, i) => `bogus${i}`);
+    assert.throws(
+      () => parseEmailFields(many),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.match(message, /"bogus29", …and 15 more\. Valid fields:/);
+        assert.equal(message.includes('"bogus30"'), false, message);
+        return true;
+      },
+    );
+  });
+
   it('is case-sensitive (the simplified names are camelCase)', () => {
     assert.throws(() => parseEmailFields(['ThreadId']), InvalidInputError);
   });
