@@ -2,10 +2,8 @@ import { stripQuotedText } from './quote-strip.js';
 import { buildUnionParts } from './inline-images.js';
 
 // Reason string for `quotedStripSkipped`. Fixed wording so a client can match on it.
-// "non-empty" is load-bearing: extractBody yields nothing both for a message with no
-// text/plain part at all (an HTML-only one) and for a text part whose value is empty, and
-// the two are indistinguishable from here. The wording covers both rather than claiming
-// the part is absent when it may just be empty.
+// "non-empty" is load-bearing: extractBody cannot tell a missing text/plain part from an
+// empty one, so the wording covers both.
 export const NO_PLAIN_TEXT_BODY = 'no non-empty plain-text body to strip';
 
 export interface SimplifiedEmail {
@@ -22,16 +20,12 @@ export interface SimplifiedEmail {
   replyTo?: string[];
   inReplyTo?: string[];
   isReply?: boolean;
-  // The forwarded original's Message-ID (from X-Forwarded-Message-Id, which
-  // draft_email records on both inline and asAttachment forward drafts). VERBOSE-tier:
-  // present on get_email/verbose reads; list items show forward-ness via
-  // isForwarded instead.
+  // The forwarded original's Message-ID (from X-Forwarded-Message-Id). VERBOSE-tier:
+  // list items show forward-ness via isForwarded instead.
   forwardedMessageId?: string[];
-  // The JMAP id of the exact stored copy a reply/forward draft was composed from
-  // (from X-Fastmail-MCP-Source-Id, recorded by draft_email's reply and forward modes).
-  // This is
-  // the copy send_draft will mark answered/forwarded, so it's inspectable pre-send.
-  // VERBOSE-tier like forwardedMessageId; absent on drafts made by other clients.
+  // The JMAP id of the exact stored copy a reply/forward draft was composed from (from
+  // X-Fastmail-MCP-Source-Id): the copy send_draft will mark. VERBOSE-tier; absent on
+  // drafts made by other clients.
   sourceEmailId?: string;
   isRead?: boolean;
   isFlagged?: boolean;
@@ -49,32 +43,26 @@ export interface SimplifiedEmail {
   bodyHtmlSize?: number;
   bodyTextSize?: number;
   // Quote-stripping signals (#73), emitted ONLY when the caller asked for stripQuoted.
-  // Exactly one of the two appears, and neither is ever omitted for being "empty" — the
-  // caller has to be able to tell "quote removed" from "nothing recognised" from "there
-  // was no text body to strip":
+  // Exactly one of the two appears, and neither is ever omitted for being "empty":
   //   quotedBytesStripped: 0 -> the body is verbatim, no marker matched.
   //   quotedBytesStripped: N -> N UTF-8 bytes of quoted history were removed.
   //   quotedStripSkipped     -> stripping did not run; the string says why.
   quotedBytesStripped?: number;
   quotedStripSkipped?: string;
-  // Set by get_thread's includeBodies path for a message that has no plain-text body to
-  // return (an HTML-only message; thread reads deliberately never carry HTML). Never
-  // present without includeBodies.
+  // Set by get_thread's includeBodies path for an HTML-only message (thread reads never
+  // carry HTML).
   bodyTextUnavailable?: true;
   // The lost-update token edit_draft requires before it will write or clear this draft's
-  // body: proof that the body being replaced is the one the caller read. Issued only by
-  // get_email, only on a draft, and only when the read returned every body part whole —
-  // exactly one of the two fields is present in that case, never neither.
+  // body. On a get_email read of a draft, exactly one of bodyHash / bodyHashWithheld is
+  // present.
   //
-  // Set on the READ path (get_email attaches it after simplification), not by
-  // simplifyEmail, because whether a hash can be issued depends on what the READ asked
-  // for: a truncated part, a body field the caller projected away, or a stripQuoted body
-  // all make a hash of what get_email returned a statement about something other than the
-  // stored draft.
+  // Set by get_email after simplification, not by simplifyEmail, because whether a hash
+  // can be issued depends on what the read asked for: a truncated part, a projected-away
+  // body field or a stripQuoted body would make the hash describe something other than
+  // the stored draft.
   bodyHash?: string;
-  // Why no hash came back, in a sentence naming the read that would issue one. Never
-  // silence: a draft read with no hash and no reason is indistinguishable from a
-  // non-draft, and the caller would have no way to find out which it was looking at.
+  // Why no hash came back, naming the read that would issue one. Without it a draft read
+  // with no hash is indistinguishable from a non-draft.
   bodyHashWithheld?: string;
   blobId?: string;
   size?: number;
@@ -88,10 +76,9 @@ export interface SimplifiedEmail {
     contentType: string;
     size: number;
     blobId: string;
-    // The part is displayed inside the message body rather than merely attached —
-    // either the server routed it into a body list, or the sender marked it inline.
-    // Omitted when false. SENDER-DECLARED, like `name` and `contentType`: it says what
-    // the message claims about the part, never that the part is safe to skip (#13).
+    // The server routed the part into a body list, or the sender marked it inline.
+    // SENDER-DECLARED, like `name` and `contentType`: never a sign the part is safe to
+    // skip (#13).
     isInline?: true;
     // The part's Content-ID, verbatim: what a `cid:` reference in the HTML body points
     // at. Omitted when the part has none.
@@ -111,15 +98,9 @@ export interface SimplifyOptions {
   timezone?: string;
 }
 
-// Single source of truth for the canonical message-state keywords (RFC 3501/5788/
-// 8621): each maps a JMAP keyword to the simplified boolean it promotes to. Two
-// concerns are derived from this one map so they can never drift (the bug behind
-// #49: $answered/$forwarded were listed as "standard" — excluded from passthrough —
-// but had no promotion line, so they vanished from output entirely):
-//   1. Promotion — every entry produces its `is*` flag (see the loop in simplifyEmail).
-//   2. Passthrough exclusion — STANDARD_KEYWORDS (the keys) is what the non-standard
-//      `keywords` map omits, so a promoted flag is never also echoed in `keywords`.
-// Adding a keyword here both promotes it AND excludes it from passthrough in one step.
+// The canonical message-state keywords (RFC 3501/5788/8621), each mapped to the `is*`
+// flag it promotes to. Both promotion and the passthrough exclusion (STANDARD_KEYWORDS)
+// derive from this one map so they cannot drift (#49).
 export const KEYWORD_FLAGS: Record<string, string> = {
   $seen: 'isRead',
   $flagged: 'isFlagged',
@@ -139,13 +120,9 @@ export function setDefaultTimezone(tz?: string): void {
   defaultTimezone = tz && tz.trim() ? tz.trim() : undefined;
 }
 
-// The same stored value, for the paths that have to INTERPRET a local date rather than
-// render one — `list_calendar_events` reads a date-only window as local days, so it needs
-// the zone every email timestamp is already displayed in. It reads this variable instead of
-// re-deriving the zone from the environment on purpose: a second env lookup is a second
-// answer, and the two drifting would mean the day a calendar query covers and the day an
-// email's `date` is printed in disagree with nothing to say so. `undefined` means the host
-// zone, exactly as it does for rendering.
+// The same stored value, for paths that INTERPRET a local date (list_calendar_events'
+// date-only window). Read from here, never re-derived from the environment, so a calendar
+// day and an email's printed `date` cannot disagree. `undefined` means the host zone.
 export function getDefaultTimezone(): string | undefined {
   return defaultTimezone;
 }
@@ -217,12 +194,10 @@ export function formatAddress(addr: { name?: string; email: string }): string {
 }
 
 // Format a UTC instant as a reply-attribution date in LOCAL time, e.g.
-// "Mon, Jun 15, 2026, at 1:29 PM". Returns '' when the instant is absent or unparseable
-// (so the caller omits the date rather than emit the literal "Invalid Date"). Reuses the
-// same zone resolution as toLocalIso (timezone || defaultTimezone || host). Node ICU
-// inserts a narrow no-break space (U+202F) before AM/PM, so we normalize every Unicode
-// space separator to a plain ASCII space to match the captured Fastmail format. Never
-// throws (a bad IANA zone falls back to the host zone, then to '').
+// "Mon, Jun 15, 2026, at 1:29 PM". Returns '' when the instant is absent or unparseable,
+// so the caller omits the date rather than print "Invalid Date". Node ICU inserts a
+// narrow no-break space (U+202F) before AM/PM, so every Unicode space separator becomes
+// an ASCII space to match the captured Fastmail format. Never throws.
 export function formatReplyDate(utcIso: string | null | undefined, timezone?: string): string {
   if (!utcIso) return '';
   const date = new Date(utcIso);
@@ -307,34 +282,24 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   // (mirrors readSourceReferences in jmap-client.ts).
   const rawSourceId = raw['header:X-Fastmail-MCP-Source-Id:asText'];
   addIf(result, 'sourceEmailId', typeof rawSourceId === 'string' && rawSourceId.trim() !== '' ? rawSourceId.trim() : undefined);
-  // Promote the canonical message-state keywords to `is*` flags from the single
-  // KEYWORD_FLAGS map (subsumes the old hand-written isRead/isFlagged/isDraft lines
-  // and adds isAnswered/isForwarded for free). DROP_WHEN_FALSE then decides which
-  // show only when true (isRead always shows; the rest are dropped when false).
   for (const [kw, flag] of Object.entries(KEYWORD_FLAGS)) {
     addFlag(result, flag, !!(raw.keywords?.[kw]));
   }
-  // Two AXES of message metadata, intentionally separate (do not dedupe them):
-  //   - KEYWORD axis (`is*`): what the message IS / what's been done to it.
-  //   - LOCATION axis (`mailboxes`/`roles`): where it's filed. Resolved in the client
-  //     layer and attached as non-enumerable `_mailboxNames`/`_mailboxRoles`.
-  // They normally agree (isDraft + roles:["drafts"]) but can legitimately diverge — a
-  // draft moved to Trash is isDraft:true with roles:["trash"], and both are correct.
-  // `mailboxes` (display names, user-renamable) and `roles` (stable JMAP roles) describe
-  // the SAME set but are NOT parallel arrays — a custom folder appears in `mailboxes`
-  // with no `roles` entry, so they can differ in length. Any id that couldn't be
-  // resolved to a name surfaces in `unresolvedMailboxIds` (never silently dropped). (#10, #49, #53)
+  // Two AXES of message metadata, intentionally separate (do not dedupe them): the
+  // keyword axis (`is*`, what the message is) and the location axis (`mailboxes`/`roles`,
+  // where it is filed, attached by the client layer as non-enumerable `_mailbox*`). They
+  // can legitimately diverge: a draft moved to Trash is isDraft:true with roles:["trash"].
+  // `mailboxes` and `roles` are NOT parallel arrays: a custom folder has no role.
+  // (#10, #49, #53)
   addIf(result, 'mailboxes', raw._mailboxNames);
   addIf(result, 'roles', raw._mailboxRoles);
   addIf(result, 'unresolvedMailboxIds', raw._unresolvedMailboxIds);
   addIf(result, 'preview', raw.preview);
   addIf(result, 'listUnsubscribe', raw['header:List-Unsubscribe:asURLs']);
-  // hasAttachment is redundant once a part listing is present, so it is suppressed
-  // whenever the read fetched `attachments` at all (an empty array counts — the listing
-  // is authoritative, and "no parts" is the answer). The two are NOT interchangeable:
-  // hasAttachment is a server heuristic that deliberately answers "is this content or
-  // decoration" (docs/conventions.md), so a message whose only image is embedded in its
-  // body can report false and still list a part here. That is the point of the listing.
+  // hasAttachment is suppressed whenever the read fetched `attachments` at all (an empty
+  // array counts): the listing is authoritative. The two are NOT interchangeable, since
+  // hasAttachment is a server content-or-decoration heuristic (docs/conventions.md): a
+  // message whose only image is embedded in its body can report false yet list a part.
   if (!raw.attachments) {
     addFlag(result, 'hasAttachment', !!raw.hasAttachment);
   }
@@ -368,14 +333,10 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
     addIf(result, 'bodyHtmlSize', bodyHtml.length);
   }
 
-  // bodyTextSize: in compact (list/search) mode we fetch the textBody part *structure*
-  // (sizes) but no bodyValues, so no body is extracted above. Surface the total text-body
-  // size in bytes so an agent can tell a ~256-char `preview` snippet apart from a large
-  // message and knows to fetch get_email before concluding content is absent (#59). It is
-  // an UPPER BOUND: quoted history is included (inside the text part) but inline image
-  // parts are excluded — only text/* parts are summed. Mirrors the bodyHtmlSize idiom:
-  // emitted only when no body content is present (redundant once verbose/get_email returns
-  // the body), and omitted when there's no text part or it's empty.
+  // bodyTextSize: compact (list/search) reads fetch the textBody part structure but no
+  // bodyValues, so the total text/* size tells a ~256-char `preview` apart from a large
+  // message (#59). An upper bound: quoted history is included. Emitted only when no body
+  // content is present.
   if (!bodyText && !bodyHtml && Array.isArray(raw.textBody)) {
     const textBytes = raw.textBody.reduce(
       (sum: number, p: any) =>
@@ -387,12 +348,8 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
     if (textBytes > 0) addIf(result, 'bodyTextSize', textBytes);
   }
 
-  // Quote stripping (#73), opt-in. Runs on the extracted plain-text body only: HTML
-  // quoting has no reliable text-level boundary, so a `bodyHtml` emitted above (verbose,
-  // or the html-only fallback) is left verbatim and is NOT counted here. The signal is
-  // emitted unconditionally — including the 0 that says "no marker matched, this body is
-  // whole" — because a caller who asked to strip must be able to tell that apart from a
-  // successful strip, and from an html-only message where there was nothing to strip.
+  // Quote stripping (#73) runs on the plain-text body only: HTML quoting has no reliable
+  // text-level boundary, so any `bodyHtml` above is left verbatim and not counted.
   if (options?.stripQuoted) {
     if (typeof bodyText === 'string') {
       const { text, quotedBytesStripped } = stripQuotedText(bodyText);
@@ -403,14 +360,11 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
     }
   }
 
-  // The part listing is the UNION of the JMAP `attachments` array and the media parts
-  // the server routed into `textBody`/`htmlBody` — for some MIME shapes an embedded
-  // image lands only in the body lists, so `attachments` alone can report nothing for
-  // a message that visibly shows a picture (#13). buildUnionParts is gated on
-  // `attachments` being fetched, so compact list/search results are untouched.
+  // The part listing is the UNION of `attachments` and the media parts the server routed
+  // into the body lists, where some MIME shapes put an embedded image (#13).
   //
-  // Computed BESIDE the raw email, never onto it: `raw` is handed back untouched by
-  // every `raw: true` path, so nothing derived here may be written back to it.
+  // Computed BESIDE the raw email, never onto it: `raw: true` paths hand `raw` back
+  // untouched.
   const attachments = buildUnionParts(raw).map(({ part, inBodyList }) => {
     const att: Record<string, any> = {
       contentType: part.type ?? 'application/octet-stream',

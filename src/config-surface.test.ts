@@ -7,11 +7,9 @@
 // nowhere, and a stale `${user_config.x}` reference produces an environment variable set
 // to an uninterpolated placeholder string. Both look configured and do nothing.
 //
-// The third check goes further and asks whether the server reads the variable at all, by
-// scanning src/index.ts and its siblings as TEXT. That mirrors src/tool-schema.test.ts and is
-// text-based for the same reason: a text scan needs no build and no server spawn, and tsc
-// does not rewrite string literals, so the source and the shipped code cannot disagree on
-// these names — the check stays accurate whether or not dist/ happens to be current.
+// The third check asks whether the server reads the variable at all, scanning src/ as TEXT:
+// that needs no build, and tsc does not rewrite string literals, so it stays accurate
+// whether or not dist/ is current.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -43,13 +41,11 @@ function collectFindEnvValueNames(): string[] {
   return names;
 }
 
-// `process.env.NAME` reads outside the findEnvValue helper. Configurable settings are
-// meant to go through findEnvValue (that lookup is what lets a DXT user_config key reach
-// the server at all), but a module reading its own variable at the point of use is still
+// `process.env.NAME` reads outside findEnvValue: a module reading its own variable is still
 // reading it, and the manifest may legitimately map it. Every non-test module is scanned
-// rather than a fixed list, so moving such a read between files cannot silently turn a
-// live setting into a "dead configuration" failure here. Comment lines are skipped so a
-// name that is only discussed in prose does not count as a read.
+// rather than a fixed list, so moving such a read between files cannot turn a live setting
+// into a "dead configuration" failure. Comment lines are skipped so a name only discussed in
+// prose does not count as a read.
 function collectDirectEnvReads(): string[] {
   const names: string[] = [];
   const files = readdirSync(SRC_URL)
@@ -134,17 +130,14 @@ describe('DXT configuration surface', () => {
   });
 
   it('offers FASTMAIL_ALLOW_BLOB_ATTACH as an installer setting that defaults to off', () => {
-    // The mirror image of the check below, and it needs its own test for the same reason:
-    // the three checks above are one-directional (manifest -> server), so deleting BOTH
-    // halves of this setting would pass every one of them, leaving the flag reachable only
-    // by hand-editing an environment. That is a posture decision either way, so both
-    // postures are pinned rather than only the one that says "keep it out".
+    // The three checks above are one-directional (manifest -> server), so deleting BOTH
+    // halves of this setting would pass every one of them. This is the mirror image of the
+    // base-URL test below: both postures are pinned.
     //
-    // Attaching content the account already holds is a send capability, not a control over
-    // where the API token may be sent, so it belongs in an installer UI. What makes that
-    // safe is the pairing asserted here: the declared default is false, and the parse in
-    // getAllowBlobAttach accepts only "true"/"1" — so the "false" a host hands over for an
-    // unchecked box leaves the capability off, and so does a host that forwards nothing.
+    // Blob attach is a send capability, not a control over where the API token goes, so it
+    // belongs in an installer UI. It is safe there because of the pairing asserted here: the
+    // default is false, and getAllowBlobAttach accepts only "true"/"1", so an unchecked box's
+    // "false", or a host that forwards nothing, leaves it off.
     const manifest = readManifest();
     const entry = manifest.user_config.fastmail_allow_blob_attach;
 

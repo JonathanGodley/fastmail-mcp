@@ -1,8 +1,7 @@
 // Raw JSON-RPC (MCP-over-stdio) client for the fastmail-mcp server.
 //
-// Purpose: a reusable harness for the on-demand live-verification path, so it is
-// not hand-rewritten (and re-bugged) each time. The server speaks newline-delimited
-// JSON over stdio and logs only to stderr, so stdout is pure protocol.
+// The server speaks newline-delimited JSON over stdio and logs only to stderr, so
+// stdout is pure protocol.
 //
 // Before use:
 //   1. `npm run build`  (the server runs from dist/index.js, not src/)
@@ -41,8 +40,7 @@ const PROTOCOL_VERSION = '2024-11-05';
  * @returns {{ init: () => Promise<object>, call: (name: string, args?: object) => Promise<object>, close: () => void }}
  */
 export function createClient({ env } = {}) {
-  // Inherit the caller's env (so FASTMAIL_API_TOKEN etc. flow through). We never
-  // read individual secrets here and never print env on any path.
+  // Never read individual secrets here, and never print env on any path.
   const child = spawn('node', [SERVER_ENTRY], {
     env: env ?? process.env,
     stdio: ['pipe', 'pipe', 'inherit'], // stderr inherited: server logs pass through, untouched
@@ -67,19 +65,16 @@ export function createClient({ env } = {}) {
       try {
         msg = JSON.parse(line);
       } catch {
-        // Not a JSON-RPC line (defensive — the server should only emit protocol
-        // on stdout). Ignore rather than crash the matcher.
+        // Not protocol; ignore rather than crash the matcher.
         continue;
       }
-      // Match strictly by JSON-RPC id — never by scraping substrings, which was
-      // the historical bug (a greedy pattern over-captured the id token).
+      // Match strictly by JSON-RPC id, never by scraping substrings.
       if (msg.id !== undefined && msg.id !== null && pending.has(msg.id)) {
         const { resolve, reject } = pending.get(msg.id);
         pending.delete(msg.id);
         if (msg.error) reject(new Error(`JSON-RPC error: ${JSON.stringify(msg.error)}`));
         else resolve(msg.result);
       }
-      // Notifications (no id) and unmatched ids are ignored.
     }
   });
 
@@ -91,9 +86,8 @@ export function createClient({ env } = {}) {
   };
 
   child.on('error', (err) => {
-    // Spawn failure (e.g. `node` not on PATH) or a transport-level error. Without
-    // a listener, Node throws on the unhandled 'error' event and init()/call()
-    // hang forever — so reject every pending request loudly instead.
+    // Without a listener, Node throws on the unhandled 'error' event (e.g. `node`
+    // not on PATH) and init()/call() hang forever.
     failAll(err);
   });
 
@@ -107,16 +101,10 @@ export function createClient({ env } = {}) {
   // harness. Swallow it — the 'exit' handler settles anything still pending.
   child.stdin.on('error', () => {});
 
-  // No per-request timeout by design: a server that is alive but never replies
-  // would hang here, but this is a manual one-shot harness (Ctrl-C it), and a
-  // blanket timeout would wrongly abort legitimately slow calls (a large sync, a
-  // big attachment upload). A caller that wants one can race send() against their
-  // own timer. The settled failure paths above cover the cases that actually
-  // recur: the process dying or the pipe breaking.
+  // No per-request timeout by design: it would abort legitimately slow calls (a
+  // big attachment upload). A caller that wants one races send() against a timer.
   function send(method, params) {
-    // The child may already be gone (exited or killed). Writing to a dead pipe
-    // would otherwise leave the request to hang forever, since the 'exit' handler
-    // has already drained `pending`. Reject up front instead.
+    // A write to a dead child would hang forever: 'exit' has already drained `pending`.
     if (child.exitCode !== null || child.killed) {
       return Promise.reject(new Error('cannot send: server process is not running'));
     }
@@ -154,16 +142,12 @@ export function createClient({ env } = {}) {
       notify('notifications/initialized', {});
       return result;
     },
-    // The advertised tool surface: names, descriptions and inputSchema exactly as a
-    // client receives them. Needs no credentials and reaches no account — the server
-    // answers tools/list before any Fastmail request — so it is the safe first call
-    // when checking what the built server actually declares.
+    // The advertised tool surface exactly as a client receives it. Needs no
+    // credentials and reaches no account.
     list() {
       return send('tools/list', {});
     },
-    // NOTE: call() is generic and CAN mutate the account (send_draft, delete_email,
-    // bulk_* …). The copy-paste default below is the read-only one on purpose —
-    // pick the tool name deliberately.
+    // call() CAN mutate the account (send_draft, delete_email, bulk_* …).
     call(name, args = {}) {
       return send('tools/call', { name, arguments: args });
     },
@@ -195,21 +179,16 @@ if (INVOKED_DIRECTLY) {
   try {
     args = rawArgs ? JSON.parse(rawArgs) : {};
   } catch {
-    // The bad value is the operator's own CLI arg — safe to surface; print only a
-    // generic message and exit before spawning a server.
     console.error('harness error: invalid JSON args');
     process.exit(1);
   }
   const client = createClient({ env: process.env });
   try {
     await client.init();
-    // --list dumps the schemas rather than invoking a tool; it needs no token, so it
-    // works against a server started with no credentials configured.
     const result = toolName === '--list' ? await client.list() : await client.call(toolName, args);
     console.log(JSON.stringify(result, null, 2));
   } catch (err) {
-    // Print only the message — never the token, env, or request body — and exit
-    // non-zero so a failed smoke call is scriptable.
+    // Print only the message: never the token, env, or request body.
     console.error(`harness error: ${err.message}`);
     process.exitCode = 1;
   } finally {

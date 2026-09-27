@@ -2,12 +2,9 @@
 // embedded (cid:) image, plus the bookkeeping that decides which of those sentences is
 // true at the end of a call (#13).
 //
-// Everything a caller says about embedded images lives here rather than at the call sites,
-// for two reasons. The same sentence is emitted from several tools — compose, reply,
-// forward and edit all report an embed — so a copy per tool would drift. And the counts in
-// those sentences have to agree with each other: a part that was going to be embedded and
-// then got removed must be reported once, as removed, not twice. The ledger below is what
-// makes that true by construction.
+// Here rather than at the call sites because several tools emit the same sentences, and a
+// copy per tool would drift; and because the counts must agree across sentences, which the
+// ledger below makes true by construction.
 import { describePart, isAuthorableCid } from './inline-images.js';
 import type { BlockUnavailableCause } from './body-tokens.js';
 
@@ -20,13 +17,8 @@ const MB = 1024 * 1024;
 
 /**
  * A byte count as a person reads it: kilobytes below a megabyte, one decimal place at or
- * above.
- *
- * The unit split is not cosmetic. A signature logo is tens of kilobytes, so reporting
- * everything in megabytes would tell the user their draft embeds "0 MB" of images. The
- * floor of one kilobyte for any non-zero size is the same guard one step down: a tracking
- * pixel is a few hundred bytes, and "0 KB" reads as nothing at all when something really
- * was carried.
+ * above. A signature logo is tens of kilobytes and would read "0 MB"; the one-kilobyte floor
+ * does the same for a tracking pixel of a few hundred bytes.
  */
 export function formatSize(bytes: number): string {
   const n = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
@@ -35,9 +27,6 @@ export function formatSize(bytes: number): string {
   return `${Math.max(1, Math.round(n / KB))} KB`;
 }
 
-// How many filenames a note lists before it summarizes the rest. Enough to recognize what
-// was affected, few enough that a message carrying fifty parts does not produce a wall of
-// text — and every name is rendered as quoted data, since a filename is sender-controlled.
 const MAX_NAMED_PARTS = 3;
 
 /**
@@ -64,10 +53,8 @@ const MAX_NAMED_PARTS = 3;
  *    typo written into two supplied bodies is ONE member here, not two, because it is one
  *    thing for the caller to fix.
  *
- * Mixing them renders wrongly in a way that reads as fact: a per-occurrence total beside a
- * deduplicated list promises a "…and N more" for members that do not exist, and a
- * per-occurrence list spends the display cap quoting one member twice while the members it
- * was meant to summarise go unnamed.
+ * Mixing them renders wrongly in a way that reads as fact: a "…and N more" for members that
+ * do not exist, or the display cap spent quoting one member twice.
  */
 export function describePartNames(
   names: (string | null | undefined)[],
@@ -93,10 +80,9 @@ export function noteEmbeddedFromQuote(count: number, bytes: number): string {
 /**
  * Some of the images the quote references were embedded and some were not.
  *
- * The two numbers count different things and are never added together: `resolvedParts` is
- * how many distinct parts the references landed on, and the separate skipped-references
- * sentence counts references that landed on nothing at all. Keeping them apart is what
- * stops one lost image being read as two.
+ * `resolvedParts` counts distinct parts the references landed on; the skipped-references
+ * sentence counts references that landed on nothing. Never add them: one lost image would
+ * read as two.
  */
 export function noteEmbeddedPartially(
   embedded: number,
@@ -135,11 +121,8 @@ export const POOLED_REMEDY_RERUN =
 /**
  * Media that could not be embedded and rides the forward as a regular attachment.
  *
- * The REMEDY is a parameter because it is not the same sentence on every tool. On a tool
- * where the forward's format is inferred, re-running as .eml is the only lever the caller
- * has. On one where the caller places the block themselves, the fix is usually to place it
- * in the html part instead — and telling that caller to "re-run with asAttachment: true"
- * sends them at a call the token gate would refuse.
+ * The REMEDY is a parameter because `draft_email`, where the caller places the block, has a
+ * better lever than re-running as .eml, and one the token gate would not refuse.
  */
 export function noteForwardPooled(
   count: number, names: (string | null | undefined)[], remedy: string = POOLED_REMEDY_RERUN,
@@ -154,10 +137,9 @@ export function noteForwardPooled(
 /**
  * Attachments the caller asked not to carry.
  *
- * The counts cover the EXCLUDED set only — never the body-embedded images, which are body
- * content and are carried regardless. The second sentence is emitted only when at least one
- * such image really was carried, because on an ordinary forward of a message with no
- * embedded images it would assert something that did not happen.
+ * The counts cover the EXCLUDED set only, never the body-embedded images, which are carried
+ * regardless. The second sentence needs at least one such image really carried, or it
+ * asserts something that did not happen.
  */
 export function noteAttachmentsExcluded(
   count: number,
@@ -185,12 +167,9 @@ export function noteRemovedEmbedded(count: number, keepNoun: string): string {
 /**
  * The caller's images could not be embedded, so they ride as ordinary attachments.
  *
- * The reason is stated in the one form that is true of every route here, because there are
- * several and the note has no way to tell them apart: the message ships no html body at
- * all; it ships one that references some other identifier; or an edit's new body stopped
- * referencing a part the draft already carried. Naming only the first would state a false
- * reason for the others, and the promise made on the attachments parameter is an honest
- * account of what happened to the file, not a guess at why.
+ * The reason is stated in the one form true of every route here, which the note cannot tell
+ * apart: no html body ships; the one that ships references some other identifier; or an
+ * edit's new body stopped referencing a part the draft already carried.
  */
 export function noteDegradedToAttachments(count: number): string {
   return `${count} of your image(s) became regular attachments (nothing in the body displays them).`;
@@ -199,11 +178,8 @@ export function noteDegradedToAttachments(count: number): string {
 /**
  * Images the quote referenced that could not be carried at all.
  *
- * A reply drops what it cannot embed rather than attaching it, because a reply is a new
- * message that quotes an original — mail clients do not attach a quoted message's images
- * to a reply that has no body to display them. Dropping is therefore the right outcome,
- * but it is never a silent one: the images the reader saw in the original are not in the
- * draft, and only this sentence says so.
+ * A reply drops what it cannot embed rather than attaching it, as mail clients do with a
+ * quoted message's images, but never silently: only this sentence says they are gone.
  */
 export function noteDroppedQuoteImages(count: number): string {
   return `${count} image(s) from the quoted message were dropped and are not part of this draft.`;
@@ -330,18 +306,13 @@ export function rejectDanglingCidRef(value: string, availability: AttachmentAvai
 /**
  * The body authors a NEW reference to one of this server's own identifiers.
  *
- * Scoped to a reference naming no part the draft already carries: a minted identifier is
- * durable now — it survives an edit for as long as the body keeps referencing it — so an
- * image-bearing draft read back and handed straight back is full of these references, and
- * refusing them all would refuse the first edit of every such draft. What stays refused is
- * AUTHORING one, which names an image the draft does not have.
+ * Scoped to a reference naming no part the draft already carries: a minted identifier
+ * survives an edit for as long as the body keeps referencing it, so refusing every such
+ * reference would refuse the first edit of every image-bearing draft handed straight back.
  */
 export function rejectReservedCidRef(value: string, surface: 'edit' | 'compose' = 'edit'): string {
-  // The DIAGNOSIS differs by surface; the remedy does not. On an edit there is a draft to
-  // check the reference against, and what is wrong is that it carries no part under that
-  // identifier. On a compose there is no draft at all, so the same clause would describe a
-  // thing that does not exist — what is wrong there is simply that the body authored an
-  // identifier this server assigns itself.
+  // The DIAGNOSIS differs by surface; the remedy does not. A compose has no draft to carry
+  // a part, so the edit clause would describe a thing that does not exist.
   const diagnosis = surface === 'edit'
     ? 'and this draft carries no part under it'
     : 'and this server assigns them itself — a body never authors one';
@@ -506,12 +477,10 @@ export function rejectInterleavedTextParts(): string {
 // Body tokens, and the read a body edit has to prove
 // ---------------------------------------------------------------------------
 //
-// These sentences serve BOTH compose and edit, which is why they live here rather than in
-// either handler. The two tools treat the same body very differently — draft_email refuses
-// what would ship wrong, because the body is wholly the caller's; edit_draft NOTES it,
-// because the body may be a foreign one handed back and a refusal keyed on its text could
-// be planted by the original's author and would then recur on every edit — so the split
-// between a refusal and a note below is deliberate and is not a wording choice.
+// These sentences serve BOTH compose and edit. The split between a refusal and a note below
+// is deliberate: draft_email refuses what would ship wrong, because the body is wholly the
+// caller's; edit_draft NOTES it, because the body may be a foreign one handed back, and a
+// refusal keyed on its text could be planted by the original's author and recur on every edit.
 
 /** Why a block had nothing to put at a token's position, as one clause of a sentence. */
 export const CAUSE_SENTENCE: Record<BlockUnavailableCause, string> = {
@@ -532,9 +501,8 @@ export function noteTokenEmpty(token: string, part: string, cause: BlockUnavaila
 /**
  * A body edit arrived with no proof that the caller read the body it replaces.
  *
- * The sentence explains WHY rather than just naming the parameter, because the reason is
- * the whole of the rule: this tool stores what it is handed and preserves nothing, so the
- * hash is the only thing standing between a stale read and a silent overwrite.
+ * The sentence explains WHY rather than just naming the parameter: the reason is the whole
+ * of the rule.
  */
 export function rejectMissingBodyHash(): string {
   return (
@@ -661,15 +629,11 @@ export function noteDiscardedTextPart(): string {
   );
 }
 
-// Why this edit returns no bodyHash. Each names the caller's way out, because the
-// alternative — omitting the field and saying nothing — is the silent-drop failure: a
-// caller that got a hash from the last edit and none from this one has no way to tell a
-// withheld hash from a forgotten one.
+// Why this edit returns no bodyHash. Each names the caller's way out: a silently omitted
+// field cannot be told from a forgotten one.
 //
-// The way out is a re-read for every case EXCEPT the ones a re-read cannot answer either —
-// a stored body the server flagged, or one carrying a part no read returns — where the
-// remedy is to recreate the draft. A note that sends the caller to a read that cannot
-// answer is a non-terminating remedy, which is no remedy at all. Those cases are NOT
+// The way out is a re-read, except where a re-read cannot answer either (a flagged stored
+// body, or a part no read returns), where it is to recreate the draft. Those cases are NOT
 // enumerated here: the two below are the reasons this edit path owns, and everything about
 // the saved body is asked of `resolveDraftBodyHash` and reported through
 // `noteBodyHashAfterReRead`, so one rule decides it for both tools.
@@ -781,11 +745,8 @@ export interface NoteTally {
 /**
  * Accumulates what a call did to each part, then reports it once at the end.
  *
- * The point is that recording is a CANDIDATE and only the final state is counted. A part
- * can be recorded as embedded early in an assembly and then removed later, and the removal
- * simply replaces the earlier record for that key — so the notes say it was removed, once,
- * instead of claiming it was both embedded and removed. Every count comes from this single
- * terminal read, which is why no note can outlive the disposition it describes.
+ * Recording is a CANDIDATE and only the final state is counted: a part recorded as embedded
+ * and later removed is reported once, as removed.
  */
 export class InlineNoteLedger {
   private readonly parts = new Map<string, PartRecord>();

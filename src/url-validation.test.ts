@@ -146,7 +146,6 @@ describe('validateFastmailUrl (default policy)', () => {
   });
 
   it('rejects host that ends with allowlisted domain (suffix-attack)', () => {
-    // Confirms the patterns are anchored at the end — a suffix match is not enough.
     assert.throws(
       () => validateFastmailUrl('https://evilapi.fastmail.com.attacker.com/', 'baseUrl'),
       /not in the Fastmail allowlist/,

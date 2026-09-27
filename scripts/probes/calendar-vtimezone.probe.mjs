@@ -10,26 +10,14 @@
 // is this probe.
 //
 // It creates ONE timed event through the BUILT server (dist/index.js, via
-// scripts/mcp-harness.mjs) in Australia/Sydney — a zone with DST, so the block is a real
-// STANDARD/DAYLIGHT observance rather than the single-offset case — sitting directly ON Sydney's
-// own October 2026 spring-forward transition (clocks jump from 02:00 AEST straight to 03:00
-// AEDT), so the event's own short span crosses it and carries exactly two observances to check.
-// (The generator's transition-finding and its DAYLIGHT-vs-STANDARD classification across a
-// transition are what src/vtimezone.test.ts proves; this probe is about the wire, not the
-// arithmetic.) It then fetches the stored resource back RAW over CalDAV — bare `fetch`, no
-// tsdav, nothing this server's own parser touches — and checks the bytes themselves, computing
-// its own expected offsets independently via Intl rather than by importing src/vtimezone.ts, so
-// a shared bug in both would not agree with itself.
+// scripts/mcp-harness.mjs) in Australia/Sydney, spanning the October 2026 spring-forward so it
+// carries exactly two observances. It fetches the stored resource back RAW over CalDAV (bare
+// `fetch`, nothing this server parses) and computes its expected offsets independently via
+// Intl rather than importing src/vtimezone.ts, so a shared bug would not agree with itself.
 //
-// The fixture goes into a temporary collection minted by MKCALENDAR, the same provenance
-// discipline calendar-window-frames.probe.mjs uses: this runs against a live personal account,
-// so nothing is ever written into a real calendar. If MKCALENDAR fails the probe stops rather
-// than falling back to one. The whole collection is removed in a `finally`, which takes the one
-// fixture with it in a single request. No participants, so nothing is mailed.
-//
-// Output is PASS/FAIL and counts/offsets only: no collection URL, UID, event title or other
-// account-derived value is printed, so a run can be quoted verbatim into a public issue or
-// commit.
+// The fixture goes into a temporary collection minted by MKCALENDAR; if that fails the probe
+// stops rather than writing into a real calendar. The `finally` removes the whole collection.
+// No participants, so nothing is mailed. Output is PASS/FAIL and counts/offsets only.
 //
 // Run: python scripts/probes/run-probe.py calendar-vtimezone.probe.mjs
 // Requires FASTMAIL_API_TOKEN plus FASTMAIL_CALDAV_USERNAME/PASSWORD; the launcher injects all
@@ -51,8 +39,6 @@ const { check, failures } = makeChecker();
 
 const ROOT = 'https://caldav.fastmail.com/dav/';
 const AUTH = 'Basic ' + Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64');
-// Every CalDAV href and every account-derived value is redacted before it is ever printed or
-// compared into a message — this account's own address included.
 const redact = s => String(s).split(USERNAME).join('<account>');
 
 async function dav(method, url, { body, headers = {} } = {}) {
@@ -74,9 +60,7 @@ const el = (xml, name) => {
 };
 const abs = href => new URL(href, ROOT).href;
 
-// The zone Intl reports for Australia/Sydney at `utcMs`, as milliseconds — computed
-// independently of src/vtimezone.ts (and of src/coerce.ts's zoneOffsetMsAt), so this probe is
-// not just re-checking the generator against itself.
+// Sydney's offset at `utcMs` via Intl, independent of src/vtimezone.ts and src/coerce.ts.
 function offsetMsAt(utcMs) {
   const p = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', {
@@ -111,8 +95,7 @@ async function discoverHome() {
   return abs(home.trim());
 }
 
-// Every STANDARD/DAYLIGHT sub-component in a VTIMEZONE block, unfolded first (RFC 5545 §3.1
-// continuation lines start with a space or tab).
+// Every STANDARD/DAYLIGHT sub-component in a VTIMEZONE block, unfolded first.
 function observances(block) {
   const unfolded = block.replace(/\r\n[ \t]/g, '').split(/\r?\n/);
   const out = [];
@@ -149,9 +132,7 @@ try {
     tempCalendarUrl = candidateUrl;
 
     // --- create one timed event through the built server ------------------------------
-    // Straddling Sydney's own 2026-10-04 spring-forward: 02:00 AEST jumps straight to 03:00
-    // AEDT, so a 01:00-04:00 local span sits on both sides and this short event carries exactly
-    // two observances — one STANDARD (pre-transition), one DAYLIGHT (post-transition).
+    // 02:00 AEST jumps to 03:00 AEDT on 2026-10-04, so 01:00-04:00 local sits on both sides.
     const createRes = await client.call('create_calendar_event', {
       calendarId: candidateUrl,
       title: 'probe-166 fixture',
@@ -160,10 +141,8 @@ try {
       timeZone: 'Australia/Sydney',
     });
     const createBody = text(createRes);
-    // The id never contains '.' or whitespace (`${Date.now()}-${random}@fastmail-mcp`); the
-    // response sentence ends it with a literal period, which a bare \S+ would swallow. Only
-    // whether an id was parsed is ever printed below — the response text itself carries the
-    // event's UID and is never put on stdout.
+    // The response sentence ends the id with a period, which a bare \S+ would swallow. The
+    // response text carries the event's UID and is never put on stdout.
     const eventId = /Event ID: ([^\s.]+)\.?/.exec(createBody)?.[1];
     check('create_calendar_event returned an event id', !!eventId, eventId ? 'an id was parsed' : 'no id was parsed');
     if (!eventId) throw new Error('stopping: no event id to fetch back');
@@ -180,9 +159,8 @@ try {
 
     check('the block carries TZID:Australia/Sydney', /^TZID:Australia\/Sydney\r?$/m.test(block));
 
-    // Scoped to the VEVENT, not the whole resource: a STANDARD/DAYLIGHT sub-component inside
-    // the VTIMEZONE block above it carries its own bare `DTSTART:<onset>` line (RFC 5545
-    // §3.6.5), which a whole-file search would find first and misread as the event's own.
+    // Scoped to the VEVENT: each VTIMEZONE observance carries its own bare `DTSTART:<onset>`,
+    // which a whole-file search would find first.
     const veventBlock = (raw.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/) ?? [''])[0];
     check('a VEVENT block is present to read DTSTART/DTEND from', veventBlock.length > 0);
     const dtstartLine = (veventBlock.match(/^DTSTART[;:].*$/m) ?? [''])[0];
@@ -192,10 +170,8 @@ try {
     const endWall = wallClockOf(dtendLine);
     check('DTSTART/DTEND are still zoned wall clocks, not rewritten', !!startWall && !!endWall, `DTSTART=${dtstartLine.split(':')[0]} DTEND=${dtendLine.split(':')[0]}`);
 
-    // The instant each wall clock names, via the same offsetMsAt used above. Both wall clocks
-    // sit deliberately close to the transition, so a single `naive - offsetMsAt(naive)` can read
-    // the offset off the wrong side of it; a second pass, off the first pass's own corrected
-    // instant, converges (neither wall clock falls in the skipped 02:00-03:00 local gap itself).
+    // Two passes: both wall clocks sit beside the transition, so one pass can read the offset
+    // off the wrong side (neither falls in the skipped 02:00-03:00 gap itself).
     const wallToUtcMs = wall => {
       const y = +wall.slice(0, 4), mo = +wall.slice(4, 6), d = +wall.slice(6, 8);
       const h = +wall.slice(9, 11), mi = +wall.slice(11, 13), s = +wall.slice(13, 15);
