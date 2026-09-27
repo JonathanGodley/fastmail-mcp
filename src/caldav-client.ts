@@ -3085,8 +3085,8 @@ function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start'
     // Quoted differently on purpose: `callerZone` is ICU's canonical spelling (server text), the
     // stored tzid is invitation-authored, so it is echoed inside DOUBLE quotes (#190).
     throw new InvalidInputError(
-      `timeZone would rewrite ${updatedSide} into '${callerZone}' while the stored ${strandedLabel} stays ` +
-      `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}" untouched — silently producing a two-zone event. ` +
+      `timeZone would rewrite ${updatedSide} into '${callerZone}'${etcGmtOffsetNote(callerZone)} while the stored ${strandedLabel} stays ` +
+      `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(desc.tzid)} untouched — silently producing a two-zone event. ` +
       `Pass BOTH start and end alongside timeZone (re-send the ${strandedLabel} you are not otherwise ` +
       `moving, unchanged, to keep its wall clock), or omit timeZone.`
     );

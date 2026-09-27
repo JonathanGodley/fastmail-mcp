@@ -7982,6 +7982,27 @@ describe('an Etc/GMT zone is shown with its real UTC offset', () => {
     );
   });
 
+  it('the stranded-zone refusal appends the offset to both zones', async () => {
+    const data = [
+      'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:strand@fm',
+      'DTSTART;TZID=Etc/GMT-5:20260320T083000', 'DTEND;TZID=Etc/GMT-5:20260320T093000',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    await assert.rejects(
+      () => client.updateCalendarEvent('strand@fm', { start: '2026-04-01T09:00:00', timeZone: 'Etc/GMT+10' }),
+      (err: Error) => {
+        assert.ok(err.message.includes("'Etc/GMT+10' (UTC-10:00; the Etc/GMT sign is inverted)"), err.message);
+        assert.ok(err.message.includes('"Etc/GMT-5" (UTC+05:00; the Etc/GMT sign is inverted)'), err.message);
+        return true;
+      },
+    );
+  });
+
   it('a read carries a trailing note for each Etc/GMT zone its events name, and none otherwise', () => {
     assert.equal(
       buildEtcGmtZoneNote([
