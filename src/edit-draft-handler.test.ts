@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { editDraft } from './edit-draft-handler.js';
+import { assertDraftEditValues } from './jmap-client.js';
 import type { EditDraftClient } from './edit-draft-handler.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
@@ -301,4 +302,21 @@ describe('editDraft — what a refusal may suggest', () => {
       assert.deepEqual(calls.update.options, { attachmentsEnabled: expected });
     }
   });
+});
+
+describe('assertDraftEditValues', () => {
+  it('accepts every clearable field in clearFields', () => {
+    for (const f of ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId']) {
+      assert.doesNotThrow(() => assertDraftEditValues({ clearFields: [f] }), f);
+    }
+  });
+
+  for (const field of ['subject', 'textBody', 'htmlBody']) {
+    it(`refuses an empty ${field}, naming it`, () => {
+      assert.throws(
+        () => assertDraftEditValues({ [field]: '  ' }),
+        (e: any) => e instanceof InvalidInputError && e.message.startsWith(`${field} cannot be empty;`),
+      );
+    });
+  }
 });
