@@ -474,7 +474,7 @@ The signature fields are the identity's configured sign-off, the same text the F
 **Verbose adds**: `addresses`, `titles`, `online`, `photos`, `anniversaries`, plus any remaining JMAP fields (including `kind` on an ordinary card) — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
 
 **Simplification applied:**
-- Name resolved from `name.full` or `given + surname`
+- Name resolved from `name.full`, or when that is absent from the name's `components`: in stored order when the name is marked ordered, otherwise title, given, middle, surname, second surname, generation, credential
 - Emails and phones flattened from JMAP's Id-map to an array — see the hybrid shape below
 - Organization extracted from first entry
 - Notes extracted from JMAP's `{hash: {note}}` object format

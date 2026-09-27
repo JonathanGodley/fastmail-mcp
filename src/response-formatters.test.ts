@@ -476,6 +476,30 @@ describe('simplifyContact', () => {
     assert.equal(result.name, 'Bob Jones');
   });
 
+  it('builds the name from RFC 9553 name components when full is absent', () => {
+    const result = simplifyContact({
+      id: 'ct-5',
+      name: { components: [
+        { kind: 'surname', value: 'Lovelace' },
+        { kind: 'title', value: 'Dr' },
+        { kind: 'given2', value: 'Augusta' },
+        { kind: 'given', value: 'Ada' },
+      ] },
+    });
+    assert.equal(result.name, 'Dr Ada Augusta Lovelace');
+  });
+
+  it('keeps component order when the name says it is ordered', () => {
+    const result = simplifyContact({
+      id: 'ct-6',
+      name: { isOrdered: true, components: [
+        { kind: 'surname', value: 'Kovacs' },
+        { kind: 'given', value: 'Eva' },
+      ] },
+    });
+    assert.equal(result.name, 'Kovacs Eva');
+  });
+
   it('handles missing name gracefully', () => {
     const result = simplifyContact({ id: 'ct-3' });
     assert.equal(result.name, undefined);

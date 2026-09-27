@@ -694,6 +694,37 @@ export function simplifyIdentity(raw: any, options?: { verbose?: boolean }): any
   return result;
 }
 
+// RFC 9553 section 2.2.1.2: an ordered name is rendered in array order with its own
+// separators; otherwise the components are placed in conventional Western order.
+const NAME_COMPONENT_ORDER = ['title', 'given', 'given2', 'surname', 'surname2', 'generation', 'credential'];
+
+function nameFromComponents(name: any): string {
+  if (!Array.isArray(name.components)) return '';
+  const parts = name.components.filter((c: any) => c && typeof c.value === 'string' && c.value.trim() !== '');
+  if (name.isOrdered === true) {
+    const sep = typeof name.defaultSeparator === 'string' ? name.defaultSeparator : ' ';
+    let out = '';
+    let pendingSep = false;
+    for (const c of parts) {
+      if (c.kind === 'separator') { out += c.value; pendingSep = false; continue; }
+      if (pendingSep) out += sep;
+      out += c.value;
+      pendingSep = true;
+    }
+    return out.trim();
+  }
+  const rank = (kind: string) => {
+    const i = NAME_COMPONENT_ORDER.indexOf(kind);
+    return i === -1 ? NAME_COMPONENT_ORDER.length : i;
+  };
+  return parts
+    .filter((c: any) => c.kind !== 'separator')
+    .map((c: any, i: number) => ({ c, i }))
+    .sort((a: any, b: any) => rank(a.c.kind) - rank(b.c.kind) || a.i - b.i)
+    .map(({ c }: any) => c.value)
+    .join(' ');
+}
+
 export function simplifyContact(raw: any, options?: { verbose?: boolean }): any {
   const result: any = { id: raw.id };
 
@@ -701,9 +732,11 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
   const kind = nonDefaultContactKind(raw);
   if (kind) result.kind = kind;
 
-  // Name - could be in name.full, name.given+surname, or other forms
   if (raw.name) {
-    result.name = raw.name.full || [raw.name.given, raw.name.surname].filter(Boolean).join(' ') || undefined;
+    result.name = raw.name.full
+      || nameFromComponents(raw.name)
+      || [raw.name.given, raw.name.surname].filter(Boolean).join(' ')
+      || undefined;
   }
 
   // The opaque Id-map keys are dropped either way. Verbose keeps each entry whole, which is
