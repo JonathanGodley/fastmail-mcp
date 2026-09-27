@@ -197,11 +197,15 @@ export function mergeEntryMap(
     }
   }
 
+  // An entry the caller could not have named is carried over, not dropped: one the view
+  // hides, and a stored duplicate of a value it sent (the input may not repeat a value).
+  const sentValues = new Set(incoming.map((item) => item[keyField]));
   const dropped: Array<{ key: string; entry: any }> = [];
   for (const k of existingKeys) {
     if (matched.has(k)) continue;
-    if (hasEntryValue(existing[k], keyField)) dropped.push({ key: k, entry: existing[k] });
-    else map[k] = existing[k];
+    const entry = existing[k];
+    if (hasEntryValue(entry, keyField) && !sentValues.has(entry[keyField])) dropped.push({ key: k, entry });
+    else map[k] = entry;
   }
   return { map, dropped, added };
 }

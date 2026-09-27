@@ -203,6 +203,17 @@ describe('mergeEntryMap', () => {
     assert.deepEqual(outcome.dropped, []);
   });
 
+  it('keeps a stored duplicate when the list is resent, since the input cannot repeat a value', () => {
+    const card = {
+      k1: { address: 'a@example.com', pref: 1 },
+      k2: { address: 'a@example.com', label: 'work' },
+      k3: { address: 'b@example.com' },
+    };
+    const outcome = mergeEntryMap(card, [{ address: 'a@example.com' }, { address: 'b@example.com' }], 'address');
+    assert.deepEqual(outcome.map, card);
+    assert.deepEqual(outcome.dropped, []);
+  });
+
   it('leaves a matched entry untouched when nothing but its value was supplied', () => {
     const outcome = mergeEntryMap(stored, [{ address: 'b@example.com' }], 'address');
     assert.deepEqual(outcome.map.short1, { address: 'b@example.com', pref: 2 });
