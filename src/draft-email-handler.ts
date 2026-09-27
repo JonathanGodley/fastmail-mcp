@@ -31,48 +31,31 @@ import { matchSubjectPrefix, noteComposeSubjectPrefix } from './subject-prefix.j
 // ---------------------------------------------------------------------------
 //
 // The caller says WHERE this server's generated blocks belong by writing `{{signature}}`,
-// `{{quote}}` and `{{forward}}` into the body; nothing is added that they did not place.
-// That is the whole difference from the three tools this supersedes, and every rule below
-// falls out of it: the mode decides which history token is even offered, a token with
-// nothing behind it is removed and reported rather than silently dropped, and a body that
-// was content before expansion and empty after it is refused rather than stored.
+// `{{quote}}` and `{{forward}}` into the body; nothing is added that they did not place. A
+// token with nothing behind it is removed and reported, never silently dropped, and a body
+// that was content before expansion and empty after it is refused rather than stored.
 //
-// ---------------------------------------------------------------------------
-// THE SECURITY RULE, restated here because this is the file that could break it.
-//
-// Expansion is a SINGLE PASS over the CALLER'S OWN AUTHORED BODY, run BEFORE any fetched
-// content is joined into it. The quote and forwarded blocks are built from an
-// attacker-authored original: a `{{signature}}` sitting inside a stranger's email must land
-// on the REPLACEMENT side of the substitution, where `String.prototype.replace` never
-// rescans it, and stay inert as literal text.
-//
-// So: never re-run `expandBodyTokens` — or any other token-aware transform — over expanded
-// output, and never pass a joined body to it. There is exactly one `expandBodyTokens` call
-// per part in this file and it takes `a.textBody` / `a.htmlBody` verbatim.
-//
-// Validation runs BEFORE expansion for its own reason (`assertBodyInputs` plus the
-// contentless guard): the other order lets a forwarded original that happens to contain
-// `<![CDATA[` refuse the whole call, and lets the quote's real tags mask an escaped-markup
-// body — the #78 defect.
+// SECURITY: expansion is body-tokens.ts's single pass, over the CALLER'S OWN AUTHORED BODY,
+// before any fetched content is joined in. The quote and forwarded blocks are built from an
+// attacker-authored original, so a `{{signature}}` inside it must stay inert text. Never
+// re-run `expandBodyTokens` (or any other token-aware transform) over expanded output, and
+// never pass it a joined body: there is exactly one call per part, on `a.textBody` /
+// `a.htmlBody` verbatim.
 // ---------------------------------------------------------------------------
 
-/** The three modes. `mode` is required and is never coerced or defaulted. */
 export type DraftEmailMode = 'new' | 'reply' | 'forward';
 
 const MODES: readonly DraftEmailMode[] = ['new', 'reply', 'forward'];
 
-/** Which history token each mode offers. `new` offers none. */
 const HISTORY_TOKEN: Record<DraftEmailMode, BodyTokenName | undefined> = {
   new: undefined,
   reply: 'quote',
   forward: 'forward',
 };
 
-/** The two body parts, named as the caller names them. */
 type PartName = 'textBody' | 'htmlBody';
 
-// Parameters passed to createDraft. One shape for all three modes — the mode decides which
-// fields are populated, not which type is used, so the assembly below has one exit.
+// One shape for all three modes, so the assembly below has one exit.
 export interface DraftEmailParams {
   to?: string[];
   cc?: string[];
@@ -97,8 +80,7 @@ export interface TokenPartReceipt {
   part: PartName;
   /**
    * Token names in POSITION order, so a sign-off placed below the history is visible on the
-   * receipt without this server judging whether that was intended. Read off the token
-   * indices, never re-inferred from the body.
+   * receipt without this server judging whether that was intended.
    */
   order: BodyTokenName[];
   /** Tokens whose block was substituted, with how many times. */
@@ -108,19 +90,16 @@ export interface TokenPartReceipt {
 }
 
 /**
- * What this call did with the caller's tokens.
- *
- * It cannot claim an expansion that did not happen: every entry is read off
- * `expandBodyTokens`' own per-site report, which records what the single pass actually
- * substituted.
+ * What this call did with the caller's tokens. Every entry is read off `expandBodyTokens`'
+ * own per-site report, so it cannot claim an expansion that did not happen.
  */
 export interface DraftEmailReceipt {
   /** One entry per supplied part that carried at least one `{{…}}` spelling. */
   parts: TokenPartReceipt[];
   /**
    * The caller's own `{{…}}` spellings this call left as written — a `{{sig}}` typo ships
-   * braces otherwise, with nothing said. Bounded like every other echoed listing, because
-   * on a forward the spelling can have been copied out of the original.
+   * braces otherwise, with nothing said. Bounded, because on a forward the spelling can have
+   * been copied out of the original.
    */
   unexpanded?: string;
   /** True when an asAttachment forward had no body of its own and got the filler note. */
@@ -135,8 +114,8 @@ export interface ComposeDraftEmailResult {
   cc?: string[];
   /**
    * The bcc actually stored — the caller's own, or the list a reply carried out of the
-   * original. Absent when the draft has none. Reported for the same reason `cc` is: a blind
-   * list the caller never named would otherwise reach recipients with nothing said.
+   * original. Reported because a blind list the caller never named would otherwise reach
+   * recipients with nothing said.
    */
   bcc?: string[];
   /** What the tokens did. Absent when the call wrote no token at all. */
@@ -145,12 +124,9 @@ export interface ComposeDraftEmailResult {
   notes?: string[];
 }
 
-// The minimal client surface this orchestration needs; JmapClient satisfies it structurally.
-// Declared here (rather than importing JmapClient) so the handler stays unit-testable with a
-// mock, and unit-tested against one.
+// JmapClient satisfies this structurally; declared here so the tests can pass a mock.
 export interface DraftEmailClient {
   getEmailById(id: string): Promise<any>;
-  /** The sending identities. Fetched once per compose, for the signature and the warning. */
   getIdentities(): Promise<any[]>;
   uploadAttachments(
     specs: AttachmentSpec[],
@@ -168,12 +144,10 @@ export interface DraftEmailClient {
 /**
  * The clause naming the spellings THIS mode accepts, for the near-miss refusal.
  *
- * Scoped to the mode, never the full three: the wrong-mode gate that runs before the
- * near-miss pass refuses the other mode's history token in every spelling, so a message that
- * listed `{{forward}}` on a reply would hand the caller a spelling this same call is about to
- * reject. `{{signature}}` applies in every mode; the history token is the mode's own, and
- * `new` has none — which is why the clause carries its own verb and article rather than
- * being interpolated into a fixed plural sentence.
+ * Scoped to the mode, never all three: the wrong-mode gate refuses the other mode's history
+ * token in every spelling, so listing `{{forward}}` on a reply would offer a spelling this
+ * same call rejects. `new` has no history token, which is why the clause carries its own verb
+ * and article rather than being interpolated into a fixed plural sentence.
  */
 function acceptedSpellings(mode: DraftEmailMode): string {
   const history = HISTORY_TOKEN[mode];
@@ -202,10 +176,9 @@ function partWord(part: PartName): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The mode, exactly as spelled. NOT coerced: `docs/conventions.md` makes leniency a
- * schema-plus-coercion pair, and a defaulted mode would turn a forgotten parameter into a
- * silently unthreaded new message. A value that is not one of the three reaches here only
- * from a client that skipped schema validation, and is refused naming all three.
+ * The mode, exactly as spelled. NOT coerced or defaulted (`docs/conventions.md` on
+ * leniency): a defaulted mode would turn a forgotten parameter into a silently unthreaded new
+ * message. Any other value reaches here only from a client that skipped schema validation.
  */
 function readMode(value: unknown): DraftEmailMode {
   if (typeof value === 'string' && (MODES as readonly string[]).includes(value)) {
@@ -219,12 +192,8 @@ function readMode(value: unknown): DraftEmailMode {
 }
 
 /**
- * A parameter that belongs to one mode only.
- *
- * One schema serves three modes, so a parameter that only makes sense in one of them cannot
- * be made `required` in the schema and is refused here instead. That trade is accepted; what
- * it buys is one message shape for every mode-only parameter, so a caller learns the rule
- * once.
+ * A parameter that belongs to one mode only. One schema serves three modes, so the schema
+ * cannot refuse it and this does.
  */
 function assertModeOnly(
   present: boolean, param: string, allowed: DraftEmailMode, mode: DraftEmailMode,
@@ -248,26 +217,20 @@ interface PartScan {
 const TOKEN_ORDER = ['signature', 'quote', 'forward'] as const;
 
 /**
- * Refuse everything about the caller's tokens that is refusable, from the scan alone.
+ * Refuse everything about the caller's tokens that is refusable, from the scan alone, before
+ * any block is built: a refused call has fetched an original and nothing else — no blob
+ * written, no draft stored.
  *
- * All of it runs BEFORE any block is built and before any substitution, so a refused call
- * has fetched an original and nothing else — no blob written, no draft stored.
+ * THE ORDER IS OVER THE WHOLE CALL, NOT PER PART: wrong-mode token, near-miss, repeat,
+ * one-part, then the two forward gates, each a separate pass across every supplied part. A
+ * per-part loop would let part A's near-miss beat part B's wrong-mode token, so the refusal
+ * would depend on which body the caller wrote first.
  *
- * THE ORDER IS FIXED AND IS OVER THE WHOLE CALL, NOT PER PART: wrong-mode token, near-miss,
- * repeat, one-part, then the two forward gates. Each is a separate pass across every supplied
- * part, and that is the point — a per-part loop lets part A's near-miss beat part B's
- * wrong-mode token, so the same call refuses differently depending on which body the caller
- * happened to write first.
- *
- * The wrong-mode pass leads because of what it spans. It matches the exact token AND every
- * near-miss spelling of a history token this mode does not accept, so `{{forward}}`,
- * `{{Forward}}` and `{{{forward}}}` on a reply are all refused FOR THE MODE. Run the
- * near-miss pass first and `{{{forward}}}` on a reply is refused for its spelling instead,
- * by a message that answers a caller reaching for the forwarded block with this mode's own
- * spellings — `{{signature}}` and `{{quote}}` — and never says the thing that is actually
- * wrong, which is that a reply has no forwarded block to place. Every other count and
- * presence test here (repeat, one-part, the forward gates) is over unescaped EXACT tokens
- * only.
+ * Wrong-mode leads because it also matches every near-miss spelling of a history token this
+ * mode does not accept. Run the near-miss pass first and `{{{forward}}}` on a reply is
+ * refused for its spelling, by a message offering `{{signature}}` and `{{quote}}` that never
+ * says a reply has no forwarded block to place. Every other test here is over unescaped EXACT
+ * tokens only.
  */
 function assertTokensAcceptable(
   parts: PartScan[], mode: DraftEmailMode, asAttachment: boolean,
@@ -275,8 +238,7 @@ function assertTokensAcceptable(
   const history = HISTORY_TOKEN[mode];
 
   // --- 1. A history token this mode does not accept, in any spelling -------
-  // `BodyTokenSite.name` carries the name a near-miss near-missed, so the near-misses can be
-  // read for the mode question without a second scan surface.
+  // A near-miss's `name` is the token it near-missed, so one scan answers the mode question.
   for (const { scan } of parts) {
     for (const site of [...scan.tokens, ...scan.nearMisses]) {
       if (site.name === 'signature' || site.name === history) continue;
@@ -288,9 +250,8 @@ function assertTokensAcceptable(
   }
 
   // --- 2. A near-miss spelling of a token this mode DOES accept ------------
-  // REFUSED, not coerced. `docs/conventions.md` bounds leniency at "rejected when guessing
-  // would change the message", and guessing here would put a signature block into a body
-  // that spelled something else.
+  // REFUSED, not coerced: `docs/conventions.md` rejects a guess that would change the message,
+  // and this one would put a signature block into a body that spelled something else.
   for (const { part, scan } of parts) {
     const miss = scan.nearMisses[0];
     if (miss) {
@@ -303,10 +264,8 @@ function assertTokensAcceptable(
   }
 
   // --- 3. The same token twice in one part ---------------------------------
-  // Expansion is a single pass over every site, so a repeat really would store the block
-  // twice — a second copy of a stranger's whole message, or a second sign-off. There is no
-  // reading of a body that wants that, and the caller who meant the braces as text has the
-  // escape.
+  // Expansion substitutes every site, so a repeat would store the block twice; a caller who
+  // meant the braces as text has the escape.
   for (const { part, scan } of parts) {
     for (const name of TOKEN_ORDER) {
       if (scan.counts[name] < 2) continue;
@@ -319,9 +278,8 @@ function assertTokensAcceptable(
   }
 
   // --- 4. A token in one SUPPLIED part but not the other -------------------
-  // The caller's slip — a message whose html carries the sign-off and whose text alternative
-  // silently does not. A SOURCE that has one form and not the other is a different thing and
-  // is reported per part as a note, not refused here.
+  // The caller's slip. A SOURCE that has one form and not the other is a different thing,
+  // reported per part as a note, not refused here.
   if (parts.length === 2) {
     const [a, b] = parts as [PartScan, PartScan];
     for (const name of TOKEN_ORDER) {
@@ -347,11 +305,10 @@ function assertTokensAcceptable(
     );
   }
 
-  // A forward that places no {{forward}} and does not ride as .eml forwards nothing, while
-  // still carrying the original's attachments, recording the source, and marking the
-  // original forwarded on send. Unlike a reply without {{quote}} — which is simply a
-  // message — that is a shape with no honest reading, so it is refused rather than noted.
-  // Presence test only: whether the block turns out to have content is a later question.
+  // A forward with no {{forward}} and no .eml forwards nothing while still carrying the
+  // original's attachments and marking it forwarded on send. Unlike a reply without {{quote}},
+  // which is simply a message, that has no honest reading, so it is refused rather than noted.
+  // Presence only: whether the block has content is step 9's question.
   if (mode === 'forward' && !asAttachment && !parts.some((p) => p.scan.counts.forward > 0)) {
     throw bad(
       'A forward must place {{forward}} in a body part, or pass asAttachment:true to send ' +
@@ -366,42 +323,26 @@ function assertTokensAcceptable(
 // Blocks
 // ---------------------------------------------------------------------------
 
-/** An unavailable block, so the cause travels with it to the note. */
 const unavailable = (cause: BlockUnavailableCause): BodyBlock => ({ available: false, cause });
 
 /**
  * A block from a builder's output: available when it produced non-blank content, otherwise
  * carrying the cause the caller is owed.
  *
- * `nothing-quotable` versus `nothing-quotable-in-this-form` is decided against the source
- * THIS part would quote, not against a combined either-form gate. An images-only original
- * passes the combined gate and fails the text one, so a text-only reply to it would
- * otherwise store no history and say nothing at all.
+ * The cause is decided against the source THIS part would quote, not a combined either-form
+ * gate: an images-only original passes the combined gate and fails the text one, so a
+ * text-only reply to it would otherwise store no history and say nothing at all.
  */
 function quoteBlock(content: string | undefined, anyForm: boolean): BodyBlock {
   if (content !== undefined && !isBlank(content)) return { available: true, content };
   return unavailable(anyForm ? 'nothing-quotable-in-this-form' : 'nothing-quotable');
 }
 
-// signatureBlock lives in reply-quote.ts beside the two block builders it chooses between:
-// edit_draft expands {{signature}} too, and the rule for WHICH form a part gets is one rule.
-
 // ---------------------------------------------------------------------------
 // Notes
 // ---------------------------------------------------------------------------
 
-// CAUSE_SENTENCE and noteTokenEmpty live in inline-notes.ts: edit_draft emits the same two
-// sentences from its own expansion, and a second copy of the cause wording is how the two
-// surfaces drift apart.
-
-/**
- * The identity has a signature and the caller placed none.
- *
- * Presence only, tested against the PRE-expansion body, so it cannot false-fire; and it
- * tests a SUPPLIED body, so an attachment-only stash, a body-less reply and an asAttachment
- * filler get no warning. It fires on every deliberately unsigned message, which is the
- * accepted cost of covering a body stored with no sign-off and nothing said.
- */
+/** The identity has a signature and the caller placed none. */
 function noteSignatureNotPlaced(identityEmail: string | undefined): string {
   return (
     `Identity ${identityEmail ? `${describeUntrusted(identityEmail)} ` : ''}has a signature; ` +
@@ -414,10 +355,9 @@ function noteSignatureNotPlaced(identityEmail: string | undefined): string {
  * A `{{forward}}` whose block ships only in the TEXT form, over an original that really has
  * html to reproduce.
  *
- * A token note of its own rather than a line on the image sentence, because the loss is the
- * FORMATTING first: the images riding as attachments is the visible half, but a forward of a
- * formatted message reproduced as plain text is degraded even when it carries no images at
- * all. The remedy has to terminate, so it names the one move that fixes both halves.
+ * A note of its own rather than a line on the image sentence, because the loss is the
+ * FORMATTING first: a formatted message forwarded as plain text is degraded even with no
+ * images at all.
  */
 const NOTE_FORWARD_TEXT_FORM =
   '{{forward}} ships in the text form only and the original ships HTML, so this forward loses ' +
@@ -425,27 +365,23 @@ const NOTE_FORWARD_TEXT_FORM =
   'keep both.';
 
 /**
- * What the pooled-media sentence ends on for THIS tool, on the path above.
+ * What the pooled-media sentence ends on, on the NOTE_FORWARD_TEXT_FORM path only.
  *
- * The shared default tells the caller to re-run with `asAttachment: true`, which on
- * `draft_email` is a call the token gate refuses while `{{forward}}` is still in the body —
- * a remedy that does not terminate. Named here so the two sentences give one instruction.
+ * The shared default says to re-run with `asAttachment: true`, a call the token gate refuses
+ * while `{{forward}}` is still in the body — a remedy that does not terminate.
  */
 const POOLED_REMEDY_PLACE_IN_HTML =
   'put {{forward}} in htmlBody to embed them, or drop the token and pass asAttachment: true ' +
   'to forward the original whole.';
 
-/** A reply that placed no {{quote}}: the default flipped, so a forgotten token is reported. */
+/** A reply that placed no {{quote}}, so a forgotten token is reported. */
 const NOTE_REPLY_UNQUOTED =
   'This reply was stored without the original: place {{quote}} in the body to include it.';
 
 /**
- * A reply that carried the original's own Bcc list into its bcc.
- *
- * Said out loud because a blind list is invisible in the composed draft the caller reads
- * back through the Fastmail UI's reply view, and this is the one recipient field a caller
- * cannot see it has widened. Both ways out are named: a bcc of your own replaces it, and a
- * to or a cc turns it off with the cc carry.
+ * A reply that carried the original's own Bcc list into its bcc. Said out loud because a
+ * blind list is invisible in the composed draft, the one recipient field a caller cannot see
+ * it has widened.
  */
 const NOTE_BCC_CARRIED =
   "The original's Bcc list was carried into this reply — pass bcc to replace it, or to or " +
@@ -470,13 +406,13 @@ function noteMintedDropped(names: (string | null | undefined)[], total: number):
 // and embedded angle brackets round-trip MANGLED (split into two ids). The value
 // comes verbatim from the forwarded — attacker-controlled — message, so pre-vet it
 // and treat a malformed id as absent: the forward still works, and only the
-// recorded-source affordance is lost. `edit_draft` never writes this header — it
-// carries whatever the draft already stores, or drops it whole when the caller names
-// forwardedMessageId in clearFields — and it does NOT re-vet what it carries. That is
-// not because the value was vetted before: a draft composed in another client was never seen
-// by this function. It is because a value Fastmail will not accept fails the CREATE loudly,
-// with the old draft still intact (the recreate creates before it disposes), so the caller
-// gets an error and one recovery step — clear the marking — rather than a silent drop.
+// recorded-source affordance is lost.
+//
+// `edit_draft` carries the stored value (or drops it via clearFields) and does NOT re-vet
+// it, though a draft composed in another client was never vetted here: a value Fastmail
+// rejects fails the recreate's CREATE loudly with the old draft intact (it creates before it
+// disposes), so the caller gets an error and one recovery — clear the marking — rather than
+// a silent drop.
 export function isSettableMessageId(id: unknown): id is string {
   return (
     typeof id === 'string' &&
@@ -488,10 +424,8 @@ export function isSettableMessageId(id: unknown): id is string {
   );
 }
 
-// Filename for the attached .eml, derived from the ORIGINAL's subject (the name
-// describes the attached message, not the new wrapper — a caller subject override
-// does not affect it). The value is consumed as a SAVE NAME by receiving clients,
-// so strip control chars (\p{Cc} covers C0 and C1 incl. U+0085), Unicode
+// Filename for the attached .eml, from the ORIGINAL's subject (a caller subject override
+// does not affect it). Receiving clients use it as a SAVE NAME, so strip control chars (\p{Cc} covers C0 and C1 incl. U+0085), Unicode
 // format/bidi controls (\p{Cf}, e.g. U+202E right-to-left override), path
 // separators and the Windows drive/ADS colon, and leading dots; cap the length.
 // Windows reserved device names (CON, NUL, …) deliberately survive as e.g.
@@ -522,22 +456,15 @@ function addressList(value: unknown): { name?: string; email: string }[] {
 }
 
 /**
- * The reply-all cc: everyone the original's To and CC named, minus the addresses this reply
- * is already going to and minus every address the account itself sends as.
+ * The reply-all cc: everyone the original's To and CC named, in that order, minus the
+ * addresses this reply is already going to and minus every address the account sends as.
  *
- * Built with formatAddress and never through coerceStringArray, for the same reason the `to`
- * default is (#31): a display name carrying a comma would otherwise re-split into a bogus
- * second recipient.
+ * formatAddress, never coerceStringArray (#31): a display name carrying a comma would
+ * otherwise re-split into a bogus second recipient.
  *
- * Both exclusions and the dedupe are decided on the ADDRESS alone, case-folded, because the
- * address is the only part that identifies a person — one participant listed as "D. Fox" in
- * To and "Dana" in CC is one recipient. What is KEPT is the whole formatted address, so the
- * display names still ship. Self is tested with matchesIdentity rather than a string compare,
- * so a wildcard identity (`*@example.com`) excludes every address at that domain, exactly as
- * it does when deciding what this account may send as.
- *
- * Order is the original's own: its To in order, then its CC. Nothing here re-sorts, so the
- * reply's cc reads as the thread's participant list did.
+ * Exclusions and dedupe use the case-folded ADDRESS alone — "D. Fox" in To and "Dana" in CC
+ * is one recipient — while the whole formatted address is kept. Self is tested with
+ * matchesIdentity, so a wildcard identity (`*@example.com`) excludes its whole domain.
  */
 function replyAllCc(
   original: any, addressed: { email: string }[], identities: any[],
@@ -558,29 +485,17 @@ function replyAllCc(
 }
 
 /**
- * The bcc a reply carries: the original's own Bcc entries, in the original's order.
+ * The bcc a reply carries: the original's own Bcc entries, whole and in order, because that
+ * is what pressing Reply in Fastmail's client produces (measured 2026-09-10;
+ * docs/fastmail-action-availability.md, "what a reply prefills"). So NOTHING is excluded:
+ * not the account's own identities, and not an address the reply's to or cc already names.
  *
- * Measured on Fastmail's mobile app (2026-09-10) against the account's own Sent copy of a
- * message it had sent to itself with a six-entry Bcc list: Reply and Reply All both produced
- * the whole list, in order, with the account's own address kept — even though that address
- * was also in the To the reply defaulted to. So NOTHING is excluded here: not the account's
- * own identities, and not an address the reply's to or cc already names. A reply to a
- * self-Bcc'd message therefore puts the operator in `to` and in `bcc`, and an address the
- * original had in both Cc and Bcc lands in the reply's cc and bcc both. That is what
- * pressing Reply in the client produces, and matching it is the point.
+ * Deliberately no "is this the account's own message" check: a received message carries no
+ * Bcc header (the submitting server strips it), so presence already marks the account's own
+ * copy. That is derived, not measured, and such a check could only silently refuse an
+ * imported or malformed message, whose shape is recorded as unmeasured in the same doc.
  *
- * There is deliberately no "is this the account's own message" check in front of this. A
- * message the account RECEIVED does not carry a Bcc header — a submitting server strips it
- * before delivery — so the field's presence is already what tells the account's own copy
- * from a received one. That reasoning is derived rather than measured, and the doc row says
- * so; the check it would justify could only ever refuse an IMPORTED or malformed message,
- * silently, so an imported message carrying a Bcc header has its list carried too. That
- * shape is unmeasured, and recorded as unmeasured in docs/fastmail-action-availability.md.
- *
- * Built with formatAddress and never through coerceStringArray, for the same reason the `to`
- * default and the cc carry are (#31): a display name carrying a comma would otherwise
- * re-split into a bogus second recipient. The dedupe is on the ADDRESS alone, case-folded,
- * and keeps the whole formatted address met first, exactly as replyAllCc does.
+ * formatAddress and a case-folded ADDRESS dedupe, as in replyAllCc (#31).
  */
 function replyBcc(original: any): string[] {
   const seen = new Set<string>();
@@ -601,12 +516,11 @@ function replyBcc(original: any): string[] {
 /**
  * Orchestrate draft_email end to end.
  *
- * Reads no environment: `attachDir` and `allowBlobAttach` are resolved by the caller and
- * between them say which attachment SOURCES this server accepts. Only ever drafts —
- * send_draft is the single tool that transmits mail, and it does the thread-state
- * maintenance from the provenance headers recorded here (#60).
+ * Reads no environment: the caller resolves `attachDir` and `allowBlobAttach`. Only ever
+ * drafts — send_draft transmits, and does the thread-state maintenance from the provenance
+ * headers recorded here (#60).
  *
- * The order below is load-bearing and is the order of the numbered steps:
+ * The order of the numbered steps is load-bearing:
  *   1  mode and mode-only parameters      — cheapest refusals first
  *   2  assertBodyInputs + contentless      — VALIDATE, before any expansion
  *   3  fetch the original                  — the only I/O before a refusal is possible
@@ -620,10 +534,10 @@ function replyBcc(original: any): string[] {
  *  11  checkInlineClosure                  — on the POST-expansion html
  *  12  createDraft, then the receipt
  *
- * Steps 6 and 11 straddle step 8 deliberately, and a unit test pins the order: the plan
- * reads the caller's OWN html (the blocks are this server's markup and legitimately carry
- * identifiers the caller never wrote), while the closure check has to read what actually
- * ships. Reversed, every image-bearing reply is refused.
+ * Steps 6 and 11 straddle step 8 deliberately (a unit test pins it): the plan reads the
+ * caller's OWN html, since the blocks legitimately carry identifiers the caller never wrote,
+ * while the closure check reads what actually ships. Reversed, every image-bearing reply is
+ * refused.
  */
 export async function composeDraftEmail(
   args: any,
@@ -635,10 +549,9 @@ export async function composeDraftEmail(
 
   // --- 1. Mode, and the parameters that belong to one mode -----------------
   const mode = readMode(a.mode);
-  // BOTH FLAGS ARE READ OFF `args?.` RATHER THAN THE `a` ALIAS, and must stay that way. The
-  // lenient-boolean guard in tool-schema.test.ts matches `!!asAttachment` and
-  // `!!args?.asAttachment` but not `!!a.asAttachment`, so tidying these back to the alias
-  // would put any future bare-`!!` read of them outside the only check that looks for one.
+  // Read off `args?.`, NOT the `a` alias: tool-schema.test.ts's lenient-boolean guard matches
+  // `!!args?.asAttachment` but not `!!a.asAttachment`, so the alias would hide a future
+  // bare-`!!` read of these flags from the only check that looks for one.
   const asAttachment = coerceBool(args?.asAttachment) ?? false;
   const includeOriginalAttachments = coerceBool(args?.includeOriginalAttachments) ?? true;
 
@@ -660,20 +573,16 @@ export async function composeDraftEmail(
   }
 
   // --- 2. Validate the caller's own bodies, BEFORE anything is expanded ----
-  // The quote and forwarded blocks would otherwise mask a malformed body: they supply the
-  // real tags an escaped-markup body lacks and the visible content an empty one lacks (#78).
+  // The blocks would otherwise mask a malformed body, supplying the real tags an
+  // escaped-markup body lacks and the visible content an empty one lacks, and a forwarded
+  // original containing `<![CDATA[` would refuse the call (#78, docs/email-bodies.md).
   assertBodyInputs(a);
 
   const { from, subject: rawSubject, textBody, htmlBody } = a;
-  // `from` may carry a display name (#161), so this handler's two uses of it take the
-  // ADDRESS half. selectIdentity delegates to matchesIdentity, whose wildcard branch accepts
-  // a bare addr-spec and nothing else, so a named `from` would otherwise resolve to no
-  // identity here and lose its signature — while createDraft, which parses, accepted it. The
-  // not-placed note takes the same half, because a message about which identity is signing
-  // should name an address and not a display name.
-  //
-  // `from` itself stays RAW below: it is handed to createDraft whole, and that is what puts
-  // the caller's name into the stored From header.
+  // `from` may carry a display name (#161). selectIdentity's wildcard match accepts a bare
+  // addr-spec only, so the identity lookup and the not-placed note take the ADDRESS half, or
+  // a named `from` would lose its signature. `from` itself goes to createDraft RAW, which is
+  // what puts the caller's name into the stored From header.
   const fromAddress: string | undefined = from ? parseAddress(from).email : from;
   const { to: toArg, cc, bcc, replyTo } = coerceRecipients(a);
   // Coerced before the contentless guard, so an attachment-only stash counts as content; a
@@ -688,9 +597,8 @@ export async function composeDraftEmail(
   );
 
   if (mode === 'new') {
-    // Bodies are tested with isBlank, matching the second copy of this guard in
-    // createDraft. Truthiness would let a whitespace-only body through to the generic
-    // message, which names none of the parameters that would fix it.
+    // isBlank, as createDraft's copy of this guard does: truthiness would let a
+    // whitespace-only body through to its generic message, which names no parameter.
     if (!toArg?.length && !subjectOverride && isBlank(textBody) && isBlank(htmlBody)
         && !specs?.length) {
       throw bad('At least one of to, subject, textBody, htmlBody, or attachments must be provided');
@@ -714,26 +622,22 @@ export async function composeDraftEmail(
   const htmlPart = supplied.find((p) => p.part === 'htmlBody');
   const textPart = supplied.find((p) => p.part === 'textBody');
 
-  // THE MESSAGE QUESTION: does this message ship an html part at all? A present-but-blank
-  // htmlBody emits none — buildBodyParts drops it — so it must not carry the only sign-off.
+  // Does this message ship an html part at all? A present-but-blank htmlBody emits none
+  // (buildBodyParts drops it), so it must not carry the only sign-off.
   const messageShipsHtml = !isBlank(htmlBody);
-  // THE HTML QUOTE QUESTION, kept apart from it: the html part is non-blank AND carries the
-  // history token. (The builders add the third conjunct, that the original has quotable
-  // html.) It decides whether the quoted images are minted, and therefore whether the text
-  // alternative may describe an image the reader can actually look at.
+  // Kept apart from it: the html part ships AND carries the history token (the builders add
+  // that the original has quotable html). It decides whether the quoted images are minted,
+  // and so whether the text alternative may describe an image the reader can look at.
   const historyHtmlShips =
     messageShipsHtml && !!history && (htmlPart?.scan.counts[history] ?? 0) > 0;
   const historyPlaced = !!history && supplied.some((p) => p.scan.counts[history] > 0);
 
   // --- 5. The identity, fetched once ---------------------------------------
-  // Always fetched on this tool, because the warning below needs to know whether the
-  // identity HAS a signature even when the caller placed no token.
-  // The whole list is kept, not just the selected one: the reply-all cc below excludes every
-  // address this account can send as, which is a question about all of them. The `?? []` is
-  // new tolerance the cc carry needs — selectIdentity has its own — and it is deliberately
-  // unpinnable: any non-empty value in its place matches nothing at either consumer, so no
-  // assertion can tell it from the empty list. A client returning no list must not throw the
-  // compose away, which is what the test beside it pins.
+  // Always fetched: the not-placed note needs to know whether the identity HAS a signature
+  // even when no token was placed, and the reply-all cc excludes every identity, not just the
+  // selected one. The `?? []` is unpinnable (any non-empty stand-in matches nothing at either
+  // consumer); what the test beside it pins is that a client returning no list does not throw
+  // the compose away.
   const identities = (await client.getIdentities()) ?? [];
   const identity = selectIdentity(identities, fromAddress);
   const signature = signatureOf(identity);
@@ -748,9 +652,8 @@ export async function composeDraftEmail(
   });
 
   // --- 7. Build the blocks, only for a token that is actually there --------
-  // Block construction runs the collect pass, which is what resolves the original's image
-  // references — so an unquoted reply gains no "dropped image" notes by doing work nobody
-  // asked for.
+  // Block construction resolves the original's image references, so building an unplaced
+  // block would give an unquoted reply "dropped image" notes.
   let quoteImages: QuoteImageOutcome = emptyQuoteImages();
   const htmlBlocks: BodyBlocks = { signature: undefined, quote: undefined, forward: undefined };
   const textBlocks: BodyBlocks = { signature: undefined, quote: undefined, forward: undefined };
@@ -761,8 +664,7 @@ export async function composeDraftEmail(
   }
 
   if (historyPlaced && mode === 'reply') {
-    // No `timezone`: this tool takes no such parameter, so the attribution line is
-    // formatted in the server's local zone, which is what buildQuoteBlocks defaults to.
+    // No `timezone`: this tool takes none, so the attribution line uses the server's zone.
     const built = buildQuoteBlocks({
       original,
       htmlShips: historyHtmlShips,
@@ -775,9 +677,8 @@ export async function composeDraftEmail(
   }
 
   let forwardSourceParts: { part: CidPart; inBodyList: boolean }[] = [];
-  // True when the forwarded block ships in its TEXT form while the original really has html
-  // worth reproducing — the cell NOTE_FORWARD_TEXT_FORM is about. Read off the builder's own
-  // `htmlQuotable`, so it cannot disagree with the arm that chose the form.
+  // The NOTE_FORWARD_TEXT_FORM case. Read off the builder's own `htmlQuotable`, so it cannot
+  // disagree with the arm that chose the form.
   let forwardTextFormOnly = false;
   if (historyPlaced && mode === 'forward') {
     forwardSourceParts = buildUnionParts(original).filter((u) => u.part?.blobId);
@@ -788,16 +689,14 @@ export async function composeDraftEmail(
     });
     quoteImages = built.images;
     forwardTextFormOnly = !historyHtmlShips && built.htmlQuotable;
-    // The forwarded block always has a header block, so it is never "nothing quotable" in
-    // the way a reply quote can be — but a caller can still place the token in a part whose
-    // form carries nothing below the headers, and the note above says which.
+    // Always `true`: the forwarded block has a header block, so it is never "nothing
+    // quotable" in any form, only in the form of the part the token was placed in.
     htmlBlocks.forward = quoteBlock(built.htmlBlock, true);
     textBlocks.forward = quoteBlock(built.textBlock, true);
   }
 
   // --- 8. THE SINGLE PASS, per part, over the caller's authored body -------
-  // Read the security rule at the top of this file before touching these two lines. Each
-  // takes the caller's OWN string; neither takes anything a builder produced.
+  // Read the security rule at the top of this file before touching these two lines.
   const expansions = new Map<PartName, BodyTokenExpansion>();
   if (htmlPart) expansions.set('htmlBody', expandBodyTokens(htmlPart.authored, htmlBlocks));
   if (textPart) expansions.set('textBody', expandBodyTokens(textPart.authored, textBlocks));
@@ -806,12 +705,10 @@ export async function composeDraftEmail(
   const expandedText = expansions.get('textBody')?.text ?? (textPart ? '' : undefined);
 
   // --- 9. A part that was content before expansion and is empty after it ---
-  // Refused per part, in every mode, and this refusal wins over the "token had nothing to
-  // expand to" note below: `mode:'forward'` with {{forward}} and an original with nothing
-  // quotable passes the presence gate in step 4 and would otherwise store a body-less
-  // forward that still carries attachments and marks the original forwarded. The message is
-  // raised here rather than left to createDraft's generic contentless one so it can name
-  // the causes and the remedies.
+  // Refused per part, in every mode, winning over the empty-token note: a forward whose
+  // {{forward}} has nothing quotable passes step 4's presence gate and would otherwise store
+  // a body-less forward that still carries attachments and marks the original forwarded.
+  // Raised here, not left to createDraft's generic message, so it can name causes and fixes.
   for (const { part, authored } of supplied) {
     const before = part === 'htmlBody' ? htmlHasVisibleContent(authored) : !isBlank(authored);
     if (!before) continue;
@@ -836,20 +733,11 @@ export async function composeDraftEmail(
   const params: DraftEmailParams = { from, replyTo };
   if (toArg?.length) params.to = toArg;
   if (cc) params.cc = cc;
-  // Tested on LENGTH, not truthiness: coerceRecipients returns [] for '' and for [], and []
-  // is truthy, so `if (bcc)` put an empty array into the params handed to createDraft and,
-  // now that the result reports the field, into `result.bcc` with it. Nothing was ever
-  // written to a message either way — createDraft guards each recipient list on `.length` of
-  // its own and drops an empty one — so what this fixes is the params and the REPORTED
-  // field, not the stored draft.
-  //
-  // `cc` keeps the truthiness form deliberately, because there it is inert both ways:
-  // createDraft drops its empty array the same way, and although `params.cc = []` does reach
-  // `result.cc`, the only consumer of this result is formatDraftEmailResult, which renders a
-  // recipient line only for a non-empty list. `replyTo` needs no test at all — it is written
-  // into the object literal above unconditionally, is not a field of the result, and is
-  // inert for the createDraft reason alone. `bcc` is the one that had to change, because it
-  // is the one the result now reports.
+  // bcc on LENGTH: coerceRecipients returns [] for '' and [], and a truthy [] would reach
+  // `result.bcc`. createDraft drops an empty recipient list itself, so this is about the
+  // reported field, not the stored draft. `cc` keeps truthiness because an empty `result.cc`
+  // is inert (formatDraftEmailResult renders only a non-empty list), and `replyTo` is not a
+  // result field at all.
   if (bcc?.length) params.bcc = bcc;
 
   let fillerBody: true | undefined;
@@ -881,15 +769,10 @@ export async function composeDraftEmail(
     if (subjectOverride === undefined && !/^Re:/i.test(subject)) subject = `Re: ${subject}`;
     params.subject = subject;
 
-    // Default the recipient to the original's Reply-To when it named one, else its From,
-    // keeping the display name via formatAddress. This array bypasses coerceStringArray, so
-    // a comma inside a name is never re-split into a bogus second recipient (#31). The
-    // address objects are kept beside it so the cc carry below can exclude them by address
-    // without re-parsing a formatted string.
-    //
-    // `params.to` is non-empty here exactly when the caller supplied one, so this whole
-    // branch IS the "caller named no recipient" case — which is why the carry is nested
-    // inside it rather than re-testing `toArg`.
+    // Reply-To if the original named one, else From, via formatAddress and never
+    // coerceStringArray (#31). The address objects are kept so the cc carry can exclude them
+    // without re-parsing a formatted string. This branch IS the "caller named no `to`" case,
+    // which is why the carry is nested inside it rather than re-testing `toArg`.
     if (!params.to?.length) {
       const replyToHeader = addressList(original.replyTo);
       const addressed = replyToHeader.length ? replyToHeader : addressList(original.from);
@@ -898,21 +781,16 @@ export async function composeDraftEmail(
         throw bad('Could not determine reply recipient. Please provide "to" explicitly.');
       }
 
-      // A reply is reply-all by default: everyone else the original addressed is carried
-      // into cc (#184). It runs ONLY when the caller named nobody at all, because an
-      // explicit `to` or `cc` is a deliberately narrowed reply and this server must not
-      // widen it back out. Note what an explicit `cc` suppresses is the CARRY alone — the
-      // `to` fallback above still runs beside it.
+      // Reply-all by default (#184), ONLY when the caller named no `to` or `cc`: either is a
+      // deliberately narrowed reply this server must not widen. An explicit `cc` suppresses
+      // the CARRY alone; the `to` fallback above still runs.
       if (!cc?.length) {
         const carried = replyAllCc(original, addressed, identities);
         if (carried.length) params.cc = carried;
 
-        // The original's own Bcc list is carried the same way and under the same condition
-        // (#189): a `to` or a `cc` of the caller's is a narrowed reply, and carrying a BLIND
-        // list behind one is the single outcome nobody could mean. A caller `bcc` is
-        // additive rather than narrowing, so it displaces only its own default and leaves
-        // the `to` fallback and the cc carry above running. An EMPTY caller bcc is no bcc at
-        // all and does not displace the carry — the same test applied to an empty `cc`.
+        // The original's Bcc list, under the same condition (#189). A caller `bcc` is
+        // additive rather than narrowing, so it displaces only this carry; an EMPTY one is no
+        // bcc and displaces nothing, as with an empty `cc`.
         if (!bcc?.length) {
           const carriedBcc = replyBcc(original);
           if (carriedBcc.length) {
@@ -946,11 +824,9 @@ export async function composeDraftEmail(
   const notIncluded: CidPart[] = [];
 
   if (mode === 'forward' && asAttachment) {
-    // Lossless form: the Email's own blobId is the raw RFC 5322 message. Inserted AFTER the
-    // empty-after-expansion check above, which is what keeps a caller-supplied part being
-    // tested on its own terms while a body-less forward still ships something readable. The
-    // filler is ordinary prose rather than a forwarded-message block, and nothing downstream
-    // reads it back: an edit of this draft replaces it like any other body.
+    // Lossless form: the Email's own blobId is the raw RFC 5322 message. The filler goes in
+    // AFTER step 9, so a supplied part is tested on its own terms. It is ordinary prose that
+    // nothing reads back; an edit replaces it like any other body.
     if (isBlank(params.textBody) && isBlank(params.htmlBody)) {
       params.textBody = 'Forwarded message attached.';
       params.htmlBody = undefined;
@@ -996,12 +872,9 @@ export async function composeDraftEmail(
   const ledger = new InlineNoteLedger();
   const carry = recordQuoteImages(ledger, quoteImages, mode === 'forward' ? 'forward' : 'reply');
 
-  // A minted part that nothing references AFTER expansion is dropped before assembly, and
-  // the result names it. New behaviour, and reachable from caller input for the first time:
-  // a token placed inside a comment or an attribute expands there, so the block is in the
-  // body but its image references are not live. The old path for an unreferenced minted part
-  // was checkInlineClosure's second arm THROWING, which is the wrong answer for something a
-  // caller can cause.
+  // A minted part nothing references AFTER expansion is dropped here and named in the result,
+  // rather than left for checkInlineClosure to throw on: a caller can cause it by placing a
+  // token inside a comment or an attribute, where the block's image references are not live.
   const liveRefs = new Set(
     expandedHtml ? extractLiveCidRefs(expandedHtml) : [],
   );
@@ -1040,18 +913,13 @@ export async function composeDraftEmail(
   const receipt = buildReceipt(expansions, fillerBody);
   const signaturePlaced = supplied.some((p) => p.scan.counts.signature > 0);
 
-  // A subject a caller typed "Re:" or "Fwd:" into does not thread the message; the headers
-  // this server writes for the other two modes do, and mode:'new' writes none (#188). So the
-  // draft reads as part of a conversation and arrives as a new one, in the caller's client
-  // and in every recipient's. Said out loud and never refused: reusing an old subject for a
-  // fresh conversation is legitimate, and a refusal would leave that caller no way through.
+  // A "Re:" or "Fwd:" typed into a mode:'new' subject does not thread the message (#188), so
+  // it reads as part of a conversation and arrives as a new one. Noted, never refused:
+  // reusing an old subject for a fresh conversation is legitimate.
   //
-  // Silent when the caller passed threading headers of their own, which is the documented
-  // route for replying to a message this account does not hold - there the note's premise
-  // is simply false. That test reads what those parameters COERCED to rather than whether
-  // they were mentioned, because the premise is about the header the draft ends up
-  // carrying: `inReplyTo: []` writes none, so such a draft does not thread and is warned
-  // about like any other.
+  // Silent when the caller's own threading headers make the draft thread (the documented
+  // route for replying to a message this account does not hold). Tested on what they
+  // COERCED to, not whether they were mentioned: `inReplyTo: []` writes no header.
   const prefixTyped = mode === 'new' && !params.inReplyTo?.length && !params.references?.length
     ? matchSubjectPrefix(params.subject)
     : undefined;
@@ -1060,8 +928,6 @@ export async function composeDraftEmail(
     ...ledger.emit({
       surface: mode === 'forward' ? 'forward' : 'reply',
       ...(carry.resolvedPartCount !== undefined && { resolvedPartCount: carry.resolvedPartCount }),
-      // Only on the path where placing the token in htmlBody really is the fix; anywhere
-      // else the shared "re-run with asAttachment" remedy is the right one.
       ...(forwardTextFormOnly && { pooledRemedy: POOLED_REMEDY_PLACE_IN_HTML }),
     }),
     ...(droppedMinted.length > 0
@@ -1076,8 +942,10 @@ export async function composeDraftEmail(
     }),
     ...emptyTokenNotes(expansions),
     ...(forwardTextFormOnly ? [NOTE_FORWARD_TEXT_FORM] : []),
-    // Presence only, on a SUPPLIED body, so a body-less reply and an attachment-only stash
-    // are silent.
+    // Presence on the PRE-expansion scan of a SUPPLIED body, so it cannot false-fire and an
+    // attachment-only stash, a body-less reply and an asAttachment filler are silent. It fires
+    // on every deliberately unsigned message: the accepted cost of never storing an unsigned
+    // body with nothing said.
     ...(!signaturePlaced && signature && supplied.length > 0
       ? [noteSignatureNotPlaced(identity?.email ?? fromAddress)]
       : []),
@@ -1091,12 +959,9 @@ export async function composeDraftEmail(
     mode,
     ...(params.subject !== undefined && { subject: params.subject }),
     ...(params.to && { to: params.to }),
-    // Read off `params`, not the caller's argument, so a reply-all carry is reported rather
-    // than the draft quietly going to more people than the result names.
+    // cc and bcc are read off `params`, not the caller's arguments, so a carried list is
+    // reported rather than the draft quietly going to more people than the result names.
     ...(params.cc && { cc: params.cc }),
-    // Read off `params` for the same reason `cc` is, and with more riding on it: a bcc the
-    // caller never named is invisible in the stored draft's reply view, so if the result
-    // did not name it nothing would.
     ...(params.bcc && { bcc: params.bcc }),
     ...(receipt && { tokens: receipt }),
     ...(notes.length > 0 && { notes }),
@@ -1105,10 +970,7 @@ export async function composeDraftEmail(
 
 /**
  * Content-IDs an html body really references, read with THE SAME collector the closure check
- * uses — so "referenced" means the same thing in both places, and the drop below can never
- * disagree with the throw it exists to prevent. A token expanded inside a comment or an
- * attribute leaves the block's markup in the body but its `<img>` outside the document, and
- * this is what tells the two apart.
+ * uses, so the minted-part drop can never disagree with the throw it exists to prevent.
  */
 function extractLiveCidRefs(html: string): string[] {
   return sanitizeQuoteHtml(html, { mode: 'collect' }).refs;
@@ -1130,12 +992,7 @@ function emptyTokenNotes(expansions: Map<PartName, BodyTokenExpansion>): string[
   return out;
 }
 
-/**
- * The receipt, read off the expansion's own per-site report.
- *
- * Absent when the call wrote no `{{…}}` spelling at all, so an ordinary body's result is
- * unchanged in shape.
- */
+/** The receipt; absent when the call wrote no `{{…}}` spelling and produced no filler. */
 function buildReceipt(
   expansions: Map<PartName, BodyTokenExpansion>, fillerBody: true | undefined,
 ): DraftEmailReceipt | undefined {
@@ -1163,8 +1020,7 @@ function buildReceipt(
     }
     parts.push({
       part,
-      // Position order: expandBodyTokens reports sites in the order the single pass met
-      // them, which is the order they sit in the body.
+      // expandBodyTokens reports sites in body order; never re-infer it from the text.
       order: expansion.tokens.map((t) => t.name),
       expanded: [...expanded.entries()].map(([token, count]) => ({ token, count })),
       removed: [...removed.values()],
