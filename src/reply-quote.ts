@@ -320,7 +320,7 @@ export function buildQuoteBlocks(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Forward support (draft_email's mode:'forward' + edit_draft's forward guard)
+// Forward support (draft_email's mode:'forward')
 // ---------------------------------------------------------------------------
 
 // Matches the Fastmail client's own forward block (probed live 2026-07-05), including its
@@ -368,15 +368,18 @@ function forwardHeaderLines(original: any): string[] {
 export interface ForwardBlocks {
   textBlock: string;
   htmlBlock: string;
-  /** Read by the forward builder's no-note arm to choose which format a bare forward emits. */
+  /**
+   * Whether the original has html worth reproducing. draft_email reads it to tell a caller
+   * whose {{forward}} ships only in the text form that the formatting was lost.
+   */
   htmlQuotable: boolean;
   images: QuoteImageOutcome;
 }
 
 /**
  * Build the forwarded-message blocks, running both image passes (the pass-ordering note is at
- * the top of this file). Unlike a reply, a forward with no caller body still ships html when
- * the original has quotable html.
+ * the top of this file). Each block is substituted where the caller placed {{forward}}, so
+ * html ships only in a caller-supplied htmlBody.
  */
 export function buildForwardBlocks(input: {
   original: any;      // raw JMAP email from getEmailById (body lists + bodyValues + addresses)
@@ -392,8 +395,8 @@ export function buildForwardBlocks(input: {
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
-  // PASS 1: collect. An image-only original becomes quotable here, which also flips a bare
-  // forward's default from text to html for it.
+  // PASS 1: collect. An image-only original becomes quotable here, so an html block over it
+  // shows the picture rather than the header block alone.
   const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
