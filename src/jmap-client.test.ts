@@ -4516,6 +4516,50 @@ describe('uploadAttachments', () => {
     }
   });
 
+  // A file read may return fewer bytes than asked for. The upload must be the whole file.
+  function fakeHandle(content: Buffer, chunk: number, size = content.length) {
+    return {
+      handle: {
+        read: async (buf: Buffer, off: number, len: number, pos: number) => {
+          const n = Math.max(0, Math.min(chunk, len, content.length - pos));
+          content.copy(buf, off, pos, pos + n);
+          return { bytesRead: n, buffer: buf };
+        },
+        close: async () => {},
+      } as any,
+      size,
+    };
+  }
+
+  it('keeps reading a local file until every byte is in, across short reads', async (t) => {
+    const client = clientWithUpload();
+    const content = Buffer.from('0123456789');
+    t.mock.method(JmapClient, 'safeReadPath', async () => fakeHandle(content, 3));
+    let uploaded: Buffer | undefined;
+    t.mock.method(client, 'uploadBlob', async (data: Buffer, ct: string) => {
+      uploaded = Buffer.from(data);
+      return { blobId: 'blob-1', type: ct, size: data.length };
+    });
+    await client.uploadAttachments([{ path: 'f.txt' }], 'unused-root', false);
+    assert.deepEqual(uploaded, content);
+  });
+
+  it('refuses, naming the file, when the file ends before its stated size', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(JmapClient, 'safeReadPath', async () => fakeHandle(Buffer.from('0123'), 3, 10));
+    let uploads = 0;
+    t.mock.method(client, 'uploadBlob', async () => { uploads++; return { blobId: 'x', type: 'text/plain', size: 1 }; });
+    await assert.rejects(
+      () => client.uploadAttachments([{ path: 'short.txt' }], 'unused-root', false),
+      (err: Error) => {
+        assert.match(err.message, /"short\.txt"/);
+        assert.match(err.message, /4 of its 10 bytes/);
+        return true;
+      },
+    );
+    assert.equal(uploads, 0);
+  });
+
   it('uploads multiple files and returns a part per file (two-pass, in order)', async (t) => {
     const client = clientWithUpload();
     let n = 0;

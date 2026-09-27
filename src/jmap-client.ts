@@ -4230,7 +4230,7 @@ export class JmapClient {
     // failure still can; Fastmail garbage-collects them). Entries stay in SPEC ORDER: the
     // compose paths map parts back onto specs by position.
     const inlineCids = options.inlineCids;
-    type PreparedFile = { kind: 'file'; handle: FileHandle; size: number; contentType: string; name: string; cid?: string };
+    type PreparedFile = { kind: 'file'; handle: FileHandle; size: number; contentType: string; name: string; file: string; cid?: string };
     type PreparedRef = { kind: 'ref'; blobId: string; type: string; name: string; cid?: string };
     const prepared: (PreparedFile | PreparedRef)[] = [];
     try {
@@ -4305,7 +4305,7 @@ export class JmapClient {
         const contentType = callerType ?? guessContentType(path);
         const { handle, size } = await JmapClient.safeReadPath(path, attachDir);
         // Push BEFORE the size checks so the finally closes this handle even if a cap throws.
-        prepared.push({ kind: 'file', handle, size, contentType, name: spec.name ?? basename(path), cid: spec.cid });
+        prepared.push({ kind: 'file', handle, size, contentType, name: spec.name ?? basename(path), file: basename(path), cid: spec.cid });
         if (size > JmapClient.MAX_ATTACHMENT_BYTES) {
           throw new PathAccessError(
             // basename is still caller text, so it is echoed like the rest.
@@ -4334,11 +4334,22 @@ export class JmapClient {
           continue;
         }
         // Bounded read, never read-then-check, which would buffer an oversize file first.
+        // A read may return fewer bytes than asked, so loop; a file that ends early (it
+        // shrank after the stat) is refused rather than uploaded truncated.
         const buffer = Buffer.alloc(o.size);
-        const { bytesRead } = await o.handle.read(buffer, 0, o.size, 0);
-        const data = bytesRead === o.size ? buffer : buffer.subarray(0, bytesRead);
+        let filled = 0;
+        while (filled < o.size) {
+          const { bytesRead } = await o.handle.read(buffer, filled, o.size - filled, filled);
+          if (bytesRead === 0) {
+            throw new PathAccessError(
+              `The attachment "${echoPath(o.file)}" could be read for only ${filled} of its ${o.size} bytes; ` +
+              'it changed while being read. Nothing was uploaded for it. Try again once the file is complete.'
+            );
+          }
+          filled += bytesRead;
+        }
 
-        const uploaded = await this.uploadBlob(data, o.contentType);
+        const uploaded = await this.uploadBlob(buffer, o.contentType);
         parts.push({
           blobId: uploaded.blobId,
           type: uploaded.type,
