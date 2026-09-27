@@ -517,7 +517,8 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   the EXPANDED html whenever that html yields text (otherwise it ships HTML-only), so it
   carries the block too, while a `textBody` supplied alone gets no
   html. A forward that places no `{{forward}}` and does not pass `asAttachment: true` is
-  refused, as is a token in one supplied part but not the other. So a forward ships HTML
+  refused, as is a token in one supplied part but not the other (a blank part counts as not
+  supplied). So a forward ships HTML
   only when the caller supplies an `htmlBody`: a text-only forward of an html original
   reproduces it as text, any inline images it displayed ride as regular attachments unless
   `includeOriginalAttachments` is false, and the result says what happened and names

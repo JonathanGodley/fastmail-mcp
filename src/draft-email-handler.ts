@@ -286,9 +286,11 @@ function assertTokensAcceptable(
 
   // --- 4. A token in one SUPPLIED part but not the other -------------------
   // The caller's slip. A SOURCE that has one form and not the other is a different thing,
-  // reported per part as a note, not refused here.
-  if (parts.length === 2) {
-    const [a, b] = parts as [PartScan, PartScan];
+  // reported per part as a note, not refused here. A blank part counts as not supplied: it
+  // ships nothing (buildBodyParts drops it), so there is nothing for it to disagree with.
+  const nonBlank = parts.filter((p) => !isBlank(p.authored));
+  if (nonBlank.length === 2) {
+    const [a, b] = nonBlank as [PartScan, PartScan];
     for (const name of TOKEN_ORDER) {
       const inA = a.scan.counts[name] > 0;
       const inB = b.scan.counts[name] > 0;

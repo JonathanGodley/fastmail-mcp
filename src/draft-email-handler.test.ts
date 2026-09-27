@@ -3116,43 +3116,47 @@ describe('draft_email — hostile fields out of a forwarded message, over the st
 // them together: a regression that moves one and not the other stores a quote whose images
 // have gone, with nothing in the output saying so.
 //
-// A blank html part beside a token-bearing text part cannot reach any of that, because the
-// symmetry rule refuses the call first — so the first test here pins the REFUSAL for those
-// spellings rather than an outcome no caller can produce. That the blank part is dropped
-// downstream anyway is not an exemption from the rule, and the exemption is the plausible
-// regression: it would store a message whose two parts say different things.
+// A blank html part counts as not supplied, so the one-part token rule does not refuse it
+// beside a token-bearing text part: the message is the text-only one.
 
 /** A part did not ship when it is absent or blank — buildBodyParts drops both. */
 const isBlankBody = (v: unknown) => v === undefined || (typeof v === 'string' && v.trim() === '');
 
 describe('draft_email — a blank html part ships no html, and mints nothing for one', () => {
-  it('refuses a token-bearing text part beside a blank html part, in either spelling', async () => {
+  it('treats a blank html part beside a token-bearing text part as absent, in either spelling', async () => {
     for (const htmlBody of ['', '   ']) {
       const { client, calls } = plainClient(withInlineImage());
-      await assert.rejects(
-        () => compose(
-          { mode: 'reply', originalEmailId: 'o1', htmlBody, textBody: 'r\n{{quote}}' }, client,
-        ),
-        /\{\{quote\}\} is in textBody but not in htmlBody\./,
-        JSON.stringify(htmlBody),
+      const r = await compose(
+        { mode: 'reply', originalEmailId: 'o1', htmlBody, textBody: 'r\n{{quote}}' }, client,
       );
-      assert.equal(calls.draft, undefined);
+      assert.ok(isBlankBody(calls.draft.htmlBody), JSON.stringify(htmlBody));
+      assert.match(calls.draft.textBody, /^r\n/);
+      assert.equal('attachments' in calls.draft, false);
+      assert.deepEqual(r.notes, [
+        '1 image(s) from the quoted message were dropped and are not part of this draft.',
+      ]);
     }
   });
 
-  it('refuses the same shape on a forward, so neither history token gets the exemption', async () => {
+  it('treats a blank html part as absent on a forward too', async () => {
     const { client, calls } = plainClient(withInlineImage());
-    await assert.rejects(
-      () => compose(
-        {
-          mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
-          htmlBody: '   ', textBody: 'note\n{{forward}}',
-        },
-        client,
-      ),
-      /\{\{forward\}\} is in textBody but not in htmlBody\./,
+    await compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        htmlBody: '   ', textBody: 'note\n{{forward}}',
+      },
+      client,
     );
-    assert.equal(calls.draft, undefined);
+    assert.ok(isBlankBody(calls.draft.htmlBody), String(calls.draft.htmlBody));
+    assert.match(calls.draft.textBody, /^note\n/);
+  });
+
+  it('treats a blank text part beside a token-bearing html part as absent', async () => {
+    const { client, calls } = plainClient(withInlineImage());
+    await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: '  ', htmlBody: '<p>r</p>{{quote}}' }, client,
+    );
+    assert.ok((calls.draft.htmlBody as string).startsWith('<p>r</p>'), calls.draft.htmlBody);
   });
 
   it('ships no html part, and no minted image, for a reply that supplies only a text part', async () => {
