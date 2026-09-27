@@ -820,7 +820,7 @@ Your recourse is per-tool, and it is coarse on purpose:
 Carrying needs an HTML body to put the images in:
 
 - A **text-only reply** can't display them, so it drops them and the result says how many. Supply an `htmlBody` that places `{{quote}}` to keep them; a text-only reply never gets an HTML part built for it.
-- A **text-only forward**, or an image the block can't display — a reference that didn't resolve to exactly one image part, or a duplicate identifier shared by several parts — falls back to riding as a regular attachment. That fallback *is* governed by `includeOriginalAttachments`, and the result says what happened either way.
+- A **text-only forward**, or an image the block can't display — a reference that didn't resolve to exactly one image part, or a duplicate identifier shared by several parts, or a `{{forward}}` placed inside a comment or an attribute so the block's images are never displayed — falls back to riding as a regular attachment. That fallback *is* governed by `includeOriginalAttachments`, and the result says what happened either way.
 
 Images written as `data:` URIs are dropped and counted rather than converted, as are images referenced by a form a quote cannot carry — a relative or protocol-relative path, which resolves against an origin the new message does not have. The quote still ships, and the result says how many went. Identifiers this server mints for carried images (`ii-<hex>@inline.invalid`) survive an edit of the same draft for as long as the body you hand back keeps referencing them; drop the reference and the part comes off. Never author a new one — it names an image that does not exist, and is rejected.
 
