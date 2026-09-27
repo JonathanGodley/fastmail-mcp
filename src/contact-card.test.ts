@@ -403,7 +403,6 @@ describe('nonDefaultContactKind', () => {
 
 describe('refusedContactKind', () => {
   it('refuses every kind create_contact cannot produce', () => {
-    // create_contact has no kind parameter, so it makes individuals only.
     for (const kind of ['group', 'org', 'location', 'device', 'application', 'x-custom']) {
       assert.equal(refusedContactKind({ kind }), kind);
     }
