@@ -11,7 +11,7 @@
 // `VTIMEZONE` needs for CalDAV round-tripping — reproducing a zone's recurrence RULE is a
 // separate, harder problem this does not attempt.
 
-import { zoneOffsetMsAt, InvalidInputError, utcMsFromComponents } from './coerce.js';
+import { zoneOffsetMsAt, InvalidInputError, utcMsFromComponents, canonicalZoneName } from './coerce.js';
 import { foldICalLine } from './ical-fold.js';
 
 const SECOND_MS = 1000;
@@ -166,13 +166,19 @@ function toUtcStamp(utcMs: number): string {
     `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
 }
 
-const abbreviationFormatterCache = new Map<string, Intl.DateTimeFormat | null>();
+// Keyed on the canonical name, and only for a zone that resolves, as `zoneOffsetMsAt`'s is.
+const abbreviationFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+export function abbreviationFormatterCacheSize(): number {
+  return abbreviationFormatterCache.size;
+}
 
 /** ICU's `en-US` short name for `zone` at `utcMs` (e.g. `AEDT`, or `GMT+11` where ICU has no
  * abbreviation for it) — the `TZNAME` value. Cached per zone for the same reason
  * `zoneOffsetMsAt`'s formatter is: one generated block can look this up several times. */
 function zoneAbbreviation(zone: string, utcMs: number): string {
-  let formatter = abbreviationFormatterCache.get(zone);
+  const key = canonicalZoneName(zone);
+  let formatter = abbreviationFormatterCache.get(key);
   if (formatter === undefined) {
     try {
       formatter = new Intl.DateTimeFormat('en-US', {
@@ -181,11 +187,10 @@ function zoneAbbreviation(zone: string, utcMs: number): string {
         hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
       });
     } catch {
-      formatter = null;
+      return zone;
     }
-    abbreviationFormatterCache.set(zone, formatter);
+    abbreviationFormatterCache.set(key, formatter);
   }
-  if (!formatter) return zone;
   const name = formatter.formatToParts(new Date(utcMs)).find(p => p.type === 'timeZoneName')?.value;
   return name ?? zone;
 }

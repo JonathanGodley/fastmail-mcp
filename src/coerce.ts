@@ -674,14 +674,19 @@ export function describeTimezone(zone: string | undefined): string {
  * The formatter is cached per zone because `src/vtimezone.ts` (#166) makes hundreds of these
  * calls per `generateVTimezone`.
  */
-// Keyed on `zone` itself, not `zone ?? ''`: a cached `null` for `''` would otherwise make every
-// later host-zone call throw.
-const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat | null>();
+// Keyed on the canonical name (`undefined` for the host zone), and only for a zone that
+// resolves, so stored TZID spellings cannot grow it past the set of real zones.
+const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat>();
+
+export function zoneOffsetFormatterCacheSize(): number {
+  return zoneOffsetFormatterCache.size;
+}
 
 function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
-  const cached = zoneOffsetFormatterCache.get(zone);
+  const key = zone === undefined ? undefined : canonicalZoneName(zone);
+  const cached = zoneOffsetFormatterCache.get(key);
   if (cached !== undefined) return cached;
-  let formatter: Intl.DateTimeFormat | null;
+  let formatter: Intl.DateTimeFormat;
   try {
     formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
@@ -694,9 +699,9 @@ function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat |
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
   } catch {
-    formatter = null;
+    return null;
   }
-  zoneOffsetFormatterCache.set(zone, formatter);
+  zoneOffsetFormatterCache.set(key, formatter);
   return formatter;
 }
 

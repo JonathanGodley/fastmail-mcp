@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateVTimezone, findTransitions, bisectTransition } from './vtimezone.js';
+import { generateVTimezone, findTransitions, bisectTransition, abbreviationFormatterCacheSize } from './vtimezone.js';
 import { InvalidInputError, utcMsFromComponents } from './coerce.js';
 
 function utc(iso: string): number {
@@ -53,6 +53,15 @@ function observances(block: string): ParsedObservance[] {
 }
 
 describe('generateVTimezone', () => {
+  it('holds one abbreviation formatter per zone, not one per spelling of it', () => {
+    const variants = ['America/Argentina/Jujuy', 'america/argentina/jujuy', 'AMERICA/ARGENTINA/JUJUY', 'America/ARGENTINA/jujuy'];
+    const t = Date.UTC(2026, 0, 1);
+    generateVTimezone(variants[0], t, t + 3600000);
+    const before = abbreviationFormatterCacheSize();
+    for (const zone of variants) generateVTimezone(zone, t, t + 3600000);
+    assert.equal(abbreviationFormatterCacheSize(), before, 'a case variant of a cached zone added a formatter');
+  });
+
   it('wraps a TZID matching the zone passed in, BEGIN to END', () => {
     const block = generateVTimezone('Asia/Hong_Kong', utc('2026-06-01T00:00:00+08:00'), utc('2026-06-02T00:00:00+08:00'));
     const lines = unfold(block);
