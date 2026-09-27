@@ -6012,3 +6012,31 @@ describe('download and upload URLs are built with literal substitution', () => {
     );
   });
 });
+
+// ---------- single-id writes: an id the server acknowledged in neither map ----------
+
+describe('single-id Email/set writes with no reported outcome', () => {
+  const cases: Array<[string, (c: JmapClient) => Promise<void>]> = [
+    ['markEmailRead', (c) => c.markEmailRead('e1')],
+    ['addKeywords', (c) => c.addKeywords('e1', ['$answered'])],
+    ['pinEmail', (c) => c.pinEmail('e1')],
+    ['deleteEmail', (c) => c.deleteEmail('e1')],
+    ['moveEmail', (c) => c.moveEmail('e1', 'mb-archive')],
+    ['addLabels', (c) => c.addLabels('e1', ['inbox'])],
+  ];
+  for (const [name, run] of cases) {
+    it(`${name} refuses to report success when e1 is in neither updated nor notUpdated`, async () => {
+      const client = makeClient();
+      stubMailboxes(client, LABEL_MAILBOXES);
+      stubRequests(client, async () => ({ methodResponses: [['Email/set', { updated: {} }, 'set']] }));
+      await assert.rejects(
+        () => run(client),
+        (err: Error) => {
+          assert.match(err.message, /neither confirmed nor refused/);
+          assert.notEqual(err.name, 'InvalidInputError');
+          return true;
+        },
+      );
+    });
+  }
+});

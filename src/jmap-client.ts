@@ -1660,6 +1660,23 @@ export class JmapClient {
   // 2. KEY PRESENCE is the refusal, not truthiness: a null value is still a refusal, hence
   //    the `?? {}`.
   // 3. isPlainResponseMap: an array-shaped map would answer for the id "0".
+  /**
+   * Throw unless a single-id Email/set confirmed `id` in `updated`: a SetError is classified
+   * by throwSingleSetError, and an id in NEITHER map is a failure, as the bulk tools count it
+   * (withUnaccountedFailures), never a silent success.
+   */
+  private assertSingleUpdated(result: any, id: string, action: string): void {
+    const setError = this.setErrorFor(result?.notUpdated, id);
+    if (setError) this.throwSingleSetError(setError, action);
+    const updated = isPlainResponseMap(result?.updated) ? result.updated : {};
+    if (!Object.prototype.hasOwnProperty.call(updated, id)) {
+      this.throwSingleSetError(
+        { type: 'outcomeUnknown', description: 'the server neither confirmed nor refused the change' },
+        action,
+      );
+    }
+  }
+
   private setErrorFor(notUpdated: any, id: string): any | undefined {
     if (!isPlainResponseMap(notUpdated)) return undefined;
     return Object.prototype.hasOwnProperty.call(notUpdated, id) ? (notUpdated[id] ?? {}) : undefined;
@@ -3135,10 +3152,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, `mark email as ${read ? 'read' : 'unread'}`);
-    }
+    this.assertSingleUpdated(result, emailId, `mark email as ${read ? 'read' : 'unread'}`);
   }
 
   // Additively set keyword flags without clobbering the others, for the reply path's
@@ -3166,10 +3180,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'add keywords to email');
-    }
+    this.assertSingleUpdated(result, emailId, 'add keywords to email');
   }
 
   async pinEmail(emailId: string, pinned: boolean = true): Promise<void> {
@@ -3193,10 +3204,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, `${pinned ? 'pin' : 'unpin'} email`);
-    }
+    this.assertSingleUpdated(result, emailId, `${pinned ? 'pin' : 'unpin'} email`);
   }
 
   async deleteEmail(emailId: string): Promise<void> {
@@ -3229,10 +3237,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
     
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'delete email');
-    }
+    this.assertSingleUpdated(result, emailId, 'delete email');
   }
 
   async moveEmail(emailId: string, target: string): Promise<void> {
@@ -3259,10 +3264,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'move email');
-    }
+    this.assertSingleUpdated(result, emailId, 'move email');
   }
 
   /**
@@ -3593,10 +3595,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
 
-    const setError = this.setErrorFor(result.notUpdated, emailId);
-    if (setError) {
-      this.throwSingleSetError(setError, 'add labels to email');
-    }
+    this.assertSingleUpdated(result, emailId, 'add labels to email');
   }
 
   /** Caller-supplied email ids rendered into prose, capped and made safe. */
