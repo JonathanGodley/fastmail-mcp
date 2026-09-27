@@ -2555,6 +2555,12 @@ describe('a VALARM\'s properties are its own, not the event\'s', () => {
     assert.equal(parseICalValue(vevent, 'DTSTART'), '20261010');
   });
 
+  it('parseAllICalProperties reads a repeated property named in lower case', () => {
+    const lower = ['BEGIN:VEVENT', 'attendee:mailto:a@example.com', 'Attendee;CN=B:mailto:b@example.com', 'END:VEVENT'].join('\r\n');
+    assert.deepEqual(parseAllICalProperties(lower, 'ATTENDEE'),
+      ['attendee:mailto:a@example.com', 'Attendee;CN=B:mailto:b@example.com']);
+  });
+
   it('parseAllICalProperties skips a VALARM\'s lines', () => {
     assert.deepEqual(parseAllICalProperties(vevent, 'ATTENDEE'), []);
   });
