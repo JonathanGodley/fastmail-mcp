@@ -144,7 +144,6 @@ export interface CalendarEventResult {
   brokenCollections?: BrokenCollections;
 }
 
-/** What `deleteCalendarEvent` returns. */
 export interface DeleteCalendarEventResult {
   /** The deleted record's own UID, as update reports it, whichever form of id was passed. */
   eventId: string;
@@ -2888,10 +2887,8 @@ export function ambiguousEventIdError(
 }
 
 /**
- * The refusal update and delete raise when the id is the url of one record and the UID of
- * another (`CalendarObjectLookup.collision`). The listing shows the other record's id as that
- * very url, so the caller may mean either; the url cannot be the way out here, so each record
- * is named with the handle that reaches it alone.
+ * The refusal update and delete raise on `CalendarObjectLookup.collision`. The url cannot be the
+ * way out here, so each record is named with the handle that reaches it alone, if any.
  */
 export function addressCollisionError(
   eventId: string,
@@ -3820,9 +3817,7 @@ export class CalDAVCalendarClient {
       data = replaceICalProperty(data, 'DESCRIPTION', fold(`DESCRIPTION:${escapeICalText(description)}`));
     }
 
-    // A zoneless value is read in the configured zone, as on create, unless the stored start is
-    // itself floating: keeping that floating keeps the event's own frame. A stored TZID, which
-    // formatDateTimeProperty inherits first, still wins over both.
+    // Floating only on a floating event: keeping it floating keeps the event's own frame.
     const storedStartLine = parseAllICalProperties(originalVevent, 'DTSTART')[0];
     const defaultZone = storedStartLine && describeDateProperty(storedStartLine).frame === 'floating'
       ? undefined

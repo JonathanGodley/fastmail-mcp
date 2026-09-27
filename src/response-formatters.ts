@@ -258,8 +258,7 @@ export function buildBrokenCollectionNote(
  * TWO NOTES, because the caller's next call differs. A bare UID names every copy equally, so
  * the note names the write tools' refusal and what to pass instead. A url ADDRESSED one record,
  * so the note must not send the caller hunting for a url they already passed: the writes act on
- * it, unless `addressCollision` (the url is another record's UID), where they refuse and the
- * way through is the addressed record's own UID.
+ * it, unless `addressCollision`, where they refuse as `addressCollisionError` does.
  */
 export function buildAmbiguousEventNote(
   otherCopies?: CalendarEventCopy[],

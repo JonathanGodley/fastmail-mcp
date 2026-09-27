@@ -2056,7 +2056,6 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal(err.name, 'InvalidInputError', tool);
     assert.match(err.message, /is the url of one record and the UID of another/, tool);
     assert.match(err.message, new RegExp(`will not ${tool} either`), tool);
-    // Each record's url, and the addressed record's own UID, the id that reaches it alone.
     for (const span of [realUrl, WORK_URL + 'decoy.ics', '"real@fm"']) {
       assert.ok(err.message.includes(span), `${tool} refusal omitted ${span}`);
     }
