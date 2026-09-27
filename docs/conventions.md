@@ -215,12 +215,15 @@ match's own `url` is one the lookup resolved from the caller's text, the caller 
 that record. At most one match can be, since a resource url resolves to a single href. That
 match leads the order, and the writes act on it, with one exception.
 
-**But the writes refuse an address that is also another record's UID.** Where the addressed
-record's own UID is not the caller's string and another match's UID is, `list_calendar_events`
-shows that other record's id as this very url, so a caller passing it back may mean either, and
-acting on the addressed record would patch or destroy an event never shown under that id.
-`addressCollisionError` refuses, names both records' urls, and quotes the addressed record's
-own UID: that UID reaches it alone, and the other record's url reaches that one. The url is
+**But the writes refuse an address that is also another record's UID.** Where any other
+match's UID is the caller's string, `list_calendar_events` shows that record's id as this very
+url, so a caller passing it back may mean either, and acting on the addressed record would patch
+or destroy an event never shown under that id. That holds even when the addressed record's own
+UID is the same url: two rows then list one id. `addressCollisionError` refuses, names both
+records' urls, and quotes the addressed record's own UID where that UID reaches it alone; the
+other record's url reaches that one. Where it does not (no UID, the url itself, or a UID another
+record also holds, which the ambiguity refusal would then refuse in turn), the refusal offers no
+id rather than one that loops, and names the Fastmail web interface. The url is
 therefore not an escape hatch in this one case, and saying "pass the url" would send the
 caller back to the id they passed. A url-shaped id with no resource at that address is
 unaffected: nothing is addressed, and it resolves by UID exactly as any other id does.

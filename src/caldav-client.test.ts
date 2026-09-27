@@ -1986,19 +1986,67 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(otherCopies, [{ calendar: 'Work', url: WORK_URL + 'decoy.ics' }]);
   });
 
-  it('tells the read whether the writes would refuse the addressed id', async () => {
+  it('tells the read whether the writes would refuse the addressed id, and whether its UID reaches it', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
     const decoy = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
-    assert.equal((await decoy.client.getCalendarEventById(realUrl)).addressCollision, true);
-    // A record whose UID is its own url, duplicated elsewhere: addressed, and the writes act.
-    const selfUrl = PERSONAL_URL + 'self.ics';
-    const self = makeLookupClient(decoyCalendars, {
-      [WORK_URL]: [{ data: eventIcal(selfUrl, 'Copy'), url: WORK_URL + 'copy.ics', etag: '"e-copy"' }],
-      [PERSONAL_URL]: [{ data: eventIcal(selfUrl, 'Self'), url: selfUrl, etag: '"e-self"' }],
-    });
-    const read = await self.client.getCalendarEventById(selfUrl);
+    assert.deepEqual((await decoy.client.getCalendarEventById(realUrl)).addressCollision, { addressedUid: 'real@fm' });
+    const self = makeLookupClient(decoyCalendars, selfUrlDuplicated());
+    const read = await self.client.getCalendarEventById(SELF_URL);
     assert.equal(read.addressedByUrl, true);
-    assert.equal(read.addressCollision, undefined);
+    assert.deepEqual(read.addressCollision, { addressedUid: undefined });
+  });
+
+  // A record whose UID is its own url, and a copy elsewhere carrying the same UID: both rows list
+  // the id `.../self.ics`, so a caller acting on the Copy row's id must not reach self.ics.
+  const SELF_URL = PERSONAL_URL + 'self.ics';
+  const selfUrlDuplicated = (): Record<string, StoredObject[]> => ({
+    [WORK_URL]: [{ data: eventIcal(SELF_URL, 'Copy'), url: WORK_URL + 'copy.ics', etag: '"e-copy"' }],
+    [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e-self"' }],
+  });
+
+  // No id reaches the addressed record alone: its UID is missing, is this url, or is shared.
+  const assertUnreachableCollision = (tool: string) => (err: Error) => {
+    assert.equal(err.name, 'InvalidInputError', tool);
+    assert.match(err.message, /is the url of one record and the UID of another/, tool);
+    assert.match(err.message, /no event id reaches that record alone through this server; change it in the Fastmail web interface/, tool);
+    assert.doesNotMatch(err.message, /pass its own UID/, tool);
+    return true;
+  };
+
+  it('refuses a url that is its own record\'s UID when another record carries that UID too', async () => {
+    for (const [tool, call] of [
+      ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent(SELF_URL, { title: 'X' })],
+      ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent(SELF_URL)],
+    ] as Array<[string, (c: CalDAVCalendarClient) => Promise<unknown>]>) {
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, selfUrlDuplicated());
+      await assert.rejects(() => call(client), assertUnreachableCollision(tool));
+      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
+    }
+  });
+
+  it('does not offer the addressed record\'s UID when another record carries that UID too', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const stored = decoyCarryingAnAddress(realUrl);
+    stored[WORK_URL].push({ data: eventIcal('real@fm', 'Duplicate'), url: WORK_URL + 'dup.ics', etag: '"e-dup"' });
+    const { client } = makeLookupClient(decoyCalendars, stored);
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
+  });
+
+  it('does not offer a UID the addressed record does not have', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const stored = decoyCarryingAnAddress(realUrl);
+    stored[PERSONAL_URL] = [{ data: eventIcal('real@fm', 'Real').replace('UID:real@fm\r\n', ''), url: realUrl, etag: '"e-real"' }];
+    const { client } = makeLookupClient(decoyCalendars, stored);
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
+  });
+
+  it('reports the url of the resource a delete removed, beside its UID', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    const deleted = await client.deleteCalendarEvent(WORK_URL + 'decoy.ics');
+    assert.equal(deleted.eventId, realUrl);
+    assert.equal(deleted.url, WORK_URL + 'decoy.ics');
   });
 
   // But the listing shows the decoy's id AS that url, so a caller who passes it back may mean

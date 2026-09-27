@@ -752,7 +752,7 @@ describe('update_calendar_event echoes the resolved event id', () => {
     const code = body.join('\n');
     assert.match(
       code,
-      /Calendar event deleted\. Event ID: "\$\{describeUntrustedAt\(deleted\.eventId, CALENDAR_UID_ECHO_LIMIT\)\}"/,
+      /Calendar event deleted\. Event ID: "\$\{describeUntrustedAt\(deleted\.eventId, CALENDAR_UID_ECHO_LIMIT\)\}", resource url: "\$\{describeUntrustedAt\(deleted\.url, CALENDAR_URL_ECHO_LIMIT\)\}"/,
     );
   });
 });

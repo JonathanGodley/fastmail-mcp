@@ -140,7 +140,7 @@ export interface CalendarEventResult {
    */
   addressedByUrl?: boolean;
   /** Set when the writes would refuse the addressed id (`CalendarObjectLookup.collision`). */
-  addressCollision?: true;
+  addressCollision?: { addressedUid: string | undefined };
   brokenCollections?: BrokenCollections;
 }
 
@@ -148,6 +148,8 @@ export interface CalendarEventResult {
 export interface DeleteCalendarEventResult {
   /** The deleted record's own UID, as update reports it, whichever form of id was passed. */
   eventId: string;
+  /** The resource actually deleted: a UID can spell another record's url. */
+  url: string;
   brokenCollections?: BrokenCollections;
 }
 
@@ -2336,9 +2338,9 @@ interface CalendarObjectMatch {
  * but addressing cannot be imitated, so an addressed record is the one the reads answer with.
  * At most one copy can be addressed.
  *
- * `collision` is set when the addressed record's own UID is not the string but another match's
- * is: the listing shows that other record's id as this url, so the writes refuse rather than
- * act on the addressed one. It carries the addressed record's UID, the id that reaches it alone.
+ * `collision` is set when another match's UID is the string: the listing shows that record's id
+ * as this url, so the writes refuse rather than act on the addressed one. `addressedUid` is the
+ * addressed record's UID only where that UID reaches it alone; otherwise no id does.
  */
 interface CalendarObjectLookup {
   matches: CalendarObjectMatch[];
@@ -2474,6 +2476,11 @@ function readCalendarData(res: DAVResponse): string | undefined {
  * The resolved copies as a caller sees them (#101). `object.url` is safe here because
  * `isResolvedCalendarObject` admitted only matches that carry one.
  */
+/** A resource's own UID, trimmed as the lookup compares it; undefined when it has none. */
+function ownUid(obj: DAVCalendarObject): string | undefined {
+  return parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim();
+}
+
 function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
   return matches.map(m => ({ calendar: m.calendarLabel, url: m.object.url }));
 }
@@ -2894,7 +2901,7 @@ export function addressCollisionError(
   const [addressed, ...others] = copies;
   const reach = addressedUid
     ? `pass its own UID "${echoCallerText(addressedUid, CALENDAR_UID_ECHO_LIMIT)}" as eventId to act on it`
-    : 'it has no UID, so no id reaches it apart from the other';
+    : 'no event id reaches that record alone through this server; change it in the Fastmail web interface';
   return new InvalidInputError(
     `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" is the url of one record and the UID of `
     + `another, and this server will not ${action} either without being told which. `
@@ -3461,21 +3468,22 @@ export class CalDAVCalendarClient {
     const addressedHrefs = new Set(urlTargets.map(t => addressComparisonKey(t.objectUrl)));
 
     // No early exit: a UID is unique per collection, not per account (#101).
-    for (const calendar of selectable) {
-      const objects = await client.fetchCalendarObjects({
-        calendar,
-        filters: uidEqualsFilter(wanted),
-        urlFilter: calendarResourceUrlFilter(calendar.url),
-      });
-      for (const obj of objects) {
-        const vevent = extractVEvent(obj.data || '');
-        if (!vevent) continue;
-        const uid = parseICalValue(vevent, 'UID')?.trim();
-        // LOAD-BEARING: the server matches case-insensitively; see `uidEqualsFilter`.
-        if (uid !== wanted) continue;
-        collect(calendar, obj);
+    const uidHolders = async (uid: string) => {
+      const holders: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }> = [];
+      for (const calendar of selectable) {
+        const objects = await client.fetchCalendarObjects({
+          calendar,
+          filters: uidEqualsFilter(uid),
+          urlFilter: calendarResourceUrlFilter(calendar.url),
+        });
+        for (const obj of objects) {
+          // LOAD-BEARING: the server matches case-insensitively; see `uidEqualsFilter`.
+          if (ownUid(obj) === uid) holders.push({ calendar, obj });
+        }
       }
-    }
+      return holders;
+    };
+    for (const { calendar, obj } of await uidHolders(wanted)) collect(calendar, obj);
 
     // The URL form; see resolveEventUrlTargets.
     for (const { calendar, objectUrl } of urlTargets) {
@@ -3502,12 +3510,17 @@ export class CalDAVCalendarClient {
     const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 
-    const ownUid = (m: CalendarObjectMatch) => parseICalValue(extractVEvent(m.object.data || '') ?? '', 'UID')?.trim();
-    const addressedUid = addressedIndex === -1 ? undefined : ownUid(matches[0]);
-    const collision = addressedIndex !== -1 && addressedUid !== wanted
-      && matches.slice(1).some(m => ownUid(m) === wanted)
-      ? { addressedUid }
-      : undefined;
+    let collision: CalendarObjectLookup['collision'];
+    if (addressedIndex !== -1 && matches.slice(1).some(m => ownUid(m.object) === wanted)) {
+      // Offer the addressed record's UID only where it reaches that record alone: not absent,
+      // not this same string, and not held by any other resolved record.
+      const uid = ownUid(matches[0].object);
+      const addressedKey = addressComparisonKey(matches[0].object.url);
+      const reachesAlone = uid !== undefined && uid !== '' && uid !== wanted
+        && !(await uidHolders(uid)).some(h => isResolvedCalendarObject(h.obj)
+          && addressComparisonKey(h.obj.url) !== addressedKey);
+      collision = { addressedUid: reachesAlone ? uid : undefined };
+    }
 
     return { matches, addressed: addressedIndex !== -1, collision, brokenCollections };
   }
@@ -3525,7 +3538,7 @@ export class CalDAVCalendarClient {
       // the tool that hands over each copy's url. Disclosed even when a copy was addressed.
       otherCopies: matches.length > 1 ? matchesToCopies(matches.slice(1)) : undefined,
       addressedByUrl: addressed,
-      addressCollision: collision ? true : undefined,
+      addressCollision: collision,
       brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }
@@ -3957,7 +3970,7 @@ export class CalDAVCalendarClient {
 
     const deleteResp = await client.deleteCalendarObject({ calendarObject: obj });
     assertDavOk(deleteResp, 'delete calendar event');
-    const uid = parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim() || eventId;
-    return { eventId: uid, brokenCollections: asBrokenCollectionsField(brokenCollections) };
+    const uid = ownUid(obj) || eventId;
+    return { eventId: uid, url: obj.url, brokenCollections: asBrokenCollectionsField(brokenCollections) };
   }
 }
