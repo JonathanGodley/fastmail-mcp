@@ -1925,7 +1925,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  // `arguments` is optional in MCP; absent reads as {}, so each handler's own required-parameter
+  // check answers rather than a TypeError from destructuring undefined.
+  const { name } = request.params;
+  const args = request.params.arguments ?? {};
 
   try {
     // Reject unknown/misspelled parameters before touching credentials, so the

@@ -869,3 +869,58 @@ describe('tsdav credential logging is suppressed', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 4. A tools/call that carries no `arguments` at all
+// ---------------------------------------------------------------------------
+//
+// MCP makes `arguments` optional, and mcp-harness always sends an object, so this drives the
+// raw protocol: a handler that destructures `args` must read an absent value as {} and give
+// its own required-parameter error, not a TypeError from destructuring undefined.
+
+describe('a tools/call with no arguments object', () => {
+  it('is read as empty arguments, so a required parameter is named', async () => {
+    assertDistIsCurrent();
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+    }
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+
+    const child = spawn(process.execPath, [SERVER_ENTRY], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    try {
+      const response = await new Promise<any>((resolvePromise, reject) => {
+        const timer = setTimeout(() => reject(new Error('no response to tools/call within 15s')), 15_000);
+        let buffer = '';
+        child.stdout.on('data', (chunk) => {
+          buffer += chunk.toString('utf8');
+          let newline: number;
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            if (!line) continue;
+            const message = JSON.parse(line);
+            if (message.id === 2) {
+              clearTimeout(timer);
+              resolvePromise(message);
+            }
+          }
+        });
+        child.on('error', reject);
+        const send = (message: object) => child.stdin.write(`${JSON.stringify(message)}\n`);
+        send({
+          jsonrpc: '2.0', id: 1, method: 'initialize',
+          params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'no-args-test', version: '1.0.0' } },
+        });
+        send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} });
+        send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'mark_email_read' } });
+      });
+
+      const text = JSON.stringify(response);
+      assert.doesNotMatch(text, /Cannot (destructure|read properties)/, `crashed on absent arguments: ${text}`);
+      assert.match(text, /emailId is required/);
+    } finally {
+      child.kill();
+    }
+  });
+});
