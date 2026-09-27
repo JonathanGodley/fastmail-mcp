@@ -391,6 +391,11 @@ export interface ImgRefObserver {
  * The collecting pass's `<img>` transform: a HOOK on the single traversal, not a second
  * parse. Tag transforms run before attribute filtering, so it sees srcs the scheme filter is
  * about to delete; attributes are returned untouched.
+ *
+ * Only `<img src>` is read. A cid reached any other way (`srcset`, `<input type="image">`,
+ * SVG `<image href>`, a `background` attribute, CSS `url(cid:…)`) is not collected, so the
+ * checks built on this pass (the signature image refusal, the dangling-reference checks on a
+ * body) do not see it, and such an image ships unresolved.
  */
 export function collectImgCidRefs(observer: ImgRefObserver): sanitizeHtml.Transformer {
   return (tagName, attribs) => {

@@ -176,11 +176,8 @@ export function signatureHtmlBlock(signature: ResolvedSignature | undefined): st
 
 /**
  * The embedded-image (cid:) references the html signature makes. An identity's signature is
- * a string, so no part carries the image any of these names.
- *
- * Only `<img src="cid:…">` is collected, so a cid set through a `background=` attribute or a
- * CSS `url(cid:…)` ships with nothing to resolve it and is not refused. Accepted: what the
- * recipient loses is a background, not a displayed image.
+ * a string, so no part carries the image any of these names. Sees only what
+ * `collectImgCidRefs` sees.
  */
 export function signatureCidRefs(signature: ResolvedSignature | undefined): string[] {
   if (signature?.html === undefined) return [];
