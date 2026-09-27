@@ -281,13 +281,22 @@ function structuralLine(text: string): string | null {
   return trimEnd(text, (ch) => ch === '\r' || ch === '\t' || ch === ' ');
 }
 
+/**
+ * `structuralLine` upper-cased, for matching a BEGIN:/END: component marker: RFC 5545 §3.1
+ * names are case-insensitive. Every marker test on the read and write paths goes through this,
+ * so a `begin:valarm` the reads treat as the alarm's is also the alarm's to the write helpers.
+ */
+function markerLine(text: string): string | null {
+  return structuralLine(text)?.toUpperCase() ?? null;
+}
+
 /** Every VEVENT block in a payload, as verbatim substrings of it. */
 function extractVEventBlocks(data: string): string[] {
   const lines = icalContentLines(data);
   const blocks: string[] = [];
   let openIdx = -1;
   for (let i = 0; i < lines.length; i++) {
-    const text = structuralLine(lines[i].text);
+    const text = markerLine(lines[i].text);
     if (text === null) continue;
     if (text === 'BEGIN:VEVENT') {
       if (openIdx === -1) openIdx = i;
@@ -433,9 +442,8 @@ function ownPropertyLines(lines: string[]): boolean[] {
   let depth = 0;
   let base: number | undefined;
   return lines.map((text) => {
-    // Upper-cased: RFC 5545 §3.1 names are case-insensitive, as hasICalProperty reads them.
-    const marker = structuralLine(text)?.toUpperCase();
-    if (marker === undefined) return false;
+    const marker = markerLine(text);
+    if (marker === null) return false;
     if (base === undefined && marker !== '') base = marker.startsWith('BEGIN:') ? 1 : 0;
     if (marker.startsWith('BEGIN:')) { depth++; return false; }
     if (marker.startsWith('END:')) { depth--; return false; }
@@ -447,10 +455,10 @@ function ownPropertyLines(lines: string[]): boolean[] {
  * The first matching property's value in a VEVENT block, unfolded. Whole content lines only
  * (see the line-model comment above): this read decides which record a destroy resolves to.
  *
- * CASE-SENSITIVE on the property name, deliberately, unlike `hasICalProperty`. A wholly
- * lower-cased payload yields no blocks at all and is invisible, which is fail-closed. A
- * mixed-case payload is not, and only `extractVTimezoneBlocks` guards its one such shape; the
- * rest is the RFC conformance audit (#57, #111).
+ * CASE-SENSITIVE on the property name, deliberately, unlike `hasICalProperty`, although
+ * component markers are read in any case (`markerLine`). A lower-cased property therefore
+ * reads as absent, which is not fail-closed; only `extractVTimezoneBlocks` guards its one such
+ * shape, and the rest is the RFC conformance audit (#57, #111).
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   const lines = icalContentLines(vevent).map(l => l.text);
@@ -635,13 +643,13 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
-  const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventStart = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('replaceICalProperty: BEGIN:VEVENT not found');
 
   let veventEnd = -1;
   let depth = 0;
   for (let i = veventStart; i < lines.length; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) depth++;
     if (trimmed.startsWith('END:')) {
@@ -660,7 +668,7 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
   let nestDepth = 0;
 
   for (let i = veventStart + 1; i < veventEnd; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) { nestDepth++; continue; }
     if (trimmed.startsWith('END:')) { nestDepth--; continue; }
@@ -686,7 +694,7 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
     for (let i = veventStart + 1; i < veventEnd; i++) {
       // structuralLine: a trimmed compare would read a folded ` BEGIN:...` as a sub-component
       // and splice the new property into the middle of the one above.
-      if (structuralLine(lines[i])?.startsWith('BEGIN:')) { insertAt = i; break; }
+      if (markerLine(lines[i])?.startsWith('BEGIN:')) { insertAt = i; break; }
     }
     const newLines = newLine.split(/\r?\n/);
     lines.splice(insertAt, 0, ...newLines);
@@ -707,13 +715,13 @@ export function removeAllICalProperties(icalData: string, key: string): string {
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
-  const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventStart = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('removeAllICalProperties: BEGIN:VEVENT not found');
 
   let veventEnd = -1;
   let depth = 0;
   for (let i = veventStart; i < lines.length; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) depth++;
     if (trimmed.startsWith('END:')) {
@@ -731,7 +739,7 @@ export function removeAllICalProperties(icalData: string, key: string): string {
   let nestDepth = 0;
 
   for (let i = veventStart + 1; i < veventEnd; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) { nestDepth++; continue; }
     if (trimmed.startsWith('END:')) { nestDepth--; continue; }
@@ -767,14 +775,14 @@ export function insertBeforeEndVEvent(icalData: string, newLine: string): string
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
-  const veventStart = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventStart = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   if (veventStart === -1) throw new Error('insertBeforeEndVEvent: BEGIN:VEVENT not found');
 
   let veventEnd = -1;
   let firstSubComponent = -1;
   let depth = 0;
   for (let i = veventStart; i < lines.length; i++) {
-    const trimmed = structuralLine(lines[i]);
+    const trimmed = markerLine(lines[i]);
     if (trimmed === null) continue;
     if (trimmed.startsWith('BEGIN:')) {
       depth++;
@@ -849,10 +857,10 @@ export function removeExceptionVEvents(icalData: string, orphanedRecurrenceIds: 
 
   const veventBlocks: Array<{ start: number; end: number; recurrenceId?: string }> = [];
   for (let i = 0; i < lines.length; i++) {
-    if (structuralLine(lines[i]) === 'BEGIN:VEVENT') {
+    if (markerLine(lines[i]) === 'BEGIN:VEVENT') {
       const blockStart = i;
       for (let j = i + 1; j < lines.length; j++) {
-        if (structuralLine(lines[j]) === 'END:VEVENT') {
+        if (markerLine(lines[j]) === 'END:VEVENT') {
           const veventText = lines.slice(blockStart, j + 1).join('\n');
           // Trimmed here because this feeds formatICalDate, which anchors its pattern.
           const recId = parseICalValue(veventText, 'RECURRENCE-ID')?.trim();
@@ -1707,7 +1715,7 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * Refused as too broken to edit: a VTIMEZONE not directly under the VCALENDAR; anything inside
  * one other than STANDARD/DAYLIGHT as direct children (RFC 5545 §3.6.5 allows no deeper
  * component); a BEGIN:/END: hidden behind a fold; and an unterminated block, which takes
- * precedence over "malformed". Component names compare case-insensitively in this scan only
+ * precedence over "malformed". Component names compare case-insensitively
  * (#57, #111). A bare `BEGIN:`/`END:` is ignored.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
@@ -1798,7 +1806,7 @@ function stripVTimezoneBlockFor(icalData: string, tzid: string): string {
  */
 function insertVTimezoneBlock(icalData: string, block: string, lineEnding: string): string {
   const lines = icalData.split(/\r?\n/);
-  const veventIdx = lines.findIndex(l => structuralLine(l) === 'BEGIN:VEVENT');
+  const veventIdx = lines.findIndex(l => markerLine(l) === 'BEGIN:VEVENT');
   lines.splice(veventIdx === -1 ? lines.length : veventIdx, 0, ...block.split(/\r?\n/));
   return lines.join(lineEnding);
 }
@@ -2422,7 +2430,7 @@ async function settleAmbiguousRecurrence(
     if (!entry) continue;
     const ical = readCalendarData(res);
     if (ical === undefined) continue;
-    // No readable VEVENT (e.g. lower-cased keywords) has not answered: `isRecurringSeriesResource`
+    // No readable VEVENT (an empty payload or VCALENDAR) has not answered: `isRecurringSeriesResource`
     // would return false, a positive "does not repeat".
     if (extractVEventBlocks(ical).length === 0) continue;
     answered.add(url);

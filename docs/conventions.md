@@ -2528,9 +2528,9 @@ response that looks complete — and the caller most likely to be asking is aski
 slot is free. A failed follow-up is the same class of failure as the expanded fetch itself
 failing, and is reported the same way rather than through a new output field that would give
 absence a second meaning. "Incomplete" includes a response that arrives carrying no readable
-VEVENT — an empty `<C:calendar-data/>`, an empty VCALENDAR, or a payload whose keywords are
-lower-cased, which RFC 5545 §3.1 permits and this file's deliberately case-sensitive marker
-scan does not read. `isRecurringSeriesResource` answers false for all three, and false on this
+VEVENT — an empty `<C:calendar-data/>` or an empty VCALENDAR. Component markers are read in
+any case (RFC 5545 §3.1), so a lower-cased payload is readable. `isRecurringSeriesResource`
+answers false for both, and false on this
 path is a positive claim about the calendar rather than the fail-closed refusal it is on the
 write path.
 

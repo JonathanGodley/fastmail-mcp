@@ -2546,6 +2546,27 @@ describe('a VALARM\'s properties are its own, not the event\'s', () => {
     assert.deepEqual(parseAllICalProperties(lower, 'ATTENDEE'), []);
   });
 
+  it('the write helpers read a lower-case VALARM as the alarm\'s, as the reads do', () => {
+    const lower = data.replace('BEGIN:VALARM', 'begin:valarm').replace('END:VALARM', 'end:valarm');
+    const replaced = replaceICalProperty(lower, 'DESCRIPTION', 'DESCRIPTION:event text');
+    assert.ok(replaced.includes('DESCRIPTION:This is an event reminder'), 'the alarm keeps its DESCRIPTION');
+    assert.ok(replaced.indexOf('DESCRIPTION:event text') < replaced.indexOf('begin:valarm'),
+      'the event\'s DESCRIPTION goes before the alarm');
+    assert.equal(replaceICalProperty(lower, 'DESCRIPTION', null), lower, 'a clear leaves the alarm\'s DESCRIPTION');
+    assert.equal(removeAllICalProperties(lower, 'ATTENDEE'), lower, 'the alarm keeps its ATTENDEE');
+    assert.equal(removeAllICalProperties(lower, 'DURATION'), lower, 'the alarm keeps its DURATION');
+    const inserted = insertBeforeEndVEvent(lower, 'SUMMARY:s');
+    assert.ok(inserted.indexOf('SUMMARY:s') < inserted.indexOf('begin:valarm'), 'insert goes before the alarm');
+  });
+
+  it('finds a lower-case VEVENT on every path', () => {
+    const lower = data.replace('BEGIN:VEVENT', 'begin:vevent').replace('END:VEVENT', 'end:vevent');
+    assert.ok(extractVEvent(lower)?.startsWith('begin:vevent'));
+    assert.ok(replaceICalProperty(lower, 'SUMMARY', 'SUMMARY:s').includes('SUMMARY:s'));
+    assert.ok(insertBeforeEndVEvent(lower, 'SUMMARY:s').includes('SUMMARY:s'));
+    assert.equal(removeAllICalProperties(lower, 'DTSTART').includes('DTSTART'), false);
+  });
+
   it('still reads the event\'s own property that follows a VALARM', () => {
     const after = ['BEGIN:VEVENT', 'DTSTART;VALUE=DATE:20261010', ...alarm, 'ATTENDEE:mailto:guest@example.com', 'END:VEVENT'].join('\n');
     assert.deepEqual(parseAllICalProperties(after, 'ATTENDEE'), ['ATTENDEE:mailto:guest@example.com']);
@@ -12045,13 +12066,21 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
     ['carries no props at all', url => ({ href: url, status: 200, ok: true })],
     ['carries no calendar-data prop', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"' } })],
     ['carries a calendar-data prop that is not text', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: { nested: 'markup' } } } })],
-    // The payload arrived and holds no event to read a rule off. An empty `<C:calendar-data/>`,
-    // a VCALENDAR with nothing in it, and a payload whose keywords are lower-cased (legal per
-    // RFC 5545 §3.1, and not what this file's case-sensitive marker scan reads) all land here.
+    // The payload arrived and holds no event to read a rule off: an empty `<C:calendar-data/>`,
+    // or a VCALENDAR with nothing in it.
     ['carries an empty calendar-data payload', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: '' } } })],
     ['carries a payload with no VEVENT in it', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR' } } })],
-    ['carries a payload this parser cannot read an event out of', url => ({ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY').toLowerCase() } } })],
   ];
+
+  it('settles a follow-up payload whose keywords are lower-cased (RFC 5545 §3.1)', async () => {
+    const url = CAL + 'series.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('s1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [{ href: url, status: 200, ok: true, props: { getetag: '"e1"', calendarData: { _cdata: master('s1@fm', '20260325T090000Z', 'RRULE:FREQ=WEEKLY').toLowerCase() } } } as any],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
 
   for (const [shape, response] of unanswerable) {
     it(`fails the whole call for a follow-up response that ${shape}`, async () => {
