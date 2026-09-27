@@ -1,6 +1,7 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, PathAccessError, InvalidInputError } from './coerce.js';
+import { getDefaultTimezone } from './email-formatter.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
@@ -4533,8 +4534,10 @@ export class JmapClient {
     includeSpam?: boolean;
   }): Promise<QueryResult> {
     // Before any network work, so a bad value fails naming its argument (#70).
-    const after = coerceUtcDate(filters.after, 'after');
-    const before = coerceUtcDate(filters.before, 'before');
+    // Read in the configured zone, the one the calendar window and the rendered `date` use.
+    const zone = getDefaultTimezone();
+    const after = coerceUtcDate(filters.after, 'after', zone);
+    const before = coerceUtcDate(filters.before, 'before', zone);
 
     const mailboxes = await this.getMailboxes();
     const resolvedMailboxId = await this.resolveMailboxId(filters.mailbox, mailboxes);

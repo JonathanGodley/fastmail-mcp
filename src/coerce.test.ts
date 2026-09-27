@@ -392,43 +392,51 @@ describe('clampLimit', () => {
 
 describe('coerceUtcDate (#70)', () => {
   it('returns undefined for undefined/null (no date bound)', () => {
-    assert.equal(coerceUtcDate(undefined, 'after'), undefined);
-    assert.equal(coerceUtcDate(null, 'before'), undefined);
+    assert.equal(coerceUtcDate(undefined, 'after', 'UTC'), undefined);
+    assert.equal(coerceUtcDate(null, 'before', 'UTC'), undefined);
   });
 
-  it('expands a date-only value to midnight UTC on that date', () => {
-    assert.equal(coerceUtcDate('2026-07-20', 'after'), '2026-07-20T00:00:00Z');
-    assert.equal(coerceUtcDate('2026-01-01', 'before'), '2026-01-01T00:00:00Z');
+  it('expands a date-only value to midnight at the start of that day in the zone given', () => {
+    assert.equal(coerceUtcDate('2026-07-20', 'after', 'UTC'), '2026-07-20T00:00:00Z');
+    assert.equal(coerceUtcDate('2026-01-01', 'before', 'UTC'), '2026-01-01T00:00:00Z');
   });
 
   it('passes a full UTC datetime through unchanged', () => {
-    assert.equal(coerceUtcDate('2026-07-20T14:30:00Z', 'after'), '2026-07-20T14:30:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00Z', 'after', 'UTC'), '2026-07-20T14:30:00Z');
   });
 
   it('converts an offset datetime to UTC', () => {
-    assert.equal(coerceUtcDate('2026-07-20T14:30:00+01:00', 'after'), '2026-07-20T13:30:00Z');
-    assert.equal(coerceUtcDate('2026-07-20T14:30:00-05:00', 'before'), '2026-07-20T19:30:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00+01:00', 'after', 'UTC'), '2026-07-20T13:30:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00-05:00', 'before', 'UTC'), '2026-07-20T19:30:00Z');
   });
 
-  it('reads a zone-less datetime as host local time and emits the same instant in UTC', () => {
-    // Asserted against the host's own conversion so the test is timezone-independent;
-    // what is pinned is that the instant survives and the emitted shape is a UTCDate.
-    const out = coerceUtcDate('2026-07-20T14:30:00', 'after');
-    assert.equal(new Date(out!).getTime(), new Date('2026-07-20T14:30:00').getTime());
-    assert.match(out!, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  it('reads a date-only value as the start of that day in the configured zone, not UTC', () => {
+    // Sydney is UTC+10 in July: its 20th begins at 14:00 UTC on the 19th.
+    assert.equal(coerceUtcDate('2026-07-20', 'after', 'Australia/Sydney'), '2026-07-19T14:00:00Z');
+    assert.equal(coerceUtcDate('2026-07-20', 'before', 'America/New_York'), '2026-07-20T04:00:00Z');
+  });
+
+  it('reads a zone-less datetime in the configured zone, never the host zone', () => {
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00', 'after', 'America/New_York'), '2026-07-20T18:30:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00', 'after', 'Australia/Sydney'), '2026-07-20T04:30:00Z');
+  });
+
+  it('takes a value carrying Z or an offset exactly as written, whatever the zone', () => {
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00Z', 'after', 'Australia/Sydney'), '2026-07-20T14:30:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00+01:00', 'after', 'Australia/Sydney'), '2026-07-20T13:30:00Z');
   });
 
   it('trims milliseconds to the canonical seconds-precision UTCDate', () => {
-    assert.equal(coerceUtcDate('2026-07-20T14:30:00.123Z', 'after'), '2026-07-20T14:30:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T14:30:00.123Z', 'after', 'UTC'), '2026-07-20T14:30:00Z');
   });
 
   it('trims surrounding whitespace before parsing', () => {
-    assert.equal(coerceUtcDate('  2026-07-20  ', 'after'), '2026-07-20T00:00:00Z');
+    assert.equal(coerceUtcDate('  2026-07-20  ', 'after', 'UTC'), '2026-07-20T00:00:00Z');
   });
 
   it('rejects an unparseable value, naming the parameter and the accepted formats', () => {
     assert.throws(
-      () => coerceUtcDate('last tuesday-ish', 'before'),
+      () => coerceUtcDate('last tuesday-ish', 'before', 'UTC'),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
         assert.match(err.message, /^before /);
@@ -445,7 +453,7 @@ describe('coerceUtcDate (#70)', () => {
     // days over), so the search window would silently differ from what was asked for.
     for (const value of ['2026-7-20', '2026/07/20', '20 July 2026', 'July 20 2026', '2026', '2026-07', '2026-2-31', '2026/02/30', '2026-07-20T']) {
       assert.throws(
-        () => coerceUtcDate(value, 'after'),
+        () => coerceUtcDate(value, 'after', 'UTC'),
         (err: Error) => {
           assert.ok(err instanceof InvalidInputError);
           assert.match(err.message, /after is not a (valid|real calendar) date/);
@@ -460,7 +468,7 @@ describe('coerceUtcDate (#70)', () => {
   it('rejects an impossible calendar date instead of rolling it over', () => {
     for (const value of ['2026-02-31', '2026-02-31T09:00:00Z', '2026-04-31T09:00:00+02:00']) {
       assert.throws(
-        () => coerceUtcDate(value, 'after'),
+        () => coerceUtcDate(value, 'after', 'UTC'),
         (err: Error) => {
           assert.ok(err instanceof InvalidInputError);
           assert.match(err.message, /after is not a real calendar date/);
@@ -473,13 +481,13 @@ describe('coerceUtcDate (#70)', () => {
   it('keeps an offset value whose UTC date differs from the written date', () => {
     // The calendar-date guard must not misfire when an offset legitimately moves the
     // instant onto the next UTC day.
-    assert.equal(coerceUtcDate('2026-07-20T23:00:00-05:00', 'before'), '2026-07-21T04:00:00Z');
+    assert.equal(coerceUtcDate('2026-07-20T23:00:00-05:00', 'before', 'UTC'), '2026-07-21T04:00:00Z');
   });
 
   it('rejects an empty or whitespace-only value rather than dropping the bound', () => {
     for (const value of ['', '   ']) {
       assert.throws(
-        () => coerceUtcDate(value, 'after'),
+        () => coerceUtcDate(value, 'after', 'UTC'),
         (err: Error) => {
           assert.ok(err instanceof InvalidInputError);
           assert.match(err.message, /after cannot be empty/);
@@ -491,7 +499,7 @@ describe('coerceUtcDate (#70)', () => {
 
   it('rejects a non-string value', () => {
     assert.throws(
-      () => coerceUtcDate(1753000000000, 'before'),
+      () => coerceUtcDate(1753000000000, 'before', 'UTC'),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
         assert.match(err.message, /before must be a date string, not a number/);
@@ -499,7 +507,7 @@ describe('coerceUtcDate (#70)', () => {
       },
     );
     assert.throws(
-      () => coerceUtcDate(['2026-07-20'], 'after'),
+      () => coerceUtcDate(['2026-07-20'], 'after', 'UTC'),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
         assert.match(err.message, /after must be a date string, not an array/);
@@ -511,7 +519,7 @@ describe('coerceUtcDate (#70)', () => {
   it('truncates a very long value in the rejection message', () => {
     const long = 'x'.repeat(200);
     assert.throws(
-      () => coerceUtcDate(long, 'after'),
+      () => coerceUtcDate(long, 'after', 'UTC'),
       (err: Error) => {
         // One ellipsis CHARACTER, not three dots: every echo goes through the same helper.
         assert.match(err.message, /x{60}…/);
@@ -1530,11 +1538,9 @@ describe('calendar window bounds resolve a date in the configured zone (#138)', 
     assert.throws(() => coerceCalendarWindowStart('next friday', 'startDate', SYDNEY), /Australia\/Sydney/);
   });
 
-  it('leaves the email search bounds on the UTC rule', () => {
-    // coerceUtcDate is shared with search_emails' before/after, which compare against a
-    // message's receivedAt — an instant, not a day on anybody's wall. It is deliberately
-    // NOT zone-aware, and this pins that the calendar change did not leak into it.
-    assert.equal(coerceUtcDate('2026-08-12', 'after'), '2026-08-12T00:00:00Z');
+  it('reads the email search bounds in the same zone as the calendar window', () => {
+    // A caller's "the 12th" names the same day in search_emails as in list_calendar_events.
+    assert.equal(coerceUtcDate('2026-08-12', 'after', SYDNEY), coerceCalendarWindowStart('2026-08-12', 'startDate', SYDNEY));
   });
 });
 
@@ -1924,7 +1930,7 @@ describe('calendar window bounds reject a time of day that does not exist (#138)
         );
       }
       // The pinned parity: the same value, through the UTC coercion the email bounds use.
-      assert.throws(() => coerceUtcDate(value, 'after'), /is not a valid date/);
+      assert.throws(() => coerceUtcDate(value, 'after', 'UTC'), /is not a valid date/);
     }
   });
 
@@ -1933,14 +1939,14 @@ describe('calendar window bounds reject a time of day that does not exist (#138)
     // coerceUtcDate accepts it. Rejecting it here would be the same divergence pointing the
     // other way.
     assert.equal(coerceCalendarWindowStart('2026-08-12T24:00:00', 'startDate', 'UTC'), '2026-08-13T00:00:00Z');
-    assert.equal(coerceUtcDate('2026-08-12T24:00:00Z', 'after'), '2026-08-13T00:00:00Z');
+    assert.equal(coerceUtcDate('2026-08-12T24:00:00Z', 'after', 'UTC'), '2026-08-13T00:00:00Z');
   });
 
   it('reads a year below 0100 as that year, not as the 1900s', () => {
     // Date.UTC maps years 0-99 to 1900-1999, so `0026-08-12` resolved to a window in 1926
     // while coerceUtcDate on the same value correctly returned the year 26.
     assert.equal(coerceCalendarWindowStart('0026-08-12', 'startDate', 'UTC'), '0026-08-12T00:00:00Z');
-    assert.equal(coerceUtcDate('0026-08-12', 'after'), '0026-08-12T00:00:00Z');
+    assert.equal(coerceUtcDate('0026-08-12', 'after', 'UTC'), '0026-08-12T00:00:00Z');
     // In a zone with an offset it is still that year, whatever the offset of the day turns
     // out to have been.
     assert.match(coerceCalendarWindowStart('0026-08-12', 'startDate', 'Australia/Sydney')!, /^0026-/);
@@ -1971,7 +1977,7 @@ describe('echoCallerText is the one echo policy (#141)', () => {
   it('strips the control characters that would forge extra lines in a message', () => {
     const withEsc = '2026-08-12T\u001B[31mBAD\u2028INJECTED';
     assert.throws(
-      () => coerceUtcDate(withEsc, 'after'),
+      () => coerceUtcDate(withEsc, 'after', 'UTC'),
       (err: Error) => {
         assert.ok(!err.message.includes('\u001B'), err.message);
         assert.ok(!err.message.includes('\u2028'), err.message);
@@ -1984,7 +1990,7 @@ describe('echoCallerText is the one echo policy (#141)', () => {
     // The coercion trims before validating, so echoing the padding back quotes a string the
     // server never looked at.
     assert.throws(
-      () => coerceUtcDate('   2026-13-45   ', 'after'),
+      () => coerceUtcDate('   2026-13-45   ', 'after', 'UTC'),
       (err: Error) => {
         assert.match(err.message, /"2026-13-45"/);
         return true;

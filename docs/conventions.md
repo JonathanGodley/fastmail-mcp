@@ -153,8 +153,9 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   error), clamped to `[1, max]`; a non-numeric value, or one that truncates to 0, takes the
   tool's default. It never throws.
 - `coerceUtcDate` — a date or datetime to the JMAP `UTCDate` shape (`2026-07-20T00:00:00Z`)
-  for the `search_emails` `after` / `before` filters. `YYYY-MM-DD` expands to midnight UTC
-  and `YYYY-MM-DDThh:mm:ss` (with `Z`, an offset, or no zone) is converted; **every other
+  for the `search_emails` `after` / `before` filters. `YYYY-MM-DD` expands to midnight at the
+  start of that day in the **configured zone**, a `YYYY-MM-DDThh:mm:ss` with no zone is read in
+  that zone, and one with `Z` or an offset is taken as written; **every other
   shape is a loud reject** naming the parameter, because the mail server's own rejection
   (`invalidArguments`) names no argument at all. This is the deliberate exception to the
   lenient-coercion rule above: `new Date()`'s fallback parser accepts `2026/07/20` and
@@ -2151,23 +2152,23 @@ Three divergences meet here, and each is right for its own question:
 
 | | date-only value means | why |
 | --- | --- | --- |
-| `search_emails` `before`/`after` (`coerceUtcDate`) | midnight **UTC** | compares against `receivedAt`, a JMAP UTCDate — an instant, not a day |
+| `search_emails` `before`/`after` (`coerceUtcDate`) | **local** midnight at the start of that day, for both bounds | "mail after the 12th" names the asker's own day, the same one the calendar reads; `before` is exclusive, so it stops at the start of that day |
 | `list_calendar_events` `startDate`/`endDate` | the whole **local** day | "what is on the 12th?" asks about the asker's own day |
 | `create_calendar_event` `end` | exclusive at the **start** of that day | RFC 5545 DTEND, one edge of a single event |
 
-The two coercions share `classifyDateValue`, so they reject an identical set of bad values with
-identical wording and diverge only on what an accepted value resolves to. Do not "unify" them
-back into one function: the shared half already is one function, and the half that differs is
-the answer to a different question.
+All three read a zoneless value in the configured zone, and the email bounds and the calendar
+window share one resolver (`resolveWindowBound`), so they reject an identical set of bad values
+and read an accepted one identically; they differ only in the calendar end's day offset and in
+the accepted-formats sentence each rejection carries.
 
 **The shared half does not cover the TIME components.**
-`classifyDateValue` never reads the hour and minute out; `coerceUtcDate` gets its range check
-for free from `new Date()` refusing `25:00:00`, and the calendar pair reads the components
-itself with a shape-only pattern and hands them to `Date.UTC`, which **rolls** rather than
-refusing: `2026-08-12T99:99:99` would silently become a window starting three and a half days
+`classifyDateValue` never reads the hour and minute out; `resolveWindowBound` reads the
+components itself with a shape-only pattern and hands them to `Date.UTC`, which **rolls** rather
+than refusing: `2026-08-12T99:99:99` would silently become a window starting three and a half days
 later, while `create_calendar_event` refused the same value on a write.
 `isWallClockInRange` keeps the parity (`24:00:00` is deliberately allowed, because the
-ECMAScript date format allows it and the UTC coercion takes it). When you add a value the two
+ECMAScript date format allows it and a value carrying `Z` or an offset, parsed by `new Date()`,
+takes it). When you add a value the two
 sides read differently, check the divergence rather than assuming the shared function covers
 it.
 

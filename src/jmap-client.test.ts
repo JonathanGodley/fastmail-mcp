@@ -5,6 +5,7 @@ import { resolve, join, basename, sep } from 'path';
 import { JmapClient, findBlankBodyPart } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { composeDraftEmail } from './draft-email-handler.js';
+import { setDefaultTimezone } from './email-formatter.js';
 import { FastmailAuth } from './auth.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
 import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
@@ -3144,10 +3145,33 @@ describe('searchEmails', () => {
         ['Email/get', { list: [] }, 'emails'],
       ],
     }));
-    await client.searchEmails({ after: '2026-07-20', before: '2026-07-25T09:00:00+02:00', limit: 10 });
+    setDefaultTimezone('UTC');
+    try {
+      await client.searchEmails({ after: '2026-07-20', before: '2026-07-25T09:00:00+02:00', limit: 10 });
+    } finally {
+      setDefaultTimezone(undefined);
+    }
     const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
     assert.equal(filter.after, '2026-07-20T00:00:00Z');
     assert.equal(filter.before, '2026-07-25T07:00:00Z');
+  });
+
+  it('reads a zoneless date bound in the configured zone, the one the calendar tools use', async () => {
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [
+        ['Email/query', { ids: [], total: 0 }, 'query'],
+        ['Email/get', { list: [] }, 'emails'],
+      ],
+    }));
+    setDefaultTimezone('Australia/Sydney');
+    try {
+      await client.searchEmails({ after: '2026-07-20', before: '2026-07-20T18:00:00', limit: 10 });
+    } finally {
+      setDefaultTimezone(undefined);
+    }
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+    assert.equal(filter.after, '2026-07-19T14:00:00Z');
+    assert.equal(filter.before, '2026-07-20T08:00:00Z');
   });
 
   it('rejects an unparseable date bound before making any request', async () => {

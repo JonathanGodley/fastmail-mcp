@@ -309,26 +309,19 @@ export function echoCallerText(value: unknown, limit: number = DATE_ECHO_LIMIT):
   return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
 }
 
-// Normalise a caller-supplied date/datetime into the JMAP UTCDate shape.
+// Normalise a caller-supplied date/datetime into the JMAP UTCDate shape, reading anything
+// without a zone in `zone`, the configured zone (`undefined` = the host's), exactly as the
+// calendar window does:
 //
-//   2026-07-20                -> 2026-07-20T00:00:00Z   (midnight UTC on that date)
+//   2026-07-20                -> midnight at the start of the 20th in `zone`
+//   2026-07-20T14:30:00       -> 14:30 in `zone`
 //   2026-07-20T14:30:00Z      -> 2026-07-20T14:30:00Z
 //   2026-07-20T14:30:00+01:00 -> 2026-07-20T13:30:00Z   (offset applied)
-//   2026-07-20T14:30:00       -> the same instant in UTC (no zone = host local time)
 //
 // Anything else is REJECTED, naming the parameter. An empty string is rejected too rather
 // than treated as "no filter": silently dropping a date bound widens the search.
-export function coerceUtcDate(value: unknown, paramName: string): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  const { trimmed, kind } = classifyDateValue(value, paramName, acceptedDateFormats());
-
-  const parsed = new Date(kind === 'date' ? `${trimmed}T00:00:00Z` : trimmed);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new InvalidInputError(
-      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedDateFormats()}`,
-    );
-  }
-  return parsed.toISOString().replace(/\.\d{3}Z$/, 'Z');
+export function coerceUtcDate(value: unknown, paramName: string, zone: string | undefined): string | undefined {
+  return resolveWindowBound(value, paramName, zone, 0, acceptedDateFormats(describeTimezone(zone)));
 }
 
 // What SHAPE a caller's date argument is. The distinction the calendar cares about is the
@@ -809,15 +802,16 @@ function resolveWindowBound(
   paramName: string,
   zone: string | undefined,
   dayOffset: 0 | 1,
+  formats: string = acceptedWindowFormats(describeTimezone(zone)),
 ): string | undefined {
   if (value === undefined || value === null) return undefined;
-  const { trimmed, kind } = classifyDateValue(value, paramName, acceptedWindowFormats(describeTimezone(zone)));
+  const { trimmed, kind } = classifyDateValue(value, paramName, formats);
 
   if (kind === 'zoned-datetime') {
     const parsed = new Date(trimmed);
     if (Number.isNaN(parsed.getTime())) {
       throw new InvalidInputError(
-        `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedWindowFormats(describeTimezone(zone))}`,
+        `${paramName} is not a valid date: "${echoDate(trimmed)}". ${formats}`,
       );
     }
     return toUtcIso(parsed.getTime());
@@ -832,7 +826,7 @@ function resolveWindowBound(
   const m = LOCAL_DATETIME_PATTERN.exec(trimmed);
   if (!m || !isWallClockInRange(Number(m[4]), Number(m[5]), Number(m[6] ?? 0))) {
     throw new InvalidInputError(
-      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${acceptedWindowFormats(describeTimezone(zone))}`,
+      `${paramName} is not a valid date: "${echoDate(trimmed)}". ${formats}`,
     );
   }
   // `dayOffset` does NOT apply: a wall-clock datetime names a time of day, not a day.
@@ -954,8 +948,10 @@ export function clampLimit(value: unknown, fallback: number, max: number): numbe
   return Math.min(Math.max(Math.trunc(Number(value)) || fallback, 1), max);
 }
 
-function acceptedDateFormats(): string {
-  return 'Accepted: a date such as 2026-07-20 (treated as 00:00:00 UTC on that date), or a full datetime such as 2026-07-20T14:30:00Z or 2026-07-20T14:30:00+01:00.';
+function acceptedDateFormats(zoneLabel: string): string {
+  return `Accepted: a date such as 2026-07-20 (read as midnight at the start of that day in ${zoneLabel}), ` +
+    'or a full datetime such as 2026-07-20T14:30:00Z or 2026-07-20T14:30:00+01:00 (taken exactly as written). ' +
+    `A datetime with no Z and no offset, such as 2026-07-20T14:30:00, is read as ${zoneLabel} local time.`;
 }
 
 // Loud-reject a settable string field that was provided but is blank or null. Call it only

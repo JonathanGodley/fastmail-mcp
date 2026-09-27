@@ -1048,11 +1048,11 @@ const TOOLS = [
             },
             after: {
               type: 'string',
-              description: 'Only emails received at or after this time. Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset such as "2026-07-20T14:30:00+01:00") - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means 00:00:00 UTC on that date, so it includes the whole of that day. An empty string is rejected; omit the parameter to search without a start bound.',
+              description: 'Only emails received at or after this time. Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset such as "2026-07-20T14:30:00+01:00") - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it includes the whole of that local day; a datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without a start bound.',
             },
             before: {
               type: 'string',
-              description: 'Only emails received before this time (exclusive). Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset) - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means 00:00:00 UTC on that date, so it excludes that whole day; pass the following date to include it. An empty string is rejected; omit the parameter to search without an end bound.',
+              description: 'Only emails received before this time (exclusive). Accepts a date ("2026-07-20") or a full datetime ("2026-07-20T14:30:00Z", or with an offset) - no other format, so no unpadded/slash-separated dates and no free text like "20 July 2026". A date-only value means midnight at the start of that day in the configured time zone (FASTMAIL_TIMEZONE, the zone the calendar tools and the rendered date use), so it excludes that whole local day; pass the following date to include it. A datetime with no Z and no offset is read in that zone too. An empty string is rejected; omit the parameter to search without an end bound.',
             },
             limit: {
               type: ['number', 'string'],
