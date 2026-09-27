@@ -1752,7 +1752,7 @@ const TOOLS = [
       },
       {
         name: 'get_account_summary',
-        description: 'Get overall account summary with statistics',
+        description: 'Get overall account summary with statistics: mailbox and identity counts, and the totalEmails/unreadEmails of each mailbox. The top-level totalEmails, unreadEmails, totalThreads and unreadThreads are the SUM of the own counts of every mailbox, Trash and Spam included, so a message filed in several mailboxes (a label) is counted once per mailbox: they are not the number of distinct messages or threads in the account, and they include deleted and junk mail.',
         inputSchema: {
           type: 'object',
           properties: {},

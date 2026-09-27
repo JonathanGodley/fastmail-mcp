@@ -825,7 +825,7 @@ Images written as `data:` URIs are dropped and counted rather than converted, as
 
 - **get_mailbox_stats**: Get statistics for a mailbox (unread count, total emails, etc.)
   - Parameters: `mailbox` (optional — [id, role, name, or path](#naming-a-mailbox); defaults to all mailboxes)
-- **get_account_summary**: Get overall account summary with statistics
+- **get_account_summary**: Get overall account summary with statistics: mailbox and identity counts, and each mailbox's `totalEmails`/`unreadEmails`. The top-level `totalEmails`, `unreadEmails`, `totalThreads` and `unreadThreads` are the **sum of every mailbox's own counts**, Trash and Spam included, so a message filed in several mailboxes (a label) is counted once per mailbox: they are not the number of distinct messages or threads in the account, and they include deleted and junk mail.
 
 ### Bulk Operations
 
