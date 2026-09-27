@@ -371,14 +371,16 @@ function noteForwardTextForm(imagesRode: boolean): string {
 }
 
 /**
- * What the pooled-media sentence ends on, on the noteForwardTextForm path only.
- *
- * The shared default says to re-run with `asAttachment: true`, a call the token gate refuses
- * while `{{forward}}` is still in the body — a remedy that does not terminate.
+ * What the pooled-media sentence ends on for this tool. Every forward that pools a part has
+ * `{{forward}}` in its body, and the shared default says to re-run with `asAttachment: true`,
+ * a call the token gate refuses while the token is still there. The first remedy is for the
+ * noteForwardTextForm path, where moving the token into htmlBody embeds the images.
  */
 const POOLED_REMEDY_PLACE_IN_HTML =
   'put {{forward}} in htmlBody to embed them, or drop the token and pass asAttachment: true ' +
   'to forward the original whole.';
+const POOLED_REMEDY_DROP_TOKEN =
+  'drop {{forward}} and pass asAttachment: true to forward the original whole.';
 
 /** A reply that placed no {{quote}}, so a forgotten token is reported. */
 const NOTE_REPLY_UNQUOTED =
@@ -965,7 +967,7 @@ export async function composeDraftEmail(
     ...ledger.emit({
       surface: mode === 'forward' ? 'forward' : 'reply',
       ...(carry.resolvedPartCount !== undefined && { resolvedPartCount: carry.resolvedPartCount }),
-      ...(forwardTextFormOnly && { pooledRemedy: POOLED_REMEDY_PLACE_IN_HTML }),
+      pooledRemedy: forwardTextFormOnly ? POOLED_REMEDY_PLACE_IN_HTML : POOLED_REMEDY_DROP_TOKEN,
     }),
     ...(mode === 'reply' && droppedMinted.length > 0
       ? [noteMintedDropped(droppedMinted.map((p) => p.name), droppedMinted.length)]

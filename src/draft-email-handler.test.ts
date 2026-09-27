@@ -737,6 +737,24 @@ describe('draft_email — {{forward}} shipping in the text form over an html ori
     }
   });
 
+  it('names a remedy the tool accepts when an html forward pools an image it cannot embed', async () => {
+    // An inline image the html never references is body media the block cannot display.
+    const unreferenced = makeOriginal({ attachments: [inlinePng] });
+    const { client, calls } = spyClient(unreferenced);
+    const r = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>FYI</p>{{forward}}' },
+      client,
+    );
+    assert.equal(calls.draft.attachments.filter((p: any) => p.blobId === 'blob-png').length, 1);
+    const pooled = r.notes!.filter((n) => n.startsWith('1 media part(s) could not be embedded'));
+    assert.equal(pooled.length, 1, JSON.stringify(r.notes));
+    assert.ok(
+      pooled[0].endsWith('drop {{forward}} and pass asAttachment: true to forward the original whole.'),
+      pooled[0],
+    );
+    assert.doesNotMatch(pooled[0], /re-run with asAttachment: true/);
+  });
+
   it('says nothing when the block ships as html', async () => {
     const { client } = spyClient(withInlineImage());
     const r = await compose(
@@ -2465,7 +2483,7 @@ describe('draft_email — what a {{forward}} carries out of the original', () =>
     ]);
     assert.deepEqual(r.notes, [
       '1 media part(s) could not be embedded and were attached as regular attachments: "p.png"' +
-      ' — re-run with asAttachment: true for full fidelity, then delete this draft.',
+      ' — drop {{forward}} and pass asAttachment: true to forward the original whole.',
     ]);
   });
 
@@ -2485,7 +2503,7 @@ describe('draft_email — what a {{forward}} carries out of the original', () =>
     const r = await compose(HTML_FORWARD, client);
     assert.deepEqual(r.notes, [
       '2 media part(s) could not be embedded and were attached as regular attachments:' +
-      ' "a.png", "b.png" — re-run with asAttachment: true for full fidelity, then delete this draft.',
+      ' "a.png", "b.png" — drop {{forward}} and pass asAttachment: true to forward the original whole.',
     ]);
   });
 
