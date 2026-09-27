@@ -71,6 +71,17 @@ describe('formatDraftEmailResult', () => {
     assert.match(text, /BCC: BoInjected <bo@example\.com>$/);
   });
 
+  it('never cuts off the address behind a display name of any length', () => {
+    const text = formatDraftEmailResult({
+      ...SAVED,
+      to: [`${'N'.repeat(400)} <victim@example.com>`],
+      bcc: [`"${'M'.repeat(300)}" <ada@example.com>`, 'bo@example.com'],
+    });
+    assert.match(text, /To: N+… <victim@example\.com> /);
+    assert.match(text, /BCC: M+… <ada@example\.com>, bo@example\.com$/);
+    assert.ok(text.length < 700, `the name is still bounded: ${text.length}`);
+  });
+
   it('omits a recipient line the draft has nothing for, including an empty one', () => {
     const text = formatDraftEmailResult({
       ...SAVED, mode: 'new', to: ['a@b.example'], cc: [], bcc: [],

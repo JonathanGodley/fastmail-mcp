@@ -1,6 +1,6 @@
 import { simplifyEmail } from './email-formatter.js';
 import { projectEmail } from './field-projection.js';
-import { describeUntrusted, describeUntrustedAt, echoCallerText, toolJson } from './coerce.js';
+import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import { CALENDAR_OPEN_WINDOW_DAYS, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
@@ -87,12 +87,18 @@ export function formatInlineNotes(notes?: string[]): string {
 // draft read back never shows. The token receipt is the expander's return value rendered
 // verbatim, so it cannot claim an expansion that did not happen.
 //
-// Each recipient goes through describeUntrustedAt, because a reply's display names come out
-// of the original and its sender wrote them. The bound is wide enough for a 254-character
-// address behind a long display name, so the address the draft goes to is never cut off.
-const RECIPIENT_ECHO_LIMIT = 320;
+// A reply's display names come out of the original, and its sender wrote them. The name and
+// the address are neutralised apart, and only the name is bounded: the address is where the
+// draft goes, so it is never cut off however long the name in front of it.
+const RECIPIENT_NAME_ECHO_LIMIT = 128;
 const echoRecipients = (list: string[]): string =>
-  list.map((r) => describeUntrustedAt(r, RECIPIENT_ECHO_LIMIT)).join(', ');
+  list.map((r) => {
+    const { name, email } = parseAddress(r);
+    const address = describeUntrustedAt(email, Number.POSITIVE_INFINITY);
+    return name
+      ? `${describeUntrustedAt(name, RECIPIENT_NAME_ECHO_LIMIT)} <${address}>`
+      : address;
+  }).join(', ');
 
 export function formatDraftEmailResult(result: ComposeDraftEmailResult): string {
   const summary = [
