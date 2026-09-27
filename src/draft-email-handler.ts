@@ -1,5 +1,5 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted, parseAddress } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted, InvalidInputError, parseAddress } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
@@ -24,6 +24,7 @@ import {
 } from './inline-images.js';
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
+import { rejectUnverifiedFrom } from './jmap-client.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 import { matchSubjectPrefix, noteComposeSubjectPrefix } from './subject-prefix.js';
 
@@ -667,6 +668,9 @@ export async function composeDraftEmail(
   // the compose away.
   const identities = (await client.getIdentities()) ?? [];
   const identity = selectIdentity(identities, fromAddress);
+  // createDraft would refuse it too, but only after step 9 had blamed an empty {{signature}}
+  // on the identity having none, and after the upload.
+  if (fromAddress && !identity) throw new InvalidInputError(rejectUnverifiedFrom(fromAddress));
   const signature = signatureOf(identity);
 
   // --- 6. The caller's embedded images, read PRE-expansion -----------------
@@ -751,8 +755,10 @@ export async function composeDraftEmail(
     throw bad(
       `${partWord(part)} is empty after expansion: it was nothing but tokens, and ` +
       `${causes.length ? causes.join('; ') : 'the block had no content for this part'}. ` +
-      'Write prose beside the token — the block skips and the result says so — or, on a ' +
-      'forward, drop {{forward}} and pass asAttachment:true.',
+      'Write prose beside the token — the block skips and the result says so' +
+      (mode === 'forward' && !asAttachment
+        ? ' — or drop {{forward}} and pass asAttachment:true.'
+        : '.'),
     );
   }
 

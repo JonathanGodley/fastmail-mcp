@@ -614,6 +614,19 @@ function rejectWildcardFromValue(fromAddress: string): string {
     'A from needs a concrete address in that domain; the wildcard identity still verifies it and still supplies its signature.';
 }
 
+const REJECT_UNVERIFIED_FROM =
+  'From address is not verified for sending. Choose one of your verified identities.';
+
+/**
+ * The refusal createDraft raises for a caller `from` whose address half matches no identity,
+ * for a compose handler that has to raise it earlier.
+ */
+export function rejectUnverifiedFrom(fromAddress: string): string {
+  return isWildcardIdentityEmail(fromAddress)
+    ? rejectWildcardFromValue(fromAddress)
+    : REJECT_UNVERIFIED_FROM;
+}
+
 function partCid(part: any): string {
   return typeof part?.cid === 'string' ? part.cid : '';
 }
@@ -1862,7 +1875,7 @@ export class JmapClient {
     if (email.from) {
       selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedFrom!.email));
       if (!selectedIdentity) {
-        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
+        throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
       selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
@@ -2060,7 +2073,7 @@ export class JmapClient {
     if (updates.from) {
       selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedUpdateFrom!.email));
       if (!selectedIdentity) {
-        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
+        throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
       const existingFrom = existingEmail.from?.[0]?.email;

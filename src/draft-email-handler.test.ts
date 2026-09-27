@@ -979,22 +979,36 @@ describe('draft_email — {{signature}} expands the FROM identity, not the first
     assert.equal(r.notes!.some((n) => n.includes('Alias User')), false);
   });
 
-  it('says nothing about identities when the named `from` matches none', async () => {
-    // The note's `?? fromAddress` fallback is defensive, not a reachable branch here: the
-    // note only fires when an identity WITH a signature was resolved, and an unverified
-    // `from` resolves none — createDraft raises the real "not verified" refusal a moment
-    // later.
-    const { client } = spyClient(makeOriginal(), {
+  it('refuses a `from` that matches no identity as unverified, before anything is built', async () => {
+    // Refused here rather than left to createDraft, because a body that was nothing but
+    // {{signature}} would otherwise be refused first, blaming a missing signature.
+    const { client, calls } = spyClient(makeOriginal(), {
       getIdentities: async () => [{ id: 'a', email: 'first@example.com', textSignature: 'S' }],
     });
-    const r = await compose(
+    const message = await messageFrom(() => compose(
       {
         mode: 'new', from: 'Nobody <nobody@example.com>', to: ['sam@example.com'],
-        textBody: 'hi',
+        textBody: '{{signature}}', attachments: [{ path: 'a.pdf' }],
       },
       client,
+      '/tmp/attach',
+    ));
+    assert.equal(
+      message,
+      'From address is not verified for sending. Choose one of your verified identities.',
     );
-    assert.equal(r.notes?.some((n) => n.includes('has a signature')) ?? false, false);
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('keeps the wildcard-pattern refusal for a `from` that IS the pattern', async () => {
+    const { client } = spyClient(makeOriginal(), {
+      getIdentities: async () => [{ id: 'a', email: 'first@example.com' }],
+    });
+    const message = await messageFrom(() => compose(
+      { mode: 'new', from: '*@example.com', to: ['sam@example.com'], textBody: 'hi' }, client,
+    ));
+    assert.match(message, /is a wildcard identity's pattern, not an address/);
   });
 });
 
@@ -3190,6 +3204,40 @@ describe('draft_email — {{signature}} does not depend on the history landing',
     const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [logoIdentity] });
     await compose({ mode: 'new', to: ['sam@example.com'], textBody: 'hi\n{{signature}}' }, client);
     assert.equal(calls.draft.textBody, 'hi\nKind regards,\nTest User');
+  });
+
+  it('offers the forward remedy only where it applies', async () => {
+    // An unsigned identity turns a body of nothing but {{signature}} empty.
+    const unsigned = { getIdentities: async () => [UNSIGNED_IDENTITY] };
+    const onNew = await messageFrom(() => compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: '{{signature}}' },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    const onReply = await messageFrom(() => compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: '{{signature}}' },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    const onAttachmentForward = await messageFrom(() => compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        asAttachment: true, textBody: '{{signature}}',
+      },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    const onForward = await messageFrom(() => compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        // The forward block always has a header, so only markup that hides it leaves the
+        // part empty.
+        htmlBody: '<!-- {{forward}} -->{{signature}}',
+      },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    for (const message of [onNew, onReply, onAttachmentForward]) {
+      assert.match(message, /empty after expansion/);
+      assert.doesNotMatch(message, /asAttachment|\{\{forward\}\}/);
+    }
+    assert.match(onForward, /drop \{\{forward\}\} and pass asAttachment:true/);
   });
 
   it('resolves the identity BEFORE any attachment is uploaded', async () => {
