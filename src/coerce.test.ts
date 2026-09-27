@@ -185,15 +185,26 @@ describe('coerceRecipients', () => {
   });
 
   // A display name may carry a comma, so the comma form splits only outside "…" and <…>.
-  it('keeps a comma inside a quoted display name or an angle-addr in one recipient', () => {
+  it('keeps a comma inside a quoted display name in one recipient', () => {
     assert.deepEqual(
       coerceRecipients({ to: '"Smith, John" <john@example.com>, ada@example.com' }).to,
       ['"Smith, John" <john@example.com>', 'ada@example.com'],
     );
-    assert.deepEqual(
-      coerceRecipients({ cc: 'Ops <"odd,local"@example.com>,bo@example.com' }).cc,
-      ['Ops <"odd,local"@example.com>', 'bo@example.com'],
-    );
+  });
+
+  // The address half must be one addr-spec: one "@" with something either side, and none of
+  // the characters that would make it several addresses or a malformed angle-addr.
+  it('refuses a comma-split piece whose address half is not a single addr-spec', () => {
+    for (const piece of [
+      '@', 'Smith@', '@example.com', 'a@b@example.com', 'x@example.com; y@example.com',
+      'A <<a@example.com>>', 'Bob <bob@example.com>>', 'Ops <"odd,local"@example.com>', 'a b@example.com',
+    ]) {
+      assert.throws(
+        () => coerceRecipients({ to: `ada@example.com, ${piece}` }),
+        (e: any) => e instanceof InvalidInputError && / names no email address\./.test(e.message),
+        piece,
+      );
+    }
   });
 
   // Unquoted, the name's comma still splits, and the half with no address is refused rather

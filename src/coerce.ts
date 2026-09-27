@@ -245,7 +245,7 @@ function coerceRecipientList(value: unknown, paramName: string): string[] | unde
   const pieces = splitRecipientList(value.trim(), paramName).map((p) => p.trim()).filter(Boolean);
   for (const piece of pieces) {
     refuseTextAfterAngle(piece, paramName);
-    if (!parseAddress(piece).email.includes('@')) {
+    if (!SINGLE_ADDR_SPEC.test(parseAddress(piece).email)) {
       throw new InvalidInputError(
         `${paramName} "${describeUntrusted(piece)}" names no email address. A comma separates ` +
         'recipients unless it is inside double quotes or <…>, so quote a display name that ' +
@@ -255,6 +255,10 @@ function coerceRecipientList(value: unknown, paramName: string): string[] | unde
   }
   return pieces;
 }
+
+// One "@" with something either side, and nothing that would make the address half several
+// addresses or a malformed angle-addr.
+const SINGLE_ADDR_SPEC = /^[^@\s<>;,]+@[^@\s<>;,]+$/;
 
 function isJsonArrayString(value: unknown): boolean {
   if (typeof value !== 'string') return false;
