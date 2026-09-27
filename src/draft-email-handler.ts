@@ -171,6 +171,11 @@ function partWord(part: PartName): string {
   return part === 'htmlBody' ? 'htmlBody' : 'textBody';
 }
 
+/** Whether a part shows anything: visible content for html, non-blank text otherwise. */
+function partHasContent(part: PartName, body: string): boolean {
+  return part === 'htmlBody' ? htmlHasVisibleContent(body) : !isBlank(body);
+}
+
 // ---------------------------------------------------------------------------
 // Mode and mode-only parameters
 // ---------------------------------------------------------------------------
@@ -738,7 +743,7 @@ export async function composeDraftEmail(
   // a body-less forward that still carries attachments and marks the original forwarded.
   // Raised here, not left to createDraft's generic message, so it can name causes and fixes.
   for (const { part, authored } of supplied) {
-    const before = part === 'htmlBody' ? htmlHasVisibleContent(authored) : !isBlank(authored);
+    const before = partHasContent(part, authored);
     if (!before) continue;
     const after = part === 'htmlBody'
       ? htmlHasVisibleContent(expandedHtml ?? '')
@@ -994,11 +999,11 @@ export async function composeDraftEmail(
     }),
     ...emptyTokenNotes(expansions),
     ...(forwardTextFormOnly ? [noteForwardTextForm(pooled.some((p) => isImageType(p.type)))] : []),
-    // Presence on the PRE-expansion scan of a SUPPLIED non-blank body, so it cannot false-fire
-    // and an attachment-only stash, a body-less reply (a blank part included) and an
-    // asAttachment filler are silent. It fires on every deliberately unsigned message: the
+    // Presence on the PRE-expansion scan of a SUPPLIED body with content, so it cannot
+    // false-fire and an attachment-only stash, a body-less reply (a blank or visually empty
+    // part included) and an asAttachment filler are silent. It fires on every deliberately unsigned message: the
     // accepted cost of never storing an unsigned body with nothing said.
-    ...(!signaturePlaced && signature && supplied.some((p) => !isBlank(p.authored))
+    ...(!signaturePlaced && signature && supplied.some((p) => partHasContent(p.part, p.authored))
       ? [noteSignatureNotPlaced(identity?.email ?? fromAddress)]
       : []),
     ...(mode === 'reply' && !historyPlaced ? [NOTE_REPLY_UNQUOTED] : []),

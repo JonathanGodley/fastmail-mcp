@@ -572,7 +572,10 @@ describe('draft_email — nothing is added that the caller did not place', () =>
   });
 
   it('says nothing about the signature on a reply whose only supplied body is blank', async () => {
-    for (const blank of [{ htmlBody: '' }, { textBody: '   ' }, { textBody: '', htmlBody: ' ' }]) {
+    for (const blank of [
+      { htmlBody: '' }, { textBody: '   ' }, { textBody: '', htmlBody: ' ' },
+      { htmlBody: '<div><br></div>' }, { htmlBody: '<p>&nbsp;</p>' },
+    ]) {
       const { client } = spyClient();
       const r = await compose({ mode: 'reply', originalEmailId: 'o1', ...blank }, client);
       assert.ok(
