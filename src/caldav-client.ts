@@ -68,8 +68,7 @@ export interface CalendarEvent {
   //
   // Values only, deliberately: TZID, VALUE=DATE and VALUE=PERIOD are dropped, so these
   // designator-less values do NOT follow the `timeZone` rule and are only evidence that other
-  // dates exist. No tool acts on an individual RDATE, so parameters would claim a precision the
-  // field cannot back up.
+  // dates exist.
   //
   // Normally absent on the listing path: Cyrus strips RDATE (and RRULE) from an expanded block
   // (scripts/probes/calendar-expand.probe.mjs, calendar-rdate-expand.probe.mjs).
@@ -163,9 +162,7 @@ export interface CalendarWindowClamp {
   // Caller-named bounds whose resolved instant ran outside the four-digit-year range every
   // consumer of these values can express, and so were pulled back to its edge. `edge` names
   // WHICH edge, because the disclosure is an opposite statement at each end and a window can
-  // saturate at both at once — knowing only the top end, the note told a caller whose bound
-  // was pulled UP to year 0000 that it had "resolved past the last date this server can
-  // express", the reverse of what happened.
+  // saturate at both at once.
   saturated?: Array<{ bound: 'startDate' | 'endDate'; edge: 'earliest' | 'latest' }>;
   // The window actually queried. `end` is exclusive.
   start: string;
@@ -2318,8 +2315,8 @@ type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjec
  * Which hrefs a calendar-object fetch will request. Passed by EVERY `fetchCalendarObjects`
  * call in this file, so that no read reaches a record another read reports as absent (#191).
  *
- * Replaces tsdav's default `url.includes('.ics')`, which judges KIND by NAME and made `.ICS` or
- * extensionless resources unreachable. The VEVENT comp-filter keeps other resources out of a
+ * Replaces tsdav's default `url.includes('.ics')`, which judges KIND by NAME and so cannot reach
+ * a `.ICS` or extensionless resource. The VEVENT comp-filter keeps other resources out of a
  * calendar-query. The url-form multiget sends none, so there `isResolvedCalendarObject`'s
  * VEVENT test is the only guard. The collection's own url must be excluded HERE: tsdav's
  * calendar branch does not.
@@ -2826,13 +2823,9 @@ function resolveCalendarTarget(
 ): DAVCalendar {
   const requested = typeof calendarId === 'string' ? calendarId.trim() : calendarId;
   // BOTH SIDES through the same normaliser: tsdav delivers a calendar called "2026" as a number.
-  // Accepted knowingly: a caller's `{_cdata: 'Work'}` now resolves too (lenient coercion,
-  // docs/conventions.md).
   const requestedName = unwrapDisplayName(requested);
 
-  // ADDRESSED BEATS NAMED, in a SEPARATE PASS: one url-or-name predicate let a decoy calendar
-  // whose NAME spells another's url, listed first, receive the write. Guarded against an empty
-  // url, per the fail-closed note above.
+  // ADDRESSED BEATS NAMED, in a SEPARATE PASS (see ambiguousCalendarNameError).
   const addressed = selectable.find(
     c => typeof c.url === 'string' && c.url.length > 0 && c.url === requested,
   );
@@ -3199,8 +3192,6 @@ export class CalDAVCalendarClient {
   private async discoverCalendars(): Promise<DiscoveredCalendars> {
     const client = await this.getClient();
     if (this.calendars && this.calendars.length > 0) {
-      // Nothing is cached while a collection is broken. Residual, stated on the tool surface: a
-      // calendar that breaks after a healthy discovery stays listed for the process's life.
       return { calendars: this.calendars, brokenCollections: [] };
     }
 
@@ -3542,7 +3533,6 @@ export class CalDAVCalendarClient {
     }
 
     // The addressed copy LEADS (see CalendarObjectLookup); every other order is untouched.
-    // `> 0` only skips a no-op, so it is indistinguishable from `>= 0` by any test.
     const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 

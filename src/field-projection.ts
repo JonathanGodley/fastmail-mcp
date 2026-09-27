@@ -1,8 +1,7 @@
 import { InvalidInputError, coerceStringArray, describeUntrustedAt, joinCapped } from './coerce.js';
 import type { SimplifiedEmail } from './email-formatter.js';
 
-// Caller-directed output projection for the email read tools (#69, #79). A 66-message
-// sweep measured 84KB, of which the five fields the caller wanted were 18%.
+// Caller-directed output projection for the email read tools (#69, #79).
 //
 // It runs AFTER simplifyEmail and is subtractive only, so every guarantee of the
 // simplified shape holds for the fields that survive; `raw: true` is never projected.

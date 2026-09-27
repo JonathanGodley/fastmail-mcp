@@ -146,9 +146,7 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
   return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}${formatInlineNotes(result.notes)}`;
 }
 
-// Reports what happened to the message the draft was composed from (#60). A keyword-write
-// failure after a successful lookup is deliberately not reported: it changes nothing about
-// what the caller sent.
+// Reports what happened to the message the draft was composed from (#60).
 export function formatSendDraftResult(result: SendDraftResult): string {
   const base = `Draft sent successfully. Submission ID: ${result.submissionId}`;
   const receipt = formatInlineNotes(result.notes);

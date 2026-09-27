@@ -132,10 +132,8 @@ without reading a byte off disk, so no path guard is in play at all:
   and the body displays is carried into the composed message. SVG is a scriptable document
   format, so this re-sends attacker-authored markup under the user's own From — the quote
   sanitizer governs the *quoting* html this server writes, never the bytes of a part it
-  carries by reference. It is worth stating what that means for a reply: **every reply whose
-  body places `{{quote}}` carries the SVG**, and nothing about placing the token asks whether
-  the original displays one. Choosing to quote a message is choosing to carry every image
-  that message displays; the only way not to is not to write the token. Accepted because the
+  carries by reference. A reply that places `{{quote}}` carries it, as it carries every image
+  the original displays (see "The reply path moves BYTES" below). Accepted because the
   receiving client, not this
   server, decides whether to render an SVG attachment, and because singling the type out
   would be a content filter this server does not otherwise attempt.

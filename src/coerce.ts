@@ -87,11 +87,8 @@ export function redactBearerTokens(input: string): string {
  * No second parameter on purpose: callers pass this to `.map` bare, and `map` would hand it
  * the index as a bound. A wider bound goes through `describeUntrustedAt`.
  *
- * A caller that quotes the value uses `"…"`: the swap protects that span only, and inside
- * `'…'` the value's own `'` closes it (#190). A bare render is judged on the whole sentence,
- * so a new `'…'` span in any sentence that renders a bare value reopens this. The drift guard
- * in coerce.test.ts catches a single-quoted `${describeUntrusted(…)}`; the whole-sentence
- * half is a reading at the sentence you are editing.
+ * The quoting rule is `describePart`'s. The drift guard in coerce.test.ts catches a
+ * single-quoted `${describeUntrusted(…)}`.
  *
  * Not for a structured result item; see `redactedJson`.
  */
@@ -144,8 +141,7 @@ export function redactedJson(value: any): string {
  * Serialise a tool result payload. THE one seam every JSON result item goes through, across
  * every handler and formatter, so how this server serialises is decided once (#40).
  *
- * Compact, with no option to indent: every payload is read by a machine, and indentation was
- * ~17% of a 25-message list page's bytes. That includes JSON embedded in a prose frame (a list
+ * Compact, with no option to indent: every payload is read by a machine. That includes JSON embedded in a prose frame (a list
  * summary line, the bulk-operations diagnostic). See docs/conventions.md, result serialisation.
  *
  * Use redactedJson above instead where the values may carry credentials.

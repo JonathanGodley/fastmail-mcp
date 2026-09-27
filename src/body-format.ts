@@ -41,9 +41,8 @@ function requireBodyString(name: string, value: unknown): string | undefined {
   return value;
 }
 
-// Validate the caller's body parameters (#62, #71/#77, #78). Rejecting escaped markup beats
-// unescaping it, which would guess at intent; that check is htmlBody only, since escaped
-// markup is ordinary content in a text part or inside real tags.
+// Validate the caller's body parameters (#62, #71/#77, #78). The escaped-markup check is
+// htmlBody only, since escaped markup is ordinary content in a text part or inside real tags.
 //
 // CDATA is asymmetric by format, because the damage is:
 //   htmlBody is rejected wherever `<![CDATA[` appears. The html-to-text derivation consumes
@@ -126,8 +125,7 @@ function htmlToTextOptions(policy: ImagePlaceholderPolicy, cidMap?: ReadonlyMap<
 
 // NEVER throws: on a converter failure it falls back to a tag strip so a send is never
 // blocked. May return '' for image-only HTML. The catch path writes no image placeholder, so
-// there an embedded-image-only body derives '' under every policy; an accepted degrade, since
-// making it image-aware would mean a second HTML parser.
+// there an embedded-image-only body derives '' under every policy; an accepted degrade.
 export function htmlToText(
   html: string,
   policy: ImagePlaceholderPolicy = 'suppress',

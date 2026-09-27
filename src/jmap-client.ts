@@ -596,9 +596,6 @@ function htmlCidRefs(html: string | null | undefined): string[] {
 //
 // WHAT A DRAFT ALREADY STORES IS RE-WRITTEN UNCHANGED on edit, pattern included: refusing it
 // would block the very edit that fixes it. The send path is where a stored pattern is caught.
-//
-// `selectIdentity` in src/identity.ts is deliberately unchanged: a wildcard identity is still
-// the correct selection, and supplies the signature.
 function isWildcardIdentityEmail(email: unknown): boolean {
   return typeof email === 'string' && email.startsWith('*@');
 }
@@ -713,7 +710,7 @@ export function buildMailboxInfoMap(mailboxes: any[]): Map<string, MailboxInfo> 
 //   - An unresolved id is rare and benign: a just-created folder, a race with the
 //     separately-fetched mailbox list, or a mailbox with no `name`. Role mailboxes always
 //     resolve. Throwing would fail a whole list/search page over one such id.
-//   - Silently omitting the id WAS the #53 bug: a promised field vanished with no trace.
+//   - Silently omitting the id would drop a promised field with no trace (#53).
 // A genuine Mailbox/get `error` response still throws via the callers' catches; that is
 // not this path.
 //

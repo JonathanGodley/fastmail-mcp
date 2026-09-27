@@ -29,8 +29,7 @@ export type SubjectPrefixKind = 'reply' | 'forward';
 //
 // The trailing whitespace run sits INSIDE the optional counter group on purpose. With it
 // outside, a subject with no counter matches two adjacent runs (`\s*\s*:`), and a long
-// whitespace run with no colon backtracks quadratically: measured at 265ms for 20,000 spaces
-// against 0.02ms for this form. Nothing caps a subject before it reaches here and the
+// whitespace run with no colon backtracks quadratically. Nothing caps a subject before it reaches here and the
 // server is one stdio process, so a stall here stalls every other call.
 const SUBJECT_PREFIX = /^\s*(re|fwd|fw)\s*(?:\[\s*\d+\s*\]\s*)?:/i;
 
@@ -50,9 +49,6 @@ export function matchSubjectPrefix(subject: string | undefined): SubjectPrefixKi
 /**
  * What a fresh compose says: the prefix is claiming something the mode does not do, and the
  * mode that does it is one parameter away.
- *
- * The remedy follows the prefix rather than offering both, because the caller has already
- * said which one they meant by typing it.
  */
 export function noteComposeSubjectPrefix(kind: SubjectPrefixKind): string {
   return kind === 'reply'

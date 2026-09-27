@@ -90,7 +90,3 @@ export function signatureOf(identity: any): ResolvedSignature | undefined {
   if (html === undefined && text === undefined) return undefined;
   return { ...(html !== undefined && { html }), ...(text !== undefined && { text }) };
 }
-
-// Deliberately no `resolveSignature(identities, from)` wrapper: every caller needs the
-// identity object as well as its sign-off, because the note that reports an empty expansion
-// names the address the message sends as.

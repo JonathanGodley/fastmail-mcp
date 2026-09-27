@@ -3,15 +3,9 @@ import { InvalidInputError } from './coerce.js';
 // Size bounds for the caller-supplied text that gets serialized into an iCalendar
 // VEVENT by `create_calendar_event` / `update_calendar_event`.
 //
-// WHY THIS EXISTS: every one of those values is emitted through `foldICalLine`
-// (src/ical-fold.ts), which folds a content line to 75 octets per RFC 5545 §3.1 by
-// repeatedly re-slicing the REMAINDER of the line — so its cost grows with the square of
-// the field length, and each fold allocates a fresh copy of the tail. Measured on this
-// code: ~135ms to fold a 200KB value, and the process runs out of memory somewhere near
-// 800KB, so one oversized `description` (a pasted document, an inlined transcript) would
-// stall or kill the server for every other request on the same process. The cap is not
-// an iCalendar rule; it is a bound on that quadratic serializer. Do not remove it
-// without first making the folding linear.
+// The cap is not an iCalendar rule; it is a bound on the quadratic serializer
+// `foldICalLine` (src/ical-fold.ts), whose cost grows with the square of the field length.
+// Do not remove it without first making the folding linear.
 //
 // The bounds are deliberately generous: they exist to stop a denial of service, not to
 // referee how long an agenda may be.
@@ -70,13 +64,6 @@ function measureField(name: string, value: unknown, totals: { bytes: number }): 
 
 /**
  * Reject a calendar-event input whose text fields exceed the serialization bounds above.
- *
- * REJECTS rather than truncates: a silently trimmed description is data loss the caller
- * never learns about, while an error naming the field and the limit is recoverable in one
- * retry.
- *
- * Throws `InvalidInputError` (InvalidParams): an `InternalError` would invite exactly the
- * bare retry that repeats the expensive serialization.
  */
 export function assertICalTextLimits(input: ICalTextInput): void {
   const totals = { bytes: 0 };

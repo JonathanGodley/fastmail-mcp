@@ -241,15 +241,8 @@ auto-appended sign-off after a concatenated quote landed *underneath* the quoted
 read as part of it. A caller who wants the sign-off above the history writes `{{signature}}`
 above `{{quote}}`.
 
-**The block carries no marker class.** It used to be wrapped in a
-`<div class="fm-mcp-signature">` so a later edit could recognise a sign-off this server had
-written, which an automatic append needed: something had to decide whether a body was signed
-already, and whether an edit meant to drop the sign-off or merely forgot it. A token says where
-the sign-off goes and a body handed back without one says there is none, so nothing is left to
-guess, and an identifying class in every signed body would buy a reader nothing while claiming
-the block is this server's to manage. The class name appears here and in the comment at the top
-of the signature section of `src/reply-quote.ts` as the record of its removal, not survivals of
-it; a sweep hunting its last occurrences should leave both.
+**The block carries no marker class**: placement is by token, so nothing later needs to
+recognise a sign-off.
 
 **On `edit_draft` the trigger is a flag, never the token's presence.** Part of a body handed
 back to that tool was authored by the original message's sender, so any in-band trigger — a
@@ -299,7 +292,7 @@ that owns the address, which is only a fallback for a draft that carries none.
 `edit_draft`'s contract is that only passed fields change, so a caller who deliberately set a
 display name on their own address must not have it silently reverted to the identity's
 configured name by a later edit that never even touched `from`, such as a metadata-only edit
-changing only the subject or a recipient (#152). The account
+changing only the subject or a recipient. The account
 default's name is still deliberately *not* a fallback — pairing it with a foreign address is
 the identical drift, one step to the left of the sign-off.
 
@@ -310,7 +303,7 @@ elsewhere) keeps whatever non-blank name it already carried against that foreign
 and no verified identity to overwrite it with. `edit_draft` never invents or strips a name
 for an address the account cannot send as.
 
-## How quoted history survives an edit (#37, #42, superseded by the body hash)
+## How quoted history survives an edit (#37, #42)
 
 A reply draft carries the quoted original *inside* its body. At compose time the caller writes
 `{{quote}}` (or `{{forward}}`) and `buildQuoteBlocks` / `buildForwardBlocks`
@@ -320,33 +313,22 @@ substitution the quoted history is ordinary body text. Nothing marks it as ours,
 on the edit path looks for it.
 
 **Because a body edit replaces the whole body, an edit that rewrites the body drops the
-quote — and that is now the documented contract rather than a defect to be guarded against.**
+quote.**
 `edit_draft` stores what it is handed, character for character. To keep a reply's quoted
 original, read the draft and hand the whole body back with the edits made in it; the history
-survives because the caller sent it, not because this server detected it. The tool's own
-description says so in those terms, and says the converse just as plainly: a body sent
-without the quote drops the quote, with no challenge and no warning.
+survives because the caller sent it, not because this server detected it.
 
-**Why no guard recognises the quote.** The earlier design (#37, redesigned #42) recognised the
-stored quote by its shape and *refused* a body edit that would drop it, unless the caller
-either named the original so the block could be rebuilt from it or asked explicitly for a
-bare body. It was removed because it answered "did this edit drop the quote?" by recognising
-a shape, and shape recognition is
-lossy in both directions at once. A quote from a foreign client in a shape it did not know
-was dropped in **silence** — the widest edge of the feature, and precisely the failure class
-it existed to kill — while quote-shaped prose in a body this server had never written was
-challenged for nothing.
+**Why no guard recognises the quote.** Shape recognition is lossy both ways: a foreign-shaped
+quote is dropped silently, and quote-shaped prose gets challenged.
 
-`edit_draft` now answers a strictly weaker question and answers it exactly. Any edit that
+`edit_draft` answers a strictly weaker question and answers it exactly. Any edit that
 writes or clears a body must carry the `bodyHash` that `get_email` issued for that draft,
 which proves the caller is replacing the body it actually **read**. It does not prove the
 caller kept any of that body: someone who reads a reply draft and deliberately sends back a
 single line gets a draft holding a single line. What the hash removes is the *silent* drop —
 you cannot overwrite quoted history you never saw — and it removes it for every draft
 equally, foreign shapes included, because it is a fact about the bytes rather than a guess
-about their meaning. The old guard was stronger wherever it recognised a quote and worthless
-wherever it did not; the hash is uniformly weaker and uniformly total, and the second property
-is the one that was missing.
+about their meaning.
 
 **A `{{quote}}` handed back to `edit_draft` is text, not an instruction.** Neither history
 token expands on the edit path, and neither may be removed either: the body may be a foreign
@@ -370,16 +352,8 @@ the caller wrote. `src/quote-strip.ts` is the **read** side: given a message's `
 body, remove the correspondence quoted inside it. "Marker" in this section means a read-side
 quote marker; the compose side matches no quote shapes (see the section above).
 
-The read side's stakes are the severe ones:
-
-| | read side (`quote-strip.ts`) |
-|---|---|
-| Input | whatever a **foreign** client produced |
-| A match means | text is **deleted from the output** |
-| Miss cost | quoted bytes stay in the response |
-| False-positive cost | the reader loses real content |
-
-A miss leaves the response untidy; a false positive destroys content the reader will never
+The read side's stakes are the severe ones: its input is whatever a **foreign** client
+produced, and a match **deletes text from the output**. A miss leaves the response untidy; a false positive destroys content the reader will never
 know was there. That gap sets the posture: **recognize confidently or not at all.** Every marker is
 conventional, machine-emitted shape anchored at line start — a leading `>` run (nesting is
 the same shape), an `On <date>, <someone> wrote:` attribution *directly above* such a run
@@ -559,13 +533,8 @@ Recovering a forwarded original across sessions is one lookup: `forwardedMessage
 bracket-less form; both probed working 2026-07-05, as is the RFC 8621 §4.4.1 `header` filter,
 which stays unused).
 
-**No guard recognises a forwarded block on edit.** An earlier design recognized it by its
-shape (a `<div type="cite">` in html, the Fastmail or Gmail dashed line in text) and
-challenged an edit that would drop it. It went with the reply guard and for the same reason:
-shape recognition was blind in silence to foreign forwards (Gmail's forward *html* is
-class-and-text-keyed, and a marker may key only on markup the quote sanitiser strips from
-embedded content, or pasted forwards would false-trip it) and noisily wrong about bodies that
-merely looked like one. A forwarded block survives an edit because the caller sent it back,
+**No guard recognises a forwarded block on edit**, for the reason given for the reply guard.
+A forwarded block survives an edit because the caller sent it back,
 under the same `bodyHash` requirement.
 
 `asAttachment` forwards are unaffected. Their forwarded content lives in the `.eml`, which no body edit
@@ -614,8 +583,7 @@ re-references attachments by `blobId`, and preserves keywords. Ordering is
 create-then-dispose (create the new draft, confirm, then dispose of the old one) so there
 is no data-loss window. A draft carrying an inline `cid:` image is carried through the
 recreate: Fastmail assembles the `multipart/related` structure from the re-referenced
-flat part (`blobId` + `cid` + `disposition`), so the embedded image survives (#13,
-shipped). Only a part the recreate cannot re-reference, or a body that interleaves
+flat part (`blobId` + `cid` + `disposition`), so the embedded image survives (#13). Only a part the recreate cannot re-reference, or a body that interleaves
 multiple same-type text parts, is refused rather than silently mangled (#85).
 
 ### Disposing of the replaced draft: Trash, never destroy (#65)
@@ -698,9 +666,7 @@ sits).
 per format over lists that a single-format draft aliases into *both*, so a part that
 answered whichever format asked for it would answer both, and the corruption that follows
 reaches the metadata-only path along with the rest. The comment above that function spells
-out what lands in which slot, and why nothing catches it when it does. Widening this side
-for symmetry with the read was tried and taken back out for exactly that reason (#179):
-corrupting a body is the worse trade.
+out what lands in which slot, and why nothing catches it when it does (#179).
 
 A third consumer, `draftInterleavedTextType` (`src/body-hash.ts`), counts a typeless part as
 neither format — the one place in that module that does not fall back to the list. It is

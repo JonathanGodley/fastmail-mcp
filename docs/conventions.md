@@ -247,7 +247,7 @@ therefore not an escape hatch in this one case, and saying "pass the url" would 
 caller back to the id they passed. A url-shaped id with no resource at that address is
 unaffected: nothing is addressed, and it resolves by UID exactly as any other id does.
 
-**Why they differ, stated so it is not read as an inconsistency.** The fail-closed rule is
+**Why they differ.** The fail-closed rule is
 about a caller mistaking a wrong outcome for a legitimate one, and a read cannot produce a
 wrong outcome here: it damages nothing, and the disclosure makes the ambiguity visible in the
 same response. Refusing on the read would be strictly worse — the `url` of each copy is the
@@ -262,11 +262,8 @@ the copy they meant.
 
 **The echo bounds are the ambiguity's own**, not a share of the calendar ones:
 `AMBIGUOUS_COPY_LIST_CAP` and `AMBIGUOUS_COPY_URL_ECHO_LIMIT` are exported constants beside
-`CALENDAR_URL_ECHO_LIMIT`, and each states its reason where it is defined. The short version:
-these values are a caller's only handle out of the refusal, and a *resource* url — unlike the
-*collection* url that `CALENDAR_URL_ECHO_LIMIT` bounds — cannot be read back off
-`list_calendars` once it is truncated. The url bound governs the **calendar** field too, and
-that is not laziness: that field holds a display name *or*, for a collection that has none, the
+`CALENDAR_URL_ECHO_LIMIT`, and each states its reason where it is defined. The url bound
+governs the **calendar** field too: that field holds a display name *or*, for a collection that has none, the
 collection's own url, and nothing at the render site can tell which. Under the 60-character
 default every nameless calendar in an account would cut to the same prefix, so the one field
 distinguishing the copies would stop distinguishing them. Both messages render every calendar
@@ -289,8 +286,8 @@ has. `resolveCalendarTarget` (`src/caldav-client.ts`) is the one function
 one** calendar or raises: zero matches keeps the shared `calendarNotFoundError`, more than one
 raises `ambiguousCalendarNameError`, which names each match with its url.
 
-**Here the READ refuses as well, and that is not an inconsistency with the `eventId` split
-above — it is the same test applied to a different fact.** The `eventId` read is allowed to
+**Here the READ refuses as well: the same test as the `eventId` split above, applied to a
+different fact.** The `eventId` read is allowed to
 answer because it damages nothing *and* because it is the only tool that can hand back the
 `url` that makes the ambiguity fixable; refusing there would close the escape hatch. Neither
 holds for a calendar. `list_calendars` already hands back every calendar's url unconditionally,
@@ -317,9 +314,7 @@ caller addressed.
 (`unwrapDisplayName` answers undefined for `''` and `'   '`, so nothing matches), but `url` is
 compared raw, and a collection whose url is the empty string would have been *addressed* by an
 empty `calendarId` — narrowing a read onto a calendar nobody named, and on the write path
-creating an event in it. The comparison requires a non-empty string url rather than the claim
-being re-worded: nothing here can promise a collection has a usable url, and this file's own
-neighbours already refuse that assumption.
+creating an event in it. The comparison requires a non-empty string url.
 
 **The echo bounds are the calendar ones**, not the ambiguity's: `CALENDAR_NAME_LIST_CAP` bounds
 how many matches are named, the url gets `CALENDAR_URL_ECHO_LIMIT` because it is offered as a
@@ -357,11 +352,7 @@ live next to each other:
 
 `src/tool-schema.test.ts` enforces both halves against the source: it fails on any tool
 parameter declared `type: 'boolean'`, and on any bare `!!` read of a boolean parameter in a
-handler file. It reads `src/index.ts` as text rather than spawning the built server and
-calling `tools/list`, because a direct `tsx --test` on this file bypasses the `pretest`
-build, and a guard reading a stale `dist/` would miss exactly the newly added tool it exists
-to catch. `tsc` does not rewrite string literals, so the source and the shipped schema cannot
-disagree here.
+handler file.
 
 The same reasoning applies to the array coercions, and every list parameter declares
 its lenient shape: `type: ['array', 'string']` with `items` kept (JSON Schema applies
@@ -378,12 +369,6 @@ the *mechanism* and not to the rule: it states the same contract in its own word
 worked JSON example of the object shape that neither constant can carry, so replacing it
 with a constant would say less.
 
-Two of them are narrowing arguments, and they are safe to widen for a reason worth stating:
-`search_emails`' `requiredMailboxes` and `excludeMailboxes` already read through
-`coerceStringArrayStrict`, so a present-but-uncoercible value is an error naming the
-parameter rather than a silent `undefined` that would widen the search the argument was
-passed to restrict. Widening the schema makes that strict half reachable; it does not
-create a new lenient path.
 
 ### Verifying coercion
 
@@ -626,10 +611,8 @@ What differs is the trigger, not the resolution. `archive_email` adds Archive wh
 the only filing; `remove_labels`/`bulk_remove_labels` add it, per message, when the named labels
 were the only filing. The evidence is the same in both cases and it is narrow: removing a message's
 last **user label** in the Fastmail client leaves it in Archive, does not delete it and does not
-refuse. The client offers no remove-label action in Trash, Spam or the other role folders, and its
-two message-action pickers settle why (#133): the Labels picker offers the Inbox and the account's
-own labels and nothing else, while Archive, Trash, Spam, Drafts, Sent, Snoozed and Scheduled
-appear only under "Move to". So a role mailbox is a **folder** in Fastmail's model, with the Inbox
+refuse. The client's two message-action pickers settle which mailboxes are labels (#133; measured
+in [docs/fastmail-action-availability.md](fastmail-action-availability.md)). So a role mailbox is a **folder** in Fastmail's model, with the Inbox
 as the sole exception, and the label tools reject one before writing anything, so what a rescue
 should do for a message in a role folder is a question that cannot arise. The test is the
 **role**, never a name list, so a user label someone called "Archive" is still a label and a role
@@ -706,10 +689,6 @@ The two forms are mutually exclusive rather than additive, which is why the send
 `mailboxIds` first and, when it is present, never looks at the `mailboxIds/<id>` keys at all
 (`imap/jmap_mail.c:11761-11775`; the additive apply is at `:12022-12040`). A whole-value key
 reintroduced beside a patch does not conflict loudly; it silently wins.
-
-`delete_email` and `bulk_delete` are unchanged by any of this and still write whole-value, so a
-message's other labels are still dropped by the move to Trash and the Trash copy cannot show you
-what they were. Fork issue #123 is the open record of that one.
 
 ## Scoping a query: intersection, exclusion, and what `inMailboxOtherThan` really means
 
@@ -886,13 +865,12 @@ a `forbidden` on the operational side, so a contacts token issued read-only surf
 `InternalError` whose message names the read-only scope — the refusal is the only place a
 caller can learn that, since the session reports an identical capability either way.
 
-One nearby throw stays a plain `Error` **on purpose**, and looks like an exception to the
-rule until you see what it carries. The ORGANIZER address check validates the operator's
+One nearby throw is a plain `Error`. The ORGANIZER address check validates the operator's
 configured CalDAV username through the participant validator — a configuration fault no
 argument can fix, so it is re-thrown in the plain class with its own wording.
 
-**The repeating-event refusal is `InvalidInputError` even though no argument fixes it**, and
-that is not a contradiction. `InvalidParams` means "re-form the call", not "add a parameter":
+**The repeating-event refusal is `InvalidInputError` even though no argument fixes it.**
+`InvalidParams` means "re-form the call", not "add a parameter":
 the caller resolves this by not making the call — pointing a different id at it, or doing the
 edit in the web client — which is a caller-side change. `InternalError` would say a bare retry
 might work, and it never will: the event repeats, and it will still repeat next time.
@@ -1198,7 +1176,7 @@ reaching past them for its own `JSON.stringify`, so the drift guard in
   pretty-printed" a property of two function signatures rather than of a text scan that has to
   keep finding every call site forever.
 
-**What redaction does and does not cover, since it is easy to state this too strongly.**
+**What redaction does and does not cover.**
 `toolJson` is a bare `JSON.stringify` with no replacer and it is nearly every seam call site, so
 routing a payload through it redacts nothing - the drift guard buys the single seam, not
 redaction. `redactedJson` is the only serialiser that redacts, and it has one call site (the
@@ -1209,19 +1187,12 @@ error description is caught.
 The reason is that indentation is bytes the caller pays for and nothing parses. Every payload
 here is machine-read — an MCP client parses it, or a model reads it as data — and neither
 needs the whitespace. It also scales with the number of JSON *tokens* rather than with the
-content, so it costs most on exactly the payloads that are already the largest. Measured live in
-August 2026, indentation was **17.3%** of a `list_emails` page, **24.9%** under
-`raw: true`, and **28.5%** of a `list_mailboxes` result (many small flat objects, so the most
-delimiters per byte of content), and **6.5%** of a single `get_email` (dominated by
-one long body string, which carries no delimiters to indent). Compacting removes no field and
-alters no value (#40).
+content, so it costs most on exactly the payloads that are already the largest. Compacting
+removes no field and alters no value (#40).
 
 **A payload inside a prose frame is still a payload.** A list result is a summary line, a
 newline, then the JSON array; the bulk-operations diagnostic wraps its JSON in a heading and a
-follow-up instruction. In both, the prose stays prose and only the JSON is compacted. Treating
-the framed ones as a readability exception would be a carve-out the next reader has to
-remember, and whitespace is not what makes a payload legible: its structure and field names
-are, and compacting changes neither.
+follow-up instruction. In both, the prose stays prose and only the JSON is compacted.
 
 The rule is about **payloads**, not about every `JSON.stringify` in the tree - which is why the
 in-`src/` exceptions are enumerated in the test rather than left to each reader's judgement.
@@ -1232,7 +1203,7 @@ running it by hand.
 
 ## Untrusted values in prose: `describeUntrusted`
 
-The rule, stated so it can be checked rather than argued per site: **any untrusted value
+The rule: **any untrusted value
 interpolated into prose a caller reads back — thrown or returned — goes through
 `describeUntrusted` (`src/coerce.ts`), and the server's own sentence around it never does.**
 
@@ -1363,22 +1334,10 @@ roots, drive-relative forms and the ADS colon; `resolve`/`normalize` preserve U+
 filename carrying one is creatable on both platforms, and `open()` on it returns ENOENT, so
 without a helper `File not found: <path>` arrives at the consumer as two lines.
 
-**What has actually been traced back to its origin is bounded, and the bound is part of the
-rule** ([#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190)): every
-single-quoted interpolation under `src/`, and then — because the quoting frame above hides
-exactly the case it cannot see — every bare unhelped render in `jmap-client.ts`'s path
-refusals and every caller-controlled value a `caldav-client.ts` refusal quotes back. Inside
-that boundary the values fed by a caller argument, by stored data an invitation or a message
-wrote, or by an id, path or hostname minted outside this server render through an echo
-inside `"…"`; the ones left render this server's own text, or a value an anchored shape has
-already constrained to digits and punctuation before the message quotes it.
-
-**Outside that boundary, bare renders have not been traced.** The expectation is that most are
-server text — a status line, a count, a field name, an action verb — but an expectation is not
-a finding, and it is the first thing to settle when adding a message elsewhere. The sweep also
-stopped at refusals, so a value rendered into a SUCCESS sentence has not been traced either;
-it is the same defect wearing a friendlier frame. The calendar tools' success sentences are
-open on [#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182).
+**Trace a bare render's value to its origin before adding the message.** The traced boundary is
+recorded on [#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190); success
+sentences were not swept, and the calendar tools' are open on
+[#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182).
 
 **One value outside it was traced and was not server text**
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)): the `detail` in
@@ -1387,16 +1346,10 @@ response — status, status text and body — so it is REMOTE-authored.
 It renders through the untrusted-value helper, not `echoCallerText`: this is the case that
 separates them, because only the former redacts a credential the response echoed back and only
 the former removes the Unicode format characters the control-character scrub leaves behind.
-The width is `describeUntrustedAt` at `LOGIN_FAILURE_ECHO_LIMIT` rather than the
-64-code-point default, for the reason `PATH_ECHO_LIMIT` is wide: what makes tsdav's text
-actionable is at the END of it (`… PROPFIND <url> returned 401 Unauthorized`), and a real
-principal url alone clears 64, so the default would cut the refusal off mid-url and never say
-what the server answered. A wider ECHO is not a wider leak — the redaction runs over the whole value
-before any of it is truncated — and the bound is a named constant carrying its reason, which is
-what stops per-site widths drifting into arbitrary numbers.
+The width is `describeUntrustedAt` at `LOGIN_FAILURE_ECHO_LIMIT`, whose reason is stated where it
+is defined.
 
-**The wide form is a second NAME, not an optional parameter on `describeUntrusted`, and that is
-not a style choice.** Call sites across this codebase render lists with a bare
+**The wide form is a second NAME, not an optional parameter on `describeUntrusted`.** Call sites across this codebase render lists with a bare
 `.map(describeUntrusted)`, and `Array.prototype.map` passes the array INDEX as the second
 argument: a positional bound there becomes 0 for every first element and truncates it to a lone
 ellipsis. Any future echo helper meant to be passed by reference takes no second positional
@@ -1780,8 +1733,7 @@ Three properties of the implementation are load-bearing and easy to undo by acci
   TEXT says nothing about their order in either direction. Both names are resolved and both values placed on the UTC scale instead, so Rome 10:00 to New
   York 08:00 the same day passes and New York 07:00 to Rome 08:00 is refused with the ordinary
   "DTEND must be later than DTSTART" wording.
-  **The one remaining stand-down is a name ICU cannot resolve**, and it is an inability, not a
-  choice: real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone, so
+  **The one remaining stand-down is a name ICU cannot resolve**: real records carry vendor TZIDs (`AUS Eastern Standard Time`), which name no zone, so
   there is no instant to order on and refusing would reject a record the account already holds.
   The resolvability test is `isUsableTimezone`, run before anything is resolved:
   `zoneOffsetMsAt` throws on a name it cannot resolve.
@@ -1841,9 +1793,7 @@ resolve, that zone is used. The configured zone is the fallback, for two cases o
 genuinely floating `start` (there is no zone to sort it in, so the caller's own clock is the
 least-wrong guess) and a `timeZone` this server was HANDED but cannot resolve (a Windows zone
 name such as `AUS Eastern Standard Time`, passed through verbatim rather than rejected — see
-below). That guard is not cosmetic: `zoneOffsetMsAt` throws on an unresolvable name, so
-sorting by an unresolvable `timeZone` directly would fail the whole listing over one event,
-which is exactly why `isUsableTimezone` gates it.
+below).
 
 **Non-IANA names pass through verbatim, on purpose.** A calendar written by a non-Fastmail
 client can carry a Windows zone name in its `TZID` rather than an IANA one. This server does
@@ -1875,9 +1825,7 @@ instant it names, a date-only value is the configured zone's local day, a `DTSTA
 span is the full multi-day local span (a date-only `DTEND` is already exclusive in iCalendar —
 see `docs/fastmail-action-availability.md` — so no day is added), and a wall clock resolves in
 its own TZID where ICU can resolve that name and in the configured zone otherwise. The zone
-fallback rule is `sortEventsByStart`'s, for the same reason: `zoneOffsetMsAt` throws on an
-unresolvable name, so an unusable `timeZone` must land on the account's configured zone
-before anything is resolved. `zone` is a required parameter of
+fallback rule is `sortEventsByStart`'s. `zone` is a required parameter of
 `eventIntersectsWindow` precisely so no call site can fall through to the host by omission.
 
 The CalDAV server remains the authority on time-range matching (RFC 4791 §9.9,
@@ -2041,7 +1989,7 @@ error text says "applied because you named none" for a `'default'` source instea
 - **`timeZone` combined with a date-only `start` or `end`** (same function) — an all-day value
   has no time component for a zone to qualify.
 - **`timeZone` that is `null`, empty, or whitespace-only** (`validateCallerTimezone`, `src/coerce.ts`)
-  — deliberate, not an incidental gap: there is no way to ask this server to force a
+  — there is no way to ask this server to force a
   FLOATING write via `timeZone`, on either tool, ever. Omitting the argument is how a caller
   reaches step 2/4 above, and a caller who explicitly sends `null` meaning "make it floating"
   gets a clear rejection instead of a silent floating write that looks identical to the
@@ -2059,8 +2007,7 @@ error text says "applied because you named none" for a `'default'` source instea
   reports as unresolvable, never as "shorthand", because ICU never got to say whether it's
   ambiguous or simply wrong; only a string ICU *can* resolve, but with no slash and no `"UTC"`
   match, is a shorthand rejection. The comparison against `"UTC"` is case-insensitive
-  (`"utc"`/`"Utc"`/`"UTC"` all pass) - it is the rule's one deliberate exception, not an
-  oversight the rule forgot to close.
+  (`"utc"`/`"Utc"`/`"UTC"` all pass).
 
   **`Etc/GMT±N` is accepted, and shown with its real offset.** The offset-shaped denylist
   (`GMT+10`, `UTC+10`, a leading sign or digit) must not reach these: they are real IANA
@@ -2126,32 +2073,10 @@ body type this server sends — parses through `ical_string_as_icalcomponent`
 (`imap/ical_support.c:832`), which calls Cyrus's own re-attach step,
 `icalcomponent_add_required_timezones` (`imap/ical_support.c:3086`), nowhere; measured directly
 too, not just read from source — a resource this server wrote came back with no VTIMEZONE when
-fetched over CalDAV (23 August 2026, #166). That is not true of CalDAV as a whole: an
-`application/event+json` body (the only one of `http_caldav.c`'s four registered calendar body
-types that does) is converted through `jevent_string_as_icalcomponent` (`imap/jmap_ical.c:8258`)
-into `jmapical_toical` (`:8273`), which runs the attacher unconditionally (`:8190`) — this server
-never sends that content type, so it doesn't apply here, but "CalDAV never attaches" would be
-false of Cyrus generally. On THIS deployment that route is closed outright: a CalDAV PUT whose
-body is `application/event+json` is refused with HTTP 403 and the `CALDAV:supported-calendar-data`
-precondition, from the Content-Type check in `meth_put` (`imap/http_dav.c:7225-7232`), which
-rejects any type not among the collection's registered MIME types before any parsing is reached
-— so the build either lacks `WITH_JMAP` or does not register that type for the calendar
-collection (measured 25 Sep 2026, `scripts/probes/calendar-event-json-put.probe.mjs`). The
-attacher's two CalDAV call sites on the READ side
-(`imap/http_caldav.c:2617`, `:5719`), and the hand-rolled re-attach in `export_calendar`
-(`imap/http_caldav.c:1841`, which adds each referenced TZID's built-in definition through
-`add_timezone`), all sit behind a `cdata->comp_flags.tzbyref` check, a per-resource
-flag set not BY `strip_vtimezones` but alongside it, in the same `if (namespace_calendar.allow &
-ALLOW_CAL_NOTZ)` block (`imap/caldav_util.c:1081-1082`), which this deployment does not enable
-(measured 17 Sep 2026, `scripts/probes/calendar-tzdist.probe.mjs`) — nor is RFC 7808 timezone
-data distribution served here for the generator to draw from instead (same probe, same date).
-(The JMAP/JSCalendar converters carry no such guard at all: `imap/jmap_ical.c:8190`
-(`jmapical_toical`), `imap/jmap_calendar.c:4503` (`merge_missing_vevents`, called from the JMAP
-create path at `:4832` and the update path at `:5728`), and `imap/jscalendar.c:5032`
-(`jscal_to_ical`, whose callers include the JMAP create/update paths, the JSCalendar conversion
-endpoint `imap/http_convert.c:177`, and `alert_to_ical` at `imap/jmap_calendar.c:1251`) all call
-`icalcomponent_add_required_timezones` unconditionally, with no `tzbyref` check anywhere nearby;
-none of them matters for this server's own write path, which sends `text/calendar`, never JSON.)
+fetched over CalDAV (23 August 2026, #166). Cyrus's other attach routes do not reach this server:
+an `application/event+json` PUT is refused here with 403 (`scripts/probes/calendar-event-json-put.probe.mjs`),
+and the read-side re-attach needs `ALLOW_CAL_NOTZ`, which this deployment does not enable, nor
+does it serve RFC 7808 timezone data (`scripts/probes/calendar-tzdist.probe.mjs`).
 `createCalendarEvent` writes one block per zone the event actually uses; `updateCalendarEvent`
 regenerates it whenever `start`/`end` changes (stripping the stale one first, so a moved event's
 `TZUNTIL` never goes stale) and otherwise leaves an existing block alone. Three residuals remain:
@@ -2272,10 +2197,7 @@ that span is the caller's own decision.
 
 **A month, because that is the question the missing bound is asking.** "What is coming up",
 "what led up to this date" - a month is what a calendar client puts on screen at a time, so
-the invented span is the one the caller reading the answer already has in mind. The expanding
-APIs nearest to this one invent no span at all: Cyrus's own JMAP `CalendarEvent/query` rejects
-an `expandRecurrences` query with no upper bound, and Microsoft Graph's `calendarView`
-requires both bounds, so inventing a month is already the generous reading. 31 rather than 30
+the invented span is the one the caller reading the answer already has in mind. 31 rather than 30
 so the same date next month is always inside the span, from any starting day in any month.
 
 **A caller who names NEITHER bound gets the same month, anchored on today**
@@ -2310,18 +2232,14 @@ of what happened, and a window that saturates at both ends at once needs both se
 ([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)).** After the bounds are
 resolved, clamped and saturated, the `time-range` and `expand` range actually SENT is widened
 by `MAX_UTC_OFFSET_MS` (14 hours, the widest UTC offset any IANA zone has used) at each edge.
-The reason is a property of the platform rather than of this server: Cyrus matches a date-only
-value on its UTC day and reads a floating time as UTC, so a window narrower than a day can
-touch an all-day or floating event without the server returning it at all — and no client-side
-filter can keep what was never sent. The extra rows the widening pulls in are trimmed by the
-exact re-filter above.
+The reason is Cyrus's UTC-day matching (see the all-day case above); the extra rows the
+widening pulls in are trimmed by the exact re-filter above.
 
 Three consequences worth stating, because each is a place this could go quietly wrong:
 
 - **The caller-facing window is never the widened one.** `windowClamp.start`/`end` report the
   bounds the caller's arguments resolved to, and the re-filter judges against those same
-  bounds. Both come from `trueWindowStart`/`trueWindowEnd`, held separately from
-  `fetchOptions.timeRange` for exactly this reason.
+  bounds.
 - **The widened bounds saturate, and that saturation is NOT disclosed.** 14 hours past
   `9999-12-31` runs off the four-digit year and reaches tsdav's `^\d{4}` check as a plain
   Error, so `shiftIsoMs` pulls it back to the representable edge. It is not added to
@@ -2357,13 +2275,6 @@ a false positive is the whole answer: a legitimate series over the cap refuses e
 that covers it (unless scoped to another calendar) until the caller narrows the window, which is
 far more expensive than parsing a few thousand extra blocks.
 
-**Attacker-authored, not merely accidental.** Calendar content in this deployment comes from
-anyone who can send an invitation, so density is not just a user's mistake to be tolerated - a
-one-line `RRULE` is enough to make any listing on the account useless - by flooding it, if the
-series were rendered, or by refusing it, under the cap, which is why the refusal names the series
-so the caller can act on it. That is the same threat model the whole-content-line rule below
-rests on.
-
 **The residual of the refusal, stated plainly: a hostile series DOES fail every listing whose
 window covers it**, until the caller narrows the window past it, scopes the call to a calendar
 that does not hold it (`calendarId`), or removes the event in the Fastmail client - this server
@@ -2377,12 +2288,8 @@ CalDAV expansion has no cap of its own (`expand_cb` returns 1 unconditionally, a
 `CALDAV:max-instances` has no handler), and tsdav's `fetchCalendarObjects` has no limit or
 paging option and buffers the whole multistatus response before returning it. So the server
 still generates every occurrence and still sends every byte; the cap decides what this server
-parses into events and shows. The listing then makes a second transfer the cap does not reach:
-the follow-up multiget that settles `isRecurring` (#155) fetches the whole stored resource, every
-exception VEVENT included, for each row that came back as a resource's only block, which on an
-ordinary calendar is nearly every one-off event too. That is a real limit, and it is the reason
-the window bound above matters more than this one - the window is the only thing that shrinks
-either request.
+parses into events and shows. That is a real limit, and it is the reason the window bound above
+matters more than this one - the window is the only thing that shrinks the request.
 
 ### Free/busy crosses four tools with one vocabulary and one rule
 

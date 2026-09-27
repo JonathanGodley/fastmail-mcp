@@ -83,7 +83,7 @@ export interface BodyTokenScan {
   /** Every other `{{…}}` whose contents carry no further `{` (branch 3's bound, see BODY_TOKEN_RE). */
   otherSpellings: BodySpellingSite[];
   /**
-   * Every ESCAPED spelling, backslash included. Not a defect: it exists for `edit_draft`, which
+   * Every ESCAPED spelling, backslash included. It exists for `edit_draft`, which
    * stores an unflagged body byte for byte, so an escape there ships WITH its backslash.
    */
   escapes: BodySpellingSite[];

@@ -11,7 +11,7 @@ import type { SimplifiedEmail } from './email-formatter.js';
 //
 // The hash is over EVERY stored body part, deduplicated across the two lists, whatever its
 // type: no part type is consulted, so a typeless part or several parts of one type are
-// covered rather than withheld. `bodyValueForType` plays no part here.
+// covered rather than withheld.
 
 /**
  * The identity a part is deduped by across the body lists. RFC 8621 §4.1.4 puts one displayed
@@ -145,8 +145,7 @@ export function collectDraftBodyParts(email: any): CollectedBodyPart[] {
     for (const part of list.parts) {
       if (!part) continue;
       // Kept in step BY HAND with `draftInterleavedTextType`'s walk: same dedupe, and the
-      // counter advances for every part, duplicates included. Deliberately not merged, since
-      // the two walks produce different things.
+      // counter advances for every part, duplicates included.
       const key = draftPartKey(part, index++);
       let entry = parts.get(key);
       if (!entry) {
