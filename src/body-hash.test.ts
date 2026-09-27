@@ -241,9 +241,12 @@ describe('bodyHash', () => {
   });
 
   it('counts a length in BYTES, not characters', () => {
-    const one = [{ key: 'p:1', value: 'é', degraded: false, showsInText: true, showsInHtml: false }];
-    const two = [{ key: 'p:1', value: 'ee', degraded: false, showsInText: true, showsInHtml: false }];
-    assert.notEqual(bodyHash(one), bodyHash(two));
+    // Each part is canonicalised as `<UTF-8 byte length>:<value>`, so 'é' (one character, two
+    // bytes) hashes as '2:é'. A character-count prefix would hash '1:é' and still create no
+    // collision, so no inequality between two bodies can catch that regression; only the
+    // exact value can.
+    const part = [{ key: 'p:1', value: 'é', degraded: false, showsInText: true, showsInHtml: false }];
+    assert.equal(bodyHash(part), 'bh1-2f23c71856587c2a6ffdb64f0e11e994');
   });
 });
 
