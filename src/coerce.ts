@@ -404,7 +404,9 @@ function echoDate(value: string): string {
 
 function acceptedWindowFormats(zoneLabel: string): string {
   return `Accepted: a date such as 2026-08-12 (read as a whole day in ${zoneLabel}), or a full datetime such as ` +
-    '2026-08-12T14:30:00Z or 2026-08-12T14:30:00+10:00 (taken exactly as written). A datetime with no ' +
+    '2026-08-12T14:30:00Z or 2026-08-12T14:30:00+10:00 (taken exactly as written). Also accepted: no ' +
+    'seconds (2026-08-12T14:30Z), fractional seconds, dropped (2026-08-12T14:30:00.5Z), a lowercase z ' +
+    '(2026-08-12T14:30:00z) and an offset without its colon (2026-08-12T14:30:00+1000). A datetime with no ' +
     `Z and no offset is read as ${zoneLabel} local time.`;
 }
 
