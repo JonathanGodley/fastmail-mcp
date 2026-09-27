@@ -1948,6 +1948,33 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
   });
 
+  // tsdav drops a fragment from the multiget href, and a server may answer a query with the
+  // resource's own href. The store below models both, so the url that comes back carries
+  // neither; an address is still an address when spelled with either.
+  for (const suffix of ['#frag', '?q=1']) {
+    it(`counts a url spelled with "${suffix}" as addressing that record`, async () => {
+      const realUrl = PERSONAL_URL + 'real.ics';
+      const spelled = realUrl + suffix;
+      // A decoy whose UID is the caller's exact string, so only addressing can break the tie.
+      const stored: Record<string, StoredObject[]> = {
+        [WORK_URL]: [{ data: eventIcal(spelled, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
+        [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
+      };
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
+      const store = makeObjectStore(stored);
+      mockDAVClient.fetchCalendarObjects = mock.fn(async (params: FetchObjectsParams) => {
+        const objectUrls = (params as { objectUrls?: string[] }).objectUrls;
+        if (!objectUrls) return store(params);
+        return store({ ...params, objectUrls: objectUrls.map(u => u.replace(/[?#].*$/, '')) } as FetchObjectsParams);
+      });
+
+      await client.deleteCalendarEvent(spelled);
+      const delCalls = mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
+      assert.equal(delCalls.length, 1);
+      assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
+    });
+  }
+
   // The other side of the rule, so it is not read as "a url-shaped id always wins". Where the
   // string is url-shaped but names no resource in this account, nothing was addressed and the
   // UID matches are all there is — including the ambiguity refusal if there are two of them.

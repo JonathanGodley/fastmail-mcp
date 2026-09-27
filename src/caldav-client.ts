@@ -2220,6 +2220,19 @@ function resolveEventUrlTargets(
 }
 
 /**
+ * An href as compared to decide whether a resource was ADDRESSED. The fragment and query are
+ * dropped from both sides: tsdav never sends a fragment, and a server may answer a query with
+ * the resource's own href, so either would stop the caller's spelling matching what came back.
+ */
+function addressComparisonKey(url: string): string {
+  const parsed = resolveCollectionUrl(url, CALDAV_URL_MATCH_BASE);
+  if (parsed === undefined) return url;
+  parsed.hash = '';
+  parsed.search = '';
+  return parsed.href;
+}
+
+/**
  * Taken from tsdav's own signature so an upgrade that changes the shape surfaces here.
  */
 type CalendarQueryFilters = NonNullable<Parameters<DAVClient['fetchCalendarObjects']>[0]['filters']>;
@@ -3352,7 +3365,7 @@ export class CalDAVCalendarClient {
     };
 
     const urlTargets = resolveEventUrlTargets(wanted, selectable);
-    const addressedHrefs = new Set(urlTargets.map(t => t.objectUrl));
+    const addressedHrefs = new Set(urlTargets.map(t => addressComparisonKey(t.objectUrl)));
 
     // No early exit: a UID is unique per collection, not per account (#101).
     for (const calendar of selectable) {
@@ -3393,7 +3406,7 @@ export class CalDAVCalendarClient {
 
     // The addressed copy LEADS (see CalendarObjectLookup); every other order is untouched.
     // `> 0` only skips a no-op, so it is indistinguishable from `>= 0` by any test.
-    const addressedIndex = matches.findIndex(m => addressedHrefs.has(m.object.url));
+    const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 
     return { matches, addressed: addressedIndex !== -1, brokenCollections };
