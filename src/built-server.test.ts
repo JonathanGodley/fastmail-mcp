@@ -266,7 +266,7 @@ function admittedTypes(declared: any): string[] {
   return [...out].sort();
 }
 
-describe('edit_draft advertises the stringified-array form its handler accepts', () => {
+describe('edit_draft advertises the clearFields enum on its array elements', () => {
   before(() => assertDistIsCurrent());
 
   // The advertised inputSchema of one tool, from a server started with no FASTMAIL_* setting
