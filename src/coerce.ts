@@ -230,6 +230,17 @@ export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unkno
   };
 }
 
+// How many caller keys an unknown-key refusal names; the rest are counted, so a call carrying
+// thousands of keys cannot become the message.
+const UNKNOWN_KEYS_ECHO_CAP = 10;
+
+/** Caller-supplied keys as quoted, neutralised spans, capped at UNKNOWN_KEYS_ECHO_CAP. */
+function quoteCallerKeys(keys: string[]): string {
+  const shown = keys.slice(0, UNKNOWN_KEYS_ECHO_CAP).map((k) => `"${describeUntrusted(k)}"`).join(', ');
+  const rest = keys.length - UNKNOWN_KEYS_ECHO_CAP;
+  return rest > 0 ? `${shown}, …and ${rest} more` : shown;
+}
+
 // Hard-reject any argument key the tool didn't declare in its inputSchema, so a
 // misspelled/hallucinated param (e.g. `mailbox` vs `mailboxId`) fails loudly
 // instead of being silently dropped and the tool running with defaults (#11).
@@ -247,7 +258,7 @@ export function assertKnownParams(
   if (unknown.length === 0) return;
   throw new McpError(
     ErrorCode.InvalidParams,
-    `Unknown parameter(s): ${unknown.join(', ')}. Valid: ${[...allowedKeys].join(', ')}`,
+    `Unknown parameter(s): ${quoteCallerKeys(unknown)}. Valid: ${[...allowedKeys].join(', ')}`,
   );
 }
 
@@ -957,7 +968,7 @@ export function validateClearFields(clearFields: string[] | undefined, allowed: 
   if (!clearFields || clearFields.length === 0) return;
   for (const field of clearFields) {
     if (!allowed.has(field)) {
-      throw new InvalidInputError(`Cannot clear "${field}"; clearable fields are: ${[...allowed].join(', ')}`);
+      throw new InvalidInputError(`Cannot clear "${describeUntrusted(field)}"; clearable fields are: ${[...allowed].join(', ')}`);
     }
     if (provided.has(field)) {
       throw new InvalidInputError(`cannot both set and clear ${field}; pass it as a value or in clearFields, not both`);
@@ -1326,7 +1337,7 @@ function coerceContactEntries<T extends Record<string, any>>(
     const unknownKeys = Object.keys(obj).filter((k) => !keys.has(k));
     if (unknownKeys.length > 0) {
       throw new InvalidInputError(
-        `${paramName}[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...keys].join(', ')}`,
+        `${paramName}[${i}] has unknown key(s): ${quoteCallerKeys(unknownKeys)}. Valid: ${[...keys].join(', ')}`,
       );
     }
     if (typeof obj[keyField] !== 'string') {
@@ -1343,7 +1354,7 @@ function coerceContactEntries<T extends Record<string, any>>(
     const firstAt = seen.get(primary);
     if (firstAt !== undefined) {
       throw new InvalidInputError(
-        `${paramName}[${i}] repeats the ${keyField} already given at ${paramName}[${firstAt}]: "${primary}". ` +
+        `${paramName}[${i}] repeats the ${keyField} already given at ${paramName}[${firstAt}]: "${describeUntrusted(primary)}". ` +
           `List each ${keyField} once.`,
       );
     }
