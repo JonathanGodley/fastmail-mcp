@@ -290,6 +290,10 @@ export interface SourceReferences {
 // The JMAP header form used to SET and GET the recorded source instance. It is NOT
 // stripped on send (EmailSubmission transmits the stored bytes verbatim); the decision is
 // recorded in docs/security-model.md.
+// The not-found refusal of the two attachment tools, which take the same emailId.
+const ATTACHMENT_EMAIL_NOT_FOUND =
+  'Email not found: that emailId matches no message. Pass an id from list_emails, search_emails or get_thread.';
+
 export const SOURCE_ID_HEADER = 'header:X-Fastmail-MCP-Source-Id:asText';
 
 // Anything that is not an RFC 8620 id is treated as absent rather than risking a
@@ -3886,8 +3890,9 @@ export class JmapClient {
 
     const response = await this.makeRequest(request);
     const email = this.getListResult(response, 0)[0];
+    if (!email) throw new InvalidInputError(ATTACHMENT_EMAIL_NOT_FOUND);
     const attachments = buildUnionParts(email).map((u) => u.part);
-    const rawAttachments = email?.attachments || [];
+    const rawAttachments = email.attachments || [];
     // buildUnionParts yields the server's own part objects, so identity is an exact
     // membership test for "this part is not in the JMAP attachments array".
     const inRaw = new Set<any>(rawAttachments);
@@ -3927,12 +3932,7 @@ export class JmapClient {
     const response = await this.makeRequest(request);
     const email = this.getListResult(response, 0)[0];
 
-    if (!email) {
-      throw new InvalidInputError(
-        'Email not found: that emailId matches no message. ' +
-        'Pass an id from list_emails, search_emails or get_thread.'
-      );
-    }
+    if (!email) throw new InvalidInputError(ATTACHMENT_EMAIL_NOT_FOUND);
 
     const parts = buildUnionParts(email).map((u) => u.part);
     const resolved = resolveAttachmentRef(parts, attachmentId);

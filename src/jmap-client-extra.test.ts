@@ -5442,11 +5442,17 @@ describe('getEmailAttachments', () => {
     assert.equal(attachments.length, rawAttachments.length);
   });
 
-  it('returns empty lists for a message that is not found', async () => {
+  it('refuses an emailId that matches no message, rather than reporting no attachments', async () => {
     const client = makeClient();
     stubEmail(client, null);
-    const result = await client.getEmailAttachments('missing');
-    assert.deepEqual(result, { attachments: [], rawAttachments: [], omittedFromRaw: 0 });
+    await assert.rejects(
+      () => client.getEmailAttachments('missing'),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /Email not found/);
+        return true;
+      },
+    );
   });
 });
 
