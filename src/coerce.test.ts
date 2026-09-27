@@ -1407,8 +1407,6 @@ describe('coerceCalendarWindowEnd (#64)', () => {
   });
 });
 
-// The refusal lists what the window parser accepts, so every looser spelling it names must
-// really be accepted, and it must name them all.
 describe('the calendar window refusal names the spellings the parser accepts', () => {
   it('lists the no-seconds, fractional, lowercase-z and colon-less forms, each accepted', () => {
     let message = '';

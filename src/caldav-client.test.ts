@@ -1949,7 +1949,7 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
   });
 
-  // The store below models both (see addressComparisonKey), so the url that comes back carries
+  // The store below models tsdav and the server (see addressComparisonKey), so the url that comes back carries
   // neither a fragment nor a query; an address is still an address when spelled with either.
   for (const suffix of ['#frag', '?q=1']) {
     it(`counts a url spelled with "${suffix}" as addressing that record`, async () => {
@@ -3041,8 +3041,6 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.equal(result.eventId, 'padded-uid');
   });
 
-  // The echoed UID is fed back to an exact-match lookup, so a long one must come back whole.
-  // Exchange-style UIDs are over 100 hex characters.
   it('echoes a UID longer than 64 code points whole at CALENDAR_UID_ECHO_LIMIT', () => {
     const uid = '040000008200E00074C5B7101A82E008' + 'A'.repeat(150);
     assert.equal(describeUntrustedAt(uid, CALENDAR_UID_ECHO_LIMIT), uid);
@@ -3057,8 +3055,6 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.equal(result.eventId, 'by-url@fm');
   });
 
-  // A malformed `;TZID=X:...Z` line is a UTC value, as the read reports it, so moving the other
-  // side to another UTC value is not a frame mismatch.
   it('treats a stored Z value that also carries a TZID as UTC when checking a new start', async () => {
     const ical = [
       'BEGIN:VCALENDAR',
