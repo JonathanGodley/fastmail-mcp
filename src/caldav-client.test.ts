@@ -5253,7 +5253,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
   it('refuses a non-string or blank title, and a non-string description or location, before any network call', async () => {
     const base = { calendarId: 'Personal', title: 'T', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' };
     for (const [label, patch, message] of [
-      ['numeric title', { title: 5 }, /title cannot be empty/],
+      ['numeric title', { title: 5 }, /title must be a string; received number/],
       ['whitespace-only title', { title: '   ' }, /title cannot be empty/],
       ['numeric description', { description: 5 }, /description must be a string; received number/],
       ['object location', { location: {} }, /location must be a string; received object/],
@@ -5685,6 +5685,15 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
         assert.deepEqual(result.start, { kind: 'zoned', zone: 'America/New_York' });
       });
     }
+  });
+
+  it('refuses a non-string title by its type, as create does', async () => {
+    const { client, mockDAVClient } = mockClient(UTC_EVENT);
+    await assert.rejects(
+      () => client.updateCalendarEvent('utc@fm', { title: 5 as unknown as string }),
+      /title must be a string; received number/,
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
   });
 
   it('trims surrounding whitespace from a date-only or datetime start and end, as create does', async () => {

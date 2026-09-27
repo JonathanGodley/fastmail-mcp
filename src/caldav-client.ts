@@ -3007,6 +3007,13 @@ function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   }
 }
 
+/** Refuse a present, non-string text field by its type; escapeICalText throws a TypeError on one. */
+function assertTextType(name: string, value: unknown): void {
+  if (value != null && typeof value !== 'string') {
+    throw new InvalidInputError(`${name} must be a string; received ${Array.isArray(value) ? 'array' : typeof value}.`);
+  }
+}
+
 /**
  * The trailing note a calendar read carries when an event's `timeZone`/`endTimeZone` is a signed
  * Etc/GMT name, whose sign is the inverse of its offset (`etcGmtOffsetNote`). A note rather than
@@ -3540,13 +3547,11 @@ export class CalDAVCalendarClient {
     /** Free/busy (#194); overrides the all-day default. See the TRANSP block below. */
     transparency?: string;
   }): Promise<CreateCalendarEventResult> {
-    // Before discovery, and by update's rules: escapeICalText throws a TypeError on a non-string.
+    // Before discovery, and by update's rules.
+    assertTextType('title', event.title);
     const title = requireNonEmpty(event.title, 'title', 'pass the event title');
-    for (const [name, value] of [['description', event.description], ['location', event.location]] as const) {
-      if (value != null && typeof value !== 'string') {
-        throw new InvalidInputError(`${name} must be a string; received ${Array.isArray(value) ? 'array' : typeof value}.`);
-      }
-    }
+    assertTextType('description', event.description);
+    assertTextType('location', event.location);
 
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
@@ -3790,6 +3795,7 @@ export class CalDAVCalendarClient {
     let timeChanged = false;
 
     if (fields.title !== undefined) {
+      assertTextType('title', fields.title);
       const title = requireNonEmpty(fields.title, 'title');
       data = replaceICalProperty(data, 'SUMMARY', fold(`SUMMARY:${escapeICalText(title)}`));
     }
