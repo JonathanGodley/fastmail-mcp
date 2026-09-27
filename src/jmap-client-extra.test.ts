@@ -1427,8 +1427,8 @@ describe('bulkMarkRead', () => {
     stubMakeRequest(client, {
       methodResponses: [
         // updated carries e1 explicitly: the success count comes from what the server
-        // acknowledged, so a stub that omits it would (correctly) report e1 as having no
-        // reported outcome instead of as a success.
+        // acknowledged, not from total - failCount, so a stub that omits it would
+        // (correctly) report e1 as having no reported outcome instead of as a success.
         ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': { type: 'notFound' } } }, 'bulkUpdate'],
       ],
     });
@@ -3969,7 +3969,8 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
     // A non-compliant server can send `null` as Email/set's own result data -
     // getMethodResult hands it straight back, and this read goes through
     // `result?.updated`/`result?.notUpdated` rather than assuming `result` is always an
-    // object. The read predates #185; this pins it on the line #185 rewrote around it.
+    // object. The read predates #185. This is a mutation kill on the line #185 rewrote, not
+    // a pin of behaviour #185 introduced.
     stubRequests(client, async (request: JmapRequest) => {
       const [method, , callId] = request.methodCalls[0] as [string, any, string];
       if (method === 'Email/get') {

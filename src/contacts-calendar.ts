@@ -551,9 +551,9 @@ export class ContactsCalendarClient extends JmapClient {
     if (result.notDestroyed?.[id]) {
       const err = result.notDestroyed[id];
       if (err.type === 'notFound') {
-        // Caller-fixable bad id: InvalidParams. A genuinely unknown id lands HERE (RFC 8620 section 5.3 puts it in notDestroyed), which is why an
-        // unreadable card below is never reported as not-found: by then the destroy has
-        // succeeded, so the id was real.
+        // Caller-fixable bad id: InvalidParams. A genuinely unknown id lands HERE (RFC 8620
+        // section 5.3 puts it in notDestroyed), which is why an unreadable card below is never
+        // reported as not-found: by then the destroy has succeeded, so the id was real.
         throw new InvalidInputError(`Contact not found: ${id}`);
       }
       this.throwSingleSetError(err, 'delete contact');

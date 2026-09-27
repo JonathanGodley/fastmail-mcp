@@ -5079,8 +5079,9 @@ describe('updateDraft embedded images (#13)', () => {
 
   // A minted identifier survives an edit for as long as the body keeps referencing it, so
   // the two halves are a matched pair and the pair is what pins the rule: naming a part the
-  // draft does not carry is refused, naming one it does is the ordinary read-edit-write shape. Refusing both would refuse the first edit
-  // of every image-bearing draft this server made.
+  // draft does not carry is refused, naming one it does is the ordinary read-edit-write
+  // shape. Refusing both would refuse the first edit of every image-bearing draft this
+  // server made.
   it('refuses a caller reference AUTHORING a server-managed identifier the draft has no part for', async () => {
     mockEdit(client, htmlDraft('<p>x</p>', []));
     await assert.rejects(

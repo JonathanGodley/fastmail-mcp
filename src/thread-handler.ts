@@ -97,8 +97,9 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
   const { emails, hiddenDraftCount } = await client.getThread(threadId, includeDrafts, includeBodies);
 
   if (raw) {
-    // No draft note on raw, so the output stays parseable JSON. The size cap still applies:
-    // it guards the response, not the formatting.
+    // No draft note on raw, so the output stays parseable JSON; a raw consumer can pass
+    // includeDrafts itself. The size cap still applies: it guards the response, not the
+    // formatting.
     if (includeBodies) assertThreadBodiesWithinCap(rawBodyBytes(emails), { stripQuoted: false, raw: true });
     return toolJson(emails);
   }

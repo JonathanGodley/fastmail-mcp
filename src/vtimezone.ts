@@ -17,9 +17,9 @@ import { foldICalLine } from './ical-fold.js';
 const SECOND_MS = 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// A year plus a day: wide enough that the observance in force at the start of the span is
-// findable even for a zone whose transitions are six months apart, narrow enough that a
-// day-by-day scan over it stays cheap. 366 covers a leap year's extra day.
+// At least a year (366 days, so a leap year is covered): wide enough that the observance in
+// force at the start of the span is findable even for a zone whose transitions are six months
+// apart, narrow enough that a day-by-day scan over it stays cheap.
 const LOOKBACK_MS = 366 * DAY_MS;
 
 // The earliest lookback start allowed, one day INTO year 1 so that rendering it as local wall

@@ -179,8 +179,8 @@ while-html rejects, plus the no-body-result reject):
 
 Do not make it symmetric (a single-body edit throwing whenever it would discard a
 non-empty opposite partner, in either direction): the body-format model makes the text
-side auto-managed, so there is nothing on that side to protect. Issue #4's resolution
-comment describes this asymmetric model.
+side auto-managed, so a custom text part that an `htmlBody`-alone edit discards is reported
+in a note, not refused. Issue #4's resolution comment describes this asymmetric model.
 
 ## The identity signature in the body model (#33)
 
@@ -232,8 +232,10 @@ image writes no placeholder under any policy — and the text part's token is re
 **Placement is the caller's, and nothing is placed for them.** The three builders live
 together in `src/reply-quote.ts` because they feed one substitution: `draft_email` expands
 `{{signature}}` on the body it composes, `edit_draft` expands it on a flagged edit, and the
-rule deciding which form a part gets is one rule. A caller who wants the sign-off above the
-history writes `{{signature}}` above `{{quote}}`.
+rule deciding which form a part gets is one rule. Placement is the caller's because an
+auto-appended sign-off after a concatenated quote landed *underneath* the quoted message and
+read as part of it. A caller who wants the sign-off above the history writes `{{signature}}`
+above `{{quote}}`.
 
 **The block carries no marker class.** It used to be wrapped in a
 `<div class="fm-mcp-signature">` so a later edit could recognise a sign-off this server had
@@ -567,8 +569,8 @@ carries the original unrendered.
   round-trips store/fetch AND the edit recreate exactly. Fastmail validates the value:
   embedded CRLF → rejected (`invalidProperties`); non-ASCII → rejected; embedded `<`/`>` →
   accepted but split into two mangled ids; a 1500-char id → accepted and folded. Hence the
-  pre-vet in `forward-handler.ts` (printable ASCII, no whitespace/angles, ≤998 chars;
-  malformed → treated as absent).
+  pre-vet `isSettableMessageId` in `src/draft-email-handler.ts` (printable ASCII, no
+  whitespace/angles, ≤998 chars; malformed → treated as absent).
 - Full-text `Email/query` finds a message by its **bare** Message-ID; the `<bracketed>`
   form finds nothing. The spec `header` FilterCondition also works on Fastmail.
 - Attaching an existing Email's own `blobId` as a `message/rfc822` part stores a

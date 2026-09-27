@@ -17,7 +17,8 @@ jobs:
     permissions:
       # actions/checkout and actions/setup-node receive the repository token as
       # a default input whatever the job's permissions, so this scope is what
-      # keeps it read-only. run: steps never get GITHUB_TOKEN.
+      # keeps it read-only. Actions puts no GITHUB_TOKEN into a run: step's
+      # environment unless one is bound, and none here is.
       contents: read
     outputs:
       # $GITHUB_ENV (set in compute-version below) only threads a value within

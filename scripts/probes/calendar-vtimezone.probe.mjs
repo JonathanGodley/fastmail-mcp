@@ -141,8 +141,10 @@ try {
       timeZone: 'Australia/Sydney',
     });
     const createBody = text(createRes);
-    // The response sentence ends the id with a period, which a bare \S+ would swallow. The
-    // response text carries the event's UID and is never put on stdout.
+    // The response sentence ends the id with a period, which a bare \S+ would swallow.
+    // `[^\s.]+` relies on the id carrying no '.' or whitespace, which holds for the UID minted
+    // in createCalendarEvent (src/caldav-client.ts). The response text carries the event's UID
+    // and is never put on stdout.
     const eventId = /Event ID: ([^\s.]+)\.?/.exec(createBody)?.[1];
     check('create_calendar_event returned an event id', !!eventId, eventId ? 'an id was parsed' : 'no id was parsed');
     if (!eventId) throw new Error('stopping: no event id to fetch back');
