@@ -2027,6 +2027,18 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(read.addressCollision, { addressedUid: undefined });
   });
 
+  it('offers an addressed record\'s UID that spells its own url another way', async () => {
+    // A fragment is dropped when an address is compared, so this UID reaches only real.ics.
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const { client } = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [{ data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
+      [PERSONAL_URL]: [{ data: eventIcal(realUrl + '#x', 'Real'), url: realUrl, etag: '"e-real"' }],
+    });
+    const read = await client.getCalendarEventById(realUrl);
+    assert.equal(read.event.title, 'Real');
+    assert.deepEqual(read.addressCollision, { addressedUid: realUrl + '#x' });
+  });
+
   // A record whose UID is its own url, and a copy elsewhere carrying the same UID: both rows list
   // the id `.../self.ics`, so a caller acting on the Copy row's id must not reach self.ics.
   const SELF_URL = PERSONAL_URL + 'self.ics';
@@ -3102,6 +3114,34 @@ describe('removeExceptionVEvents', () => {
 
     const result = removeExceptionVEvents(data, [new Date()]);
     assert.ok(result.includes('SUMMARY:Master'));
+  });
+
+  it('removes an exception that comes before the master in a wrapped payload', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:rec@fm',
+      'RECURRENCE-ID:20260408T100000Z',
+      'SUMMARY:Exception 1',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'UID:rec@fm',
+      'RRULE:FREQ=WEEKLY',
+      'SUMMARY:Master',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+
+    const result = removeExceptionVEvents(data, [new Date('2026-04-08T10:00:00Z')]);
+    assert.equal(result, [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:rec@fm',
+      'RRULE:FREQ=WEEKLY',
+      'SUMMARY:Master',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n'));
   });
 });
 
@@ -4757,6 +4797,35 @@ describe('replaceICalProperty insert position with VALARM', () => {
     const alarmIdx = out.indexOf('BEGIN:VALARM');
     assert.ok(descIdx !== -1 && alarmIdx !== -1);
     assert.ok(descIdx < alarmIdx, 'property must precede VALARM per RFC 5545 ABNF');
+    assert.equal(out.split('\n')[4], 'DESCRIPTION:hello', 'after the event\'s own properties');
+  });
+
+  it('insertBeforeEndVEvent inserts inside the VEVENT, after its properties, in a wrapped payload', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'BEGIN:VALARM',
+      'TRIGGER:-PT15M',
+      'END:VALARM',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\n');
+    assert.deepEqual(insertBeforeEndVEvent(data, 'ATTENDEE:mailto:guest@example.com').split('\n'), [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:u1',
+      'DTSTART:20260320T093000Z',
+      'ATTENDEE:mailto:guest@example.com',
+      'BEGIN:VALARM',
+      'TRIGGER:-PT15M',
+      'END:VALARM',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ]);
   });
 });
 
@@ -8521,6 +8590,17 @@ describe('parseCalendarObjects', () => {
     assert.equal(events[0].isRecurring, undefined);
   });
 
+  it('marks every block of an expanded blob holding two, though neither carries a marker', () => {
+    const block = (date: string) => [
+      'BEGIN:VEVENT', 'UID:pair@fm', `DTSTART:${date}T093000Z`, 'SUMMARY:Pair', 'END:VEVENT',
+    ].join('\r\n');
+    const data = ['BEGIN:VCALENDAR', block('20270305'), block('20270312'), 'END:VCALENDAR'].join('\r\n');
+
+    const events = parseCalendarObjects({ data, url: '/cal/pair.ics' }, { expanded: true });
+
+    assert.deepEqual(events.map(e => e.isRecurring), [true, true]);
+  });
+
   it('still returns only the master for the same blob when expansion was NOT requested', () => {
     // The shape decision comes from the CALLER, never from the payload. Without `expanded`
     // this is a series master followed by an override, and only the master is reported.
@@ -11882,6 +11962,27 @@ describe('list_calendar_events settles isRecurring for an ambiguous expanded row
     const { client } = listingClient(
       [{ url, data: expandedBlocks('r1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
       async () => [multiGetResponse(url, master('r1@fm', '20260325T090000Z', 'RDATE:20260401T090000Z'))],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
+
+  it('reads a stored RRULE whose name is folded across two continuation lines', async () => {
+    const url = CAL + 'folded.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('f1@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('f1@fm', '20260325T090000Z', 'RR', ' UL', ' E:FREQ=WEEKLY'))],
+    );
+    const { events } = await client.getCalendarEvents(...WINDOW);
+    assert.equal(events[0].isRecurring, true);
+  });
+
+  it('reports isRecurring when the stored resource is a lone override of a series', async () => {
+    // An invitation to one instance of someone else's series stores only that override.
+    const url = CAL + 'lone-override.ics';
+    const { client } = listingClient(
+      [{ url, data: expandedBlocks('lo@fm', markerlessBlock('${UID}', '20260325T090000Z')) }],
+      async () => [multiGetResponse(url, master('lo@fm', '20260325T090000Z', 'RECURRENCE-ID:20260325T090000Z'))],
     );
     const { events } = await client.getCalendarEvents(...WINDOW);
     assert.equal(events[0].isRecurring, true);

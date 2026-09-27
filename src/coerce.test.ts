@@ -288,7 +288,8 @@ describe('coerceRecipients', () => {
     assert.throws(
       () => coerceRecipients({ cc: ['ada@example.com', entry] }),
       (e: any) => e instanceof InvalidInputError
-        && e.message.startsWith(`cc[1] "${entry}" holds more than one <address>`),
+        && e.message === `cc[1] "${entry}" holds more than one <address>, and only the last would be used. `
+          + 'Give each recipient its own entry.',
     );
     // A "<" inside a quoted display name is the name's.
     assert.deepEqual(coerceRecipients({ to: ['"Bob <x>" <bob@example.com>'] }).to, ['"Bob <x>" <bob@example.com>']);
