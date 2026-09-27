@@ -855,7 +855,6 @@ describe('collectImgCidRefs', () => {
       onCidRef: (key) => refs.push(key),
       onDataImage: () => { data++; },
     });
-    // Remote, root-relative, and an <img> with no src at all.
     const cases: Record<string, string>[] = [{ src: 'https://a/b.png' }, { src: '/b.png' }, {}];
     for (const attribs of cases) {
       transform('img', attribs);

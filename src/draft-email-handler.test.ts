@@ -89,7 +89,7 @@ const compose = (args: any, client: DraftEmailClient, dir?: string, allowBlob = 
  */
 const MINTED_CID = /^ii-[0-9a-f]{32}@inline\.invalid$/;
 
-/** The note a reply gets when it placed no {{quote}} — the default is now unquoted. */
+/** The note a reply gets when it placed no {{quote}}. */
 const NOTE_REPLY_UNQUOTED =
   'This reply was stored without the original: place {{quote}} in the body to include it.';
 
@@ -188,8 +188,7 @@ describe('draft_email — mode', () => {
   it("keeps the contentless-draft guard on mode:'new', testing bodies with isBlank", async () => {
     const { client } = spyClient();
     await assert.rejects(() => compose({ mode: 'new' }, client), /At least one of to, subject, textBody, htmlBody, or attachments/);
-    // A whitespace-only body is contentless too. The old handler tested truthiness here and
-    // let this through to a later, vaguer refusal.
+    // A whitespace-only body is contentless too.
     await assert.rejects(() => compose({ mode: 'new', textBody: '   ' }, client), /At least one of to, subject/);
   });
 });
@@ -241,8 +240,7 @@ describe('draft_email — token refusals, decided before anything is built', () 
     assert.ok(!newMessage.includes('{{quote}}'), newMessage);
     assert.ok(!newMessage.includes('{{forward}}'), newMessage);
 
-    // The half that was already right stays: the caller's own spelling is named back, and
-    // the escape — valid in every mode — is still offered.
+    // Every mode names the caller's own spelling back and offers the escape.
     for (const message of [replyMessage, forwardMessage, newMessage]) {
       assert.ok(message.includes('"{{Signature}}"'), message);
       assert.match(message, /escape them: \\\{\{signature\}\} ships the literal token/);
@@ -489,9 +487,9 @@ describe('draft_email — the authored-image plan reads PRE-expansion, the closu
 
   it('drops a minted image the expanded body does not really reference, and says so', async () => {
     // A token expanded inside an html comment leaves the block's markup in the body with its
-    // <img> outside the document. The old path for an unreferenced minted part was
-    // checkInlineClosure THROWING, which is the wrong answer for something a caller can
-    // cause: it is dropped before assembly and named on the result instead.
+    // <img> outside the document. checkInlineClosure throwing is the wrong answer for
+    // something a caller can cause, so the part is dropped before assembly and named on the
+    // result instead.
     const { client, calls } = spyClient(withInlineImage());
     const r = await compose(
       { mode: 'reply', originalEmailId: 'o1', htmlBody: '<p>hi</p><!-- {{quote}} -->' }, client,
@@ -759,7 +757,7 @@ describe('draft_email — {{signature}} expands the FROM identity, not the first
     // The note's `?? fromAddress` fallback is defensive, not a reachable branch here: the
     // note only fires when an identity WITH a signature was resolved, and an unverified
     // `from` resolves none — createDraft raises the real "not verified" refusal a moment
-    // later. Pinned so the silence is deliberate rather than incidental.
+    // later.
     const { client } = spyClient(makeOriginal(), {
       getIdentities: async () => [{ id: 'a', email: 'first@example.com', textSignature: 'S' }],
     });
@@ -1148,9 +1146,8 @@ describe('draft_email — a malformed body is refused before the draft is create
 // Threading headers on mode:'new' — coerced, then routed
 // ---------------------------------------------------------------------------
 
-// Coercing a helper correctly is only half the guarantee; the other half is that the
-// orchestration actually routes the parameter through it. An uncoerced string would reach
-// JMAP as a per-character header list instead of one Message-ID.
+// These pin that the orchestration routes each header through the coercer: an uncoerced
+// string would reach JMAP as a per-character header list instead of one Message-ID.
 describe("draft_email — threading headers on mode:'new'", () => {
   async function draftWith(args: object): Promise<any> {
     const { client, calls } = plainClient();
@@ -1490,16 +1487,14 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     );
     assert.equal(calls.draft.subject, 'New topic');
     assert.equal(r.subject, 'New topic');
-    // The override changes only the subject: the threading chain is built the same way.
     assert.deepEqual(calls.draft.inReplyTo, ['orig-msg@example.com']);
     assert.deepEqual(calls.draft.references, ['root@example.com', 'orig-msg@example.com']);
   });
 
   it('treats a supplied-but-blank or null subject as omitted, on a reply and a forward', async () => {
     // '\u200B' is a zero-width space: visually empty, so it reads as blank like the rest.
-    // Written as the escape rather than the character, in the fixture and in this line
-    // alike: a raw one is invisible, so the explanation would be as unreadable as the thing
-    // it explains, and a normalisation pass could eat either with nothing to see.
+    // Written as the escape because a raw one is invisible, and a normalisation pass could
+    // eat it with nothing to see.
     for (const blank of ['', '   ', '\u200B', null]) {
       const reply = plainClient();
       await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x', subject: blank }, reply.client);
@@ -1633,9 +1628,8 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     // A caller who means to reply to one person passes `to` explicitly — the drafting
     // workflow does — and that suppresses the carry by the rule above.
     //
-    // This fixture carries no Bcc header, so the Bcc carry (#189, pinned in its own block
-    // below) has nothing to do here and this case reads exactly as it did before it existed.
-    // The sibling below is the same message WITH one.
+    // This fixture carries no Bcc header, so the Bcc carry (#189) has nothing to do here;
+    // the sibling below is the same message WITH one.
     const { client, calls } = plainClient(makeOriginal({
       from: [{ name: 'Test User', email: 'me@example.com' }],
       to: [{ email: 'dana@example.com' }],
@@ -1892,7 +1886,6 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
     assert.deepEqual(calls.draft.to, ['jon@example.com']);
     assert.deepEqual(calls.draft.cc, ['dana@example.com']);
     assert.deepEqual(calls.draft.bcc, ['bob@x.example']);
-    // The caller's own bcc is reported the same way the carried one is.
     assert.deepEqual(r.bcc, ['bob@x.example']);
     assert.equal(r.notes?.includes(NOTE_BCC_CARRIED) ?? false, false);
   });
@@ -1911,9 +1904,9 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
 
   it('never hands createDraft an empty bcc array, and never reports one', async () => {
     // coerceRecipients returns [] for '' and for [], and [] is truthy — so a truthiness test
-    // put `bcc: []` into these params and, now that the result reports the field, into the
-    // result. It never reached a message: createDraft guards each recipient list on .length
-    // and drops an empty one. Both surfaces this handler owns, in every mode.
+    // would put `bcc: []` into these params and into the result. createDraft drops an empty
+    // list on .length, so no message is at stake; these pin the two surfaces this handler
+    // owns, in every mode.
     for (const empty of [[], '']) {
       const newDraft = plainClient();
       const rNew = await compose(
@@ -1937,10 +1930,9 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
   });
 
   it("a bcc of [''] is refused, not shipped as one blank recipient", async () => {
-    // [''] used to survive trimAll with length 1: it read as a real caller bcc, suppressed
-    // the carry, and shipped a blank entry. The recipient fields now fail closed per element,
-    // so the caller is told which entry is unusable instead of a reply quietly going out to a
-    // different set of people than either reading intended.
+    // Let through, [''] would read as a real caller bcc, suppress the carry, and ship a
+    // blank entry. The recipient fields fail closed per element, so the caller is told which
+    // entry is unusable instead.
     const { client, calls } = plainClient(selfBccOriginal());
     await assert.rejects(
       compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x', bcc: [''] }, client),
@@ -1950,10 +1942,9 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
   });
 
   it('refuses an uncoercible to on a reply rather than falling back to reply-all', async () => {
-    // The failure this closes: `to: 123` coerced to undefined, the handler read that as "no
-    // to was passed", and the reply-all default filled to/cc from the original AND carried
-    // its Bcc list — so a caller narrowing a reply to one person silently sent it to everyone
-    // the original touched. No draft may be created on that input.
+    // Coerced to undefined, `to: 123` would read as "no to was passed", and the reply-all
+    // default would fill to/cc from the original AND carry its Bcc list — a caller narrowing
+    // a reply to one person would silently send it to everyone the original touched.
     const { client, calls } = plainClient(selfBccOriginal());
     await assert.rejects(
       compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x', to: 123 }, client),
@@ -2034,8 +2025,7 @@ describe('draft_email — the images a {{quote}} carries', () => {
     assert.match(calls.draft.htmlBody, /wrote:/);
   });
 
-  // The phantom-quote row: an image-only original whose sole reference resolves to nothing
-  // has no content to quote at all, so the reply must not open an attribution over an empty
+  // An image-only original whose sole reference resolves to nothing has no content to quote at all, so the reply must not open an attribution over an empty
   // blockquote. The token is removed and the result says why.
   it('ships no quote at all when an image-only original references a part it does not carry', async () => {
     const original = withInlineImage({
@@ -2247,11 +2237,9 @@ describe("draft_email — mode:'forward' subject, recipients and the recorded so
     assert.equal(absent.calls.draft.sourceEmailId, 'o1');
 
     // Fastmail rejects or mangles each of these on Email/set, so they are treated as absent.
-    // The control character is written as the escape `\x07` rather than as the byte itself:
-    // a raw BEL is invisible on the page, so an editor, a normalisation pass or a re-encode
-    // could eat it and leave this case asserting nothing, with nothing to see in the diff.
-    // The non-ASCII entry in the same list stays a literal character — it is valid UTF-8, visible,
-    // and it survives every UTF-8-correct tool, so escaping it would only cost the reader.
+    // The BEL is written as `\x07` because a raw one is invisible and could be eaten unseen,
+    // leaving the case asserting nothing; the non-ASCII entry is visible, valid UTF-8, so it
+    // stays literal.
     for (const value of [
       'has space@example.com',
       'angle<bracket@example.com',
@@ -2599,11 +2587,10 @@ describe('sanitizeEmlFilename', () => {
 // `calls.draft` — the body handed to createDraft, after the block was built, after the single
 // expansion pass joined it into the caller's own body.
 //
-// They are deliberately not written against buildQuoteBlocks / buildForwardBlocks, which is
-// where the sanitising actually happens and where the same assertion text would compile and
-// pass. A block-level pin answers "is the construct absent from the block", which is strictly
-// narrower — it says nothing about what the join produces, and the difference is invisible in
-// the assertion. The surface has to be the stored one.
+// They are deliberately not written against buildQuoteBlocks / buildForwardBlocks, where the
+// sanitising happens and the same assertion text would compile and pass: a block-level pin
+// answers the strictly narrower "is the construct absent from the block", and says nothing
+// about what the join produces.
 
 describe('draft_email — the quote sanitiser, over the stored body', () => {
   // A reply whose html part carries the token, so the html quote is the one that ships.
@@ -2718,12 +2705,10 @@ describe('draft_email — a swallowing construct out of a fetched original canno
       // html→text conversion is the step that would read one and eat everything after it.
       // The supplied part above cannot answer this — it never passes through the converter.
       //
-      // Through `normalizeBodies`, the seam createDraft uses (shapeBodies at
-      // jmap-client.ts:2354 calls it, and createDraft calls that), so the conversion mode is
-      // production's rather than this test's — `htmlToText` takes a mode argument, and
-      // calling it directly here would let the test pick behaviour the shipping path does
-      // not use. Html alone, because that is the shape that derives: given both parts
-      // normalizeBodies passes them straight through and converts nothing.
+      // Through `normalizeBodies`, the seam createDraft uses (via shapeBodies in
+      // jmap-client.ts), so the conversion mode is production's: `htmlToText` takes a mode
+      // argument, and calling it directly would let the test pick behaviour the shipping path
+      // does not use. Html alone, because given both parts normalizeBodies converts nothing.
       const derived = normalizeBodies({ htmlBody: html });
       assert.match(
         derived.textBody ?? '',
