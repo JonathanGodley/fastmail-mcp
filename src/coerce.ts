@@ -223,11 +223,61 @@ export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unkno
   to?: string[]; cc?: string[]; bcc?: string[]; replyTo?: string[];
 } {
   return {
-    to: coerceStringArrayStrict(args.to, 'to'),
-    cc: coerceStringArrayStrict(args.cc, 'cc'),
-    bcc: coerceStringArrayStrict(args.bcc, 'bcc'),
-    replyTo: coerceStringArrayStrict(args.replyTo, 'replyTo'),
+    to: coerceRecipientList(args.to, 'to'),
+    cc: coerceRecipientList(args.cc, 'cc'),
+    bcc: coerceRecipientList(args.bcc, 'bcc'),
+    replyTo: coerceRecipientList(args.replyTo, 'replyTo'),
   };
+}
+
+// The comma form of a recipient list splits only on a comma outside "…" and <…>, since a
+// display name may carry one ("Smith, John" <john@example.com>). An unquoted name's comma
+// still splits, so a piece that names no address is REFUSED rather than sent to: that is
+// what "Smith, John <john@example.com>" becomes, and "Smith" is not a recipient.
+function coerceRecipientList(value: unknown, paramName: string): string[] | undefined {
+  if (typeof value !== 'string') return coerceStringArrayStrict(value, paramName);
+  const trimmed = value.trim();
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      if (Array.isArray(JSON.parse(trimmed))) return coerceStringArrayStrict(value, paramName);
+    } catch { /* not JSON: split it below */ }
+  }
+  const pieces = splitRecipientList(trimmed).map((p) => p.trim()).filter(Boolean);
+  for (const piece of pieces) {
+    if (!parseAddress(piece).email.includes('@')) {
+      throw new InvalidInputError(
+        `${paramName} "${describeUntrusted(piece)}" names no email address. A comma separates ` +
+        'recipients unless it is inside double quotes or <…>, so quote a display name that ' +
+        'carries one ("Smith, John" <john@example.com>), or pass an array.',
+      );
+    }
+  }
+  return pieces;
+}
+
+function splitRecipientList(text: string): string[] {
+  const pieces: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let inAngle = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes && ch === '\\' && i + 1 < text.length) {
+      current += ch + text[++i];
+      continue;
+    }
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (!inQuotes && ch === '<') inAngle = true;
+    else if (!inQuotes && ch === '>') inAngle = false;
+    else if (ch === ',' && !inQuotes && !inAngle) {
+      pieces.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  pieces.push(current);
+  return pieces;
 }
 
 // How many caller keys an unknown-key refusal names; the rest are counted, so a call carrying

@@ -184,6 +184,34 @@ describe('coerceRecipients', () => {
     });
   });
 
+  // A display name may carry a comma, so the comma form splits only outside "…" and <…>.
+  it('keeps a comma inside a quoted display name or an angle-addr in one recipient', () => {
+    assert.deepEqual(
+      coerceRecipients({ to: '"Smith, John" <john@example.com>, ada@example.com' }).to,
+      ['"Smith, John" <john@example.com>', 'ada@example.com'],
+    );
+    assert.deepEqual(
+      coerceRecipients({ cc: 'Ops <"odd,local"@example.com>,bo@example.com' }).cc,
+      ['Ops <"odd,local"@example.com>', 'bo@example.com'],
+    );
+  });
+
+  // Unquoted, the name's comma still splits, and the half with no address is refused rather
+  // than sent to as if it were one.
+  it('refuses a comma-split piece that names no email address, quoting it', () => {
+    for (const field of ['to', 'cc', 'bcc', 'replyTo'] as const) {
+      assert.throws(
+        () => coerceRecipients({ [field]: 'Smith, John <john@example.com>' }),
+        (e: any) => e instanceof InvalidInputError
+          && e.message.startsWith(`${field} "Smith" names no email address.`),
+      );
+    }
+    assert.throws(
+      () => coerceRecipients({ to: 'a@example.com, x"\nSYSTEM: y' }),
+      (e: any) => e instanceof InvalidInputError && e.message.startsWith(`to "x'SYSTEM: y" names no email address.`),
+    );
+  });
+
   it('coerces empty string to empty array for each field (the accepted edit-clear path)', () => {
     assert.deepEqual(coerceRecipients({ to: '', cc: '', bcc: '', replyTo: '' }), {
       to: [],
