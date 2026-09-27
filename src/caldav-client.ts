@@ -1648,6 +1648,8 @@ function referencedZoneTzids(frames: DatePropertyFrame[]): Set<string> {
  * The UTC instant of each usable zoned frame, feeding ONE span shared by every zone the VEVENT
  * references (#166): a cross-zone event needs both zones' blocks to cover the same range.
  * An unresolvable value throws rather than being skipped: a span missing an endpoint is wrong.
+ * An unresolvable TZID is skipped, not refused: it gets no block (docs/conventions.md, "The
+ * VTIMEZONE residual", item 2), and no generated block needs its value.
  */
 function collectZoneInstants(labeled: Array<{ label: string; frame: DatePropertyFrame }>): number[] {
   const instants: number[] = [];
