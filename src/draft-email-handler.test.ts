@@ -170,7 +170,6 @@ describe('draft_email — mode', () => {
     await compose({ mode: 'new', textBody: 'hi', originalEmailId: null, ...nulls }, client);
     assert.equal(calls.draft.textBody, 'hi');
     assert.equal('mailbox' in calls.draft, false);
-    // A real value on the wrong mode is still refused.
     await assert.rejects(
       () => compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'hi', asAttachment: false }, client),
       /asAttachment applies to mode:'forward' only/,

@@ -171,7 +171,6 @@ function partWord(part: PartName): string {
   return part === 'htmlBody' ? 'htmlBody' : 'textBody';
 }
 
-/** Whether a part shows anything: visible content for html, non-blank text otherwise. */
 function partHasContent(part: PartName, body: string): boolean {
   return part === 'htmlBody' ? htmlHasVisibleContent(body) : !isBlank(body);
 }
@@ -375,9 +374,8 @@ function noteForwardTextForm(imagesRode: boolean): string {
 
 /**
  * What the pooled-media sentence ends on. Every forward that pools a part has `{{forward}}`
- * in its body, so re-running as .eml means dropping the token, which the token gate requires.
- * The first remedy is for the noteForwardTextForm path, where moving the token into htmlBody
- * embeds the images. Either fix is a new draft, so both say to delete this one.
+ * in its body, so re-running as .eml means dropping the token first. Either fix makes a new
+ * draft, so both say to delete this one.
  */
 const POOLED_REMEDY_PLACE_IN_HTML =
   'put {{forward}} in htmlBody to embed them, or drop the token and pass asAttachment: true ' +
@@ -409,11 +407,7 @@ function noteMintedDropped(names: (string | null | undefined)[], total: number):
   );
 }
 
-/**
- * The forward counterpart: an image the forwarded block displayed that the expanded body no
- * longer references rides as a regular attachment, or is left out when
- * includeOriginalAttachments is false. Either way the placement cause is named.
- */
+/** The forward counterpart of noteMintedDropped. */
 function noteForwardUnreferenced(
   names: (string | null | undefined)[], total: number, carried: boolean,
 ): string {
@@ -765,8 +759,7 @@ export async function composeDraftEmail(
   const params: DraftEmailParams = { from, replyTo };
   if (toArg?.length) params.to = toArg;
   // On LENGTH: coerceRecipients returns [] for '' and [], and a truthy [] would reach the
-  // result. createDraft drops an empty recipient list itself, so this is about the reported
-  // fields, not the stored draft.
+  // result.
   if (cc?.length) params.cc = cc;
   if (bcc?.length) params.bcc = bcc;
 
@@ -848,12 +841,9 @@ export async function composeDraftEmail(
     if (isSettableMessageId(originalMessageId)) params.forwardedMessageId = [originalMessageId];
   }
 
-  // A minted part that nothing references AFTER expansion is dropped before assembly, and
-  // the result names it: a token placed inside a comment or an attribute expands there, so
-  // the block is in the body but its image references are not live. Decided here, before
-  // anything is recorded as embedded, so a dropped image is never also reported as embedded,
-  // and a forward treats it like any image it cannot embed: carried as an attachment, or
-  // left out when includeOriginalAttachments is false.
+  // A minted part nothing references AFTER expansion (a token inside a comment or an
+  // attribute) is dropped here, before anything is recorded, so it is never also reported as
+  // embedded; a forward then treats it like any image it cannot embed.
   const liveRefs = new Set(
     expandedHtml ? extractLiveCidRefs(expandedHtml) : [],
   );
@@ -999,8 +989,8 @@ export async function composeDraftEmail(
     ...(forwardTextFormOnly ? [noteForwardTextForm(pooled.some((p) => isImageType(p.type)))] : []),
     // Presence on the PRE-expansion scan of a SUPPLIED body with content, so it cannot
     // false-fire and an attachment-only stash, a body-less reply (a blank or visually empty
-    // part included) and an asAttachment filler are silent. It fires on every deliberately unsigned message: the
-    // accepted cost of never storing an unsigned body with nothing said.
+    // part included) and an asAttachment filler are silent. It fires on every deliberately
+    // unsigned message: the accepted cost of never storing an unsigned body with nothing said.
     ...(!signaturePlaced && signature && supplied.some((p) => partHasContent(p.part, p.authored))
       ? [noteSignatureNotPlaced(identity?.email ?? fromAddress)]
       : []),

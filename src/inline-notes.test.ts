@@ -533,7 +533,6 @@ describe('emitInlineNotes', () => {
       ['1 media part(s) could not be embedded and were attached as regular attachments: ' +
        '"logo.png" — put the token in htmlBody.'],
     );
-    // Omitted, the sentence states the fact alone.
     assert.equal(
       emitInlineNotes(tally({ pooled: 1, pooledNames: [] }), { surface: 'forward' })[0],
       '1 media part(s) could not be embedded and were attached as regular attachments.',
