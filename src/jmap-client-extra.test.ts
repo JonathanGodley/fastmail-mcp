@@ -5,7 +5,7 @@ import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { buildExclusionNote, simplifyMailbox } from './response-formatters.js';
+import { buildExclusionNote, simplifyMailbox, formatSavedAttachment } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
 import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -5353,6 +5353,43 @@ describe('downloadAttachmentToFile write flags', () => {
     }
   });
 });
+describe('downloadAttachmentToFile replaced flag', () => {
+  async function saveInto(root: string) {
+    const client = makeClient();
+    mock.method(client, 'fetchAttachmentBuffer', async () => ({
+      buffer: Buffer.from('NEW BYTES'),
+      url: 'https://www.fastmailusercontent.com/jmap/download/acct/blob/report.txt',
+      name: 'report.txt',
+      type: 'text/plain',
+      blobId: 'blob-1',
+    }));
+    return client.downloadAttachmentToFile('e1', 'a1', 'report.txt', root);
+  }
+
+  it('reports that an existing file at the path was replaced', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-replace-'));
+    try {
+      await fsWriteFile(join(root, 'report.txt'), 'OLD BYTES');
+      const result = await saveInto(root);
+      assert.equal(result.replaced, true);
+      assert.match(formatSavedAttachment(result), /replaced an existing file/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports no replacement for a new file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fastmail-mcp-replace-'));
+    try {
+      const result = await saveInto(root);
+      assert.equal(result.replaced, false);
+      assert.doesNotMatch(formatSavedAttachment(result), /replaced/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ---------- attachment reads: the part listing and the download forms (#13) ----------
 
 // A Fastmail-shaped host is required, not cosmetic: the built URL is re-validated

@@ -4367,7 +4367,7 @@ export class JmapClient {
     return { buffer: Buffer.from(await response.arrayBuffer()), url, ...info };
   }
 
-  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, downloadDir?: string): Promise<{ url: string; bytesWritten: number; savedPath: string }> {
+  async downloadAttachmentToFile(emailId: string, attachmentId: string, savePath: string, downloadDir?: string): Promise<{ url: string; bytesWritten: number; savedPath: string; replaced: boolean }> {
     // Checked before the slow fetch, so a bad path fails fast.
     await JmapClient.safeWritePath(savePath, downloadDir);
     const { buffer, url } = await this.fetchAttachmentBuffer(emailId, attachmentId);
@@ -4377,6 +4377,7 @@ export class JmapClient {
     // unlink just created.
     const safePath = await JmapClient.safeWritePath(savePath, downloadDir);
     await mkdir(dirname(safePath), { recursive: true });
+    let replaced = false;
     try {
       await writeFile(safePath, buffer, { flag: 'wx' });
     } catch (e: any) {
@@ -4384,9 +4385,10 @@ export class JmapClient {
       await JmapClient.safeWritePath(savePath, downloadDir); // refuses a symlink at the target
       await unlink(safePath);
       await writeFile(safePath, buffer, { flag: 'wx' });
+      replaced = true;
     }
 
-    return { url, bytesWritten: buffer.length, savedPath: safePath };
+    return { url, bytesWritten: buffer.length, savedPath: safePath, replaced };
   }
 
   // Shared engine for searchEmails + getEmails: the filter, the default Trash/Spam

@@ -500,6 +500,12 @@ function locationPhrase(group: ArchiveEmailResult[]): string {
  * per-message specifics ride in the JSON. removedFromInbox splits into two lines because
  * "Archive was not added" reads as false for a message already in Archive.
  */
+/** download_attachment's result line when it saved to a path. */
+export function formatSavedAttachment(result: { savedPath: string; bytesWritten: number; replaced?: boolean }): string {
+  const replaced = result.replaced ? '; this replaced an existing file at that path' : '';
+  return `Saved to: ${result.savedPath} (${result.bytesWritten} bytes${replaced})`;
+}
+
 export function formatArchiveResult(result: ArchiveResult): string {
   const { results, counts } = result;
   const total = results.length;
