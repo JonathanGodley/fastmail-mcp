@@ -446,6 +446,11 @@ export function echoPath(value: unknown): string {
 }
 
 const zoneCanonicalizationCache = new Map<string, string>();
+export const ZONE_CANONICALIZATION_CACHE_LIMIT = 512;
+
+export function zoneCanonicalizationCacheSize(): number {
+  return zoneCanonicalizationCache.size;
+}
 
 /**
  * ICU's canonical spelling for a zone name — `Intl.DateTimeFormat`'s own name for whatever the
@@ -453,16 +458,19 @@ const zoneCanonicalizationCache = new Map<string, string>();
  * zone comparison and every written zone routes through (write side #157, read-side
  * `zoneNamesEqual` #139), so an alias canonicalises identically on write and on read.
  *
- * Cached because `zoneNamesEqual` runs per event on every list read. Deliberately unbounded:
- * the keys are the handful of zones the account itself uses, with no path for an untrusted
- * party to feed it distinct strings.
+ * Cached because `zoneNamesEqual` runs per event on every list read. The keys are untrusted:
+ * every stored TZID reaches here, and an invitation's sender chooses it. So only names ICU
+ * resolves are kept, and at most `ZONE_CANONICALIZATION_CACHE_LIMIT` of them, oldest dropped
+ * first, since ICU matches case-insensitively and each case variant is a distinct key.
  */
 export function canonicalZoneName(zone: string): string {
   const cached = zoneCanonicalizationCache.get(zone);
   if (cached !== undefined) return cached;
-  const resolved = isUsableTimezone(zone)
-    ? new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone
-    : zone;
+  if (!isUsableTimezone(zone)) return zone;
+  const resolved = new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone;
+  if (zoneCanonicalizationCache.size >= ZONE_CANONICALIZATION_CACHE_LIMIT) {
+    zoneCanonicalizationCache.delete(zoneCanonicalizationCache.keys().next().value!);
+  }
   zoneCanonicalizationCache.set(zone, resolved);
   return resolved;
 }

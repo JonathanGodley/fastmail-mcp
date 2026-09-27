@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, zoneOffsetMsAt, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -1595,6 +1595,25 @@ describe('canonicalZoneName', () => {
     // outside it); this just exercises the same input twice, which is the path the cache is for.
     assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
     assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
+  });
+
+  // A stored TZID reaches this on every listing, and an invitation's sender chooses it.
+  it('retains nothing for a name ICU cannot resolve', () => {
+    const before = zoneCanonicalizationCacheSize();
+    for (let i = 0; i < 50; i++) canonicalZoneName(`Vendor/Zone-${i}-${'x'.repeat(1000)}`);
+    assert.equal(zoneCanonicalizationCacheSize(), before, 'unresolvable names were cached');
+  });
+
+  it('never holds more than its limit, even for distinct spellings ICU does resolve', () => {
+    // ICU matches case-insensitively, so every case variant is a distinct resolvable key.
+    const base = 'america/argentina/comodrivadavia';
+    const letters = [...base].map((c, i) => (/[a-z]/.test(c) ? i : -1)).filter(i => i >= 0);
+    for (let n = 0; n < ZONE_CANONICALIZATION_CACHE_LIMIT + 50; n++) {
+      const chars = [...base];
+      letters.forEach((pos, bit) => { if ((n >> bit) & 1) chars[pos] = chars[pos].toUpperCase(); });
+      canonicalZoneName(chars.join(''));
+    }
+    assert.ok(zoneCanonicalizationCacheSize() <= ZONE_CANONICALIZATION_CACHE_LIMIT, `cache grew to ${zoneCanonicalizationCacheSize()}`);
   });
 });
 
