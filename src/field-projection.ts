@@ -1,4 +1,4 @@
-import { InvalidInputError, coerceStringArray } from './coerce.js';
+import { InvalidInputError, coerceStringArray, describeUntrustedAt } from './coerce.js';
 import type { SimplifiedEmail } from './email-formatter.js';
 
 // Caller-directed output projection for the email read tools (#69, #79). A 66-message
@@ -62,8 +62,9 @@ const EMAIL_FIELD_SET = new Set<string>(EMAIL_FIELD_NAMES);
 // can't become the error message (mirrors the date-echo limit in coerce.ts).
 const FIELD_ECHO_LIMIT = 40;
 
+// Caller text: neutralised as well as bounded, so it cannot forge a line or close its "…".
 function echoField(value: string): string {
-  return value.length > FIELD_ECHO_LIMIT ? `${value.slice(0, FIELD_ECHO_LIMIT)}...` : value;
+  return describeUntrustedAt(value, FIELD_ECHO_LIMIT);
 }
 
 function validFieldList(): string {
