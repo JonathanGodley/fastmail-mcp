@@ -452,9 +452,8 @@ function ownPropertyLines(lines: string[]): boolean[] {
  * The first matching property's value in a VEVENT block, unfolded. Whole content lines only
  * (see the line-model comment above): this read decides which record a destroy resolves to.
  *
- * The property name matches in any case (RFC 5545 §3.1), as component markers do
- * (`markerLine`) and as every write helper matches it, so a read and the write it feeds agree
- * on which line is the property.
+ * The property name matches in any case (RFC 5545 §3.1), as every write helper matches it, so a
+ * read and the write it feeds agree on which line is the property.
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   const lines = icalContentLines(vevent).map(l => l.text);
