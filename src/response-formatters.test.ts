@@ -56,7 +56,6 @@ describe('formatDraftEmailResult', () => {
     );
   });
 
-  // A reply's recipients carry display names out of the original, which its sender wrote.
   it('neutralises a recipient that would forge a line, without cutting a long address', () => {
     const longName = 'N'.repeat(80);
     const text = formatDraftEmailResult({

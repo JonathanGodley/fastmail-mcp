@@ -930,7 +930,6 @@ export async function composeDraftEmail(
 
   const ledger = new InlineNoteLedger();
   const carry = recordQuoteImages(ledger, quoteImages, mode === 'forward' ? 'forward' : 'reply');
-  const keptMinted = carry.minted;
 
   const uploaded = specs?.length
     ? await client.uploadAttachments(specs, attachDir, allowBlobAttach, {
@@ -938,14 +937,14 @@ export async function composeDraftEmail(
     })
     : undefined;
 
-  const attachments = [...carried, ...(uploaded ?? []), ...keptMinted];
+  const attachments = [...carried, ...(uploaded ?? []), ...carry.minted];
   if (attachments.length > 0) params.attachments = attachments;
 
   // --- 11. Closure, on what actually ships ---------------------------------
   checkInlineClosure({
     htmlBodies: [params.htmlBody],
     finalPartCids: attachments.map((part) => part.cid),
-    attachedMintedCids: keptMinted.map((part) => part.cid).filter((c): c is string => !!c),
+    attachedMintedCids: carry.minted.map((part) => part.cid).filter((c): c is string => !!c),
   });
 
   // --- 12. Store, then report ----------------------------------------------
@@ -992,7 +991,7 @@ export async function composeDraftEmail(
       : []),
     ...await reportAuthoredInlineImages({
       uploaded,
-      mintedCids: keptMinted.map((p) => p.cid).filter((c): c is string => !!c),
+      mintedCids: carry.minted.map((p) => p.cid).filter((c): c is string => !!c),
       plan: inlinePlan,
       emailId,
       readBack: (id) => client.getEmailById(id),
