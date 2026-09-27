@@ -12,6 +12,8 @@ const STEP_PAUSE_MS = 500;
  * step 2 marks unread again only the ones that were unread before, so each message ends in
  * its own prior state. Step 2 runs even when step 1 failed part-way: it writes only the prior
  * state of messages that were unread, so a message step 1 never reached is left as it was.
+ * A message whose keywords were not reported has no known prior state, so neither step
+ * touches it.
  */
 export async function runBulkReadTest(
   emails: any[],
@@ -19,8 +21,9 @@ export async function runBulkReadTest(
   client: BulkTestClient,
   pause: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 ): Promise<string> {
-  const emailIds = emails.map((email) => email.id);
-  const unreadIds = emails.filter((email) => !email.keywords?.$seen).map((email) => email.id);
+  const known = emails.filter((email) => email.keywords && typeof email.keywords === 'object' && !Array.isArray(email.keywords));
+  const emailIds = known.map((email) => email.id);
+  const unreadIds = known.filter((email) => !email.keywords.$seen).map((email) => email.id);
 
   const operations: Array<{ name: string; description: string; parameters: { emailIds: string[]; read: boolean } }> = [
     {

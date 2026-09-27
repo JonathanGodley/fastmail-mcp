@@ -29,6 +29,17 @@ describe('runBulkReadTest', () => {
     ]);
   });
 
+  it('leaves a message whose keywords were not reported out of both steps', async () => {
+    const { client, calls } = makeClient();
+    const unknown = { id: 'e9', subject: 'Message e9', from: [{ email: 'a@example.com' }] };
+    const odd = { ...unknown, id: 'e8', keywords: 'garbage' };
+    await runBulkReadTest([email('e1', false), unknown, odd], false, client, noPause);
+    assert.deepEqual(calls, [
+      { ids: ['e1'], read: true },
+      { ids: ['e1'], read: false },
+    ]);
+  });
+
   it('writes nothing back when every message was already read', async () => {
     const { client, calls } = makeClient();
     await runBulkReadTest([email('e1', true), email('e2', true)], false, client, noPause);
