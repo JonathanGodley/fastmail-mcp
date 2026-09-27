@@ -10,9 +10,9 @@ import {
 import {
   assertUnambiguousEntryEdit,
   buildEntryMap,
-  contactGroupRefusal,
+  contactKindRefusal,
   isAmbiguousEntryEdit,
-  isContactGroupCard,
+  refusedContactKind,
   mergeContactName,
   mergeContactNotes,
   mergeEntryMap,
@@ -31,7 +31,6 @@ export interface UpdateContactPatch {
   notes?: string;
   clearFields?: string[];
   allowEntryReplace?: boolean;
-  expectState?: string;
 }
 
 export interface UpdateContactResult {
@@ -300,14 +299,43 @@ export class ContactsCalendarClient extends JmapClient {
    * and nothing else, which is not enough to merge with, nor to show a caller what a write
    * took off the card.
    *
-   * Returns undefined for an id the account does not hold; callers decide what that means.
+   * `card` is undefined for an id the account does not hold; callers decide what that means.
+   * `state` is the ContactCard state the card was read at. Both writes send it as `ifInState`,
+   * so a card changed between this read and the write is refused rather than overwritten
+   * from a stale merge. Fastmail's state is account-wide, so a change to ANY card in that
+   * window refuses too; a retry re-reads and succeeds.
    */
-  private async fetchCardOrUndefined(accountId: string, id: string): Promise<any | undefined> {
+  private async fetchCard(accountId: string, id: string): Promise<{ card: any | undefined; state?: string }> {
     const response = await this.makeRequest({
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'],
       methodCalls: [['ContactCard/get', { accountId, ids: [id] }, 'card']],
     });
-    return this.getListResult(response, 0)[0];
+    const card = this.getListResult(response, 0)[0];
+    const state = this.getMethodResult(response, 0).state;
+    return { card, state: typeof state === 'string' ? state : undefined };
+  }
+
+  /** Refuse before an unguarded write: without the read's state, a stale merge would go through. */
+  private requireReadState(state: string | undefined, id: string, outcome: string): string {
+    if (state === undefined) {
+      throw new Error(
+        `The server returned no ContactCard state with contact ${id}, so the write could not be guarded ` +
+          `against a change made since the read; nothing was ${outcome}.`,
+      );
+    }
+    return state;
+  }
+
+  /** Throw the retry refusal when a write's `ifInState` no longer matched (RFC 8620 section 5.3). */
+  private assertStateStillMatched(response: any, index: number, id: string, tool: string, outcome: string): void {
+    const entry = response.methodResponses?.[index];
+    if (entry?.[0] === 'error' && entry[1]?.type === 'stateMismatch') {
+      throw new Error(
+        `The contact ${id} changed since it was read; nothing was ${outcome}. Retry the ${tool} call: ` +
+          `it re-reads the contact first. The contacts state is account-wide on Fastmail, so a change ` +
+          `to any contact in between also causes this refusal.`,
+      );
+    }
   }
 
   /**
@@ -370,7 +398,7 @@ export class ContactsCalendarClient extends JmapClient {
    * An empty array is REJECTED rather than read as "clear" — see the rejection below.
    */
   async updateContact(id: string, patch: UpdateContactPatch): Promise<UpdateContactResult> {
-    const { expectState, clearFields, allowEntryReplace = false, name, emails, phones, addresses, notes } = patch;
+    const { clearFields, allowEntryReplace = false, name, emails, phones, addresses, notes } = patch;
 
     const provided = new Set<string>();
     for (const [field, value] of Object.entries({ name, emails, phones, addresses, notes })) {
@@ -407,26 +435,24 @@ export class ContactsCalendarClient extends JmapClient {
 
     const accountId = await this.contactsAccountId();
 
-    const previousCard = await this.fetchCardOrUndefined(accountId, id);
+    const { card: previousCard, state: readState } = await this.fetchCard(accountId, id);
     if (!previousCard) {
       throw new InvalidInputError(`Contact not found: ${id}`);
     }
 
-    // A group card holds a `members` map and no emails/phones at all. None of this tool's
-    // parameters describe a group, and there is no members surface here to edit one through,
-    // so an update aimed at a group is refused rather than half-applied to a record whose
-    // shape it does not fit. deleteContact refuses the same card kind; both raise it through
-    // contactGroupRefusal so they read as one.
-    if (isContactGroupCard(previousCard)) {
-      throw new InvalidInputError(contactGroupRefusal({
+    const refusedKind = refusedContactKind(previousCard);
+    if (refusedKind) {
+      throw new InvalidInputError(contactKindRefusal({
         id,
+        kind: refusedKind,
         tool: 'update_contact',
         because:
-          'its members are not editable through this server, and name/emails/phones/addresses/notes ' +
-          'do not describe a group.',
+          'name/emails/phones/addresses/notes describe a person card, this server can create only individual ' +
+          'cards, and group members are not editable here.',
         recovery: 'Edit it in the Fastmail web interface instead.',
       }));
     }
+    const guardState = this.requireReadState(readState, id, 'written');
 
     const patchObject: Record<string, any> = {};
     if (name) patchObject.name = mergeContactName(previousCard.name, name);
@@ -460,11 +486,12 @@ export class ContactsCalendarClient extends JmapClient {
         ['ContactCard/set', {
           accountId,
           update: { [id]: patchObject },
-          ...(expectState && { ifInState: expectState }),
+          ifInState: guardState,
         }, 'updateContact'],
         ['ContactCard/get', { accountId, ids: [id] }, 'updatedCard'],
       ],
     });
+    this.assertStateStillMatched(response, 0, id, 'update_contact', 'written');
     const result = this.getMethodResult(response, 0);
     if (result.notUpdated?.[id]) {
       this.throwSingleSetError(result.notUpdated[id], 'update contact');
@@ -504,36 +531,33 @@ export class ContactsCalendarClient extends JmapClient {
    * `error` entry must not throw: that would report a failure for a completed irreversible
    * write and discard the only thing the caller could still act on. `deletedCard` is then
    * undefined and the tool states the degrade.
-   *
-   * A contact GROUP is refused outright — see the guard below.
    */
-  async deleteContact(id: string, expectState?: string): Promise<DeleteContactResult> {
+  async deleteContact(id: string): Promise<DeleteContactResult> {
     const accountId = await this.contactsAccountId();
 
-    // A group is refused because `create_contact` has no `kind` and no `members` parameter, so
-    // the echoed card could not rebuild a membership list that on a real card runs to a
-    // hundred-odd uids (CONTRIBUTING.md, "A destroy must not remove what the
-    // server cannot recreate"; the test is the record KIND, not its fields).
-    //
-    // It costs its own round trip: a JMAP batch cannot make one method conditional on
+    // The kind refusal (CONTRIBUTING.md, "A destroy must not remove what the server cannot
+    // recreate") costs its own round trip: a JMAP batch cannot make one method conditional on
     // another's result, so the card has to be read in a request that completes before the
     // destroy is sent. The echo still comes from the read inside the destroy batch, so it
     // remains the card as it stood at the moment it was destroyed. A card that cannot be read
     // at ALL fails here, before anything is destroyed, where there is nothing yet to lose by
     // throwing. A card the account simply does not hold reads as undefined and falls through
     // to the destroy, whose own `notFound` is the authoritative answer for a bad id.
-    const doomedCard = await this.fetchCardOrUndefined(accountId, id);
-    if (isContactGroupCard(doomedCard)) {
-      throw new InvalidInputError(contactGroupRefusal({
+    const { card: doomedCard, state: readState } = await this.fetchCard(accountId, id);
+    const refusedKind = refusedContactKind(doomedCard);
+    if (refusedKind) {
+      throw new InvalidInputError(contactKindRefusal({
         id,
+        kind: refusedKind,
         tool: 'delete_contact',
         because:
-          'this server cannot create a group — create_contact has no kind or members parameter — so it ' +
-          'will not destroy one it could never put back, and the deletedCard echo could not rebuild its ' +
-          'members either.',
+          'this server can create only individual cards (it cannot create a group or any other kind; ' +
+          'create_contact has no kind or members parameter), so it will not destroy one it could never ' +
+          'put back, and the deletedCard echo could not rebuild it either.',
         recovery: 'Delete it in the Fastmail web interface instead.',
       }));
     }
+    const guardState = this.requireReadState(readState, id, 'deleted');
 
     const response = await this.makeRequest({
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'],
@@ -542,10 +566,11 @@ export class ContactsCalendarClient extends JmapClient {
         ['ContactCard/set', {
           accountId,
           destroy: [id],
-          ...(expectState && { ifInState: expectState }),
+          ifInState: guardState,
         }, 'deleteContact'],
       ],
     });
+    this.assertStateStillMatched(response, 1, id, 'delete_contact', 'deleted');
 
     const result = this.getMethodResult(response, 1);
     if (result.notDestroyed?.[id]) {

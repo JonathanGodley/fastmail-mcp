@@ -1,4 +1,4 @@
-import { InvalidInputError } from './coerce.js';
+import { InvalidInputError, describeUntrusted } from './coerce.js';
 
 // The per-entry algebra shared by the contact READ shape (src/response-formatters.ts) and
 // the update_contact MERGE (src/contacts-calendar.ts), in its own module so the formatter
@@ -30,7 +30,8 @@ export function resolveEntryLabel(entry: any): string | undefined {
 /**
  * The default read shape of an emails/phones map: a HYBRID list. An unlabelled entry emits
  * as a BARE STRING, the common case, to save tokens; a labelled one as `{address, label}`.
- * An entry with no value is skipped, still reachable through `verbose` and `raw`.
+ * An entry with no value is skipped, still reachable through `verbose` and `raw`; the merge
+ * keeps such an entry for the same reason (see `hasEntryValue`).
  */
 export function simplifyEntryMap(
   map: any,
@@ -39,12 +40,21 @@ export function simplifyEntryMap(
   if (!map || typeof map !== 'object') return undefined;
   const out: Array<string | Record<string, string>> = [];
   for (const entry of Object.values(map)) {
-    const value = (entry as any)?.[keyField];
-    if (typeof value !== 'string' || value === '') continue;
+    if (!hasEntryValue(entry, keyField)) continue;
+    const value = (entry as any)[keyField];
     const label = resolveEntryLabel(entry);
     out.push(label ? { [keyField]: value, label } : value);
   }
   return out.length ? out : undefined;
+}
+
+/**
+ * Whether the default read shape shows this entry. One the view hides cannot be named in a
+ * resent list, so `mergeEntryMap` carries it over rather than reading its absence as a drop.
+ */
+function hasEntryValue(entry: any, keyField: EntryKeyField): boolean {
+  const value = entry?.[keyField];
+  return typeof value === 'string' && value !== '';
 }
 
 export interface ContactEntryInput {
@@ -187,11 +197,22 @@ export function mergeEntryMap(
     }
   }
 
-  const dropped = existingKeys.filter((k) => !matched.has(k)).map((k) => ({ key: k, entry: existing[k] }));
+  // An entry the caller could not have named is carried over, not dropped: one the view
+  // hides, and a stored duplicate of a value it sent (the input may not repeat a value).
+  const sentValues = new Set(incoming.map((item) => item[keyField]));
+  const dropped: Array<{ key: string; entry: any }> = [];
+  for (const k of existingKeys) {
+    if (matched.has(k)) continue;
+    const entry = existing[k];
+    if (hasEntryValue(entry, keyField) && !sentValues.has(entry[keyField])) dropped.push({ key: k, entry });
+    else map[k] = entry;
+  }
   return { map, dropped, added };
 }
 
-const MAX_ECHOED_DROPPED_ENTRIES = 5;
+// Past any real card's entry count, so the echo is whole in practice; the bound only keeps a
+// pathological card from producing an unbounded error message.
+const MAX_ECHOED_DROPPED_ENTRIES = 50;
 
 /**
  * The card-level `kind` (RFC 9553 section 2.1.4), read ONLY here so the read surface and the
@@ -221,17 +242,20 @@ export function nonDefaultContactKind(card: any): string | undefined {
 }
 
 /**
- * The contact write surface has no `kind` or `members` parameter, so it can neither create
- * nor describe a group; both write tools refuse one through this single rule.
+ * The kind the contact write tools refuse, or undefined for a card they may write.
+ * `create_contact` has no `kind` parameter, so it makes individuals only; any other declared
+ * kind is a record this server could not put back, and both write tools refuse it through
+ * this single rule.
  */
-export function isContactGroupCard(card: any): boolean {
-  return contactCardKind(card) === 'group';
+export function refusedContactKind(card: any): string | undefined {
+  return nonDefaultContactKind(card);
 }
 
-/** The shared refusal both group-aware write tools raise, so they read as one rule. */
-export function contactGroupRefusal(opts: { id: string; tool: string; because: string; recovery: string }): string {
-  return `Contact ${opts.id} is a contact GROUP, not a person card, so ${opts.tool} refuses it: ` +
-    `${opts.because} ${opts.recovery}`;
+/** The shared refusal both write tools raise, so they read as one rule. */
+export function contactKindRefusal(opts: { id: string; kind: string; tool: string; because: string; recovery: string }): string {
+  const group = opts.kind === 'group' ? ' (a contact GROUP)' : '';
+  return `Contact ${opts.id} is a card of kind "${describeUntrusted(opts.kind)}"${group}, not a person card, ` +
+    `so ${opts.tool} refuses it: ${opts.because} ${opts.recovery}`;
 }
 
 /**
@@ -246,8 +270,9 @@ export function isAmbiguousEntryEdit(outcome: EntryMergeOutcome): boolean {
  * Reject an edit that both drops a known entry and adds an unknown one: it reads as a
  * correction or as a removal plus an unrelated addition, and silent replace is the lossy one.
  *
- * The dropped entries are echoed in FULL, hidden fields included, so the lossless retry is
- * cheaper than reaching for `allowEntryReplace`.
+ * The dropped entries are echoed in FULL, hidden fields included, up to
+ * MAX_ECHOED_DROPPED_ENTRIES, so the lossless retry is cheaper than reaching for
+ * `allowEntryReplace`.
  */
 export function assertUnambiguousEntryEdit(field: string, outcome: EntryMergeOutcome): void {
   if (!isAmbiguousEntryEdit(outcome)) return;
@@ -255,7 +280,7 @@ export function assertUnambiguousEntryEdit(field: string, outcome: EntryMergeOut
   const shown = outcome.dropped.slice(0, MAX_ECHOED_DROPPED_ENTRIES);
   const more = outcome.dropped.length - shown.length;
   const droppedText = `${shown.map((d) => JSON.stringify(d.entry)).join(', ')}${
-    more > 0 ? `, …and ${more} more` : ''
+    more > 0 ? `, …and ${more} more (read them in full with get_contact with verbose:true)` : ''
   }`;
 
   throw new InvalidInputError(

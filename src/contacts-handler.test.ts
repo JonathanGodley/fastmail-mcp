@@ -72,6 +72,19 @@ describe('createContactTool', () => {
     });
   });
 
+  it('reports the created id, not a failure, when only the read-back fails', async () => {
+    const { client, calls } = makeClient();
+    client.getContactById = async () => { throw new Error('read failed'); };
+    const content = await createContactTool({ name: 'Ada Lovelace' }, client);
+    assert.equal(calls.created.length, 1);
+    assert.deepEqual(payload(content), { id: 'C1' });
+    assert.equal(content.length, 2);
+    assert.deepEqual(content.map((c) => c.type), ['text', 'text']);
+    assert.match(content[1].text, /was created/);
+    assert.match(content[1].text, /get_contact/);
+    assert.match(content[1].text, /duplicate/);
+  });
+
   it('coerces every input array before handing it to the client', async () => {
     const { client, calls } = makeClient();
     await createContactTool(
@@ -186,6 +199,21 @@ describe('updateContactTool', () => {
     );
   });
 
+  for (const clearFields of [{ notes: true }, 42, ['notes', 7]]) {
+    it(`refuses an unparseable clearFields (${JSON.stringify(clearFields)}) rather than ignoring it`, async () => {
+      const { client, calls } = makeClient();
+      await assert.rejects(
+        () => updateContactTool({ contactId: 'C1', notes: 'hi', clearFields }, client),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /clearFields/);
+          return true;
+        },
+      );
+      assert.equal(calls.updated.length, 0);
+    });
+  }
+
   it('rejects an empty notes string, naming clearFields', async () => {
     const { client } = makeClient();
     await assert.rejects(
@@ -239,5 +267,15 @@ describe('deleteContactTool', () => {
       throw new InvalidInputError('Contact not found: ghost');
     };
     await assert.rejects(() => deleteContactTool({ contactId: 'ghost' }, client), /Contact not found: ghost/);
+  });
+});
+
+describe('contact tool boolean flags', () => {
+  it('names the parameter when a boolean flag cannot be read', async () => {
+    await assert.rejects(() => createContactTool({ name: 'Ada', raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => createContactTool({ name: 'Ada', verbose: 'yes' }, {} as any), /verbose must be true or false/);
+    await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', verbose: 'yes' }, {} as any), /verbose must be true or false/);
+    await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', allowEntryReplace: 'yes' }, {} as any), /allowEntryReplace must be true or false/);
   });
 });

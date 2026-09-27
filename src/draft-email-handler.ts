@@ -579,8 +579,8 @@ export async function composeDraftEmail(
   // Read off `args?.`, NOT the `a` alias: tool-schema.test.ts's lenient-boolean guard matches
   // `!!args?.asAttachment` but not `!!a.asAttachment`, so the alias would hide a future
   // bare-`!!` read of these flags from the only check that looks for one.
-  const asAttachment = coerceBool(args?.asAttachment) ?? false;
-  const includeOriginalAttachments = coerceBool(args?.includeOriginalAttachments) ?? true;
+  const asAttachment = coerceBool(args?.asAttachment, 'asAttachment') ?? false;
+  const includeOriginalAttachments = coerceBool(args?.includeOriginalAttachments, 'includeOriginalAttachments') ?? true;
 
   // `!= null`, not `!== undefined`: a lenient client sends null for every declared key, and
   // null reads as absent (docs/conventions.md).

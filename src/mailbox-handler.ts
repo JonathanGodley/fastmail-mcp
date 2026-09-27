@@ -19,8 +19,8 @@ export type ToolContent = Array<{ type: 'text'; text: string }>;
  */
 export async function listMailboxes(args: any, client: MailboxClient): Promise<ToolContent> {
   // coerceBool, not `!!`: a lenient client's "false" is truthy (#54).
-  const raw = coerceBool(args?.raw) ?? false;
-  const verbose = coerceBool(args?.verbose) ?? false;
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
 
   // `path` is root-anchored, so it needs the WHOLE tree even when the listing is narrowed
   // to one parent's children: fetch unnarrowed, then filter the list already in hand.
@@ -47,8 +47,8 @@ export async function listMailboxes(args: any, client: MailboxClient): Promise<T
  * which runs before any round trip.
  */
 export async function createMailbox(args: any, client: MailboxClient): Promise<ToolContent> {
-  const raw = coerceBool(args?.raw) ?? false;
-  const verbose = coerceBool(args?.verbose) ?? false;
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
 
   const { mailbox, created, path } = await client.createMailbox({
     name: args?.name,

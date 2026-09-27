@@ -76,10 +76,10 @@ function rawBodyBytes(emails: any[]): Array<{ id: string; bytes: number }> {
 export async function readThread(args: any, client: ThreadClient): Promise<string> {
   const { threadId } = args ?? {};
   // coerceBool, not `!!`: a lenient client's "false" is truthy (#54).
-  const raw = coerceBool(args?.raw) ?? false;
-  const includeDrafts = coerceBool(args?.includeDrafts) ?? false;
-  const includeBodies = coerceBool(args?.includeBodies) ?? false;
-  const stripQuoted = coerceBool(args?.stripQuoted) ?? false;
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const includeDrafts = coerceBool(args?.includeDrafts, 'includeDrafts') ?? false;
+  const includeBodies = coerceBool(args?.includeBodies, 'includeBodies') ?? false;
+  const stripQuoted = coerceBool(args?.stripQuoted, 'stripQuoted') ?? false;
 
   assertStripQuotedNotRaw(stripQuoted, raw);
   // Validated before the fetch, and rejected with raw for the same reason as the other
@@ -104,7 +104,7 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
     return toolJson(emails);
   }
 
-  const simplified: SimplifiedEmail[] = emails.map((e: any) => simplifyEmail(e, { stripQuoted }));
+  const simplified: SimplifiedEmail[] = emails.map((e: any) => simplifyEmail(e, { stripQuoted, htmlFallback: false }));
 
   if (includeBodies) {
     // An HTML-only message yields no bodyText (thread reads never carry HTML), so flag it

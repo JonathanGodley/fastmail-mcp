@@ -5,7 +5,7 @@ import {
   coerceContactEmails,
   coerceContactName,
   coerceContactPhones,
-  coerceStringArray,
+  coerceStringArrayStrict,
   toolJson,
   type ContactAddressSpec,
   type ContactEmailSpec,
@@ -31,16 +31,13 @@ export interface ContactsWriteClient {
   }): Promise<string>;
   getContactById(id: string): Promise<any>;
   updateContact(id: string, patch: UpdateContactPatch): Promise<UpdateContactResult>;
-  deleteContact(id: string, expectState?: string): Promise<DeleteContactResult>;
+  deleteContact(id: string): Promise<DeleteContactResult>;
 }
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
 
-// `expectState` is deliberately NOT a parameter of any of these tools, though the client
-// methods accept it (as `ifInState`). No read tool surfaces the JMAP state string, so a
-// caller could only guess (failing every write with a stateMismatch) or omit it. The
-// `previousCard` echo makes a stale-copy overwrite visible instead. To expose it, surface
-// `state` on the contacts reads first, then accept it here.
+// No tool takes a JMAP state string, since no read tool surfaces one; the client guards each
+// write with its own pre-write read's state instead (`fetchCard`).
 
 // The pre-edit and pre-destroy echoes are ALWAYS the untransformed JMAP card, whatever
 // `verbose` or `raw` say: the simplified shape folds away the per-entry `contexts` and
@@ -90,8 +87,8 @@ function renderCard(card: any, raw: boolean, verbose: boolean): any {
  * the server-assigned id, uid and prodId.
  */
 export async function createContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
-  const raw = coerceBool(args?.raw) ?? false;
-  const verbose = coerceBool(args?.verbose) ?? false;
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
 
   const id = await client.createContact({
     name: coerceContactName(args?.name),
@@ -102,14 +99,28 @@ export async function createContactTool(args: any, client: ContactsWriteClient):
     addressBookId: coerceAddressBookId(args?.addressBookId),
   });
 
-  const card = await client.getContactById(id);
+  let card: any;
+  try {
+    card = await client.getContactById(id);
+  } catch {
+    // Not a throw: the create has happened, and a reported failure invites a duplicating retry.
+    return [
+      { type: 'text', text: toolJson({ id }) },
+      {
+        type: 'text',
+        text:
+          `The contact was created (id ${id}), but reading it back failed, so only its id is shown. ` +
+          `Do not create it again, which would make a duplicate; read it with get_contact.`,
+      },
+    ];
+  }
   return [{ type: 'text', text: toolJson(renderCard(card, raw, verbose)) }];
 }
 
 /** update_contact. Returns `{contact, previousCard}` in every mode. */
 export async function updateContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
-  const raw = coerceBool(args?.raw) ?? false;
-  const verbose = coerceBool(args?.verbose) ?? false;
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
   const contactId = requireContactId(args);
 
   const result = await client.updateContact(contactId, {
@@ -118,10 +129,9 @@ export async function updateContactTool(args: any, client: ContactsWriteClient):
     phones: coerceContactPhones(args?.phones),
     addresses: coerceContactAddresses(args?.addresses),
     notes: coerceContactNotes(args?.notes, `to remove the note pass clearFields:['notes'].`),
-    // Same lenient-client reason as edit_draft's clearFields: a stringified array has to
-    // coerce back before the allowed/conflict rules can see it.
-    clearFields: coerceStringArray(args?.clearFields),
-    allowEntryReplace: coerceBool(args?.allowEntryReplace) ?? false,
+    // Strict: an ignored clearFields would report a clear that never happened.
+    clearFields: coerceStringArrayStrict(args?.clearFields, 'clearFields'),
+    allowEntryReplace: coerceBool(args?.allowEntryReplace, 'allowEntryReplace') ?? false,
   });
 
   const envelope: Record<string, any> = {};

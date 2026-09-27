@@ -88,6 +88,9 @@ export interface SimplifiedEmail {
 
 export interface SimplifyOptions {
   includeHtml?: boolean;
+  // false: an HTML-only message returns no bodyHtml (only bodyHtmlSize). get_thread sets it,
+  // because its body cap and its description count plain text only.
+  htmlFallback?: boolean;
   // Remove recognised quoted correspondence from `bodyText` and report how much went
   // (#73). Opt-in per call; the default output is always verbatim. Applies to the plain
   // text body ONLY — a `bodyHtml` returned alongside it (verbose) is untouched.
@@ -325,7 +328,7 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   addIf(result, 'bodyText', bodyText);
   if (options?.includeHtml) {
     addIf(result, 'bodyHtml', bodyHtml);
-  } else if (!bodyText && bodyHtml) {
+  } else if (!bodyText && bodyHtml && options?.htmlFallback !== false) {
     // HTML-only email — include HTML as fallback since there's no plain text
     addIf(result, 'bodyHtml', bodyHtml);
   } else if (bodyHtml) {

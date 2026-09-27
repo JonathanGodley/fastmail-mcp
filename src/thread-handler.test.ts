@@ -19,8 +19,9 @@ function makeEmail(id: string, text: string, over: any = {}) {
   };
 }
 
-// An HTML-only message: its only body part is text/html, and no html value is fetched.
-function makeHtmlOnlyEmail(id: string) {
+// An HTML-only message: its only body part is text/html. RFC 8621 puts that part on
+// textBody too, so fetchTextBodyValues returns its value although html values are not asked for.
+function makeHtmlOnlyEmail(id: string, html = '<p>Hello</p>') {
   return {
     id,
     subject: `Message ${id}`,
@@ -28,7 +29,7 @@ function makeHtmlOnlyEmail(id: string) {
     receivedAt: '2026-06-15T03:29:02Z',
     textBody: [{ partId: `h-${id}`, type: 'text/html' }],
     htmlBody: [{ partId: `h-${id}`, type: 'text/html' }],
-    bodyValues: {},
+    bodyValues: { [`h-${id}`]: { value: html } },
     keywords: { $seen: true },
   };
 }
@@ -138,6 +139,13 @@ describe('readThread — stripQuoted composition', () => {
     const messages = parseMessages(await readThread({ threadId: 't1', includeBodies: true }, client));
     assert.equal(messages[0].bodyTextUnavailable, true);
     assert.equal(messages[0].quotedStripSkipped, undefined);
+  });
+
+  it('never returns the HTML of an HTML-only message, which the body cap does not count', async () => {
+    const { client } = makeClient([makeHtmlOnlyEmail('e1', `<p>${'x'.repeat(THREAD_BODY_BYTE_CAP + 10)}</p>`)]);
+    const messages = parseMessages(await readThread({ threadId: 't1', includeBodies: true }, client));
+    assert.equal(messages[0].bodyHtml, undefined);
+    assert.equal(messages[0].bodyTextUnavailable, true);
   });
 });
 
@@ -347,5 +355,14 @@ describe('readThread — embedded image parts (#13)', () => {
     const { client } = makeClient([makeEmbeddedImageEmail('e1')]);
     const emails = JSON.parse(await readThread({ threadId: 't1', raw: true }, client));
     assert.deepEqual(emails[0].attachments, []);
+  });
+});
+
+describe('get_thread boolean flags', () => {
+  it('names the parameter when a boolean flag cannot be read', async () => {
+    await assert.rejects(() => readThread({ threadId: 't1', raw: 'yes' }, {} as any), /raw must be true or false/);
+    await assert.rejects(() => readThread({ threadId: 't1', includeDrafts: 'yes' }, {} as any), /includeDrafts must be true or false/);
+    await assert.rejects(() => readThread({ threadId: 't1', includeBodies: 'yes' }, {} as any), /includeBodies must be true or false/);
+    await assert.rejects(() => readThread({ threadId: 't1', stripQuoted: 'yes' }, {} as any), /stripQuoted must be true or false/);
   });
 });
