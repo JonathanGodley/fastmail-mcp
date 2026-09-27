@@ -2311,8 +2311,8 @@ interface CalendarObjectLookup {
  * and a plain Error would read as InternalError for a value only the caller can fix, so the
  * argument is refused instead.
  *
- * DELIBERATELY NOT HERE, because each is sendable: tab, CR and LF (legal `Char`, so the id just
- * comes back not-found); U+FDD0-U+FDEF (admitted by XML 1.0); lone surrogates (MEASURED:
+ * DELIBERATELY NOT HERE, because each is sendable: tab, CR and LF (legal `Char`: the UID form
+ * comes back not-found, and the url form's URL parser strips them); U+FDD0-U+FDEF (admitted by XML 1.0); lone surrogates (MEASURED:
  * `TextEncoder` repairs them to U+FFFD).
  */
 const XML_UNSENDABLE_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
