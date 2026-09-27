@@ -14,7 +14,7 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
 - **Faithful, reversible draft edits** — `edit_draft` preserves the draft's threading headers (In-Reply-To/References), attachments, and keywords across the immutable-email recreate, instead of silently dropping them. The draft it replaces goes to **Trash rather than being destroyed**, and the result echoes back what that draft contained, so an edit made from an out-of-date copy is both visible and undoable ([#65](https://github.com/JonathanGodley/fastmail-mcp/issues/65)).
 - **Compose ergonomics** — drafts carry a display name alongside the From address: state it yourself by passing `from` as `"Name <email>"`, or leave it to the name an edited draft already carries, and then the sending identity's; recipient strings like `"Name <email>"` are parsed across every compose tool.
 - **Outgoing attachments, including embedded images** — attach a local file, a `blobId`, or one part of an existing message to a draft, reply, forward, or edited draft (append / remove-by-ref / clear-all), and give an item a `cid` to show it *inside* the message body instead of hanging it off the end ([#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)). Each source is opt-in: local files need `FASTMAIL_ATTACH_DIR` and are confined to it (reading a local file to email it out is an exfiltration vector), while the two in-account sources need `FASTMAIL_ALLOW_BLOB_ATTACH`. See [Sending attachments](#sending-attachments).
-- **Forwarding** — `draft_email`'s `forward` mode reproduces the original under the Fastmail-native forwarded-message block and **carries its attachments** (the official server-side forward carries none), with an `asAttachment` mode that attaches the whole original as a lossless `.eml`. The edit-draft body guard extends to forward drafts.
+- **Forwarding** — `draft_email`'s `forward` mode reproduces the original under the Fastmail-native forwarded-message block and **carries its attachments** (the official server-side forward carries none), with an `asAttachment` mode that attaches the whole original as a lossless `.eml`.
 - **Quotes and forwards keep their pictures** — a reply's quote and an inline forward's block carry the images the original displayed, instead of leaving broken references or silently blank space ([#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)). This re-sends image data outward that you never attached and no `FASTMAIL_ATTACH_DIR` governs; leaving `{{quote}}` out of the body is the way to send none of it. See [Replying and forwarding with images](#replying-and-forwarding-with-images).
 - **Attachment paths** — relative `download_attachment` paths resolve inside the configured download dir, so a bare filename lands there in one step.
 - **Path-aware mailbox naming** - every mailbox parameter accepts a root-anchored path (`Archive/2026/Receipts`) alongside an id, role, or name, `list_mailboxes` returns the path it accepts, and `create_mailbox` makes the folder you want to file into ([#27](https://github.com/JonathanGodley/fastmail-mcp/issues/27), [#48](https://github.com/JonathanGodley/fastmail-mcp/issues/48)). A duplicated folder name is reported as ambiguous with its candidate paths instead of resolving to whichever one came back first. See [Naming a mailbox](#naming-a-mailbox).
@@ -1049,7 +1049,7 @@ Single (non-repeating) events are unaffected.
 #### Calendar known limitations
 
 - **Recurring events, on read**: `list_calendar_events` always expands recurrences server-side - a caller naming no bounds is given the next month rather than an unwindowed listing ([#142](https://github.com/JonathanGodley/fastmail-mcp/issues/142)) - so it reports real occurrence dates; `get_calendar_event` fetches a single resource with no window and therefore always returns the series master at its original date. Rows are filtered **exactly** against the window you asked for ([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)): a `Z`/offset value is the instant it names, an all-day value is the account's LOCAL day (a `DTSTART..DTEND` date span being the full multi-day span), and a wall clock resolves in the zone name the parsed event carries (`timeZone`/`endTimeZone`, [#139](https://github.com/JonathanGodley/fastmail-mcp/issues/139)) where that name resolves, and in the configured zone otherwise. The range **requested of the server** is widened by 14 hours at both edges, because Fastmail matches an all-day value on its UTC day and reads a floating time as UTC, so a window narrower than a day could touch either kind of event without the server returning it at all - and no client-side filter can keep what was never sent. Two kinds of row can still sit outside the window. A block that still carries its own recurrence - **`RRULE` or `RDATE`** - is never dropped whatever its dates say, because an unexpanded master shows the series' original `DTSTART` and judging that date would turn a wrongly-dated row into a missing one; such a row carries `recurrenceRule` and/or `recurrenceDates` so you can see why it is there. And a **floating** timed event comes back from expansion stamped as `Z` with the floating marker destroyed, so nothing on this side can move it to your clock: it is judged on UTC and can land in the wrong day for an account far from UTC. That one is documented rather than fixed - there is no information left to fix it with. **The two residuals fail in opposite directions, and that matters for how you read a result.** A recurrence carrier only ever **adds** a row, so check each `start` against the window you asked for rather than assuming every row is inside it. A mis-judged floating event is the other way round: it is **missing** from the window it really belongs to and present in a neighbouring one - so on an account far from UTC, an empty result from `list_calendar_events` is **not** proof of a free day. Confirm a free day in the Fastmail web interface, or widen the window by a day at each edge - the mis-judgement is bounded by the account's offset, so widening surfaces the event and tells you the day is not provably free, but not where it actually sits: `start` is the value that is wrong. **A third case is not a row this filter mis-judges but a row that never arrives.** For a series that lists its occurrences as `RDATE`s and states no `RRULE`, Fastmail's own time-range filter indexes only `DTSTART..DTSTART+DURATION`, so a window covering one of the listed dates and not the series start matches the resource not at all, with expansion and without it - measured against an `RRULE` control series whose occurrence falls at the identical instant and *is* returned by the very same request ([#165](https://github.com/JonathanGodley/fastmail-mcp/issues/165)). No client-side filter can recover that row, because the server never sends it, and widening the window only surfaces it once the wider window reaches the series start. So an empty result is not proof of a free day even on an account sitting at UTC. Whether this server should compensate is open ([#167](https://github.com/JonathanGodley/fastmail-mcp/issues/167)). An expanded series' first occurrence, which Fastmail sends with no `RECURRENCE-ID`, is **not** a residual: the listing settles it itself (see `list_calendar_events`' "Four fields say what a date is", [#155](https://github.com/JonathanGodley/fastmail-mcp/issues/155)).
-- **Recurring events, on write**: not supported at all — see below.
+- **Recurring events, on write**: not supported at all — see [Repeating events cannot be changed or deleted here](#repeating-events-cannot-be-changed-or-deleted-here) above.
 - **Attendee parameters**: RSVP, ROLE, CUTYPE and other attendee parameters are parsed on read but not settable on create/update — only `email` and `name` are accepted.
 
 ### Identity & Testing Tools
@@ -1109,6 +1109,7 @@ src/
 ├── jmap-client.ts          # JMAP client wrapper
 ├── email-formatter.ts      # Simplified email format for AI consumption
 ├── response-formatters.ts  # Mailbox/identity/contact simplifiers and query formatters
+├── id-collapse-note.ts     # The duplicate-id sentence shared by bulk success and failure texts
 ├── field-projection.ts     # `fields` output projection for the email read tools
 ├── quote-strip.ts          # Quoted-history detection and removal for the read path
 ├── thread-handler.ts       # get_thread orchestration (bodies, size cap, signals)
@@ -1121,6 +1122,8 @@ src/
 ├── subject.ts              # The inherited reply/forward subject, and its override
 ├── subject-prefix.ts       # What counts as a Re:/Fwd: prefix, and what compose and edit say about one
 ├── body-format.ts          # HTML as source of truth, and the derived text/plain fallback
+├── body-tokens.ts          # The {{signature}}/{{quote}}/{{forward}} scan and single-pass substitution
+├── body-hash.ts            # The draft bodyHash that get_email issues and edit_draft checks
 ├── inline-images.ts        # Embedded (cid:) image identity, vetting and reconciliation
 ├── compose-inline.ts       # The embedded-image checks the compose path runs
 ├── inline-notes.ts         # The wording used when an image is carried, demoted or refused
@@ -1128,6 +1131,8 @@ src/
 ├── contact-card.ts         # Contact card algebra: label resolution and the per-entry merge
 ├── contacts-handler.ts     # create/update/delete_contact orchestration behind an injected client
 ├── ical-limits.ts          # Size bounds on calendar text, checked before serialization
+├── ical-fold.ts            # iCalendar content-line folding at 75 octets
+├── vtimezone.ts            # The VTIMEZONE block written beside every TZID, from Node's ICU data
 └── caldav-client.ts        # CalDAV calendar client (the only calendar path)
 ```
 
@@ -1163,8 +1168,9 @@ Contributions are welcome. The development rules, including the documentation th
 If calendar and contacts functions return "Forbidden" errors, this is likely due to:
 
 1. **Account Plan**: Calendar/contacts API may require business/professional Fastmail plans
-2. **API Token Scope**: Your API token may need calendar/contacts permissions enabled
-3. **Feature Enablement**: These features may need explicit activation in your account
+2. **Calendar credentials**: Calendar runs over CalDAV, not the API token. Set `FASTMAIL_CALDAV_USERNAME` (your Fastmail address) and `FASTMAIL_CALDAV_PASSWORD` (a Fastmail app password with calendar (CalDAV) access)
+3. **API Token Scope (contacts)**: Your API token may need contacts permissions enabled; a contacts write that comes back forbidden needs a token with read-write contacts access
+4. **Feature Enablement**: These features may need explicit activation in your account
 
 **Solution**: Run `check_function_availability` for step-by-step setup guidance.
 
