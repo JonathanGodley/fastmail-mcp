@@ -1069,7 +1069,8 @@ export function parseAddress(input: string): { name?: string; email: string } {
     const email = trimmed.slice(open + 1, close).trim();
     let name = trimmed.slice(0, open).trim();
     if (name.length >= 2 && name.startsWith('"') && name.endsWith('"')) {
-      name = name.slice(1, -1).trim();
+      // A quoted-string's `\x` is an escaped x (RFC 5322 quoted-pair).
+      name = name.slice(1, -1).replace(/\\(.)/g, '$1').trim();
     }
     return name ? { name, email } : { email };
   }

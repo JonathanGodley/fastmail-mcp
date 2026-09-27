@@ -895,6 +895,15 @@ describe('validateClearFields', () => {
 });
 
 describe('parseAddress', () => {
+  it('unescapes a backslash-escaped character inside a quoted display name', () => {
+    assert.deepEqual(parseAddress('"Sm\\"ith, J" <j@example.com>'), { name: 'Sm"ith, J', email: 'j@example.com' });
+    assert.deepEqual(parseAddress('"a\\\\b" <j@example.com>'), { name: 'a\\b', email: 'j@example.com' });
+    assert.deepEqual(
+      coerceRecipients({ to: '"Sm\\"ith, J" <j@example.com>, ada@example.com' }).to,
+      ['"Sm\\"ith, J" <j@example.com>', 'ada@example.com'],
+    );
+  });
+
   it('parses "Name <email>" into name + email', () => {
     assert.deepEqual(parseAddress('Alice <a@x.example>'), { name: 'Alice', email: 'a@x.example' });
   });
