@@ -247,7 +247,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 All data-returning tools simplify responses by default to reduce token usage. Three optional parameters control how much data is returned:
 
-- **Default** — a curated, cleaned response. Addresses are strings instead of objects, boolean flags replace keyword maps, null/empty fields are stripped, and only the most useful fields are included.
+- **Default** — a curated, cleaned response. Email addresses are strings instead of objects (an identity's `replyTo` and `bcc` are the exception, below), boolean flags replace keyword maps, null/empty fields are stripped, and only the most useful fields are included.
 - **`verbose: true`** — all fields, still in the simplified shape. Use this when you need data the default omits (e.g. HTML body, mailbox permissions, contact addresses) without dealing with raw JMAP structures.
 - **`raw: true`** — the original JMAP response with no transformation. Use this for debugging or when you need exact JMAP field names and structures.
 - **`fields: [...]`** — the opposite direction: return *only* the named fields. See [Field projection](#field-projection-fields).
@@ -461,6 +461,8 @@ search_emails { "query": "invoice", "excludeMailboxes": ["Newsletters"] }
 ### Identity fields
 
 **Default**: `id`, `name`, `email`, `replyTo`, `mayDelete`, `textSignature`, `htmlSignature`
+
+`replyTo`, and verbose's `bcc`, are passed through in JMAP's shape: an array of `{name, email}` objects, not `"Name <email>"` strings.
 
 The signature fields are the identity's configured sign-off, the same text the Fastmail web UI appends for you. JMAP does not append it server-side, so signing is a per-call choice here: put `{{signature}}` where the sign-off goes in a `draft_email` body (or in an `edit_draft` body with `expandSignature:true`) and this server writes the identity's own signature at exactly that point, or read the field from here and write it into the body yourself. An unset or blank signature is omitted like any other empty field ([#33](https://github.com/JonathanGodley/fastmail-mcp/issues/33)). See [Signing a message](#signing-a-message) for where the token goes and what happens when it has nothing to expand to.
 
