@@ -1798,7 +1798,7 @@ describe('CalDAVCalendarClient event lookup', () => {
           // hunting for an override flag, the same failure the repeating refusal met.
           assert.match(
             err.message,
-            /Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly one record, whatever else spells it as a UID, and this tool accepts it wherever it accepts an id\./,
+            /Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly one record, and this tool accepts it wherever it accepts an id\./,
             tool,
           );
           assert.match(err.message, /get_calendar_event still works on this id/, tool);
@@ -1969,20 +1969,42 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(otherCopies, [{ calendar: 'Work', url: WORK_URL + 'decoy.ics' }]);
   });
 
-  it('updates and deletes the addressed record rather than refusing it as ambiguous', async () => {
+  // But the listing shows the decoy's id AS that url, so a caller who passes it back may mean
+  // the decoy. A write that went to the addressed record would patch or destroy an event the
+  // caller never saw under that id, so the writes refuse and name the handle that reaches each.
+  const assertAddressCollision = (realUrl: string, tool: string) => (err: Error) => {
+    assert.equal(err.name, 'InvalidInputError', tool);
+    assert.match(err.message, /is the url of one record and the UID of another/, tool);
+    assert.match(err.message, new RegExp(`will not ${tool} either`), tool);
+    // Each record's url, and the addressed record's own UID, the id that reaches it alone.
+    for (const span of [realUrl, WORK_URL + 'decoy.ics', '"real@fm"']) {
+      assert.ok(err.message.includes(span), `${tool} refusal omitted ${span}`);
+    }
+    return true;
+  };
+
+  it('refuses to update or delete when the url addresses one record and is the UID of another', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
+    for (const [tool, call] of [
+      ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent(realUrl, { title: 'Renamed' })],
+      ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent(realUrl)],
+    ] as Array<[string, (c: CalDAVCalendarClient) => Promise<unknown>]>) {
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+      await assert.rejects(() => call(client), assertAddressCollision(realUrl, tool));
+      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
+    }
+  });
 
-    const up = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
-    await up.client.updateCalendarEvent(realUrl, { title: 'Renamed' });
-    const upCalls = up.mockDAVClient.updateCalendarObject.mock.calls.map(c => c.arguments);
-    assert.equal(upCalls.length, 1);
-    assert.equal((upCalls[0][0].calendarObject as { url: string }).url, realUrl);
-
-    const del = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
-    await del.client.deleteCalendarEvent(realUrl);
-    const delCalls = del.mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
-    assert.equal(delCalls.length, 1);
-    assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
+  it('reaches the addressed record by its own UID and the other by its url', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    for (const [id, target] of [['real@fm', realUrl], [WORK_URL + 'decoy.ics', WORK_URL + 'decoy.ics']]) {
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+      await client.deleteCalendarEvent(id);
+      const delCalls = mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
+      assert.equal(delCalls.length, 1, id);
+      assert.equal((delCalls[0][0].calendarObject as { url: string }).url, target, id);
+    }
   });
 
   // The store below models tsdav and the server (see addressComparisonKey), so the url that comes back carries
@@ -1991,7 +2013,8 @@ describe('CalDAVCalendarClient event lookup', () => {
     it(`counts a url spelled with "${suffix}" as addressing that record`, async () => {
       const realUrl = PERSONAL_URL + 'real.ics';
       const spelled = realUrl + suffix;
-      // A decoy whose UID is the caller's exact string, so only addressing can break the tie.
+      // A decoy whose UID is the caller's exact string: only an addressed record draws the
+      // collision refusal rather than the plain "names 2 records" one.
       const stored: Record<string, StoredObject[]> = {
         [WORK_URL]: [{ data: eventIcal(spelled, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
         [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
@@ -2004,10 +2027,11 @@ describe('CalDAVCalendarClient event lookup', () => {
         return store({ ...params, objectUrls: objectUrls.map(u => u.replace(/[?#].*$/, '')) } as FetchObjectsParams);
       });
 
-      await client.deleteCalendarEvent(spelled);
-      const delCalls = mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments);
-      assert.equal(delCalls.length, 1);
-      assert.equal((delCalls[0][0].calendarObject as { url: string }).url, realUrl);
+      await assert.rejects(() => client.deleteCalendarEvent(spelled), (err: Error) => {
+        assert.doesNotMatch(err.message, /names 2 records/);
+        return assertAddressCollision(realUrl, 'delete')(err);
+      });
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
     });
   }
 

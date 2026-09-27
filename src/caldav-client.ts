@@ -2323,12 +2323,17 @@ interface CalendarObjectMatch {
  *
  * `addressed` means the caller's string was the resource url of `matches[0]`, not merely a UID.
  * It DECIDES AMBIGUITY: an invitation sender can mint a decoy whose UID is another event's url,
- * but addressing cannot be imitated, so an addressed record is the one the writes act on. At
- * most one copy can be addressed.
+ * but addressing cannot be imitated, so an addressed record is the one the reads answer with.
+ * At most one copy can be addressed.
+ *
+ * `collision` is set when the addressed record's own UID is not the string but another match's
+ * is: the listing shows that other record's id as this url, so the writes refuse rather than
+ * act on the addressed one. It carries the addressed record's UID, the id that reaches it alone.
  */
 interface CalendarObjectLookup {
   matches: CalendarObjectMatch[];
   addressed: boolean;
+  collision?: { addressedUid: string | undefined };
   brokenCollections: BrokenCollections;
 }
 
@@ -2840,7 +2845,8 @@ export function describeEventCopies(copies: CalendarEventCopy[]): string {
  * RAISED BEFORE THE REPEATING-SERIES REFUSAL, so the caller learns a second record exists.
  *
  * ACCEPTED: an invitation sender can mint a duplicate UID to freeze writes, which is why the
- * url, which ADDRESSES one record and cannot be made ambiguous, is the offered way out. Word it
+ * url, which ADDRESSES one record, is the offered way out; where another record's UID spells
+ * that url, `addressCollisionError` names the addressed record's UID instead. Word it
  * "addresses", not "names": the copies listed beside it may all name the url-shaped id.
  */
 export function ambiguousEventIdError(
@@ -2855,10 +2861,35 @@ export function ambiguousEventIdError(
     + `in this account, and this server will not ${action} one of them without being told which. `
     + `The copies are: ${describeEventCopies(copies)}. `
     + 'Pass the `url` of the copy you mean as eventId instead — a resource url ADDRESSES exactly '
-    + 'one record, whatever else spells it as a UID, and this tool accepts it wherever it '
-    + 'accepts an id. '
+    + 'one record, and this tool accepts it wherever it accepts an id. '
     + 'get_calendar_event still works on this id: it returns the first copy and lists the others.'
     // The count is account-wide; an unsearched collection may hold another copy (#136).
+    + describeBrokenCollections(broken),
+  );
+}
+
+/**
+ * The refusal update and delete raise when the id is the url of one record and the UID of
+ * another (`CalendarObjectLookup.collision`). The listing shows the other record's id as that
+ * very url, so the caller may mean either; the url cannot be the way out here, so each record
+ * is named with the handle that reaches it alone.
+ */
+export function addressCollisionError(
+  eventId: string,
+  action: 'update' | 'delete',
+  copies: CalendarEventCopy[],
+  addressedUid: string | undefined,
+  broken?: BrokenCollections,
+): InvalidInputError {
+  const [addressed, ...others] = copies;
+  const reach = addressedUid
+    ? `pass its own UID "${echoCallerText(addressedUid, CALENDAR_UID_ECHO_LIMIT)}" as eventId to act on it`
+    : 'it has no UID, so no id reaches it apart from the other';
+  return new InvalidInputError(
+    `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" is the url of one record and the UID of `
+    + `another, and this server will not ${action} either without being told which. `
+    + `The record at that url is ${describeEventCopies([addressed])}; ${reach}. `
+    + `Other records it names: ${describeEventCopies(others)}; pass the url of the one you mean as eventId.`
     + describeBrokenCollections(broken),
   );
 }
@@ -3437,7 +3468,14 @@ export class CalDAVCalendarClient {
     const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
 
-    return { matches, addressed: addressedIndex !== -1, brokenCollections };
+    const ownUid = (m: CalendarObjectMatch) => parseICalValue(extractVEvent(m.object.data || '') ?? '', 'UID')?.trim();
+    const addressedUid = addressedIndex === -1 ? undefined : ownUid(matches[0]);
+    const collision = addressedIndex !== -1 && addressedUid !== wanted
+      && matches.slice(1).some(m => ownUid(m) === wanted)
+      ? { addressedUid }
+      : undefined;
+
+    return { matches, addressed: addressedIndex !== -1, collision, brokenCollections };
   }
 
   async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
@@ -3618,7 +3656,7 @@ export class CalDAVCalendarClient {
     // every write while one collection is unhealthy is NOT the safe default here: it guards only
     // a duplicate UID whose other copy sits in the broken collection, and this path writes once,
     // to the one resource it resolved.
-    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, collision, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
@@ -3628,6 +3666,9 @@ export class CalDAVCalendarClient {
     // (#101). `addressed` keeps the url escape hatch open.
     if (!addressed && matches.length > 1) {
       throw ambiguousEventIdError(eventId, 'update', matchesToCopies(matches), brokenCollections);
+    }
+    if (collision) {
+      throw addressCollisionError(eventId, 'update', matchesToCopies(matches), collision.addressedUid, brokenCollections);
     }
 
     // UNREACHABLE DEFENCE (#137): `isResolvedCalendarObject` already requires a VEVENT. A plain
@@ -3829,7 +3870,7 @@ export class CalDAVCalendarClient {
   async deleteCalendarEvent(eventId: string): Promise<DeleteCalendarEventResult> {
     const client = await this.getClient();
     // Proceeds on the copy it found, as update does (#136).
-    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, collision, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
@@ -3838,6 +3879,9 @@ export class CalDAVCalendarClient {
     // Same rule and order as update's; see ambiguousEventIdError (#101).
     if (!addressed && matches.length > 1) {
       throw ambiguousEventIdError(eventId, 'delete', matchesToCopies(matches), brokenCollections);
+    }
+    if (collision) {
+      throw addressCollisionError(eventId, 'delete', matchesToCopies(matches), collision.addressedUid, brokenCollections);
     }
 
     // Keyed on the resolved RESOURCE, not the argument's shape, so passing a row's url cannot

@@ -186,7 +186,7 @@ than one thing ([#101](https://github.com/JonathanGodley/fastmail-mcp/issues/101
 
 **One rule, in one sentence: a url ADDRESSES exactly one thing; a name merely NAMES whatever
 carries it.** So an identifier that resolves to several records is refused rather than guessed
-between, and the escape hatch is always the url. It applies at two levels — an `eventId` naming
+between, and the escape hatch is the url, with one exception for events stated below. It applies at two levels — an `eventId` naming
 two events, and a `calendarId` naming two calendars — and the levels differ only in what a
 *read* is allowed to do, for the reason stated under each.
 
@@ -208,18 +208,22 @@ two-copy result differs by tool, and the split is the whole convention:
   testable promise rather than an accident), sets `otherCopies` on its result, and appends
   `buildAmbiguousEventNote`'s trailing line.
 
-**Addressing a record is not naming it, and only the first is ambiguous.** Both forms of
-`eventId` are always tried, so a record whose UID literally spells another record's resource
-`url` puts two records in one result — and if that counted as an ambiguity, the refusal would
-tell a caller who had passed an exact address to "pass the `url` of the copy you mean", which
-is what they just did. There is no next call, and the escape hatch the whole convention rests
-on closes. So the disambiguation is made on the RESULT rather than on the look of the string:
-where a match's own `url` is one the lookup resolved from the caller's text, the caller
-**addressed** that record. At most one match can be, since a resource url resolves to a single
-href. That match leads the order, the writes act on it instead of refusing, and the read's
-trailing note says which record they will touch rather than announcing a refusal that will not
-come. A url-shaped id with no resource at that address is unaffected: nothing is addressed, and
-it resolves by UID exactly as any other id does.
+**Addressing a record is not naming it.** Both forms of `eventId` are always tried, so a
+record whose UID literally spells another record's resource `url` puts two records in one
+result. The disambiguation is made on the RESULT rather than on the look of the string: where a
+match's own `url` is one the lookup resolved from the caller's text, the caller **addressed**
+that record. At most one match can be, since a resource url resolves to a single href. That
+match leads the order, and the writes act on it, with one exception.
+
+**But the writes refuse an address that is also another record's UID.** Where the addressed
+record's own UID is not the caller's string and another match's UID is, `list_calendar_events`
+shows that other record's id as this very url, so a caller passing it back may mean either, and
+acting on the addressed record would patch or destroy an event never shown under that id.
+`addressCollisionError` refuses, names both records' urls, and quotes the addressed record's
+own UID: that UID reaches it alone, and the other record's url reaches that one. The url is
+therefore not an escape hatch in this one case, and saying "pass the url" would send the
+caller back to the id they passed. A url-shaped id with no resource at that address is
+unaffected: nothing is addressed, and it resolves by UID exactly as any other id does.
 
 **Why they differ, stated so it is not read as an inconsistency.** The fail-closed rule is
 about a caller mistaking a wrong outcome for a legitimate one, and a read cannot produce a
@@ -250,8 +254,9 @@ requires to protect them (see [Untrusted values in prose](#untrusted-values-in-p
 **The accepted consequence, recorded rather than mitigated.** Whoever sends this account an
 invitation chooses the `UID` it arrives under, so a stranger who knows an event's id can freeze
 its writes by minting a duplicate in a shared calendar. The refusal is still the right answer —
-the alternative is a destructive call that guesses — and the `url` form is the guaranteed way
-through, which is why it is named on the tool surface and not merely in the error.
+the alternative is a destructive call that guesses — and the `url` form is the way through,
+which is why it is named on the tool surface and not merely in the error. It is not guaranteed:
+a stranger who also mints a record whose UID is the event's url closes that route too.
 
 #### An ambiguous `calendarId`: the read refuses too
 
