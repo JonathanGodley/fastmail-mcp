@@ -3320,6 +3320,12 @@ export class CalDAVCalendarClient {
    */
   private async findCalendarObjectByUID(eventId: string): Promise<CalendarObjectLookup> {
     // Here, not in the handler, whose guard is falsy-only; all three tools inherit it.
+    if (eventId != null && typeof eventId !== 'string') {
+      throw new InvalidInputError(
+        `eventId must be a string; received ${Array.isArray(eventId) ? 'array' : typeof eventId}. `
+        + 'Pass an event id or url from list_calendar_events.',
+      );
+    }
     const wanted = requireNonEmpty(eventId, 'eventId', 'pass an event id or url from list_calendar_events');
     if (XML_UNSENDABLE_CHARS.test(wanted)) {
       throw new InvalidInputError(

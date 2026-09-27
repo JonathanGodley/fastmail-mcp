@@ -1433,6 +1433,31 @@ describe('CalDAVCalendarClient event lookup', () => {
     }
   });
 
+  // A lenient client can send `123` for `"123"`. Refused naming the type, as a non-string id in
+  // `coerceStringArrayStrict` is: a large number's String() is not the digits the caller meant.
+  it('rejects a non-string eventId by its type, before any query is built', async () => {
+    const numeric = 123 as unknown as string;
+    for (const call of [
+      (c: CalDAVCalendarClient) => c.getCalendarEventById(numeric),
+      (c: CalDAVCalendarClient) => c.updateCalendarEvent(numeric, { title: 'X' }),
+      (c: CalDAVCalendarClient) => c.deleteCalendarEvent(numeric),
+    ]) {
+      const { client, fetchCalendarObjects } = makeLookupClient(
+        [{ displayName: 'Personal', url: PERSONAL_URL }],
+        onePersonalEvent(),
+      );
+      await assert.rejects(
+        () => call(client),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, /eventId must be a string; received number\. Pass an event id or url from list_calendar_events/);
+          return true;
+        },
+      );
+      assert.equal(fetchCalendarObjects.mock.callCount(), 0);
+    }
+  });
+
   // tsdav's delete runs its headers through `cleanupFalsy`, so an object with no etag is sent
   // with no If-Match at all and the resource is destroyed UNCONDITIONALLY — whatever it has
   // become since it was read. A resource the server did not describe fully is therefore not a
