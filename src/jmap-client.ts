@@ -289,7 +289,6 @@ export interface SourceReferences {
   sourceEmailId?: string;
 }
 
-// The not-found refusal of the two attachment tools, which take the same emailId.
 const ATTACHMENT_EMAIL_NOT_FOUND =
   'Email not found: that emailId matches no message. Pass an id from list_emails, search_emails or get_thread.';
 
@@ -1654,8 +1653,7 @@ export class JmapClient {
   /**
    * edit_draft refuses a draft filed in Trash. A superseded copy keeps `$draft` there, and the
    * recreate carries the old copy's mailboxIds, so an edit would write the replacement into
-   * Trash too. A draft filed anywhere else (draft_email's `mailbox`) stays editable. A map
-   * this cannot read, or an account with no trash-role mailbox, is not refused here.
+   * Trash too. A draft filed anywhere else (draft_email's `mailbox`) stays editable.
    */
   private refuseTrashedDraftEdit(filing: any, mailboxes: any[]): void {
     const trash = this.findByExactRole(mailboxes, 'trash');
@@ -1687,9 +1685,8 @@ export class JmapClient {
   }
 
   /**
-   * Throw unless a single-id Email/set confirmed `id` in `updated`: a SetError is classified
-   * by throwSingleSetError, and an id in NEITHER map is a failure, as the bulk tools count it
-   * (withUnaccountedFailures), never a silent success.
+   * Throw unless a single-id Email/set confirmed `id` in `updated`. An id in NEITHER map is a
+   * failure, as the bulk tools count it (withUnaccountedFailures), never a silent success.
    */
   private assertSingleUpdated(result: any, id: string, action: string): void {
     const setError = this.setErrorFor(result?.notUpdated, id);
@@ -2207,7 +2204,7 @@ export class JmapClient {
     // off the part UNION: which list holds the .eml is a MIME-shape accident.
     const emlAttached = storedParts.some((p: any) => classifyPartType(p?.type) === 'message/rfc822');
     // The source instance rides with the forward marking: dropped when a FORWARD draft is
-    // de-forwarded, kept on a reply draft. Vetted as the create vets it (isSettableSourceId).
+    // de-forwarded, kept on a reply draft.
     const storedSourceId = existingEmail[SOURCE_ID_HEADER];
     const trimmedSourceId = typeof storedSourceId === 'string' ? storedSourceId.trim() : undefined;
     const carriedSourceId: string | undefined =

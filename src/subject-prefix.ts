@@ -29,8 +29,8 @@ export type SubjectPrefixKind = 'reply' | 'forward';
 //
 // The trailing whitespace run sits INSIDE the optional counter group on purpose. With it
 // outside, a subject with no counter matches two adjacent runs (`\s*\s*:`), and a long
-// whitespace run with no colon backtracks quadratically. Nothing caps a subject before it reaches here and the
-// server is one stdio process, so a stall here stalls every other call.
+// whitespace run with no colon backtracks quadratically. Nothing caps a subject before it
+// reaches here and the server is one stdio process, so a stall here stalls every other call.
 const SUBJECT_PREFIX = /^\s*(re|fwd|fw)\s*(?:\[\s*\d+\s*\]\s*)?:/i;
 
 /**
