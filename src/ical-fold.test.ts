@@ -52,6 +52,18 @@ describe('foldICalLine', () => {
     assert.ok(foldICalLine(line76).includes('\r\n'));
   });
 
+  it('fills each ASCII segment to exactly 75 octets', () => {
+    assert.equal(foldICalLine('X'.repeat(80)), 'X'.repeat(75) + '\r\n ' + 'X'.repeat(5));
+  });
+
+  it('moves a whole surrogate pair to the next segment at both ends of the low-surrogate range', () => {
+    // 72 octets of ASCII plus a lone high surrogate (3 octets) is exactly 75, so the cut lands
+    // between the two halves of the pair.
+    for (const ch of ['\u{10000}', '\u{10FFFF}']) {
+      assert.equal(foldICalLine('X'.repeat(72) + ch), 'X'.repeat(72) + '\r\n ' + ch);
+    }
+  });
+
   it('never leaves a lone surrogate when the 75-octet cut falls inside a surrogate pair', () => {
     function unfold(folded: string): string {
       const lines = folded.split('\r\n');
