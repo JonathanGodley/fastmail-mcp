@@ -471,7 +471,7 @@ The signature fields are the identity's configured sign-off, the same text the F
 
 **Default**: `id`, `name`, `emails`, `phones`, `organization`, `notes`, and `kind` when it is not `individual`
 
-**Verbose adds**: `addresses`, `titles`, `online`, `photos`, `anniversaries`, plus any remaining JMAP fields (including `kind` on an ordinary card) — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
+**Verbose adds**: `addresses`, `titles`, `anniversaries`, plus every remaining JMAP field under its own JSContact name and in its stored shape: on Fastmail that includes `links` (URLs), `onlineServices`, `media` (photos), `nicknames` and `kind` on an ordinary card — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
 
 **Simplification applied:**
 - Name resolved from `name.full`, or when that is absent from the name's `components`: in stored order when the name is marked ordered, otherwise title, given, middle, surname, second surname, generation, credential
@@ -479,7 +479,7 @@ The signature fields are the identity's configured sign-off, the same text the F
 - Organization extracted from first entry
 - Notes extracted from JMAP's `{hash: {note}}` object format
 - `kind` omitted when it is the default `individual` - see below
-- Verbose: addresses as objects, titles as strings, online/URLs as URIs
+- Verbose: addresses as objects, titles as strings, anniversaries as stored; the other passed-through fields keep JMAP's Id-map shape
 
 #### `kind` tells you which cards the write tools will refuse
 
