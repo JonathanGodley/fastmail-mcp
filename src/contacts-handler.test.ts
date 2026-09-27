@@ -72,6 +72,20 @@ describe('createContactTool', () => {
     });
   });
 
+  it('reports the created id, not a failure, when only the read-back fails', async () => {
+    // The create has already happened, so a thrown error would invite a retry that
+    // duplicates the contact.
+    const { client, calls } = makeClient();
+    client.getContactById = async () => { throw new Error('read failed'); };
+    const content = await createContactTool({ name: 'Ada Lovelace' }, client);
+    assert.equal(calls.created.length, 1);
+    assert.deepEqual(payload(content), { id: 'C1' });
+    assert.equal(content.length, 2);
+    assert.match(content[1].text, /was created/);
+    assert.match(content[1].text, /get_contact/);
+    assert.match(content[1].text, /duplicate/);
+  });
+
   it('coerces every input array before handing it to the client', async () => {
     const { client, calls } = makeClient();
     await createContactTool(

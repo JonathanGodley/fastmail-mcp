@@ -102,7 +102,21 @@ export async function createContactTool(args: any, client: ContactsWriteClient):
     addressBookId: coerceAddressBookId(args?.addressBookId),
   });
 
-  const card = await client.getContactById(id);
+  let card: any;
+  try {
+    card = await client.getContactById(id);
+  } catch {
+    // Not a throw: the create has happened, and a reported failure invites a duplicating retry.
+    return [
+      { type: 'text', text: toolJson({ id }) },
+      {
+        type: 'text',
+        text:
+          `The contact was created (id ${id}), but reading it back failed, so only its id is shown. ` +
+          `Do not create it again, which would make a duplicate; read it with get_contact.`,
+      },
+    ];
+  }
   return [{ type: 'text', text: toolJson(renderCard(card, raw, verbose)) }];
 }
 
