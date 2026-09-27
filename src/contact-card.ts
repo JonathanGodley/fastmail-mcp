@@ -1,4 +1,4 @@
-import { InvalidInputError } from './coerce.js';
+import { InvalidInputError, describeUntrusted } from './coerce.js';
 
 // The per-entry algebra shared by the contact READ shape (src/response-formatters.ts) and
 // the update_contact MERGE (src/contacts-calendar.ts), in its own module so the formatter
@@ -221,17 +221,20 @@ export function nonDefaultContactKind(card: any): string | undefined {
 }
 
 /**
- * The contact write surface has no `kind` or `members` parameter, so it can neither create
- * nor describe a group; both write tools refuse one through this single rule.
+ * The kind the contact write tools refuse, or undefined for a card they may write.
+ * `create_contact` has no `kind` parameter, so it makes individuals only; any other declared
+ * kind is a record this server could not put back, and both write tools refuse it through
+ * this single rule.
  */
-export function isContactGroupCard(card: any): boolean {
-  return contactCardKind(card) === 'group';
+export function refusedContactKind(card: any): string | undefined {
+  return nonDefaultContactKind(card);
 }
 
-/** The shared refusal both group-aware write tools raise, so they read as one rule. */
-export function contactGroupRefusal(opts: { id: string; tool: string; because: string; recovery: string }): string {
-  return `Contact ${opts.id} is a contact GROUP, not a person card, so ${opts.tool} refuses it: ` +
-    `${opts.because} ${opts.recovery}`;
+/** The shared refusal both write tools raise, so they read as one rule. */
+export function contactKindRefusal(opts: { id: string; kind: string; tool: string; because: string; recovery: string }): string {
+  const group = opts.kind === 'group' ? ' (a contact GROUP)' : '';
+  return `Contact ${opts.id} is a card of kind "${describeUntrusted(opts.kind)}"${group}, not a person card, ` +
+    `so ${opts.tool} refuses it: ${opts.because} ${opts.recovery}`;
 }
 
 /**

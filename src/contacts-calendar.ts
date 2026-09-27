@@ -10,9 +10,9 @@ import {
 import {
   assertUnambiguousEntryEdit,
   buildEntryMap,
-  contactGroupRefusal,
+  contactKindRefusal,
   isAmbiguousEntryEdit,
-  isContactGroupCard,
+  refusedContactKind,
   mergeContactName,
   mergeContactNotes,
   mergeEntryMap,
@@ -412,18 +412,18 @@ export class ContactsCalendarClient extends JmapClient {
       throw new InvalidInputError(`Contact not found: ${id}`);
     }
 
-    // A group card holds a `members` map and no emails/phones at all. None of this tool's
-    // parameters describe a group, and there is no members surface here to edit one through,
-    // so an update aimed at a group is refused rather than half-applied to a record whose
-    // shape it does not fit. deleteContact refuses the same card kind; both raise it through
-    // contactGroupRefusal so they read as one.
-    if (isContactGroupCard(previousCard)) {
-      throw new InvalidInputError(contactGroupRefusal({
+    // This tool's parameters describe a person card, and a group's members are not editable
+    // here at all, so an update aimed at any other kind is refused rather than half-applied.
+    // deleteContact refuses the same kinds through the same message.
+    const refusedKind = refusedContactKind(previousCard);
+    if (refusedKind) {
+      throw new InvalidInputError(contactKindRefusal({
         id,
+        kind: refusedKind,
         tool: 'update_contact',
         because:
-          'its members are not editable through this server, and name/emails/phones/addresses/notes ' +
-          'do not describe a group.',
+          'name/emails/phones/addresses/notes describe a person card, this server can create only individual ' +
+          'cards, and group members are not editable here.',
         recovery: 'Edit it in the Fastmail web interface instead.',
       }));
     }
@@ -505,15 +505,16 @@ export class ContactsCalendarClient extends JmapClient {
    * write and discard the only thing the caller could still act on. `deletedCard` is then
    * undefined and the tool states the degrade.
    *
-   * A contact GROUP is refused outright — see the guard below.
+   * A card of any kind but an individual (a group, an org, ...) is refused outright; see the
+   * guard below.
    */
   async deleteContact(id: string, expectState?: string): Promise<DeleteContactResult> {
     const accountId = await this.contactsAccountId();
 
-    // A group is refused because `create_contact` has no `kind` and no `members` parameter, so
-    // the echoed card could not rebuild a membership list that on a real card runs to a
-    // hundred-odd uids (CONTRIBUTING.md, "A destroy must not remove what the
-    // server cannot recreate"; the test is the record KIND, not its fields).
+    // Any kind but an individual is refused because `create_contact` has no `kind` (or
+    // `members`) parameter, so the echoed card could not be put back (CONTRIBUTING.md, "A
+    // destroy must not remove what the server cannot recreate"; the test is the record KIND,
+    // not its fields).
     //
     // It costs its own round trip: a JMAP batch cannot make one method conditional on
     // another's result, so the card has to be read in a request that completes before the
@@ -523,14 +524,16 @@ export class ContactsCalendarClient extends JmapClient {
     // throwing. A card the account simply does not hold reads as undefined and falls through
     // to the destroy, whose own `notFound` is the authoritative answer for a bad id.
     const doomedCard = await this.fetchCardOrUndefined(accountId, id);
-    if (isContactGroupCard(doomedCard)) {
-      throw new InvalidInputError(contactGroupRefusal({
+    const refusedKind = refusedContactKind(doomedCard);
+    if (refusedKind) {
+      throw new InvalidInputError(contactKindRefusal({
         id,
+        kind: refusedKind,
         tool: 'delete_contact',
         because:
-          'this server cannot create a group — create_contact has no kind or members parameter — so it ' +
-          'will not destroy one it could never put back, and the deletedCard echo could not rebuild its ' +
-          'members either.',
+          'this server can create only individual cards (it cannot create a group or any other kind; ' +
+          'create_contact has no kind or members parameter), so it will not destroy one it could never ' +
+          'put back, and the deletedCard echo could not rebuild it either.',
         recovery: 'Delete it in the Fastmail web interface instead.',
       }));
     }

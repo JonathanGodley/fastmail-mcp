@@ -5,7 +5,7 @@ import {
   buildEntryMap,
   contactCardKind,
   isAmbiguousEntryEdit,
-  isContactGroupCard,
+  refusedContactKind,
   nonDefaultContactKind,
   mergeContactName,
   mergeContactNotes,
@@ -351,31 +351,25 @@ describe('nonDefaultContactKind', () => {
   });
 });
 
-describe('isContactGroupCard', () => {
-  it('recognises a group', () => {
-    assert.equal(isContactGroupCard({ kind: 'group' }), true);
+describe('refusedContactKind', () => {
+  it('refuses every kind create_contact cannot produce', () => {
+    // create_contact has no kind parameter, so it makes individuals only.
+    for (const kind of ['group', 'org', 'location', 'device', 'application', 'x-custom']) {
+      assert.equal(refusedContactKind({ kind }), kind);
+    }
   });
 
-  it('does not treat other non-person kinds as groups', () => {
-    // Only a group is refused by the write tools: it is the one kind whose whole content is a
-    // members list this server has no surface for. An org card is an ordinary card that
-    // update_contact and delete_contact can still handle.
-    for (const kind of ['org', 'location', 'device', 'application', 'individual']) {
-      assert.equal(isContactGroupCard({ kind }), false, kind);
-    }
-    assert.equal(isContactGroupCard({}), false);
-    assert.equal(isContactGroupCard(undefined), false);
+  it('allows an individual, and a card with no kind, which reads as one', () => {
+    assert.equal(refusedContactKind({ kind: 'individual' }), undefined);
+    assert.equal(refusedContactKind({}), undefined);
+    assert.equal(refusedContactKind(undefined), undefined);
   });
 
   it('agrees with the kind the read surface surfaces', () => {
-    // The read shows a value and the write refuses on one: the same card must not read as a
-    // group in one place and not the other.
-    const group = { id: 'G1', kind: 'group' };
-    assert.equal(isContactGroupCard(group), true);
-    assert.equal(nonDefaultContactKind(group), 'group');
-
-    const person = { id: 'C1', kind: 'individual' };
-    assert.equal(isContactGroupCard(person), false);
-    assert.equal(nonDefaultContactKind(person), undefined);
+    // The read shows a value and the write refuses on one: the same card must not read as
+    // refusable in one place and not the other.
+    for (const card of [{ id: 'G1', kind: 'group' }, { id: 'C1', kind: 'individual' }, { id: 'O1', kind: 'org' }]) {
+      assert.equal(refusedContactKind(card), nonDefaultContactKind(card));
+    }
   });
 });

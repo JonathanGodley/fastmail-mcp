@@ -450,9 +450,9 @@ by what the tool can actually write back, not by what the echo contains.
 **Where that bound turns into a refusal.** An echo that cannot rebuild a *field* is a
 documented limit; a destroy aimed at a record the create surface cannot produce **at all** is
 refused outright, because there the echo is worth nothing. That is why `delete_contact` rejects
-a contact GROUP: `create_contact` has no `kind` and no `members` parameter, so a group destroyed
-here is gone for good, `deletedCard` included. `update_contact` refuses the same card kind, and
-both raise it through one shared message. The test is the record KIND, not its fields; the
+every card whose kind is not `individual` (a group, an org, ...): `create_contact` has no `kind`
+and no `members` parameter, so such a card destroyed here is gone for good, `deletedCard`
+included. `update_contact` refuses the same kinds, and both raise it through one shared message. The test is the record KIND, not its fields; the
 general rule and its granularity are in `CONTRIBUTING.md` ("A destroy must not remove what the
 server cannot recreate") because it governs delete paths not yet written.
 
@@ -854,7 +854,7 @@ format and control-character rejects, the participant-address rejects, a `calend
 `eventId` that resolves to nothing, and the repeating-event refusal that
 `update_calendar_event` / `delete_calendar_event` raise (see below). `src/contacts-calendar.ts` follows it too — its
 input rejects (a contact with neither name nor address, an update naming no field, an
-empty entry array, an ambiguous entry edit, an update aimed at a contact group) and its
+empty entry array, an ambiguous entry edit, an update aimed at a card that is not an individual) and its
 not-found rejects are `InvalidInputError`, and its create/update/delete set-errors route
 through the same `throwSingleSetError` classifier the mail writes use. That classifier puts
 a `forbidden` on the operational side, so a contacts token issued read-only surfaces as an

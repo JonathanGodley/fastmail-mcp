@@ -747,6 +747,19 @@ describe('updateContact merge', () => {
     assert.equal(makeReq.mock.calls.length, 1, 'a group must be refused before any write');
   });
 
+  it('refuses to update an org card, which create_contact cannot produce', async () => {
+    const makeReq = stubUpdate(client, { id: 'O1', kind: 'org', name: { full: 'Acme' } });
+    await assert.rejects(
+      () => client.updateContact('O1', { name: { full: 'Renamed' } }),
+      (err: Error) => {
+        assert.equal(err.name, 'InvalidInputError');
+        assert.match(err.message, /kind "org"/);
+        return true;
+      },
+    );
+    assert.equal(makeReq.mock.calls.length, 1, 'an org card must be refused before any write');
+  });
+
   it('echoes the pre-edit card and returns the read-back card', async () => {
     const before = storedCard();
     const after = storedCard({ notes: { n0: { note: 'hello' } } });
@@ -973,6 +986,37 @@ describe('deleteContact', () => {
         assert.notEqual(methodCall[0], 'ContactCard/set', 'a group must be refused before any destroy');
       }
     }
+  });
+
+  for (const kind of ['org', 'location', 'device', 'application', 'x-custom']) {
+    it(`refuses to delete a card of kind ${kind}, which create_contact cannot produce`, async () => {
+      const makeReq = stubMakeRequest(
+        client,
+        destroyResponse({ id: 'K1', kind, name: { full: 'Thing' } }, { destroyed: ['K1'] }),
+      );
+      await assert.rejects(
+        () => client.deleteContact('K1'),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, new RegExp(`kind "${kind}"`));
+          assert.match(err.message, /only individual/);
+          return true;
+        },
+      );
+      for (const call of makeReq.mock.calls) {
+        for (const methodCall of call.arguments[0].methodCalls) {
+          assert.notEqual(methodCall[0], 'ContactCard/set', `a ${kind} card must be refused before any destroy`);
+        }
+      }
+    });
+  }
+
+  it('deletes a card with no kind at all, which reads as an individual', async () => {
+    const card = { id: 'C1', name: { full: 'Ada Lovelace' } };
+    const makeReq = stubMakeRequest(client, destroyResponse(card, { destroyed: ['C1'] }));
+    const result = await client.deleteContact('C1');
+    assert.deepEqual(result.deletedCard, card);
+    assert.deepEqual(destroyRequest(makeReq).methodCalls[1][1].destroy, ['C1']);
   });
 
   it('deletes an ordinary card and still echoes it, so the group guard is scoped to the kind', async () => {
