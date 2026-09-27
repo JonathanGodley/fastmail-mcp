@@ -2527,8 +2527,6 @@ describe('sendDraft', () => {
     );
   });
 
-  // A mailbox name is account-controlled, so it must not be able to close the location list
-  // and write sentences of its own into the refusal.
   it('names each location as a sanitised, quoted value that cannot forge text', async () => {
     // Short enough that no truncation hides the quote or the newline.
     mock.method(client, 'getMailboxes', async () => [
