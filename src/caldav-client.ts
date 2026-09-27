@@ -3512,6 +3512,14 @@ export class CalDAVCalendarClient {
     /** Free/busy (#194); overrides the all-day default. See the TRANSP block below. */
     transparency?: string;
   }): Promise<CreateCalendarEventResult> {
+    // Before discovery, and by update's rules: escapeICalText throws a TypeError on a non-string.
+    const title = requireNonEmpty(event.title, 'title', 'pass the event title');
+    for (const [name, value] of [['description', event.description], ['location', event.location]] as const) {
+      if (value != null && typeof value !== 'string') {
+        throw new InvalidInputError(`${name} must be a string; received ${Array.isArray(value) ? 'array' : typeof value}.`);
+      }
+    }
+
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
@@ -3574,7 +3582,7 @@ export class CalDAVCalendarClient {
       `LAST-MODIFIED:${now}`,
       startLine,
       endLine,
-      foldICalLine(`SUMMARY:${escapeICalText(event.title)}`),
+      foldICalLine(`SUMMARY:${escapeICalText(title)}`),
     ];
 
     // ALL-DAY IS WRITTEN FREE, TIMED IS LEFT BUSY: the Fastmail client's defaults (#195,

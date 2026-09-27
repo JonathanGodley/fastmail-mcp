@@ -1402,7 +1402,7 @@ const TOOLS = [
             },
             title: {
               type: 'string',
-              description: `Event title (max ${MAX_ICAL_FIELD_KB}KB)`,
+              description: `Event title (max ${MAX_ICAL_FIELD_KB}KB). Surrounding whitespace is trimmed, and a whitespace-only title is rejected, as on update_calendar_event.`,
             },
             description: {
               type: 'string',

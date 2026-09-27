@@ -5209,6 +5209,35 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     }
   });
 
+  it('refuses a non-string or blank title, and a non-string description or location, before any network call', async () => {
+    const base = { calendarId: 'Personal', title: 'T', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' };
+    for (const [label, patch, message] of [
+      ['numeric title', { title: 5 }, /title cannot be empty/],
+      ['whitespace-only title', { title: '   ' }, /title cannot be empty/],
+      ['numeric description', { description: 5 }, /description must be a string; received number/],
+      ['object location', { location: {} }, /location must be a string; received object/],
+    ] as Array<[string, Record<string, unknown>, RegExp]>) {
+      const { client, mockDAVClient } = createMockedCreateClient();
+      await assert.rejects(
+        () => client.createCalendarEvent({ ...base, ...patch } as Parameters<CalDAVCalendarClient['createCalendarEvent']>[0]),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError', label);
+          assert.match(err.message, message, label);
+          return true;
+        },
+      );
+      assert.equal(mockDAVClient.fetchCalendars.mock.callCount(), 0, label);
+      assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0, label);
+    }
+  });
+
+  it('writes the title trimmed, as update does', async () => {
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await client.createCalendarEvent({ calendarId: 'Personal', title: '  Standup  ', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' });
+    const written = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+    assert.ok(written.includes('\r\nSUMMARY:Standup\r\n'), written);
+  });
+
   it('rejects a day its month does not have instead of rolling it into the next one', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await assert.rejects(
