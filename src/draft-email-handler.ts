@@ -398,8 +398,8 @@ function quoteBlock(content: string | undefined, anyForm: boolean): BodyBlock {
  * The identity has a signature and the caller placed none.
  *
  * Presence only, tested against the PRE-expansion body, so it cannot false-fire; and it
- * tests a SUPPLIED body, so an attachment-only stash, a body-less reply and an asAttachment
- * filler get no warning. It fires on every deliberately unsigned message, which is the
+ * tests a SUPPLIED non-blank body, so an attachment-only stash, a body-less reply and an
+ * asAttachment filler get no warning. It fires on every deliberately unsigned message, which is the
  * accepted cost of covering a body stored with no sign-off and nothing said.
  */
 function noteSignatureNotPlaced(identityEmail: string | undefined): string {
@@ -1109,9 +1109,9 @@ export async function composeDraftEmail(
     }),
     ...emptyTokenNotes(expansions),
     ...(forwardTextFormOnly ? [NOTE_FORWARD_TEXT_FORM] : []),
-    // Presence only, on a SUPPLIED body, so a body-less reply and an attachment-only stash
-    // are silent.
-    ...(!signaturePlaced && signature && supplied.length > 0
+    // Presence only, on a SUPPLIED non-blank body, so a body-less reply (a blank part
+    // included) and an attachment-only stash are silent.
+    ...(!signaturePlaced && signature && supplied.some((p) => !isBlank(p.authored))
       ? [noteSignatureNotPlaced(identity?.email ?? fromAddress)]
       : []),
     ...(mode === 'reply' && !historyPlaced ? [NOTE_REPLY_UNQUOTED] : []),

@@ -555,6 +555,17 @@ describe('draft_email — nothing is added that the caller did not place', () =>
     assert.ok(r.notes!.some((n) => /has a signature; this body has no \{\{signature\}\}/.test(n)));
   });
 
+  it('says nothing about the signature on a reply whose only supplied body is blank', async () => {
+    for (const blank of [{ htmlBody: '' }, { textBody: '   ' }, { textBody: '', htmlBody: ' ' }]) {
+      const { client } = spyClient();
+      const r = await compose({ mode: 'reply', originalEmailId: 'o1', ...blank }, client);
+      assert.ok(
+        (r.notes ?? []).every((n) => !/has a signature/.test(n)),
+        `${JSON.stringify(blank)}: ${JSON.stringify(r.notes)}`,
+      );
+    }
+  });
+
   it('says nothing about the signature when the identity has none', async () => {
     const { client } = spyClient(makeOriginal(), { getIdentities: async () => [UNSIGNED_IDENTITY] });
     const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'hi\n{{quote}}' }, client);
