@@ -247,7 +247,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 All data-returning tools simplify responses by default to reduce token usage. Three optional parameters control how much data is returned:
 
-- **Default** — a curated, cleaned response. Email addresses are strings instead of objects (an identity's `replyTo` and `bcc` are the exception, below), boolean flags replace keyword maps, null/empty fields are stripped, and only the most useful fields are included.
+- **Default** — a curated, cleaned response. In email message data, addresses are strings instead of objects, boolean flags replace keyword maps, null/empty fields are stripped, and only the most useful fields are included.
 - **`verbose: true`** — all fields, still in the simplified shape. Use this when you need data the default omits (e.g. HTML body, mailbox permissions, contact addresses) without dealing with raw JMAP structures.
 - **`raw: true`** — the original JMAP response with no transformation. Use this for debugging or when you need exact JMAP field names and structures.
 - **`fields: [...]`** — the opposite direction: return *only* the named fields. See [Field projection](#field-projection-fields).
