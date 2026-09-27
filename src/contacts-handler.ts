@@ -36,33 +36,19 @@ export interface ContactsWriteClient {
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
 
-// `expectState` is deliberately NOT a parameter of any of these tools, even though the client
-// methods accept it and pass it through as `ifInState`.
-//
-// It guards a write against a concurrent change by naming the JMAP state string the caller
-// expects the account to still be in — but no read tool on this server surfaces that string,
-// so a caller has no way to obtain a correct value. The only things it could pass are a guess
-// (which fails every write with a stateMismatch) or nothing at all, and a parameter whose only
-// honest value is "omit it" is a parameter that misleads. The pre-edit `previousCard` echo
-// covers the case it was reached for anyway: an overwrite made from a stale copy is visible in
-// the response rather than prevented.
-//
-// The client argument and its tests stay, so exposing it later is one line. Doing so means
-// surfacing `state` on the contacts READS first, then accepting it here — in that order,
-// because a guard nobody can supply a value for is worse than no guard.
+// `expectState` is deliberately NOT a parameter of any of these tools, though the client
+// methods accept it (as `ifInState`). No read tool surfaces the JMAP state string, so a
+// caller could only guess (failing every write with a stateMismatch) or omit it. The
+// `previousCard` echo makes a stale-copy overwrite visible instead. To expose it, surface
+// `state` on the contacts reads first, then accept it here.
 
 // The pre-edit and pre-destroy echoes are ALWAYS the untransformed JMAP card, whatever
-// `verbose` or `raw` say. Their purpose is to keep visible whatever the write took away, which
-// needs every field, including the per-entry `contexts` and `pref` the simplified shape folds
-// into a bare string. Those are precisely the fields the merge exists to protect, so a
-// simplified echo would drop exactly what the caller most needs to see it lost. `raw`/`verbose`
-// therefore govern the CARD the tool returns, never the echo.
+// `verbose` or `raw` say: the simplified shape folds away the per-entry `contexts` and
+// `pref`, which are exactly the fields the merge protects.
 //
-// What the echo is NOT is a restore. This server writes a name, emails, phones, addresses and
-// a note; nothing here can put back photos, titles, organizations, nicknames, URLs,
-// anniversaries, group membership, the uid, or a per-entry `contexts`/`pref`. So the echo
-// makes a bad write legible and partly repairable, and the rest is a job for a Fastmail
-// client. Descriptions and docs must say that, rather than promising a clean recreate.
+// The echo is NOT a restore: nothing here can put back photos, titles, organizations,
+// nicknames, URLs, anniversaries, group membership, the uid, or a per-entry
+// `contexts`/`pref`. Descriptions and docs must not promise a clean recreate.
 
 function coerceContactNotes(value: unknown, hint: string): string | undefined {
   if (value === undefined || value === null) return undefined;
@@ -100,9 +86,8 @@ function renderCard(card: any, raw: boolean, verbose: boolean): any {
 }
 
 /**
- * create_contact. The card is read back after the write so the tool returns the same shape
- * `get_contact` does — including the id, uid and prodId the server assigns — rather than a
- * bare id the caller then has to fetch.
+ * create_contact. Reads the card back so the tool returns the `get_contact` shape, including
+ * the server-assigned id, uid and prodId.
  */
 export async function createContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
   const raw = coerceBool(args?.raw) ?? false;
@@ -121,10 +106,7 @@ export async function createContactTool(args: any, client: ContactsWriteClient):
   return [{ type: 'text', text: toolJson(renderCard(card, raw, verbose)) }];
 }
 
-/**
- * update_contact. Returns `{contact, previousCard}` in every mode — see the note above for why
- * the echo is not subject to `raw`/`verbose`.
- */
+/** update_contact. Returns `{contact, previousCard}` in every mode. */
 export async function updateContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
   const raw = coerceBool(args?.raw) ?? false;
   const verbose = coerceBool(args?.verbose) ?? false;
@@ -148,8 +130,6 @@ export async function updateContactTool(args: any, client: ContactsWriteClient):
 
   const content: ToolContent = [{ type: 'text', text: toolJson(envelope) }];
   if (result.contact === undefined) {
-    // Never-silent degrade: the write landed, the read-back that rides with it did not come
-    // back, so the promised `contact` field is absent and says why rather than vanishing.
     content.push({
       type: 'text',
       text:
@@ -162,9 +142,8 @@ export async function updateContactTool(args: any, client: ContactsWriteClient):
 }
 
 /**
- * delete_contact. Takes no `raw`/`verbose`: the only card it returns is `deletedCard`, which is
- * always untransformed, so either parameter could only be a no-op — and a parameter that
- * quietly does nothing is what the unknown-parameter guard exists to prevent.
+ * delete_contact. Takes no `raw`/`verbose`: its only card, `deletedCard`, is always
+ * untransformed, so either parameter would be a silent no-op.
  */
 export async function deleteContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
   const contactId = requireContactId(args);
@@ -174,9 +153,7 @@ export async function deleteContactTool(args: any, client: ContactsWriteClient):
     { type: 'text', text: toolJson({ deleted: contactId, deletedCard }) },
   ];
   if (deletedCard === undefined) {
-    // The one degrade that cannot be retried out of: the contact is gone and no copy of it
-    // came back. Saying so loudly is all that is left — the alternative, throwing, would
-    // report a failure for a completed irreversible write and lose the fact that it happened.
+    // Not a throw: that would report a failure for a completed irreversible write.
     content.push({
       type: 'text',
       text:
