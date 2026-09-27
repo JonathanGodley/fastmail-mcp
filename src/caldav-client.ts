@@ -417,6 +417,25 @@ export function extractTzidParam(line: string): string | undefined {
 }
 
 /**
+ * Which content lines start a property of the block itself: not a folded continuation, not a
+ * BEGIN:/END: marker, and not inside a nested component. A VALARM's DESCRIPTION, ATTENDEE,
+ * DURATION or UID is the alarm's; read as the event's, an update writes the alarm's recipient
+ * back as a real ATTENDEE. The block may open with its own BEGIN: line or be bare properties.
+ */
+function ownPropertyLines(lines: string[]): boolean[] {
+  let depth = 0;
+  let base: number | undefined;
+  return lines.map((text) => {
+    const marker = structuralLine(text);
+    if (marker === null) return false;
+    if (base === undefined && marker !== '') base = marker.startsWith('BEGIN:') ? 1 : 0;
+    if (marker.startsWith('BEGIN:')) { depth++; return false; }
+    if (marker.startsWith('END:')) { depth--; return false; }
+    return depth <= (base ?? 0);
+  });
+}
+
+/**
  * The first matching property's value in a VEVENT block, unfolded. Whole content lines only
  * (see the line-model comment above): this read decides which record a destroy resolves to.
  *
@@ -427,10 +446,11 @@ export function extractTzidParam(line: string): string | undefined {
  */
 export function parseICalValue(vevent: string, key: string): string | undefined {
   const lines = icalContentLines(vevent).map(l => l.text);
+  const own = ownPropertyLines(lines);
   const test = new RegExp(`^${key}[;:]`);
 
   for (let i = 0; i < lines.length; i++) {
-    if (isFoldedContinuation(lines[i])) continue;
+    if (!own[i]) continue;
     const line = lines[i].replace(/\r$/, '');
     if (!test.test(line)) continue;
 
@@ -459,11 +479,12 @@ export function parseICalValue(vevent: string, key: string): string | undefined 
  */
 export function parseAllICalProperties(vevent: string, key: string): string[] {
   const lines = icalContentLines(vevent).map(l => l.text);
+  const own = ownPropertyLines(lines);
   const regex = new RegExp(`^${key}[;:]`);
   const results: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
-    if (isFoldedContinuation(lines[i])) continue;
+    if (!own[i]) continue;
     const line = lines[i].replace(/\r$/, '');
     if (!regex.test(line)) continue;
 

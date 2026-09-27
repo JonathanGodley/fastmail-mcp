@@ -2358,6 +2358,51 @@ describe('parseAllICalProperties', () => {
   });
 });
 
+describe('a VALARM\'s properties are its own, not the event\'s', () => {
+  // An email alarm (RFC 5545 §3.6.6) carries DESCRIPTION, SUMMARY, ATTENDEE and DURATION; with
+  // RFC 9074 it may carry a UID too.
+  const alarm = [
+    'BEGIN:VALARM',
+    'UID:alarm-uid@fm',
+    'ACTION:EMAIL',
+    'TRIGGER:-PT15M',
+    'REPEAT:3',
+    'DURATION:PT5M',
+    'SUMMARY:Alarm subject',
+    'DESCRIPTION:This is an event reminder',
+    'ATTENDEE:mailto:someone@example.com',
+    'END:VALARM',
+  ];
+  const vevent = ['BEGIN:VEVENT', 'DTSTART;VALUE=DATE:20261010', ...alarm, 'END:VEVENT'].join('\r\n');
+  const data = ['BEGIN:VCALENDAR', vevent, 'END:VCALENDAR'].join('\r\n');
+
+  it('parseICalValue skips a VALARM\'s lines', () => {
+    for (const key of ['DESCRIPTION', 'SUMMARY', 'DURATION', 'UID']) {
+      assert.equal(parseICalValue(vevent, key), undefined, key);
+    }
+    assert.equal(parseICalValue(vevent, 'DTSTART'), '20261010');
+  });
+
+  it('parseAllICalProperties skips a VALARM\'s lines', () => {
+    assert.deepEqual(parseAllICalProperties(vevent, 'ATTENDEE'), []);
+  });
+
+  it('still reads the event\'s own property that follows a VALARM', () => {
+    const after = ['BEGIN:VEVENT', 'DTSTART;VALUE=DATE:20261010', ...alarm, 'ATTENDEE:mailto:guest@example.com', 'END:VEVENT'].join('\n');
+    assert.deepEqual(parseAllICalProperties(after, 'ATTENDEE'), ['ATTENDEE:mailto:guest@example.com']);
+  });
+
+  it('parseCalendarObject reads no description, title, end, id or participant from the alarm', () => {
+    const event = parseCalendarObject({ data, url: '/cal/alarm.ics' }, { includeParticipants: true, configuredZone: 'UTC' });
+    assert.equal(event.description, undefined);
+    assert.equal(event.title, 'Untitled');
+    assert.equal(event.start, '2026-10-10');
+    assert.equal(event.end, undefined, 'the alarm\'s DURATION is not the event\'s');
+    assert.equal(event.id, '/cal/alarm.ics');
+    assert.equal(event.participants, undefined);
+  });
+});
+
 describe('parseAttendee', () => {
   it('parses simple ATTENDEE with CN', () => {
     const result = parseAttendee('ATTENDEE;CN=Alice:mailto:alice@example.com');
