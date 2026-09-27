@@ -530,7 +530,7 @@ describe('timeZone / endTimeZone (#139)', () => {
       'END:VCALENDAR',
     ].join('\r\n');
     const event = parseCalendarObject({ data, url: '' }, { configuredZone: CONFIGURED });
-    assert.match(event.start, /Z$/, 'start keeps its Z');
+    assert.match(event.start ?? '', /Z$/, 'start keeps its Z');
     assert.equal(event.timeZone, undefined, 'a Z start never carries timeZone');
     assert.equal(event.endTimeZone, undefined, 'a Z end never carries endTimeZone');
   });
