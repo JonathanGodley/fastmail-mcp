@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, etcGmtOffsetNote, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -1576,6 +1576,26 @@ describe('describeTimezone', () => {
     assert.ok(host && host.length > 0);
     assert.equal(host, Intl.DateTimeFormat().resolvedOptions().timeZone);
   });
+
+  it('shows an Etc/GMT zone\'s real offset beside its inverted name', () => {
+    assert.equal(describeTimezone('Etc/GMT+10'), 'Etc/GMT+10 (UTC-10:00; the Etc/GMT sign is inverted)');
+  });
+});
+
+describe('etcGmtOffsetNote', () => {
+  for (const [zone, note] of [
+    ['Etc/GMT+10', ' (UTC-10:00; the Etc/GMT sign is inverted)'],
+    ['Etc/GMT-14', ' (UTC+14:00; the Etc/GMT sign is inverted)'],
+    ['etc/gmt+5', ' (UTC-05:00; the Etc/GMT sign is inverted)'],
+    ['Etc/GMT', ''],
+    ['Etc/GMT+0', ''],
+    ['Etc/UTC', ''],
+    ['Australia/Sydney', ''],
+    ['Etc/GMT+10x', ''],
+    ['Foo/Etc/GMT+10', ''],
+  ] as const) {
+    it(`"${zone}" -> "${note}"`, () => assert.equal(etcGmtOffsetNote(zone), note));
+  }
 });
 
 // resolveUsableTimezone (#139) is the single decision point describeTimezone and every calendar
@@ -1757,10 +1777,7 @@ describe('validateCallerTimezone', () => {
     assert.throws(() => validateCallerTimezone('5Etc/Something'), /not a fixed UTC offset/);
   });
 
-  // The denylist must not overreach: these are legitimate IANA names that happen to fail the
-  // GMT/UTC/UT/leading-digit shapes only superficially (Etc/GMT-10 embeds a POSIX-style sign
-  // AFTER the name, not at the start) and must still resolve via isUsableTimezone. Both are
-  // also unchanged by canonicalisation (an Etc/GMT offset name is already ICU-canonical).
+  // Why Etc/GMT names stay accepted: docs/conventions.md, "Etc/GMT±N is accepted".
   // EST5EDT is a real, non-offset-shaped IANA name too, but it has no region-qualifying slash,
   // so the slash rule below rejects it as shorthand.
   for (const [legit, canonical] of [

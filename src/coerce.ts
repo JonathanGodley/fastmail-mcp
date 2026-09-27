@@ -661,15 +661,32 @@ export function resolveConfiguredTimezone(
 }
 
 /**
+ * The real UTC offset of a signed `Etc/GMT` zone, to show beside its name, or `''` for any
+ * other zone. These names carry the POSIX sign, the inverse of the offset: `Etc/GMT+10` is
+ * UTC-10:00. They are accepted (docs/conventions.md), so wherever one is shown this goes with it.
+ */
+export function etcGmtOffsetNote(zone: string): string {
+  const offset = etcGmtUtcOffset(zone);
+  return offset ? ` (UTC${offset}; the Etc/GMT sign is inverted)` : '';
+}
+
+/** A signed `Etc/GMT` zone's real offset as `-10:00`, or undefined for any other zone. */
+export function etcGmtUtcOffset(zone: string): string | undefined {
+  const m = /^Etc\/GMT([+-])(\d{1,2})$/i.exec(zone);
+  if (!m || Number(m[2]) === 0) return undefined;
+  return `${m[1] === '+' ? '-' : '+'}${m[2].padStart(2, '0')}:00`;
+}
+
+/**
  * The IANA name to show a caller, resolving `undefined` to whatever the host zone is.
  *
- * Names the zone and nothing else: this string lands in every date rejection, so where the
+ * Names the zone (plus `etcGmtOffsetNote`) and nothing else: this string lands in every date rejection, so where the
  * zone came from belongs in the tool description instead. A name ICU cannot resolve is flagged
  * as such rather than printed as though dates were read in it.
  */
 export function describeTimezone(zone: string | undefined): string {
   if (!zone) return hostTimezone();
-  if (isUsableTimezone(zone)) return zone;
+  if (isUsableTimezone(zone)) return `${zone}${etcGmtOffsetNote(zone)}`;
   const echoed = echoCallerText(zone, ZONE_ECHO_LIMIT);
   return `"${echoed}" (the configured time zone, which is not a time zone this server can resolve)`;
 }
