@@ -265,9 +265,7 @@ the second pass, where the only `Z` among them is the `UNTIL`. Read it as scoped
 not to the resource: the housekeeping timestamps (`CREATED`, `DTSTAMP`, `LAST-MODIFIED`, `TZUNTIL`)
 are UTC throughout. That is the measured ratification of the write model this server ships
 (#139, #157): a zone name plus wall clock in both directions, and an omitted zone writing the
-configured zone rather than leaving the value floating. The scheduling values match what the client
-authors; the bytes do not, since this server also writes a `DTEND` and an embedded `VTIMEZONE`
-where the client does not.
+configured zone rather than leaving the value floating.
 
 **All-day means `VALUE=DATE`, not a midnight-to-midnight timed span.** Both all-day shapes carry a
 date-only `DTSTART`, and the multi-day one ends with a date-only `DTEND` one day past the last day
