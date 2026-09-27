@@ -36,9 +36,8 @@ export interface ContactsWriteClient {
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
 
-// No tool takes a JMAP state string: no read tool surfaces one. The client guards each write
-// with the state of its own pre-write read instead (`fetchCard`), so a stale merge is refused
-// with a retry hint rather than written.
+// No tool takes a JMAP state string, since no read tool surfaces one; the client guards each
+// write with its own pre-write read's state instead (`fetchCard`).
 
 // The pre-edit and pre-destroy echoes are ALWAYS the untransformed JMAP card, whatever
 // `verbose` or `raw` say: the simplified shape folds away the per-entry `contexts` and

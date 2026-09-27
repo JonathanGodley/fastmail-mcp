@@ -539,8 +539,7 @@ const labelMailboxesDesc = (verb: 'add' | 'remove') =>
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
   LENIENT_LIST_DESC;
 
-// $seen is an aggregate over a message's per-mailbox copies, so any change of filing can change
-// the read state a message reports, with no keyword written. Shared by every filing tool.
+// Shared by every tool that changes a message's filing, delete included.
 const SEEN_AGGREGATE_DESC =
   'No keyword is written, but that is not the same as the read state being untouched: $seen is reported only when every one of a message\'s per-mailbox copies carries it, so dropping an unread copy (an unread Inbox copy, typically) can flip a message to read.';
 

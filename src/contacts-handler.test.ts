@@ -73,8 +73,6 @@ describe('createContactTool', () => {
   });
 
   it('reports the created id, not a failure, when only the read-back fails', async () => {
-    // The create has already happened, so a thrown error would invite a retry that
-    // duplicates the contact.
     const { client, calls } = makeClient();
     client.getContactById = async () => { throw new Error('read failed'); };
     const content = await createContactTool({ name: 'Ada Lovelace' }, client);

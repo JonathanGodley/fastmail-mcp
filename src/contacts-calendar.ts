@@ -440,9 +440,6 @@ export class ContactsCalendarClient extends JmapClient {
       throw new InvalidInputError(`Contact not found: ${id}`);
     }
 
-    // This tool's parameters describe a person card, and a group's members are not editable
-    // here at all, so an update aimed at any other kind is refused rather than half-applied.
-    // deleteContact refuses the same kinds through the same message.
     const refusedKind = refusedContactKind(previousCard);
     if (refusedKind) {
       throw new InvalidInputError(contactKindRefusal({
@@ -534,19 +531,12 @@ export class ContactsCalendarClient extends JmapClient {
    * `error` entry must not throw: that would report a failure for a completed irreversible
    * write and discard the only thing the caller could still act on. `deletedCard` is then
    * undefined and the tool states the degrade.
-   *
-   * A card of any kind but an individual (a group, an org, ...) is refused outright; see the
-   * guard below.
    */
   async deleteContact(id: string): Promise<DeleteContactResult> {
     const accountId = await this.contactsAccountId();
 
-    // Any kind but an individual is refused because `create_contact` has no `kind` (or
-    // `members`) parameter, so the echoed card could not be put back (CONTRIBUTING.md, "A
-    // destroy must not remove what the server cannot recreate"; the test is the record KIND,
-    // not its fields).
-    //
-    // It costs its own round trip: a JMAP batch cannot make one method conditional on
+    // The kind refusal (CONTRIBUTING.md, "A destroy must not remove what the server cannot
+    // recreate") costs its own round trip: a JMAP batch cannot make one method conditional on
     // another's result, so the card has to be read in a request that completes before the
     // destroy is sent. The echo still comes from the read inside the destroy batch, so it
     // remains the card as it stood at the moment it was destroyed. A card that cannot be read

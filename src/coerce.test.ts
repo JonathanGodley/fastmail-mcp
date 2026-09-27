@@ -260,8 +260,6 @@ describe('coerceBool', () => {
   });
 
   it('refuses every other value, naming the parameter, rather than reading it as absent', () => {
-    // An unreadable value that became undefined would silently drop a search filter
-    // (unread:"yes") or fall back to a default the caller was trying to change.
     for (const v of ['yes', 'no', 'on', '', '  ', '2', 2, -1, 0.5, {}, [], ['true']]) {
       assert.throws(
         () => coerceBool(v, 'isUnread'),

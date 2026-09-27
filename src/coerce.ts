@@ -251,10 +251,8 @@ export function assertKnownParams(
   );
 }
 
-// A boolean parameter: true, "true" in any case, 1 or "1" read as true; false, "false", 0 or
-// "0" as false; null/undefined as absent. Anything else is REFUSED naming the parameter: read
-// as absent it would silently drop a filter (`isUnread:"yes"`) or keep the default the caller
-// was trying to change (`includeTrash:"1"`).
+// An unreadable value is REFUSED, not read as absent: absent would silently drop a filter
+// (`isUnread:"yes"`) or keep the default the caller was trying to change.
 export function coerceBool(value: unknown, paramName: string): boolean | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === 'boolean') return value;

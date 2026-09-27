@@ -3955,8 +3955,6 @@ describe('label removal never leaves a message filed nowhere (#132)', () => {
   });
 
   it('says plainly that the rest of the batch was written when an unknown id fails', async () => {
-    // An id the server does not know is not a batch-level rejection: the other messages are
-    // written, and the error must not read as though nothing changed.
     const makeReq = stubRemoval(client, { e1: { 'mb-receipts': true, 'mb-inbox': true } }, { updated: { e1: null } });
     await assert.rejects(
       () => client.bulkRemoveLabels(['e1', 'typo'], ['Receipts']),
