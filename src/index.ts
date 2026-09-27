@@ -2709,9 +2709,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             enablementGuide: contactsAvailable ? null : {
               steps: [
                 '1. Log into Fastmail web interface',
-                '2. Go to Settings → Privacy & Security → Connected Apps & API tokens',
+                '2. Go to Settings → Privacy & Security, and in the "Connected apps & API tokens" section click "Manage API tokens"',
                 '3. Check if contacts scope is enabled for your API token',
-                '4. If it is not, create a new API token with contacts access (read-write, to use create_contact/update_contact/delete_contact)'
+                '4. If it is not, click "New API token" and create one with contacts access (read-write, to use create_contact/update_contact/delete_contact)'
               ],
               documentation: 'https://www.fastmail.com/help/technical/jmap-api.html'
             }

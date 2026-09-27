@@ -82,10 +82,8 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
 
 1. Get your Fastmail API token:
    - Log in to Fastmail web interface
-   - Go to Settings → Privacy & Security
-   - Find "Connected apps & API tokens" section
-   - Click "Manage API tokens"
-   - Click "New API token"
+   - Go to **Settings → Privacy & Security**, and in the **Connected apps & API tokens** section click **Manage API tokens**
+   - Click **New API token**
    - Copy the generated token
 
 2. Set environment variables:

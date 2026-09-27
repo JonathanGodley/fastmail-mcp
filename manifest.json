@@ -31,7 +31,7 @@
     "fastmail_api_token": {
       "title": "Fastmail API Token",
       "type": "string",
-      "description": "Fastmail API token (Settings → Privacy & Security → API tokens)",
+      "description": "Fastmail API token (Settings → Privacy & Security → the \"Connected apps & API tokens\" section → \"Manage API tokens\" → \"New API token\")",
       "sensitive": true,
       "required": true
     },
