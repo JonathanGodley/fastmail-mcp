@@ -239,8 +239,9 @@ url, so a caller passing it back may mean either, and acting on the addressed re
 or destroy an event never shown under that id. That holds even when the addressed record's own
 UID is the same url: two rows then list one id. `addressCollisionError` refuses, names both
 records' urls, and quotes the addressed record's own UID where that UID reaches it alone; the
-other record's url reaches that one. Where it does not (no UID, the url itself, or a UID another
-record also holds, which the ambiguity refusal would then refuse in turn), the refusal offers no
+other record's url reaches that one. Where it does not (no UID, the url itself, a UID that is
+another resource's url, or a UID another record also holds, each of which a refusal would then
+refuse in turn), the refusal offers no
 id rather than one that loops, and names the Fastmail web interface. The url is
 therefore not an escape hatch in this one case, and saying "pass the url" would send the
 caller back to the id they passed. A url-shaped id with no resource at that address is

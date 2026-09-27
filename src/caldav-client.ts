@@ -3549,10 +3549,12 @@ export class CalDAVCalendarClient {
     let collision: CalendarObjectLookup['collision'];
     if (addressedIndex !== -1 && matches.slice(1).some(m => ownUid(m.object) === wanted)) {
       // Offer the addressed record's UID only where it reaches that record alone: not absent,
-      // not this same string, and not held by any other resolved record.
+      // not this same string, not another resource's url, and not held by any other resolved
+      // record.
       const uid = ownUid(matches[0].object);
       const addressedKey = addressComparisonKey(matches[0].object.url);
       const reachesAlone = uid !== undefined && uid !== '' && uid !== wanted
+        && resolveEventUrlTargets(uid, selectable).every(t => addressComparisonKey(t.objectUrl) === addressedKey)
         && !(await uidHolders(uid)).some(h => isResolvedCalendarObject(h.obj)
           && addressComparisonKey(h.obj.url) !== addressedKey);
       collision = { addressedUid: reachesAlone ? uid : undefined };

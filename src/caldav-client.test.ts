@@ -2012,6 +2012,21 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(read.addressCollision, { addressedUid: undefined });
   });
 
+  it('does not offer an addressed record\'s UID when that UID is another record\'s url', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const otherUrl = WORK_URL + 'other.ics';
+    const { client } = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [
+        { data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' },
+        { data: eventIcal('other@fm', 'Other'), url: otherUrl, etag: '"e-other"' },
+      ],
+      [PERSONAL_URL]: [{ data: eventIcal(otherUrl, 'Real'), url: realUrl, etag: '"e-real"' }],
+    });
+    const read = await client.getCalendarEventById(realUrl);
+    assert.equal(read.event.title, 'Real');
+    assert.deepEqual(read.addressCollision, { addressedUid: undefined });
+  });
+
   // A record whose UID is its own url, and a copy elsewhere carrying the same UID: both rows list
   // the id `.../self.ics`, so a caller acting on the Copy row's id must not reach self.ics.
   const SELF_URL = PERSONAL_URL + 'self.ics';
