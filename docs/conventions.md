@@ -1692,8 +1692,6 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
   skip rather than marking an arbitrary candidate — this is exactly the case the
   exact-instance header exists to avoid, and it remains reachable on drafts that lack
   the header (older drafts, foreign clients, a pointer that failed validation).
-  `edit_draft`'s guard never resolves at all and instead requires the caller to pass
-  `originalEmailId`, so a quote is never rebuilt from a message the caller didn't name.
 
 Platform facts behind the design (live-probed 2026-08-14 against Fastmail):
 
@@ -1710,8 +1708,7 @@ Platform facts behind the design (live-probed 2026-08-14 against Fastmail):
   source-id header gone). So a UI-edited reply/forward draft loses its exact-instance
   record, and `send_draft` degrades to the Message-ID fallback — the designed path for
   record-less drafts, and the reason that fallback stays load-bearing rather than
-  vestigial. A forward's edit guard is unaffected: it keys on `x-forwarded-message-id`,
-  which survives.
+  vestigial.
 - **EmailSubmission transmits stored headers verbatim.** The delivered copy of a
   self-forward still carried `x-forwarded-message-id`, and a reply sent from Fastmail's
   mobile app arrived still carrying `X-PersonalityId`. Header stripping at send is a
@@ -2412,8 +2409,7 @@ the first real component — inside a `VTIMEZONE`'s `TZNAME`, say — which open
 enough to swallow the zone rule's own `DTSTART` and report the event dated 1970.
 
 **"Every structural scan" includes the one that decides where to INSERT.** Of the four scans
-`replaceICalProperty` runs, the insert-position one was the last converted: it looks for the
-first sub-component so a new property lands before a `VALARM` (RFC 5545's `eventprop *alarmc`
+`replaceICalProperty` runs, the insert-position one looks for the first sub-component so a new property lands before a `VALARM` (RFC 5545's `eventprop *alarmc`
 order). A trimmed compare there would read ` BEGIN:phase two of the agenda` — the head of a
 folded `DESCRIPTION` — as that sub-component and would splice the new line into the MIDDLE of
 the description: the description would lose its tail and the inserted property would swallow
