@@ -853,7 +853,7 @@ const TOOLS = [
             },
             textBody: {
               type: 'string',
-              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Place the same tokens here as in htmlBody — a token in one supplied part but not the other is refused. A text-only reply or forward reproduces the original as plain text, which cannot show the images the original displayed: they are dropped and the result says how many. Must be a plain string: a body wrapped in a CDATA section is rejected.',
+              description: 'Plain-text body (optional). Use it for genuinely plain messages, or alongside htmlBody to provide your own plain-text alternative in place of the auto-generated one. Place the same tokens here as in htmlBody — a token in one supplied part but not the other is refused. A text-only reply or forward reproduces the original as plain text, which cannot show the images the original displayed: a reply drops them, and a forward carries them as regular attachments (left out when includeOriginalAttachments is false); the result says which. Must be a plain string: a body wrapped in a CDATA section is rejected.',
             },
             htmlBody: {
               type: 'string',
