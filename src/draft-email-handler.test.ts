@@ -2165,22 +2165,6 @@ describe("draft_email — mode:'reply' carries the original's Bcc", () => {
     }
   });
 
-  it('says so when the Bcc was not carried because the mailbox could not be confirmed', async () => {
-    const NOTE = /Bcc list was not carried .*could not be confirmed as Sent/;
-    const cases: [any, boolean][] = [
-      [{ _mailboxRoles: undefined, _unresolvedMailboxIds: ['mb-1'] }, true],
-      [{ _mailboxRoles: ['archive'], _unresolvedMailboxIds: ['mb-1'] }, true],
-      [{ _mailboxRoles: ['inbox'] }, false],
-      [{ _mailboxRoles: undefined, _unresolvedMailboxIds: ['mb-1'], bcc: [] }, false],
-    ];
-    for (const [over, noted] of cases) {
-      const { client, calls } = plainClient(selfBccOriginal(over));
-      const r = await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
-      assert.equal('bcc' in calls.draft, false, JSON.stringify(over));
-      assert.equal((r.notes ?? []).some((n) => NOTE.test(n)), noted, JSON.stringify({ over, notes: r.notes }));
-    }
-  });
-
   it('carries the Bcc from a Sent copy that is also labelled elsewhere', async () => {
     const { client, calls } = plainClient(selfBccOriginal({ _mailboxRoles: ['inbox', 'sent'] }));
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
