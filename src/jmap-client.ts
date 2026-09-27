@@ -1634,59 +1634,27 @@ export class JmapClient {
   // every caller reads `.id` straight away, and a missing one becomes the literal
   // "undefined" in a silently corrupt write.
   /**
-   * A DRAFT IS SENT OR EDITED ONLY FROM THE DRAFTS FOLDER: filed anywhere else, someone has
-   * made it something other than outbound mail, and an edit would recreate it there (a
-   * superseded draft sits in Trash with `$draft` kept). MEMBERSHIP, NOT EXCLUSIVITY: a label
-   * beside Drafts is not a move.
-   *
-   * EXACT role, never a name substring, which in front of an irreversible send would PERMIT
-   * a "Draft notes" folder. Both arms refuse: no drafts-role mailbox is not a permit.
+   * edit_draft refuses a draft filed in Trash. A superseded copy keeps `$draft` there, and the
+   * recreate carries the old copy's mailboxIds, so an edit would write the replacement into
+   * Trash too. A draft filed anywhere else (draft_email's `mailbox`) stays editable. A map
+   * this cannot read, or an account with no trash-role mailbox, is not refused here.
    */
-  private assertDraftInDrafts(filing: any, mailboxes: any[], verb: 'send' | 'edit'): any {
-    const tool = verb === 'send' ? 'send_draft' : 'edit_draft';
-    const nothingDone = verb === 'send' ? 'Nothing was sent.' : 'Nothing was changed.';
-    const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
-    if (!draftsMailbox) {
-      throw new Error(
-        'Could not find a Drafts mailbox (no mailbox in this account carries the "drafts" role), ' +
-        `so this draft cannot be confirmed to be in Drafts. ${tool} only ${verb}s a draft that is ` +
-        'in the Drafts folder.',
-      );
-    }
-    // Read like this file's other mailboxIds reads (see setErrorFor): hasOwnProperty, or
-    // "constructor" OPENS the gate; the VALUE must be `true`, not merely present; and
-    // isPlainResponseMap. Nothing on Fastmail produces these shapes, but this check stands in
-    // front of the only irreversible action here.
-    //
-    // AN UNREADABLE MAP GETS ITS OWN REFUSAL rather than `{}`, which would hand back a
-    // move_email repair for a draft that may already be in Drafts.
-    if (!isPlainResponseMap(filing)) {
-      throw new Error(
-        'The server returned this draft with no readable mailboxIds, so this server cannot ' +
-        `tell whether it is in the Drafts folder and will not ${verb} it. ${nothingDone} ` +
-        'This is a fault in the response rather than in the call, and no tool here can ' +
-        'repair it: report it rather than retrying.',
-      );
-    }
-    const inMailbox = (id: string) =>
-      Object.prototype.hasOwnProperty.call(filing, id) && filing[id] === true;
-
-    if (!inMailbox(draftsMailbox.id)) {
-      const filedIn = Object.keys(filing)
-        .filter(id => filing[id] === true)
-        .map(id => {
-          const mailbox = mailboxes.find(mb => mb?.id === id);
-          const name = describeUntrusted(mailbox?.name);
-          if (mailbox && name.trim() !== '') return `"${name}"`;
-          return `${mailbox ? 'unnamed' : 'unknown'} mailbox (id: "${describeUntrusted(id)}")`;
-        });
-      throw new InvalidInputError(
-        `This draft is not in the Drafts folder, so it will not be ${verb === 'send' ? 'sent' : 'edited'}` +
-        (filedIn.length > 0 ? ` (it is in: ${joinCapped(filedIn)})` : '') +
-        `. Move it back to Drafts with move_email and ${verb} it again.`,
-      );
-    }
-    return draftsMailbox;
+  private refuseTrashedDraftEdit(filing: any, mailboxes: any[]): void {
+    const trash = this.findByExactRole(mailboxes, 'trash');
+    if (!trash || !isPlainResponseMap(filing)) return;
+    if (!(Object.prototype.hasOwnProperty.call(filing, trash.id) && filing[trash.id] === true)) return;
+    const filedIn = Object.keys(filing)
+      .filter(id => filing[id] === true)
+      .map(id => {
+        const mailbox = mailboxes.find(mb => mb?.id === id);
+        const name = describeUntrusted(mailbox?.name);
+        if (mailbox && name.trim() !== '') return `"${name}"`;
+        return `${mailbox ? 'unnamed' : 'unknown'} mailbox (id: "${describeUntrusted(id)}")`;
+      });
+    throw new InvalidInputError(
+      `This draft is in Trash, so it will not be edited (it is in: ${joinCapped(filedIn)}). ` +
+      'Move it back to Drafts with move_email and edit it again.',
+    );
   }
 
   private findByExactRole(mailboxes: any[], role: string): any | undefined {
@@ -2093,7 +2061,7 @@ export class JmapClient {
     if (!existingEmail.keywords?.$draft) {
       throw new InvalidInputError('Cannot edit a non-draft email');
     }
-    this.assertDraftInDrafts(existingEmail.mailboxIds, await this.getMailboxes(), 'edit');
+    this.refuseTrashedDraftEdit(existingEmail.mailboxIds, await this.getMailboxes());
 
     const availability: AttachmentAvailability = {
       attachmentsEnabled: options.attachmentsEnabled !== false,
@@ -2982,7 +2950,54 @@ export class JmapClient {
     // One mailbox fetch serves both the Drafts gate below and the Sent target further down.
     const mailboxes = await this.getMailboxes();
 
-    const draftsMailbox = this.assertDraftInDrafts(email.mailboxIds, mailboxes, 'send');
+    // A DRAFT IS SENDABLE ONLY FROM THE DRAFTS FOLDER: filed anywhere else, someone has made
+    // it something other than outbound mail. MEMBERSHIP, NOT EXCLUSIVITY: a label beside
+    // Drafts is not a move.
+    //
+    // EXACT role, never a name substring, which in front of an irreversible send would
+    // PERMIT a "Draft notes" folder. Both arms refuse: no drafts-role mailbox is not a permit.
+    const draftsMailbox = this.findByExactRole(mailboxes, 'drafts');
+    if (!draftsMailbox) {
+      throw new Error(
+        'Could not find a Drafts mailbox (no mailbox in this account carries the "drafts" role), ' +
+        'so this draft cannot be confirmed to be in Drafts. send_draft only sends a draft that is ' +
+        'in the Drafts folder.',
+      );
+    }
+    // Read like this file's other mailboxIds reads (see setErrorFor): hasOwnProperty, or
+    // "constructor" OPENS the gate; the VALUE must be `true`, not merely present; and
+    // isPlainResponseMap. Nothing on Fastmail produces these shapes, but this check stands in
+    // front of the only irreversible action here.
+    //
+    // AN UNREADABLE MAP GETS ITS OWN REFUSAL rather than `{}`, which would hand back a
+    // move_email repair for a draft that may already be in Drafts.
+    const filing = email.mailboxIds;
+    if (!isPlainResponseMap(filing)) {
+      throw new Error(
+        'The server returned this draft with no readable mailboxIds, so this server cannot ' +
+        'tell whether it is in the Drafts folder and will not send it. Nothing was sent. ' +
+        'This is a fault in the response rather than in the call, and no tool here can ' +
+        'repair it: report it rather than retrying.',
+      );
+    }
+    const inMailbox = (id: string) =>
+      Object.prototype.hasOwnProperty.call(filing, id) && filing[id] === true;
+
+    if (!inMailbox(draftsMailbox.id)) {
+      const filedIn = Object.keys(filing)
+        .filter(id => filing[id] === true)
+        .map(id => {
+          const mailbox = mailboxes.find(mb => mb?.id === id);
+          const name = describeUntrusted(mailbox?.name);
+          if (mailbox && name.trim() !== '') return `"${name}"`;
+          return `${mailbox ? 'unnamed' : 'unknown'} mailbox (id: "${describeUntrusted(id)}")`;
+        });
+      throw new InvalidInputError(
+        'This draft is not in the Drafts folder, so it will not be sent' +
+        (filedIn.length > 0 ? ` (it is in: ${joinCapped(filedIn)})` : '') +
+        '. Move it back to Drafts with move_email and send it again.',
+      );
+    }
 
     // EXACT role, as for Drafts: a name substring would file the sent copy into
     // "Presentations". Refused BEFORE the submission, so nothing is transmitted.

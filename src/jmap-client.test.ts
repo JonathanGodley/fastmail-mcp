@@ -698,7 +698,7 @@ describe('updateDraft', () => {
 
   // A superseded draft sits in Trash with `$draft` kept. Editing it would create the
   // replacement in Trash too, because the replacement carries the old copy's mailboxIds.
-  it('refuses to edit a draft that is not in the Drafts folder, naming where it is', async () => {
+  it('refuses to edit a draft that is in Trash, naming where it is', async () => {
     mock.method(client, 'getMailboxes', async () => [
       DRAFTS_MAILBOX,
       { id: 'mb-trash', name: 'Trash "old"\nX', role: 'trash' },
@@ -712,7 +712,7 @@ describe('updateDraft', () => {
       () => client.updateDraft('draft-1', { subject: 'X' }),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
-        assert.match(err.message, /not in the Drafts folder, so it will not be edited/);
+        assert.match(err.message, /is in Trash, so it will not be edited/);
         // Through describeUntrusted: the name's own quote cannot close the quoted span.
         assert.match(err.message, /\(it is in: "Trash 'old'X"\)/);
         assert.equal(err.message.includes('\n'), false, err.message);
@@ -722,6 +722,14 @@ describe('updateDraft', () => {
     );
     // Nothing was written: the only request was the draft read.
     assert.equal(makeReq.mock.calls.length, 1);
+  });
+
+  // draft_email's mailbox parameter files a draft anywhere on purpose; only Trash is refused.
+  it('edits a draft filed in a mailbox that is neither Drafts nor Trash', async () => {
+    const parked = { ...EXISTING_DRAFT, mailboxIds: { 'mb-parked': true } };
+    const makeReq = mockUpdate(client, parked);
+    assert.equal((await client.updateDraft('draft-1', { subject: 'X' })).id, 'draft-2');
+    assert.deepEqual(callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft.mailboxIds, { 'mb-parked': true });
   });
 
   it('edits a draft that is in Drafts alongside another mailbox', async () => {
