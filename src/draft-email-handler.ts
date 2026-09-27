@@ -524,18 +524,14 @@ function replyAllCc(
  * docs/fastmail-action-availability.md, "what a reply prefills"). So NOTHING is excluded:
  * not the account's own identities, and not an address the reply's to or cc already names.
  *
- * ONLY FROM AN ORIGINAL IN A SENT-ROLE MAILBOX; anything else carries nothing. A sender can
- * write a Bcc header into mail they send this account, and carrying it would put recipients
- * of their choosing, unseen, on the reply. The roles are the ones getEmailById attaches
- * (attachMailboxInfo), so an original whose mailboxes could not be resolved carries nothing.
+ * Deliberately no "is this the account's own message" check: a received message carries no
+ * Bcc header (the submitting server strips it), so presence already marks the account's own
+ * copy. That is derived, not measured, and such a check could only silently refuse an
+ * imported or malformed message, whose shape is recorded as unmeasured in the same doc.
  *
  * formatAddress and a case-folded ADDRESS dedupe, as in replyAllCc (#31).
  */
 function replyBcc(original: any): string[] {
-  const roles: unknown = original?._mailboxRoles;
-  const inSent = Array.isArray(roles)
-    && roles.some((r) => typeof r === 'string' && r.toLowerCase() === 'sent');
-  if (!inSent) return [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const entry of addressList(original.bcc)) {
