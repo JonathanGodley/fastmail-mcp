@@ -5658,6 +5658,35 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     assert.ok(written.includes('DURATION:PT1H'));
   });
 
+  // A zoneless value with no timeZone is read in the configured zone, except on an event whose
+  // stored start is itself floating: keeping that floating keeps the event's own frame.
+  describe('a zoneless start/end with no timeZone and no stored TZID', () => {
+    before(() => setDefaultTimezone('America/New_York'));
+    after(() => setDefaultTimezone(undefined));
+
+    it('stays floating on an event whose stored start is floating', async () => {
+      const { client, mockDAVClient } = mockClient(FLOATING_EVENT);
+      await client.updateCalendarEvent('flt@fm', { start: '2026-03-21T08:30:00', end: '2026-03-21T09:30:00' });
+      const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+      assert.ok(data.includes('\r\nDTSTART:20260321T083000\r\n'), data);
+      assert.ok(data.includes('\r\nDTEND:20260321T093000\r\n'), data);
+    });
+
+    for (const [label, ical, uid] of [
+      ['UTC', UTC_EVENT, 'utc@fm'],
+      ['date-only', stored('day@fm', 'DTSTART;VALUE=DATE:20260320', 'DTEND;VALUE=DATE:20260321'), 'day@fm'],
+    ] as const) {
+      it(`is written in the configured zone, never floating, on a ${label} event`, async () => {
+        const { client, mockDAVClient } = mockClient(ical);
+        const result = await client.updateCalendarEvent(uid, { start: '2026-03-21T08:30:00', end: '2026-03-21T09:30:00' });
+        const data = callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+        assert.ok(data.includes('DTSTART;TZID=America/New_York:20260321T083000'), data);
+        assert.ok(data.includes('DTEND;TZID=America/New_York:20260321T093000'), data);
+        assert.deepEqual(result.start, { kind: 'zoned', zone: 'America/New_York' });
+      });
+    }
+  });
+
   it('trims surrounding whitespace from a date-only or datetime start and end, as create does', async () => {
     const allDay = mockClient(stored('pad1@fm', 'DTSTART;VALUE=DATE:20260320', 'DTEND;VALUE=DATE:20260321'));
     await allDay.client.updateCalendarEvent('pad1@fm', { start: ' 2026-04-10 ', end: '  2026-04-11 ' });

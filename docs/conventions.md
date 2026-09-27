@@ -1994,11 +1994,14 @@ rather than a silently-different zone.
 instant for every reader", is a worse default than the configured zone for the overwhelming
 majority of events a caller creates for themselves, so a designator-less `create_calendar_event`
 call writes the configured zone unless `timeZone` says otherwise (#157).
-**Update never defaults**, on purpose: unlike create, an update's untouched side may already
-carry a real, meaningful `TZID` — quietly overwriting it with the configured zone the moment a
-caller edits the *other* side would be a silent, unrequested rewrite of data the caller never
-asked to touch. So omitting `timeZone` on update lands on step 2 or step 4, and reaching the
-configured zone requires naming it.
+**Update defaults only where the event says nothing**, on purpose: an update's untouched side
+may already carry a real, meaningful `TZID`, and quietly overwriting it with the configured zone
+the moment a caller edits the *other* side would be a silent, unrequested rewrite. So a stored
+`TZID` is inherited first. Where there is none, a date or time given without a zone is read in
+the configured zone, as everywhere else, with one exception: on an event whose stored `DTSTART`
+is itself floating, the new value stays floating, which keeps that event's own form rather than
+converting it. On a UTC or all-day event the value is written with the configured `TZID`, never
+floating; a single-sided change then meets the frame check against the stored side.
 
 **`timeZone` provenance (`tzidSource`) exists so a rejection never misattributes a zone the
 caller didn't choose.** `describeDateProperty` threads `'caller' | 'stored' | 'default'`

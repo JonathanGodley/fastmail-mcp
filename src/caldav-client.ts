@@ -1470,8 +1470,8 @@ interface FormattedDateProperty {
  * the input, so the two cannot disagree about what the caller wrote.
  *
  * `create_calendar_event` passes the configured zone as `defaultZone`; `update_calendar_event`
- * passes none, so update stays inherit-then-floating and never defaults. That split is
- * deliberate (docs/conventions.md).
+ * passes it too, except on an event whose stored start is floating, which stays floating
+ * (docs/conventions.md).
  *
  * Exported so `tzidSource` is unit-testable: consumers only distinguish 'default' (#157, #102).
  */
@@ -3678,8 +3678,8 @@ export class CalDAVCalendarClient {
     location?: string;
     participants?: Array<{ email: string; name?: string }>;
     clearFields?: string[];
-    // Explicit zone for a designator-less start/end (#157). Unlike create, update NEVER defaults
-    // an omitted zone: the stored TZID, or floating, is preserved.
+    // Explicit zone for a designator-less start/end (#157). Omitted: the stored TZID, else
+    // floating on a floating event, else the configured zone.
     timeZone?: string | null;
     /**
      * Free/busy (#194). Omitted leaves the stored value alone; exclusive with
@@ -3799,16 +3799,23 @@ export class CalDAVCalendarClient {
       data = replaceICalProperty(data, 'DESCRIPTION', fold(`DESCRIPTION:${escapeICalText(description)}`));
     }
 
+    // A zoneless value is read in the configured zone, as on create, unless the stored start is
+    // itself floating: keeping that floating keeps the event's own frame. A stored TZID, which
+    // formatDateTimeProperty inherits first, still wins over both.
+    const storedStartLine = parseAllICalProperties(originalVevent, 'DTSTART')[0];
+    const defaultZone = storedStartLine && describeDateProperty(storedStartLine).frame === 'floating'
+      ? undefined
+      : resolveUsableTimezone(getDefaultTimezone());
+
     if (fields.start !== undefined) {
-      // No defaultZone: update never defaults an omitted zone, only create does.
-      newStartFormatted = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding, callerZone);
+      newStartFormatted = formatDateTimeProperty('DTSTART', fields.start, originalVevent, lineEnding, callerZone, defaultZone);
       newStartLine = newStartFormatted.line;
       data = replaceICalProperty(data, 'DTSTART', newStartLine);
       timeChanged = true;
     }
 
     if (fields.end !== undefined) {
-      newEndFormatted = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding, callerZone);
+      newEndFormatted = formatDateTimeProperty('DTEND', fields.end, originalVevent, lineEnding, callerZone, defaultZone);
       newEndLine = newEndFormatted.line;
       data = replaceICalProperty(data, 'DTEND', newEndLine);
       // DTEND and DURATION are mutually exclusive (RFC 5545 §3.6.1).
