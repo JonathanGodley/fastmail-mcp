@@ -4356,20 +4356,21 @@ export class JmapClient {
           continue;
         }
         // Bounded read, never read-then-check, which would buffer an oversize file first.
-        // A read may return fewer bytes than asked, so loop; a file that ends early (it
-        // shrank after the stat) is refused rather than uploaded truncated.
+        // A read may return fewer bytes than asked, so loop. A file whose length is no longer
+        // the size taken at the stat (it shrank, or grew) is refused rather than uploaded cut.
+        const changed = (found: string) => new PathAccessError(
+          `The attachment "${echoPath(o.file)}" ${found} than the ${o.size} bytes it had when checked; ` +
+          'it changed while being read. Nothing was uploaded for it. Try again once the file is complete.'
+        );
         const buffer = Buffer.alloc(o.size);
         let filled = 0;
         while (filled < o.size) {
           const { bytesRead } = await o.handle.read(buffer, filled, o.size - filled, filled);
-          if (bytesRead === 0) {
-            throw new PathAccessError(
-              `The attachment "${echoPath(o.file)}" could be read for only ${filled} of its ${o.size} bytes; ` +
-              'it changed while being read. Nothing was uploaded for it. Try again once the file is complete.'
-            );
-          }
+          if (bytesRead === 0) throw changed(`could be read for only ${filled} bytes, fewer`);
           filled += bytesRead;
         }
+        const { bytesRead: beyond } = await o.handle.read(Buffer.alloc(1), 0, 1, o.size);
+        if (beyond > 0) throw changed('is now longer');
 
         const uploaded = await this.uploadBlob(buffer, o.contentType);
         parts.push({

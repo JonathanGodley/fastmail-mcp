@@ -4563,7 +4563,23 @@ describe('uploadAttachments', () => {
       () => client.uploadAttachments([{ path: 'short.txt' }], 'unused-root', false),
       (err: Error) => {
         assert.match(err.message, /"short\.txt"/);
-        assert.match(err.message, /4 of its 10 bytes/);
+        assert.match(err.message, /only 4 bytes, fewer than the 10 bytes/);
+        return true;
+      },
+    );
+    assert.equal(uploads, 0);
+  });
+
+  it('refuses, naming the file, when the file grew past its stated size', async (t) => {
+    const client = clientWithUpload();
+    t.mock.method(JmapClient, 'safeReadPath', async () => fakeHandle(Buffer.from('0123456789'), 3, 4));
+    let uploads = 0;
+    t.mock.method(client, 'uploadBlob', async () => { uploads++; return { blobId: 'x', type: 'text/plain', size: 1 }; });
+    await assert.rejects(
+      () => client.uploadAttachments([{ path: 'grown.txt' }], 'unused-root', false),
+      (err: Error) => {
+        assert.match(err.message, /"grown\.txt"/);
+        assert.match(err.message, /changed while being read/);
         return true;
       },
     );
