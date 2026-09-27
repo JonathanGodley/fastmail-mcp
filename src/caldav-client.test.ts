@@ -1976,8 +1976,8 @@ describe('CalDAVCalendarClient event lookup', () => {
   //
   // The rule: a match whose OWN url is the href resolved from the caller's string was ADDRESSED
   // by name, and addressing is not something a UID can imitate. That match leads, and the reads
-  // answer with it. The writes still refuse while another record's UID equals the addressed url,
-  // since the listing shows that record's id as the url.
+  // answer with it. The writes still refuse while another record's UID is the caller's string
+  // itself, since the listing shows that record's id as that string.
   const decoyCarryingAnAddress = (realUrl: string): Record<string, StoredObject[]> => ({
     // Discovered FIRST, so the decoy is collected first under a plain union.
     [WORK_URL]: [{ data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"' }],
