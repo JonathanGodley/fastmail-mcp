@@ -135,10 +135,11 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   unchanged: `null`/`undefined` read as absent, `""` and `[]` coerce to the empty list (which
   `draft_email`'s `bcc` documents as "treated as omitted"), and a comma-separated string
   still splits, but only on a comma outside double quotes and `<…>`, so a quoted display
-  name may carry one. Each piece must be one addr-spec (one `@` with text either side, no
-  whitespace, `<`, `>`, `;` or `,`), a quote or `<` left open refuses the whole value, and
-  text after a recipient's closing `>` is refused in an array entry too: each of those would
-  otherwise drop or invent a recipient unseen. An ELEMENT is checked too: `[""]` is refused by index like any other unusable
+  name may carry one, and a quote or `<` left open refuses the whole value. In either form,
+  each entry's address must be one addr-spec (one `@` with text either side, no whitespace,
+  `<`, `>`, `;` or `,`), and an entry holding more than one `<address>` outside double quotes
+  or text after its closing `>` is refused: each of those would otherwise drop or invent a
+  recipient unseen. An ELEMENT is checked too: `[""]` is refused by index like any other unusable
   entry, because read as a present list of length 1 it would ship a blank recipient and
   suppress the reply `Bcc` carry.
 - `coerceParticipants` — the `participants` array on the calendar write tools to

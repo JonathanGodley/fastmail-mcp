@@ -247,12 +247,23 @@ export function coerceRecipients(args: { to?: unknown; cc?: unknown; bcc?: unkno
 // display name may carry one ("Smith, John" <john@example.com>). An unquoted name's comma
 // still splits, so a piece that names no address is REFUSED rather than sent to: that is
 // what "Smith, John <john@example.com>" becomes, and "Smith" is not a recipient. A quote or
-// "<" left open swallows every comma after it, and parseAddress reads only up to the last
-// ">", so both would drop recipients unseen: each is refused too.
+// "<" left open swallows every comma after it, and parseAddress reads the address from the
+// last "<" to the last ">", so each would drop recipients unseen: each is refused too, in the
+// array form as well as the comma form.
 function coerceRecipientList(value: unknown, paramName: string): string[] | undefined {
   if (typeof value !== 'string' || isJsonArrayString(value)) {
     const entries = coerceStringArrayStrict(value, paramName);
-    entries?.forEach((entry, i) => refuseTextAfterAngle(entry, `${paramName}[${i}]`));
+    entries?.forEach((entry, i) => {
+      const label = `${paramName}[${i}]`;
+      refuseTextAfterAngle(entry, label);
+      if (!SINGLE_ADDR_SPEC.test(parseAddress(entry).email)) {
+        throw new InvalidInputError(
+          `${label} "${describeUntrusted(entry.trim())}" is not one email address. Give each ` +
+          'recipient its own entry.',
+        );
+      }
+      refuseSeveralAngleAddrs(entry, label);
+    });
     return entries;
   }
   const pieces = splitRecipientList(value.trim(), paramName).map((p) => p.trim()).filter(Boolean);
@@ -265,8 +276,24 @@ function coerceRecipientList(value: unknown, paramName: string): string[] | unde
         'carries one ("Smith, John" <john@example.com>), or pass an array.',
       );
     }
+    refuseSeveralAngleAddrs(piece, paramName);
   }
   return pieces;
+}
+
+// An unquoted "<" or ">" in the display-name half means a second angle-addr, which
+// parseAddress would fold into the name.
+function refuseSeveralAngleAddrs(entry: string, label: string): void {
+  const trimmed = entry.trim();
+  const open = trimmed.lastIndexOf('<');
+  if (open === -1 || trimmed.lastIndexOf('>') < open) return;
+  const unquotedName = trimmed.slice(0, open).replace(/"(?:[^"\\]|\\.)*"/g, '');
+  if (/[<>]/.test(unquotedName)) {
+    throw new InvalidInputError(
+      `${label} "${describeUntrusted(trimmed)}" holds more than one <address>, and only the last ` +
+      'would be used. Give each recipient its own entry.',
+    );
+  }
 }
 
 // One "@" with something either side, and nothing that would make the address half several
