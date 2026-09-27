@@ -417,6 +417,8 @@ Every parameter that names a mailbox - `mailbox` on the read tools, `targetMailb
 
 There is no substring matching at any step. A folder name matching exactly one mailbox wins over reading the same text as a path, so a folder whose own name contains a `/` stays reachable by that name. That tie rule applies only where nothing else answers to the same text: if a top-level folder is literally named `Archive/2026` **and** a real `Archive` > `2026` nesting also exists, the reference is rejected as ambiguous rather than filed into the flat folder.
 
+A `mailboxes`, `requiredMailboxes` or `excludeMailboxes` list given as one string splits on every comma, so a mailbox whose name or path contains a comma has to be passed in an array (or a JSON-encoded array).
+
 Three failures are reported distinctly rather than as "not found", because they call for different corrections:
 
 - A **name shared by several mailboxes** is rejected as ambiguous and the error lists the candidates by full path - retry with one of those, or with the id. Your spelling was not the problem.

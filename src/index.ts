@@ -524,6 +524,9 @@ const CREATE_PARENT_PARAM_DESC =
 const LENIENT_LIST_DESC =
   ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
 
+const MAILBOX_LIST_COMMA_DESC =
+  ' The string form splits on every comma, so a mailbox whose name or path contains a comma has to be passed in an array (or a JSON-encoded array).';
+
 // The recipient lists (to/cc/bcc/replyTo on draft_email and edit_draft) FAIL CLOSED through
 // coerceStringArrayStrict. Said on the surface because a dropped recipient field turns into
 // an outcome the caller would not question: a reply that quietly reverts to reply-all, an
@@ -543,7 +546,7 @@ const LENIENT_OBJECT_LIST_DESC =
 const labelMailboxesDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
-  LENIENT_LIST_DESC;
+  LENIENT_LIST_DESC + MAILBOX_LIST_COMMA_DESC;
 
 // Shared by every tool that changes a message's filing, delete included.
 const SEEN_AGGREGATE_DESC =
@@ -1048,12 +1051,12 @@ const TOOLS = [
             requiredMailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: REQUIRED_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
+              description: REQUIRED_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC + MAILBOX_LIST_COMMA_DESC,
             },
             excludeMailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: EXCLUDE_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
+              description: EXCLUDE_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC + MAILBOX_LIST_COMMA_DESC,
             },
             after: {
               type: 'string',
